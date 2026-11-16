@@ -9,6 +9,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	afake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi/fake"
 	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
@@ -33,6 +35,9 @@ type faultClient struct {
 	mu     sync.Mutex
 	before func(method string, obj client.Object) error
 	after  func(method string, obj client.Object)
+	// failAfter, when set, runs after a write that was made: an error it returns is the write's result, though the write
+	// is stored (a reply that never came back).
+	failAfter func(method string, obj client.Object) error
 }
 
 // set replaces both hooks.
@@ -62,7 +67,20 @@ func (f *faultClient) write(method string, obj client.Object, do func() error) e
 	if after != nil {
 		after(method, obj)
 	}
+	f.mu.Lock()
+	failAfter := f.failAfter
+	f.mu.Unlock()
+	if failAfter != nil {
+		return failAfter(method, obj)
+	}
 	return nil
+}
+
+// setFailAfter sets the hook of a write that is stored and still returns an error.
+func (f *faultClient) setFailAfter(h func(method string, obj client.Object) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failAfter = h
 }
 
 func (f *faultClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -404,4 +422,96 @@ func (w *execWorld) passRanAfterNow(md, sentinel string) {
 	if got := w.getOp(sentinel); got.Spec.Confirm != nil || got.Status.Phase != v1alpha1.OperationPhasePlanned {
 		w.t.Fatalf("the sentinel %s is %q with confirm %v, want Planned and unconfirmed", sentinel, got.Status.Phase, got.Spec.Confirm)
 	}
+}
+
+// newStartingWorld is a deployment of two Instances on A: R, ready, and S, whose job has started and whose engine takes
+// three minutes to be ready, so that S is still starting. A Scale to one takes S, as EndStarting.
+func newStartingWorld(t *testing.T) (w *execWorld, ready, starting string) {
+	t.Helper()
+	log := newCauseLog()
+	h := newHedgeRig(t, withInterceptors(log.funcs()))
+	started := 0
+	h.engine = func(string) afake.Engine {
+		started++
+		if started == 2 {
+			return afake.Engine{StartDelay: 3 * time.Minute}
+		}
+		return afake.Engine{}
+	}
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{})
+	h.Step()
+	md := noOverAllocation(mdSpec(hoMD))
+	md.Spec.Instances = 2
+	h.create(md)
+	pol := globalPolicy(person)
+	h.create(&pol)
+	h.until(10*time.Minute, 10*time.Second, "R ready and S starting on a started job", func() bool {
+		live := h.liveInstances(hoMD)
+		if len(live) != 2 || h.readyCount(hoMD) != 1 {
+			return false
+		}
+		for _, in := range live {
+			if in.Status.Phase != v1alpha1.InstanceReady {
+				a, ok := h.allocation(in.Spec.AllocationRef.Name)
+				return ok && a.Status.AtProvider.StartTime != nil
+			}
+		}
+		return false
+	})
+	for _, in := range h.liveInstances(hoMD) {
+		if in.Status.Phase == v1alpha1.InstanceReady {
+			ready = in.Name
+		} else {
+			starting = in.Name
+		}
+	}
+	w = &execWorld{hedgeRig: h, log: log, fc: &faultClient{Client: h.r.Client}}
+	h.r.Client = w.fc
+	return w, ready, starting
+}
+
+// stepsUntil runs rounds with the controller's passes allowed to fail with an error that says "injected" or "the controller
+// was killed", until cond holds.
+func (w *execWorld) stepsUntil(limit, tick time.Duration, what string, cond func() bool) {
+	w.t.Helper()
+	for end := w.clock.Now().Add(limit); ; {
+		if cond() {
+			return
+		}
+		if !w.clock.Now().Before(end) {
+			w.t.Fatalf("%s: not reached within %s (now %s)", what, limit, w.clock.Now().Format(time.RFC3339))
+		}
+		w.clock.Advance(tick)
+		if err := w.stepKeepingErrors(); err != nil && !strings.Contains(err.Error(), "injected") && !errors.Is(err, errKilled) {
+			w.t.Fatalf("%s: a pass failed with %v", what, err)
+		}
+	}
+}
+
+// newTwoWorld is a deployment of two ready Instances on A, their jobs started five minutes apart, so that R1's lease end is
+// the nearer.
+func newTwoWorld(t *testing.T) (w *execWorld, insts [2]string, allocs [2]string) {
+	t.Helper()
+	log := newCauseLog()
+	h := newHedgeRig(t, withInterceptors(log.funcs()))
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{})
+	h.Step()
+	md := noOverAllocation(mdSpec(hoMD))
+	md.Spec.Instances = 1
+	h.create(md)
+	pol := globalPolicy(person)
+	h.create(&pol)
+	for n := int32(1); n <= 2; n++ {
+		if n > 1 {
+			h.run(5*time.Minute, 30*time.Second)
+			h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = n })
+		}
+		h.until(10*time.Minute, 10*time.Second, "ready", func() bool { return h.readyCount(hoMD) == int(n) })
+	}
+	for i, in := range h.liveInstances(hoMD) {
+		insts[i], allocs[i] = in.Name, in.Spec.AllocationRef.Name
+	}
+	w = &execWorld{hedgeRig: h, log: log, fc: &faultClient{Client: h.r.Client}}
+	h.r.Client = w.fc
+	return w, insts, allocs
 }

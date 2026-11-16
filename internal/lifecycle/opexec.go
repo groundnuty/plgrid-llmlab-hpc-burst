@@ -31,9 +31,17 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
-// isExecuting reports whether the Operation is committed and not finished.
+// isExecuting reports whether the Operation is committed and not finished: Executing, or PartlyFailed with a failure
+// that is still retried. A PartlyFailed Operation whose every failure is final has finishedAt set (phaseOf), and holds
+// nothing: not the one-at-a-time slot, not step 7's selection, not an Allocation.
 func isExecuting(op *v1alpha1.Operation) bool {
-	return op.Status.Phase == v1alpha1.OperationPhaseExecuting || op.Status.Phase == v1alpha1.OperationPhasePartlyFailed
+	switch op.Status.Phase {
+	case v1alpha1.OperationPhaseExecuting:
+		return true
+	case v1alpha1.OperationPhasePartlyFailed:
+		return op.Status.FinishedAt == nil
+	}
+	return false
 }
 
 // anotherExecuting returns an Operation of the pass, other than op, that is Executing or PartlyFailed: one at a
@@ -50,6 +58,9 @@ func (p *pass) anotherExecuting(op *v1alpha1.Operation) *v1alpha1.Operation {
 // readyOperation handles a confirmed Operation whose every target that needs approval has it, or that needs none:
 // it waits while another Operation executes, else it is checked for staleness, once, and committed.
 func (p *pass) readyOperation(op *v1alpha1.Operation, env *opEnv, plan *v1alpha1.OperationPlan, standings []targetStanding) error {
+	if p.commitUnknown {
+		return nil // an earlier commit of this pass may or may not have landed: nothing else commits until a pass reads it
+	}
 	if other := p.anotherExecuting(op); other != nil {
 		return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 			s.ObservedGeneration = op.Generation
@@ -109,15 +120,35 @@ func (p *pass) commitOperation(op *v1alpha1.Operation, plan *v1alpha1.OperationP
 			fmt.Sprintf("committed to %d targets: the controller acts on this list and on nothing else", len(committed)))
 		apimeta.RemoveStatusCondition(&s.Conditions, v1alpha1.ConditionNoApprovalPolicy)
 	}); err != nil {
+		p.afterCommitError(op)
 		return err
 	}
 	return p.executing(op)
+}
+
+// afterCommitError settles what a commit write that returned an error means. The write may have been applied all the
+// same (a lost reply, a timeout after the API server stored it), and then the Operation IS the executing one: no other
+// Operation may commit in this pass, so the Operation is read again, through the uncached reader, and the pass's own copy
+// becomes what the API server holds. When that read fails too, nothing is known, and no other Operation commits in this
+// pass (commitUnknown); the next pass reads again. The pass fails with the commit's own error either way.
+func (p *pass) afterCommitError(op *v1alpha1.Operation) {
+	var cur v1alpha1.Operation
+	if err := p.r.Reader.Get(p.ctx, client.ObjectKeyFromObject(op), &cur); err != nil {
+		p.commitUnknown = true
+		return
+	}
+	if isExecuting(&cur) {
+		*op = cur
+	}
 }
 
 // executing is one pass over a committed Operation: the spec write, then every committed target, then the report.
 // A target's failure does not stop the others; the errors are returned joined, so the key is retried with backoff, and
 // the report says which target failed (opreport.go).
 func (p *pass) executing(op *v1alpha1.Operation) error {
+	if finishedOperation(op) {
+		return nil // every failure was final and the rest done: nothing is carried out again
+	}
 	var errs []error
 	failed := map[types.UID]error{}
 	// What was already being deleted when this pass began: only such an Allocation can be reported as failing to go (a
@@ -126,8 +157,8 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 	specOK := true
 	if err := p.applySpec(op); err != nil {
 		specOK = false
-		// Nothing is acted on, created or replaced until the spec has landed. An End's deployment target is the one that
-		// failed; a Scale has no deployment target, and stays Executing until the write lands.
+		// Nothing is acted on, created or replaced until the spec has landed and is recorded. An End's deployment target is
+		// the one that failed; a Scale has no deployment target, and stays Executing until the write lands.
 		p.opsHold = true
 		errs = append(errs, err)
 		for _, t := range op.Status.Committed {
@@ -146,44 +177,68 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 	return errors.Join(errs...)
 }
 
+// finishedOperation reports whether the Operation has finished, whichever way: it has a finish time.
+func finishedOperation(op *v1alpha1.Operation) bool { return op.Status.FinishedAt != nil }
+
 // applySpec writes the spec change an Operation commits to, once, before any target is acted on: Scale lowers
 // spec.instances to N, End sets spec.endTime to now or deletes the ModelDeployment with a UID precondition. The write
 // is an update that carries the resourceVersion read, under the lifecycle controller's field manager, and p.md
 // becomes what was written, so the rest of the pass, step 7 included, works from it: after an End the pass shuts down.
 // A deployment that is gone, being deleted, or another one of the same name now is never written.
+//
+// The write is made only while the deployment's generation is still the plan's. The stale check at the commit made them
+// equal, and a spec change moves the generation, so a generation past the plan's means the spec changed since: by this
+// Operation's own earlier write, whose record in status did not land (a kill between the two), or by a person or an agent.
+// The two cannot be told apart, and neither is written over: whatever the spec holds then stays. The record that the spec
+// is dealt with (v1alpha1.ConditionSpecWritten) is its own status write, made right after the spec write, so that the
+// window in which a kill leaves it unwritten is that one write.
 func (p *pass) applySpec(op *v1alpha1.Operation) error {
 	if apimeta.IsStatusConditionTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) {
 		return nil
 	}
 	plan, md := op.Status.Plan, p.md
-	if plan == nil || md == nil || md.UID != plan.ModelDeployment.UID || !md.DeletionTimestamp.IsZero() {
-		return nil
+	switch {
+	case plan == nil || md == nil || md.UID != plan.ModelDeployment.UID || !md.DeletionTimestamp.IsZero():
+		return p.recordSpecWritten(op, "the deployment is gone, being deleted, or another one now: there is no spec to write")
+	case md.Generation != plan.ModelDeployment.Generation:
+		return p.recordSpecWritten(op, fmt.Sprintf("the deployment's spec changed after the plan (generation %d, the plan's %d): it is not written over", md.Generation, plan.ModelDeployment.Generation))
 	}
+	write, why := (*v1alpha1.ModelDeployment)(nil), ""
 	switch op.Spec.Action {
 	case v1alpha1.OperationActionScale:
 		if op.Spec.Scale == nil {
 			return errors.New("a Scale names its count in spec.scale")
 		}
-		n := op.Spec.Scale.Instances
-		if md.Spec.Instances <= n {
-			return nil
+		if n := op.Spec.Scale.Instances; md.Spec.Instances > n {
+			write, why = md.DeepCopy(), fmt.Sprintf("set spec.instances to %d", n)
+			write.Spec.Instances = n
 		}
-		next := md.DeepCopy()
-		next.Spec.Instances = n
-		return p.writeSpec(next, fmt.Sprintf("set spec.instances to %d", n))
 	case v1alpha1.OperationActionEnd:
 		if op.Spec.End != nil && op.Spec.End.Delete {
-			return p.deleteDeployment(md)
+			if err := p.deleteDeployment(md); err != nil {
+				return err
+			}
+			return p.recordSpecWritten(op, "the deployment's delete was asked for")
 		}
-		if md.Spec.EndTime != nil && !md.Spec.EndTime.After(p.now) {
-			return nil
+		if md.Spec.EndTime == nil || md.Spec.EndTime.After(p.now) {
+			t := metav1.NewTime(p.now)
+			write, why = md.DeepCopy(), "set spec.endTime to now"
+			write.Spec.EndTime = &t
 		}
-		next := md.DeepCopy()
-		t := metav1.NewTime(p.now)
-		next.Spec.EndTime = &t
-		return p.writeSpec(next, "set spec.endTime to now")
 	}
-	return nil
+	if write != nil {
+		if err := p.writeSpec(write, why); err != nil {
+			return err
+		}
+	}
+	return p.recordSpecWritten(op, "the spec change this Operation commits to has landed, or there was none to make")
+}
+
+// recordSpecWritten writes the condition that the spec is dealt with, in its own status write.
+func (p *pass) recordSpecWritten(op *v1alpha1.Operation, why string) error {
+	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
+		p.setCondition(s, op, v1alpha1.ConditionSpecWritten, metav1.ConditionTrue, "Written", why)
+	})
 }
 
 // writeSpec updates the ModelDeployment with the resourceVersion read and makes the pass work from the stored object.
@@ -257,21 +312,17 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 			return nil
 		}
 		alloc := p.allocs[in.Spec.AllocationRef.Name]
-		switch t.Effect {
-		case v1alpha1.PlanEffectDrainInstance, v1alpha1.PlanEffectDrainLastReady:
-			if in.Status.Phase == v1alpha1.InstanceReady {
-				return p.startDrain(in)
-			}
-			if in.Status.Phase == v1alpha1.InstanceDraining {
-				return nil // step 6 carries the drain on
-			}
-			// It is no longer ready: there is nothing to drain, so it ends, as the shutdown ends such an Instance.
-			return p.end(in, alloc, v1alpha1.ReasonDrained, opMessage(op, "ended"), false)
-		case v1alpha1.PlanEffectEndStarting, v1alpha1.PlanEffectCancelPending:
-			// The Instance ends and its Allocation is left alone here: a committed Allocation target releases it, with
-			// the Operation's cause, and an uncommitted one follows retention.
-			return p.end(in, alloc, v1alpha1.ReasonDrained, opMessage(op, "ended"), false)
+		// By the Instance's phase NOW, not as committed: a target committed as pending or still starting may have turned
+		// Ready since, and a serving Instance is drained (HBEP-7, Handover, Draining), never ended: its requests are in flight.
+		switch in.Status.Phase {
+		case v1alpha1.InstanceReady:
+			return p.startDrain(in)
+		case v1alpha1.InstanceDraining:
+			return nil // step 6 carries the drain on (and, in a shutdown, step 6 began it in this very pass)
 		}
+		// Neither serving nor draining: it ends, whatever it was committed as, with its Allocation left to the
+		// Allocation's own target (CancelPending or a release), or to retention.
+		return p.end(in, alloc, v1alpha1.ReasonDrained, opMessage(op, "ended"), false)
 	case v1alpha1.TargetKindAllocation:
 		if !releasingEffect(t.Effect) {
 			return nil // Keep: no act
@@ -279,6 +330,11 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		a, err := p.committedAllocation(t)
 		if err != nil || a == nil {
 			return err
+		}
+		if startedSinceCommit(t, a) {
+			// The approval was to cancel a QUEUED job, which costs a queue position; its job has started since, and releasing a
+			// running one is another price (ReleaseStarted). It is left to retention, and reported Failed for good.
+			return nil
 		}
 		if len(p.liveOn(a.Name)) > 0 {
 			// An Instance still runs on it (a drain that has not finished): its release waits until it has ended,
@@ -288,6 +344,13 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		return p.deleteAllocation(a, v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID))
 	}
 	return nil
+}
+
+// startedSinceCommit reports whether a committed CancelPending target's job has started since the commit: it was queued
+// when the plan was made, since the plan's ID covers the effect and the stale check passed, so a start time now is a start
+// after it.
+func startedSinceCommit(t v1alpha1.CommittedTarget, a *v1alpha1.Allocation) bool {
+	return t.Effect == v1alpha1.PlanEffectCancelPending && a != nil && a.Status.AtProvider.StartTime != nil
 }
 
 // opMessage names the Operation in a stop's message.
@@ -346,12 +409,47 @@ func (p *pass) operationCause(a *v1alpha1.Allocation) (string, bool) {
 			continue
 		}
 		for _, t := range op.Status.Committed {
-			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID && releasingEffect(t.Effect) {
+			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID && releasingEffect(t.Effect) && !startedSinceCommit(t, a) {
 				return v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID), true
 			}
 		}
 	}
 	return "", false
+}
+
+// committedForRelease reports whether an Executing Operation committed the Allocation for release: nothing is placed on it
+// (warmAllocation).
+func (p *pass) committedForRelease(a *v1alpha1.Allocation) bool {
+	_, ok := p.operationCause(a)
+	return ok
+}
+
+// committedInstance reports whether an Executing Operation committed the Instance as a target: step 8 makes it no
+// replacement, since the Operation takes it (a drain that failed to start is retried, not replaced).
+func (p *pass) committedInstance(in *v1alpha1.Instance) bool {
+	for _, op := range p.ops {
+		if !isExecuting(op) {
+			continue
+		}
+		for _, t := range op.Status.Committed {
+			if t.Kind == v1alpha1.TargetKindInstance && t.UID == in.UID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// holdsSelection reports whether an Executing Operation of any action holds back step 7's own scale-down selection (HBEP-7,
+// Reconcile loop, step 7: while an Operation is Executing, the scale-down takes its committed targets instead of choosing
+// its own). Provisioning of missing primaries is not held.
+func (p *pass) holdsSelection() bool {
+	for _, op := range p.ops {
+		if isExecuting(op) {
+			return true
+		}
+	}
+	return false
 }
 
 // executingScale returns the Executing Scale Operation of the pass, or nil. While it is, step 7 counts min(spec.instances,

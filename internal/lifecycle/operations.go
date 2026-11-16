@@ -156,7 +156,8 @@ func (p *pass) operation(op *v1alpha1.Operation, env *opEnv) error {
 	case v1alpha1.OperationPhaseRefused, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale:
 		return nil
 	case v1alpha1.OperationPhaseExecuting, v1alpha1.OperationPhasePartlyFailed:
-		// Committed: acted on by its committed list, never planned again, whatever the state is now.
+		// Committed: acted on by its committed list, never planned again, whatever the state is now. A PartlyFailed one with a
+		// finish time has only final failures left, and is done with.
 		return p.executing(op)
 	}
 	if op.Spec.Confirm != nil {
@@ -343,6 +344,10 @@ func (p *pass) opsNamingKey() bool {
 	for _, op := range p.ops {
 		switch op.Status.Phase {
 		case v1alpha1.OperationPhaseRefused, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale:
+		case v1alpha1.OperationPhasePartlyFailed:
+			if !finishedOperation(op) {
+				return true
+			}
 		default:
 			return true
 		}

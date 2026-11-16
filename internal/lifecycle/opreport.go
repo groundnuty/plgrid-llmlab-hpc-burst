@@ -34,6 +34,45 @@ func noActDone(effect v1alpha1.PlanEffect, specWritten, deploymentGone bool) boo
 	return false
 }
 
+// reasonJobStartedSinceCommit is the reason of a committed CancelPending Allocation target whose job started between the
+// commit and the act (HBEP-10, The report, as amended by #665: the science agent's ruling on #664, 16 Nov 2026).
+const reasonJobStartedSinceCommit = "JobStartedSinceCommit"
+
+// failureIsFinal is the ONE function that says which failures of a target are final (HBEP-10, The report, as amended by
+// #665): a failure that no retry can fix, because it is the approved effect that cannot apply any more. A refused cancel and
+// the controller's own write's error are retried with backoff; a job that started after it was approved for cancelling
+// in the queue is never released under that approval. phaseOf says what a final failure does to the Operation.
+func failureIsFinal(reason string) bool { return reason == reasonJobStartedSinceCommit }
+
+// phaseOf is the ONE function that says what the outcomes of the committed targets make of the Operation, and whether it is
+// finished (HBEP-10, The report, as amended by #665): Done when every target is done; PartlyFailed and finished (finishedAt
+// is set, so the deployment is free for the next Operation and the Operation is removed 7 days later) when every target is
+// done or has failed for good; PartlyFailed and not finished while a failure that a retry can fix remains, which is
+// retried; and Executing while none has failed.
+func phaseOf(outcomes []v1alpha1.TargetOutcome) (phase v1alpha1.OperationPhase, finished bool) {
+	done, final, failed := 0, 0, 0
+	for _, o := range outcomes {
+		switch o.State {
+		case v1alpha1.TargetStateDone:
+			done++
+		case v1alpha1.TargetStateFailed:
+			failed++
+			if failureIsFinal(o.Reason) {
+				final++
+			}
+		}
+	}
+	switch {
+	case done == len(outcomes):
+		return v1alpha1.OperationPhaseDone, true
+	case failed == 0:
+		return v1alpha1.OperationPhaseExecuting, false
+	case done+final == len(outcomes):
+		return v1alpha1.OperationPhasePartlyFailed, true
+	}
+	return v1alpha1.OperationPhasePartlyFailed, false
+}
+
 // targetDone reports whether a committed target is done, as the report says it: an Instance that has ended or is gone, an
 // Allocation that is gone (its finalizer cancels every tagged job first, so a delete that is held is not done), and a
 // target with no act by noActDone. A committed Allocation the controller released by its own rule meanwhile is gone, so it
@@ -105,81 +144,107 @@ func (p *pass) deletingBeforeThePass(op *v1alpha1.Operation) map[types.UID]bool 
 	return out
 }
 
-// outcomes is the report: one entry per committed target, Done, Failed or NotStarted, with the time its state last
-// changed kept while it does not. all is true when every target is done, and failures lists the failed ones.
-func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, deleting map[types.UID]bool, specWritten bool) (out []v1alpha1.TargetOutcome, all bool, failures []string, err error) {
+// finalFailure reports whether a target has failed for good, with its reason and message: a committed CancelPending
+// Allocation whose job started since the commit. It is never released under that approval, which was to cancel a queued job
+// and not a running one, and is left to retention. Once it is recorded in status it stays: the Allocation's later release
+// by retention is not the approved act.
+func (p *pass) finalFailure(t v1alpha1.CommittedTarget, prior *v1alpha1.TargetOutcome) (reason, message string, ok bool, err error) {
+	if prior != nil && prior.State == v1alpha1.TargetStateFailed && failureIsFinal(prior.Reason) {
+		return prior.Reason, prior.Message, true, nil
+	}
+	if t.Kind != v1alpha1.TargetKindAllocation || t.Effect != v1alpha1.PlanEffectCancelPending {
+		return "", "", false, nil
+	}
+	a, err := p.committedAllocation(t)
+	if err != nil || !startedSinceCommit(t, a) {
+		return "", "", false, err
+	}
+	return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and its retention policy now keeps or releases it", true, nil
+}
+
+// outcomes is the report: one entry per committed target, Done, Failed or NotStarted, with the time its state last changed
+// kept while it does not. failures lists the failed ones, a final failure (finalFailure) and one that is retried
+// (targetFailure) alike.
+func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, deleting map[types.UID]bool, specWritten bool) (out []v1alpha1.TargetOutcome, failures []string, err error) {
 	prior := map[types.UID]v1alpha1.TargetOutcome{}
 	for _, o := range op.Status.Targets {
 		prior[o.UID] = o
 	}
-	all = true
 	for _, t := range op.Status.Committed {
-		done, err := p.targetDone(t, specWritten)
-		if err != nil {
-			return nil, false, nil, err
-		}
 		o := v1alpha1.TargetOutcome{Kind: t.Kind, Name: t.Name, UID: t.UID, State: v1alpha1.TargetStateNotStarted, LastTransitionTime: metav1.NewTime(p.now)}
-		switch {
-		case done:
-			o.State = v1alpha1.TargetStateDone
-		default:
-			reason, msg, bad, err := p.targetFailure(t, failed[t.UID], deleting)
+		var was *v1alpha1.TargetOutcome
+		if w, ok := prior[t.UID]; ok {
+			was = &w
+		}
+		// A final failure first: a target is never reported done when its approved act did not happen, so an Allocation that
+		// started and that retention then released is still the failure it was.
+		reason, msg, bad, err := p.finalFailure(t, was)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !bad {
+			done, err := p.targetDone(t, specWritten)
 			if err != nil {
-				return nil, false, nil, err
+				return nil, nil, err
 			}
-			if bad {
-				o.State, o.Reason, o.Message = v1alpha1.TargetStateFailed, reason, msg
-				failures = append(failures, fmt.Sprintf("%s %s (%s): %s", t.Kind, t.Name, reason, msg))
+			if done {
+				o.State = v1alpha1.TargetStateDone
+			} else if reason, msg, bad, err = p.targetFailure(t, failed[t.UID], deleting); err != nil {
+				return nil, nil, err
 			}
 		}
-		all = all && done
-		if was, ok := prior[t.UID]; ok && was.State == o.State {
+		if bad {
+			o.State, o.Reason, o.Message = v1alpha1.TargetStateFailed, reason, msg
+			failures = append(failures, fmt.Sprintf("%s %s (%s): %s", t.Kind, t.Name, reason, msg))
+		}
+		if was != nil && was.State == o.State {
 			o.LastTransitionTime = was.LastTransitionTime
 		}
 		out = append(out, o)
 	}
-	return out, all, failures, nil
+	return out, failures, nil
 }
 
-// report writes status.targets and the phase: PartlyFailed while any target is Failed, with OperationPartlyFailed raised
-// when it starts and then at most once an hour while it lasts; Executing again once none is; and Done, with its finish
-// time, once every target is done. specWritten is whether the spec write has landed.
+// report writes status.targets and the phase phaseOf gives: PartlyFailed while any target is Failed, finished (finishedAt set)
+// when the rest are done and the failures are final, with OperationPartlyFailed raised when it starts and then at most once
+// an hour while it lasts; Executing again once none is Failed; and Done, with its finish time, once every target is done.
+// specWritten is whether the spec write has landed: an Operation is not Done before it has.
 func (p *pass) report(op *v1alpha1.Operation, failed map[types.UID]error, deleting map[types.UID]bool, specWritten bool) error {
-	targets, all, failures, err := p.outcomes(op, failed, deleting, specWritten)
+	targets, failures, err := p.outcomes(op, failed, deleting, specWritten)
 	if err != nil {
 		return err
 	}
-	all = all && specWritten // a Scale whose targets are all done is not Done while its spec write has not landed
+	phase, finished := phaseOf(targets)
+	if phase == v1alpha1.OperationPhaseDone && !specWritten {
+		phase, finished = v1alpha1.OperationPhaseExecuting, false // a Scale whose targets are all done is not Done while its spec write has not landed
+	}
 	key := "partly-failed/" + string(op.UID)
-	if len(failures) > 0 && !all {
+	if phase == v1alpha1.OperationPhasePartlyFailed {
 		if p.mem.repeat(key, p.now) {
 			p.r.Recorder.Event(op, nil, eventFailing, v1alpha1.ReasonOperationPartlyFailed,
-				fmt.Sprintf("Operation %s/%s is partly failed, and retries: %s", op.Namespace, op.Name, strings.Join(failures, "; ")))
+				fmt.Sprintf("Operation %s/%s is partly failed: %s", op.Namespace, op.Name, strings.Join(failures, "; ")))
 		}
 	} else {
 		p.mem.clear(key)
 	}
 	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 		s.Targets = targets
-		if specWritten {
-			p.setCondition(s, op, v1alpha1.ConditionSpecWritten, metav1.ConditionTrue, "Written", "the spec change this Operation commits to has landed, or there was none to make")
-		}
+		s.Phase = phase
 		switch {
-		case all:
-			s.Phase = v1alpha1.OperationPhaseDone
+		case phase == v1alpha1.OperationPhaseDone:
 			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonDone, "every committed target is done")
-			if s.FinishedAt == nil {
-				t := metav1.NewTime(p.now)
-				s.FinishedAt = &t
-			}
-		case len(failures) > 0:
-			s.Phase = v1alpha1.OperationPhasePartlyFailed
+		case finished:
+			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonDone, "every committed target is done or has failed for good: the Operation is finished")
+		case phase == v1alpha1.OperationPhasePartlyFailed:
 			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionTrue, v1alpha1.ReasonExecuting,
-				fmt.Sprintf("%d of %d committed targets failed and are retried with backoff", len(failures), len(targets)))
+				fmt.Sprintf("%d of %d committed targets failed; those a retry can fix are retried with backoff", len(failures), len(targets)))
 		default:
-			s.Phase = v1alpha1.OperationPhaseExecuting
 			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionTrue, v1alpha1.ReasonExecuting,
 				fmt.Sprintf("committed to %d targets: the controller acts on this list and on nothing else", len(targets)))
+		}
+		if finished && s.FinishedAt == nil {
+			t := metav1.NewTime(p.now)
+			s.FinishedAt = &t
 		}
 	})
 }
