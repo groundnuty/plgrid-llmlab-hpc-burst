@@ -78,13 +78,12 @@ func TestWaitForCommHoldsUntilTheProcessTakesItsName(t *testing.T) {
 	}
 }
 
-// A process that never takes the name fails the wait at its bound, naming the name it last read and the name it wanted, after more than one
-// read: a wait that read once would pass the test above's first read and fail here. The bound is short: the test waits for the failure, not for
-// a time.
+// A process that never takes the name fails the wait at its bound, naming the name it last read, the name it wanted and the bound. The bound is
+// short: the test waits for the failure, not for a time, and asserts nothing about how many reads fit in it, which depends on the load.
 func TestWaitForCommFailsNamingTheNameItLastRead(t *testing.T) {
 	pid, _ := gatedChild(t)
 	const bound = 150 * time.Millisecond
-	_, reads, err := waitForComm(pid, newlineName+"\n", bound, nil)
+	_, _, err := waitForComm(pid, newlineName+"\n", bound, nil)
 	if err == nil {
 		t.Fatal("a process that never took the name passed the wait")
 	}
@@ -93,8 +92,36 @@ func TestWaitForCommFailsNamingTheNameItLastRead(t *testing.T) {
 			t.Errorf("the error %q does not say %q", err, want)
 		}
 	}
-	if reads < 2 {
-		t.Errorf("the wait read the name %d time(s) in %s, want it to read again", reads, bound)
+}
+
+// A first read that misses is always followed by one more before the wait fails, whatever the load: with a bound of zero, which has passed
+// before the first read ends, the wait reads exactly twice, not once, so a process that took its name in that time is seen. The test has no
+// clock in it: a bound that is already over is over on any machine. The child is released between the two reads, by the tick, and the wait
+// then returns the new name, with no error, instead of failing on the first read.
+func TestWaitForCommReadsOnceMoreAtItsBound(t *testing.T) {
+	pid, release := gatedChild(t)
+	want := newlineName + "\n"
+	_, reads, err := waitForComm(pid, want, 0, nil)
+	if err == nil || reads != 2 {
+		t.Errorf("a bound of zero: %d reads and error %v, want 2 reads and the bound's error", reads, err)
+	}
+	// The same, with the process taking its name after the first read: only the read after the bound sees it. The tick releases the child on the
+	// first read and waits for its new name to show in /proc, so the second read, the one after the bound, cannot miss.
+	pid, release = gatedChild(t)
+	first, reads, err := waitForComm(pid, want, 0, func(reads int, got string) error {
+		if reads != 1 {
+			return nil
+		}
+		release()
+		for deadline := time.Now().Add(waitDeadline); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+			if b, rerr := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); rerr == nil && string(b) == want {
+				return nil
+			}
+		}
+		return errors.New("the released child did not take its name")
+	})
+	if err != nil || reads != 2 || first != "sh\n" {
+		t.Errorf("a bound of zero, the child named after the first read: first %q, %d reads, error %v, want \"sh\\n\", 2 reads and no error", first, reads, err)
 	}
 }
 

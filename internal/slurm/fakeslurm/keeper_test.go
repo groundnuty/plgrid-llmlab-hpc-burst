@@ -139,11 +139,15 @@ func TestABackgroundChildNamedWithANewlineEndsWhenItsHostIsKilled(t *testing.T) 
 // after its exec: a process that was only forked carries its parent's name until then (issue #619). It returns
 // the first name it read and the number of reads. It fails, naming the name it last read, when bound passes;
 // when the process is gone (an exec that failed leaves a zombie, whose comm reads on); and when tick, called
-// after each read that did not match, returns an error.
+// after each read that did not match, returns an error. A read after the bound always comes before it fails, so
+// a first read that misses is followed by at least one more, however long the first took: a process that took
+// its name between the last read in time and the bound is seen, and the number of reads does not depend on
+// the load.
 func waitForComm(pid int, want string, bound time.Duration, tick func(reads int, got string) error) (first string, reads int, err error) {
 	deadline := time.Now().Add(bound)
 	file := "/proc/" + strconv.Itoa(pid) + "/comm"
 	last := ""
+	final := false // the bound has passed: this read is the last
 	for {
 		b, rerr := os.ReadFile(file)
 		reads++
@@ -162,8 +166,12 @@ func waitForComm(pid int, want string, bound time.Duration, tick func(reads int,
 				return first, reads, terr
 			}
 		}
-		if time.Now().After(deadline) {
+		if final {
 			return first, reads, fmt.Errorf("process %d is named %q (%v) after %d reads within %s, want %q", pid, last, rerr, reads, bound, want)
+		}
+		if !time.Now().Before(deadline) {
+			final = true // read once more, now, before failing
+			continue
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
