@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Expected performance and over-allocation (beta; HBEP-4, Platform profile
@@ -162,12 +163,23 @@ type ExpectedPerformance struct {
 }
 
 // SuspendedReference is an expected-performance entry suspended for one
-// deployment: the class's two most recent verdicts against it, from two
-// Allocations, were both Missed (HBEP-7, The throughput gate, A suspect
-// reference). The gate records only against an entry listed with the same
-// date; the listing is removed when the profile's matching entry has another
+// deployment: the two most recent Passed or Missed verdicts against it, from
+// two Allocations, were both Missed (HBEP-7, The throughput gate, A suspect
+// reference). An entry is one profile's: it is keyed by its PlatformProfile,
+// its key and its date (`@hpc-burst-science-agent`, 16 Nov 2026, on #652). The
+// gate records only against an entry listed with the same profile, key and
+// date; the listing is removed when that profile's matching entry has another
 // date or is gone.
 type SuspendedReference struct {
+	// PlatformProfile is the name of the PlatformProfile the entry comes from,
+	// so a suspension of one profile's entry never stops the gate on another
+	// profile's entry with the same key and date. A listing without it
+	// matches the entry in any of the deployment's profiles.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	PlatformProfile string `json:"platformProfile,omitempty"`
+
 	ReferenceKey `json:",inline"`
 
 	// Date is the suspended entry's date.
@@ -179,6 +191,46 @@ type SuspendedReference struct {
 
 	// SuspendedTime is when the second miss suspended it.
 	SuspendedTime metav1.Time `json:"suspendedTime"`
+}
+
+// ReferenceMiss is an expected-performance entry whose latest Passed or
+// Missed verdict is Missed and that is not suspended yet (beta; HBEP-7, The
+// throughput gate, A suspect reference; `@hpc-burst-science-agent`, 16 Nov
+// 2026, on #652). Every gated Instance's verdict counts, one placed on a warm
+// Allocation included, and it is recorded in the pass that judges it, before
+// the Instance's verdict is written. A Passed verdict against the entry
+// removes it; a Missed from another Allocation suspends the entry
+// (SuspendedReference) and removes it.
+type ReferenceMiss struct {
+	// PlatformProfile is the name of the PlatformProfile the entry comes from.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	PlatformProfile string `json:"platformProfile"`
+
+	ReferenceKey `json:",inline"`
+
+	// Date is the entry's date.
+	//
+	// +kubebuilder:validation:MaxLength=10
+	// +kubebuilder:validation:Pattern=`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`
+	// +kubebuilder:validation:XValidation:rule="string(timestamp(self + 'T00:00:00Z')).startsWith(self)",message="date must be a real calendar date, YYYY-MM-DD"
+	Date string `json:"date"`
+
+	// InstanceUID is the Instance that missed, and AllocationUID its
+	// Allocation's.
+	//
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	InstanceUID types.UID `json:"instanceUID"`
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	AllocationUID types.UID `json:"allocationUID"`
+
+	// Time is when the gate recorded the miss.
+	Time metav1.Time `json:"time"`
 }
 
 // InstanceGate is the throughput gate's record on one Instance (beta; HBEP-7,

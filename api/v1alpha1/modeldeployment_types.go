@@ -746,18 +746,29 @@ type ModelDeploymentStatus struct {
 	StartOutcomes []ClassStartOutcomes `json:"startOutcomes,omitempty"`
 
 	// SuspendedReferences are the expected-performance entries suspended for
-	// this deployment: the class's two most recent verdicts against one entry
-	// and its date, from two Allocations, were both Missed, so the gate
-	// records only against it (beta; HBEP-7, The throughput gate, A suspect
-	// reference). The listing is written in the pass that records the second
-	// miss, so it outlives the class's kept outcomes and a controller
-	// restart, and is removed once the profile's matching entry has another
-	// date or is gone.
+	// this deployment: the two most recent Passed or Missed verdicts against
+	// one entry (a profile's, by its key and date), from two Allocations, were
+	// both Missed, so the gate records only against it (beta; HBEP-7, The
+	// throughput gate, A suspect reference). The listing is written in the
+	// pass that records the second miss, so it outlives the class's kept
+	// outcomes and a controller restart, and is removed once the profile's
+	// matching entry has another date or is gone.
 	//
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=32
 	SuspendedReferences []SuspendedReference `json:"suspendedReferences,omitempty"`
+
+	// ReferenceMisses are the expected-performance entries whose latest
+	// Passed or Missed verdict is Missed and that are not suspended yet, one
+	// per entry (beta; HBEP-7, The throughput gate, A suspect reference). Kept
+	// in status, the record outlasts a queue wait longer than restart.window,
+	// which prunes the ended Instances, and a controller restart.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=32
+	ReferenceMisses []ReferenceMiss `json:"referenceMisses,omitempty"`
 
 	// Instances is the number of Instances that exist and have not ended. It
 	// is the scale subresource's status count.
