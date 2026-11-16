@@ -10,44 +10,16 @@ package front
 // came before that rebuild ended was routed on a view that held one Instance, and the ring homed its session there. The router is as documented;
 // the fixture did not wait for the state its first request relies on.
 //
-// Both tests force that window with the router's own seam (Router.afterBuild), by order, never by time: a rebuild is held after it has read the
-// registrations and before its view is published, the other Instance registers, and the reader is released once the router counts it waiting.
+// Both tests force that window with the router's own seam (Router.afterBuild, through holdRebuilds of coalesce_test.go), by order, never by time: a
+// rebuild is held after it has read the registrations and before its view is published, the other Instance registers, and the reader is released
+// once the router counts it waiting. The test that shows the cause holds a second rebuild as well, until the request has made its pick (below).
 
 import (
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// holdFirstRebuild makes the router's next rebuild stop once its view is built, before it is published, until release is called. entered is closed
-// when it has stopped. release is also called when the test ends, so that a failing test does not leave the rebuild holding the router's lock.
-func holdFirstRebuild(t *testing.T, r *Router) (entered <-chan struct{}, release func()) {
-	t.Helper()
-	in, out := make(chan struct{}), make(chan struct{})
-	var first, once sync.Once
-	r.afterBuild = func() {
-		held := false
-		first.Do(func() { held = true; close(in) })
-		if held {
-			<-out
-		}
-	}
-	release = func() { once.Do(func() { close(out) }) }
-	t.Cleanup(release)
-	return in, release
-}
-
-// waitEntered waits until a held rebuild has stopped.
-func waitEntered(t *testing.T, entered <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-entered:
-	case <-time.After(failAfter):
-		t.Fatalf("no rebuild of the router began within %s of a registration", failAfter)
-	}
-}
 
 // releaseWhenAReaderWaits releases a held rebuild once a reader of the router's view waits for it: Router.waiting counts the readers that wait for
 // the lock the rebuild holds. released says that it did; a reader that never comes leaves it false, and the test's clean-up releases the rebuild.
@@ -55,6 +27,27 @@ func releaseWhenAReaderWaits(r *Router, release func()) (released *atomic.Bool) 
 	released = new(atomic.Bool)
 	go func() {
 		for end := time.Now().Add(failAfter); r.waiting.Load() < 1; time.Sleep(time.Millisecond) {
+			if time.Now().After(end) {
+				return
+			}
+		}
+		released.Store(true)
+		release()
+	}()
+	return released
+}
+
+// releaseWhenInFlight releases a held rebuild once the group's in-flight count for member reads 1: the request has picked it and is blocked on the
+// router's lock, which the held rebuild holds, so the count stays 1 until the release. It reads the group's own lock and not the router's, which
+// would wait for the rebuild. It must not wait for the request to reach the engine: the request needs the router's lock (Router.LeaseEnd, armLease)
+// before that, and would never come. released says that it did.
+func releaseWhenInFlight(g interface{ InFlight(string) (int64, bool) }, member string, release func()) (released *atomic.Bool) {
+	released = new(atomic.Bool)
+	go func() {
+		for end := time.Now().Add(failAfter); ; time.Sleep(time.Millisecond) {
+			if n, ok := g.InFlight(member); ok && n == 1 {
+				break
+			}
 			if time.Now().After(end) {
 				return
 			}
@@ -86,21 +79,30 @@ func publishedMembers(r *Router) (n int) {
 // of #417 as the hazard for a fixture, and is the cause shown, not a fault of the router.
 func TestAFirstRequestOnTheViewOfARebuildThatPredatesARegistrationGoesToAnotherInstance(t *testing.T) {
 	f := buildBulkFront(t, 2, true)
-	entered, release := holdFirstRebuild(t, f.router)
+	group := f.scGroup("ns/md-0") // the live group, read below without the router's lock
+	holds := holdRebuilds(t, f.router, 2)
 	f.tun.setRegistered(f.uids[1], true) // the rebuild this starts reads only this registration
-	waitEntered(t, entered)
+	holds[0].waitHeld(t)
 	f.tun.setRegistered(f.uids[0], true) // marks the view stale: the held rebuild has already read its registrations
 	for i, u := range f.uids {
 		if !f.tun.Registered(u) {
 			t.Fatalf("Instance %d is not registered: the window needs both registered, as the fixture's wait ended", i)
 		}
 	}
-	released := releaseWhenAReaderWaits(f.router, release)
+	released := releaseWhenAReaderWaits(f.router, holds[0].open)
+	// The drain's follow-up rebuild, for the registration the first did not read, starts as soon as the request leaves the router's lock. The
+	// request reads the view, whose ring has md-0-1 alone, but picks from the LIVE group, which a rebuild rewrites (Group.Update): a follow-up
+	// rebuild that ended between the two would put md-0-0 in the group, and the request would go there, an outcome that depends on which of
+	// two goroutines is faster (the review of #642; forced through Router.beforePick it sends the request to md-0-0). So that rebuild is held
+	// too, until the pick has been made: the group counts the request in flight on md-0-1 then, and the request stays there, blocked on the
+	// router's lock (Router.LeaseEnd, which the held rebuild holds), until this releases it. Releasing on the engine's receipt of the request
+	// would never come.
+	releasedPick := releaseWhenInFlight(group, f.keys[1], holds[1].open)
 	session := scKeys(t, f.keys, f.keys[0], 1)[0]
 	resp := f.post("/v1/chat/completions", chatPlain, "x-session-id", session)
 	readAll(t, resp)
-	if !released.Load() {
-		t.Fatal("the request did not wait for the held rebuild")
+	if !released.Load() || !releasedPick.Load() {
+		t.Fatalf("the request did not wait for the held rebuild (%t), or the second rebuild was not held until the pick (%t)", released.Load(), releasedPick.Load())
 	}
 	if resp.StatusCode != 200 || scInstanceOf(resp) != f.keys[1] {
 		t.Errorf("a request on the view of a rebuild that predates md-0-0's registration: %d from %q, want 200 from %s (the one Instance in that view)", resp.StatusCode, scInstanceOf(resp), f.keys[1])
@@ -129,11 +131,11 @@ func TestTheBulkFixtureWaitsForTheRoutersViewOfEveryInstance(t *testing.T) {
 	}{{"the second Instance registers last", 1, 0}, {"the first Instance registers last", 0, 1}} {
 		t.Run(c.name, func(t *testing.T) {
 			f := buildBulkFront(t, 2, true)
-			entered, release := holdFirstRebuild(t, f.router)
+			holds := holdRebuilds(t, f.router, 1)
 			f.tun.setRegistered(f.uids[c.first], true)
-			waitEntered(t, entered)
+			holds[0].waitHeld(t)
 			f.tun.setRegistered(f.uids[c.last], true)
-			released := releaseWhenAReaderWaits(f.router, release)
+			released := releaseWhenAReaderWaits(f.router, holds[0].open)
 			f.waitRoutable()
 			if !released.Load() {
 				t.Fatal("waitRoutable returned while the router's rebuild was held: it waited for the tunnels' registrations and not for the router's view of them")
