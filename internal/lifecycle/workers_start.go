@@ -230,7 +230,7 @@ func workersThroughput(tps []*v1alpha1.Throughput) *v1alpha1.Throughput {
 // workerStartSignal returns the malfunction of an Instance of several workers that is not ready yet, and
 // the worker whose rung it enters: a worker that exited at its current generations (a clean exit too;
 // L-2.9), or a start past health.startTimeout from its start instruction, or from its last restart,
-// taken by the worker that holds the start back (HBEP-7:469: the timeout judges that worker): the first
+// taken by the worker that holds the start back (HBEP-7, Several workers: the timeout judges that worker): the first
 // not yet warmed up, else the first the current router report does not hold healthy, else worker-0
 // (#498's review).
 func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st settings) (string, string) {

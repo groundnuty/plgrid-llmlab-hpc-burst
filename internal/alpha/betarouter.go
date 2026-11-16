@@ -6,7 +6,7 @@ package alpha
 // path, that no loopback run can say:
 //   - Envoy runs bare in the job, from the build the Provider staged by its pinned digest: a process of the job whose command
 //     is envoy and whose ancestors hold no Apptainer, and whose executable is the pinned digest's file, read on the node;
-//   - the node's glibc, version only (HBEP-5:133 asks for it): read on the node by one srun step of getconf and, from the
+//   - the node's glibc, version only (HBEP-5, Amendments, "Envoy runs bare, staged by digest", asks for it): read on the node by one srun step of getconf and, from the
 //     other side, from the agent's own log, which says why a refused start was refused. The two are read so that the NOT RUN
 //     below does not depend on which comes first, since the agent starts Envoy at the Instance's start instruction;
 //   - the router in the path: spec.launch.router is envoy, status.healthyWorkers is 1 (the controller reads it from Envoy's own
@@ -20,7 +20,7 @@ package alpha
 //   - one restart at the worker rung, with the router in front: the gate of HBEP-7.
 //
 // NOT RUN, exit 3, never a pass and never a failure: a node whose glibc is under 2.30 (ErrGlibcTooOld), naming the version.
-// Envoy cannot run bare there, which is itself the evidence HBEP-5:133 asks for; running Envoy from an image is the route for
+// Envoy cannot run bare there, which is itself the evidence HBEP-5, Amendments, "Envoy runs bare, staged by digest", asks for; running Envoy from an image is the route for
 // such a node, and a separate decision.
 
 import (
@@ -59,7 +59,7 @@ func BetaRouterRow() Row {
 }
 
 // BetaHeliosRouterRow is the router row on Helios's GH200 (issue #566), so that the compute node's glibc is read in the first minutes
-// after Helios returns: Helios's login node has glibc 2.28, under the 2.30 Envoy run bare needs (HBEP-5:133), and if the GH200 node is
+// after Helios returns: Helios's login node has glibc 2.28, under the 2.30 Envoy run bare needs (HBEP-5, Amendments, "Envoy runs bare, staged by digest"), and if the GH200 node is
 // too, Apptainer is the route. It is the Helios rows' shape and slot, tunnel-hour-helios's single job in QOS now: one GPU, the owner's go of
 // QOS now, the slot held for the lease, the live clock of profiles/helios.yaml, under which the lease is the shortest an Instance's
 // lead allows (MinLease: a cold GH200 start may take the hour of its start timeout). The run releases the slot as soon as it ends. Its
@@ -72,7 +72,7 @@ func BetaHeliosRouterRow() Row {
 // GlibcVersion is a glibc version, major and minor.
 type GlibcVersion struct{ Major, Minor int }
 
-// MinEnvoyGlibc is the glibc Envoy 1.40.2's pinned release needs on both pinned architectures (HBEP-5:133; the symbol versions the
+// MinEnvoyGlibc is the glibc Envoy 1.40.2's pinned release needs on both pinned architectures (HBEP-5, Amendments, "Envoy runs bare, staged by digest"; the symbol versions the
 // agent reads, internal/agent/envoyglibc.go).
 var MinEnvoyGlibc = GlibcVersion{2, 30}
 
@@ -372,7 +372,7 @@ func healthyChecks(o RouterObs) []string {
 
 // VerifyBetaRouter judges the router row.
 //
-//	hbep/0005-llmlab-compatible-front/README.md:133: Envoy runs bare, from the binary staged by digest, on a compute node.
+//	HBEP-5, Amendments ("Envoy runs bare, staged by digest"): Envoy runs bare, from the binary staged by digest, on a compute node.
 //	hbep/0007-lifecycle-controller/README.md (Several workers): status.healthyWorkers; a worker restart at the worker rung.
 //	hbep/0005-llmlab-compatible-front/README.md (Test plan, Beta, the router, Bytes): S13's cases, read at the response here.
 func VerifyBetaRouter(row Row, o RouterObs, jobs []provider.Job) []string {

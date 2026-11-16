@@ -243,7 +243,7 @@ func (r *liveRun) nowSuccessorPastStartWait(p Plan, succTag string) successorOut
 // nowThirdJobSign is successorOf's stop for row B: true once the successor's Instance has ended before it was ready (a
 // start that failed: the Instance's phase is ended, whatever its reason), or the watch shows an
 // Allocation of the run that is neither the predecessor's nor the successor's. A failed Instance's replacement is a new
-// Allocation (hbep/0003-resource-model-and-naming/README.md:358), a third job in the owner's slot, so the run ends its
+// Allocation (HBEP-3, Test plan), a third job in the owner's slot, so the run ends its
 // deployment at once rather than waiting out the ready wait.
 func (r *liveRun) nowThirdJobSign(predAlloc, succAlloc string) func() bool {
 	return func() bool {

@@ -1,7 +1,7 @@
 package alpha
 
 // The worker-rung fault of the stack rows (issue #245; the science agent's
-// ruling of 2 Nov 2026): HBEP-7:637 asks for "one restart at the worker rung"
+// ruling of 2 Nov 2026): HBEP-7, Graduation criteria, asks for "one restart at the worker rung"
 // on each alpha platform, so the run kills the engine in its own job and the
 // stack must restart the worker. The run reaches the node the way an operator
 // would, from the login node with srun --overlap into its own job's
