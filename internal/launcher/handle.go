@@ -49,7 +49,8 @@ import (
 // read_lock(tasklist_lock), which excludes de_thread: it reports the exit only for a group that
 // has really exited, and nothing at all for a live one. That is exact. For a process that is not
 // the launcher's child (one an earlier invocation started, which was reparented), waitid answers
-// ECHILD, and the answer is one more poll, final. This branch is exact only because waitid has
+// ECHILD (or EINVAL, on a kernel older than 5.4, whose waitid takes no pidfd), and the answer is
+// one more poll, final. This branch is exact only because waitid has
 // already taken tasklist_lock before it finds that the process is not a child, which orders the
 // next poll after any hand-over in progress. That is an implementation detail of the kernel's
 // __do_wait, verified at v6.8, v6.15 and master, not a documented guarantee. It is a stated
@@ -103,13 +104,22 @@ var (
 //   - A poll that does not read readable means the process is alive: one call, no wait.
 //   - A readable poll is followed by wait. childExited means exited. childAlive means alive: the
 //     poll read the hand-over of an execve. notChild means one more poll, whose answer is final.
-//   - An error from poll or wait, or a result wait has no name for, is returned as the error.
+//   - EINVAL from wait counts as notChild. waitid takes a pidfd (P_PIDFD) only from Linux 5.4, and
+//     the launcher's floor is 5.3 (pidfd_open), so on 5.3 every waitid fails with EINVAL: this
+//     kernel cannot confirm through waitid, and the re-poll is the confirmation it has. Such a
+//     kernel also predates the 6.15 poll that can misread, so a real exit must still read as one
+//     rather than as Unknown.
+//   - Any other error from poll or wait, or a result wait has no name for, is returned as the
+//     error.
 func confirmExit(poll func() (bool, error), wait func() (waitResult, error)) (bool, error) {
 	readable, err := poll()
 	if err != nil || !readable {
 		return false, err
 	}
 	w, err := wait()
+	if errors.Is(err, unix.EINVAL) {
+		w, err = notChild, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -167,7 +177,8 @@ func pollPidfd(fd int) (bool, error) {
 // waitPidfd asks waitid whether the process behind the pidfd has exited, without waiting and
 // without reaping it (WNOWAIT leaves the zombie). The kernel decides this under tasklist_lock:
 // it reports SIGCHLD only for a child whose whole thread group has exited, and reports nothing
-// for a live child. A process that is not a child, or was reaped, gives ECHILD.
+// for a live child. A process that is not a child, or was reaped, gives ECHILD. EINVAL (a kernel
+// before 5.4) comes back as an error, which confirmExit treats as ECHILD.
 func waitPidfd(fd int) (waitResult, error) {
 	for {
 		var info unix.Siginfo

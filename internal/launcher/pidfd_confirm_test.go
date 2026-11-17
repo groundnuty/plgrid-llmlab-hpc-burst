@@ -57,6 +57,9 @@ func TestConfirmExit(t *testing.T) {
 		{"readable, not a child, not readable again: the transient", []pollStep{yes, no}, []waitStep{{res: notChild}}, false, nil, "", "poll wait poll", 0, 1},
 		{"a poll error is returned, with no wait", []pollStep{{err: boom}}, nil, false, boom, "", "poll", 0, 0},
 		{"a wait error is returned, not an exit and not alive", []pollStep{yes}, []waitStep{{err: boom}}, false, boom, "", "poll wait", 0, 0},
+		{"EINVAL from wait (a kernel before 5.4) is a re-poll: exited", []pollStep{yes, yes}, []waitStep{{err: unix.EINVAL}}, true, nil, "", "poll wait poll", 0, 0},
+		{"EINVAL from wait (a kernel before 5.4) is a re-poll: the transient", []pollStep{yes, no}, []waitStep{{err: unix.EINVAL}}, false, nil, "", "poll wait poll", 0, 1},
+		{"EINVAL from wait, then a re-poll error, is that error", []pollStep{yes, {err: boom}}, []waitStep{{err: unix.EINVAL}}, false, boom, "", "poll wait poll", 0, 0},
 		{"a re-poll error is returned", []pollStep{yes, {err: boom}}, []waitStep{{res: notChild}}, false, boom, "", "poll wait poll", 0, 0},
 		{"a wait result with no meaning is an error", []pollStep{yes}, []waitStep{{res: 0}}, false, nil, "has no meaning", "poll wait", 0, 0},
 	}
