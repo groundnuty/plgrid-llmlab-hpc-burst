@@ -112,6 +112,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 		// A loss job is waiting for the notifier: it raises for the run as it stands now. It is the run's own
 		// job, or an older run's that has not started, which this run takes over.
 		j.gen, j.count, j.since = r.gen, r.runCount, r.runStart
+		j.covered = false // it raises for this run now, which no closing covers
 		if j.at.IsZero() || now.After(j.at) {
 			j.at = now
 		}
