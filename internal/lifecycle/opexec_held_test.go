@@ -36,8 +36,10 @@ func TestTheMarkIsClearedByPlacementAndByAServingPairAndByNothingElse(t *testing
 		{"its own Instance still starting once the Scale above zero has finished: cleared", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, false, v1alpha1.InstanceStarting, true},
 		{"the same, but the deployment is in shutdown: the spec keeps nothing, the mark stays", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, true, v1alpha1.InstanceReady, false},
 		{"an Instance placed on it that the Operation did not commit to, though the Operation is unfinished: cleared", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, false, false, v1alpha1.InstanceStarting, true},
-		{"an Instance placed on it, draining already: cleared, it was placed", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhasePartlyFailed, true, false, false, v1alpha1.InstanceDraining, true},
-		{"the marking Operation is gone and a live Instance is on it: cleared", nil, "", false, true, false, v1alpha1.InstanceReady, true},
+		{"an Instance placed on it that is already ending is not a placement: the mark stays", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, false, false, v1alpha1.InstanceDraining, false},
+		{"the marking Operation is gone and a live Instance serves on: cleared", nil, "", false, true, false, v1alpha1.InstanceReady, true},
+		{"the marking Operation is gone, finished and removed, and its Instance is draining: the mark stays", nil, "", false, true, false, v1alpha1.InstanceDraining, false},
+		{"the marking Operation is gone and the deployment is in shutdown: the mark stays", nil, "", false, true, true, v1alpha1.InstanceReady, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &v1alpha1.Allocation{}
