@@ -201,6 +201,18 @@ func (p *pass) settleYields() error {
 		if v == "" {
 			continue
 		}
+		if !countable(in) {
+			// A cancelled extra's tombstone keeps its mark while its Allocation is being deleted: that Allocation still
+			// holds the slot the named deployment's primary waits for, and the guard counts the mark (readReserved).
+			// Cleared here, a second extra would be marked for the same primary.
+			if a := p.allocOf(in); a != nil && !a.DeletionTimestamp.IsZero() {
+				continue
+			}
+			if err := p.patchYield(p.ctx, in, ""); err != nil {
+				return err
+			}
+			continue
+		}
 		b, at, ok := parseYield(v)
 		if !ok || !isSurplus[in] || p.stale[in.UID] || jobStarted(p.allocOf(in)) {
 			if err := p.patchYield(p.ctx, in, ""); err != nil {
@@ -241,8 +253,9 @@ func (p *pass) needsSlot(deployment string) (needs bool, last *time.Time, err er
 	case err != nil:
 		return false, nil, fmt.Errorf("read ModelDeployment %s for a yield mark: %w", deployment, err)
 	}
-	if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 {
-		return false, nil, nil
+	if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 ||
+		(md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time)) {
+		return false, nil, nil // gone, being deleted, scaled to zero or past its end time: its pass makes no primary
 	}
 	v := deploymentView{key: deployment, allocs: map[string]*v1alpha1.Allocation{}}
 	var il v1alpha1.InstanceList

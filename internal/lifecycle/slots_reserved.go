@@ -107,8 +107,9 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 // readReserved is reservedOn, and it returns, from the same reads, the pending surplus Instances of every
 // deployment on the Provider (the yield's candidates): countable surplus Instances whose Allocation exists, holds a
 // slot and has no job started, newest first; and every Instance on the Provider that carries a yield mark while its
-// Allocation still holds a slot, whatever its phase (the marks outstanding: a cancelled extra's, until its Allocation's
-// deletion completes, still counts as the slot its refused primary is waiting for).
+// Allocation still holds a slot and either the Instance is live or the Allocation is being deleted (the marks
+// outstanding: a cancelled extra's, until its Allocation's deletion completes, still counts as the slot its refused
+// primary is waiting for; an extra that ended for another reason and keeps its Allocation counts for nothing).
 func readReserved(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) ([]reservedSlot, []*v1alpha1.Instance, []*v1alpha1.Instance, error) {
 	var il v1alpha1.InstanceList
 	if err := r.List(ctx, &il, client.MatchingLabels{v1alpha1.LabelProvider: provider}); err != nil {
@@ -231,7 +232,8 @@ func readReserved(ctx context.Context, r client.Reader, provider string, profile
 	}
 	var outstanding []*v1alpha1.Instance
 	for _, in := range here {
-		if a := allocs[in.Namespace+"/"+in.Spec.AllocationRef.Name]; in.Annotations[annotationYieldTo] != "" && a != nil && holdsSlot(a) {
+		if a := allocs[in.Namespace+"/"+in.Spec.AllocationRef.Name]; in.Annotations[annotationYieldTo] != "" && a != nil && holdsSlot(a) &&
+			(countable(in) || !a.DeletionTimestamp.IsZero()) {
 			outstanding = append(outstanding, in)
 		}
 	}
