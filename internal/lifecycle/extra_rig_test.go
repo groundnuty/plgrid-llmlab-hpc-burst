@@ -63,10 +63,12 @@ func TestAMissingPrimaryBringsItsExtra(t *testing.T) {
 
 // TestTheExtraAndTheSlotBeyondItsOwnHandovers: the extra's slot and caps checks, each row a Provider and a deployment. The
 // effective submit limit counts the listed Allocations, those reserved and not listed yet, and the slots reserved for
-// handovers; the extra needs listed + expected + reserved + alsoLeave + 1 within the limit, where alsoLeave is one for
-// each chosen primary there that holds no reservation yet but will once Running: the deployment has no end time, or one
-// after its expected drain start, creation + the time limit - the drain window. Every deployment is fully served at
-// 08:01:10 (its primaries ready), so a refusal that sets a Degraded reason would show.
+// handovers; the extra needs listed + expected + reserved + alsoLeave + 1 + H within the limit, where alsoLeave is one for
+// each chosen primary there that holds no reservation yet but will once Running (the deployment has no end time, or one
+// after its expected drain start, creation + the time limit - the drain window) and H, the admission headroom (#711), is
+// 1 here: no other deployment misses a primary. Every deployment is fully served at 08:01:10 (its primaries ready), so a
+// refusal that sets a Degraded reason would show. Before the headroom the same rows were admitted one Allocation sooner
+// (host-dialed (2) with an end time, limit 5 with instances 2): that one slot is H.
 func TestTheExtraAndTheSlotBeyondItsOwnHandovers(t *testing.T) {
 	// 08:00:10 + 12 h - 2 h 10 min = 17:50:10 is the primary's expected drain start in the 12 h rows.
 	endBefore := metav1.NewTime(hoT(14, 0, 0))
@@ -77,10 +79,12 @@ func TestTheExtraAndTheSlotBeyondItsOwnHandovers(t *testing.T) {
 		end       *metav1.Time
 		want      int // Allocations, the extra's included
 	}{
-		{"host-dialed (2), no end time: 1 + 1 + 1 = 3 > 2, no extra", []rigOption{withHostDialed()}, 1, nil, 1},
-		{"host-dialed (2), end time 14:00, before the drain start 17:50:10: the handover reserves no slot, 1 + 0 + 1 = 2, the extra", []rigOption{withHostDialed()}, 1, &endBefore, 2},
-		{"limit 5, instances 2: 2 + 2 + 1 = 5, the extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-s5", MaxSubmitPerUser: i32(5)}}, "", "example-s5"), 2, nil, 3},
-		{"limit 4, instances 2: 2 + 2 + 1 = 5 > 4, no extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-s4", MaxSubmitPerUser: i32(4)}}, "", "example-s4"), 2, nil, 2},
+		{"host-dialed (2), no end time: 1 + 1 + 1 + 1 = 4 > 2, no extra", []rigOption{withHostDialed()}, 1, nil, 1},
+		{"host-dialed (2), end time 14:00, before the drain start 17:50:10: the handover reserves no slot, yet 1 + 0 + 1 + 1 = 3 > 2, no extra: the headroom leaves host-dialed mode none", []rigOption{withHostDialed()}, 1, &endBefore, 1},
+		{"limit 3, end time 14:00: the handover reserves no slot, 1 + 0 + 1 + 1 = 3 <= 3, the extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-s3", MaxSubmitPerUser: i32(3)}}, "", "example-s3"), 1, &endBefore, 2},
+		{"limit 6, instances 2: 2 + 2 + 1 + 1 = 6, the extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-s6", MaxSubmitPerUser: i32(6)}}, "", "example-s6"), 2, nil, 3},
+		{"limit 5, instances 2: 2 + 2 + 1 + 1 = 6 > 5, no extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-s5", MaxSubmitPerUser: i32(5)}}, "", "example-s5"), 2, nil, 2},
+		{"limit 4, instances 2: 2 + 2 + 1 + 1 = 6 > 4, no extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-s4", MaxSubmitPerUser: i32(4)}}, "", "example-s4"), 2, nil, 2},
 		{"a QOS of one GPU per user: 1 + 1 = 2 GPUs > 1, no extra", qosOpts([]v1alpha1.QOSProfile{{Name: "example-g1", MaxGPUsPerUser: i32(1)}}, "", "example-g1"), 1, nil, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {

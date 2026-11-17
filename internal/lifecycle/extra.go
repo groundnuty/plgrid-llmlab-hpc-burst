@@ -1,7 +1,11 @@
 package lifecycle
 
 import (
+	"context"
+	"fmt"
 	"slices"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -29,11 +33,11 @@ func (p *pass) createExtras(placed []string) error {
 		if pv == nil {
 			continue
 		}
-		alsoLeave, ok := p.extraChecks(pv, nil)
+		alsoLeave, headroom, ok := p.extraChecks(pv, nil)
 		if !ok {
 			continue
 		}
-		if _, err := p.provisionWith(nil, placeOpts{only: pv.name, extra: true, caps: true, alsoLeave: alsoLeave}); err != nil {
+		if _, err := p.provisionWith(nil, placeOpts{only: pv.name, extra: true, caps: true, alsoLeave: alsoLeave, headroom: headroom}); err != nil {
 			return err
 		}
 	}
@@ -80,16 +84,105 @@ func (p *pass) selectionWithout(exclude *v1alpha1.Instance) selection {
 	return sel
 }
 
-// extraChecks are the extra's first two checks on a Provider, the bound and the slot beyond its own handovers
-// (alsoLeave), in ONE place for createExtras, which makes the extra, and ensureAllocation, which retries one whose
-// Allocation's create was cut short, so the two never drift (#708, finding 4). exclude is the Instance that retries
-// (nil for a new extra). The third check, the per-user caps, and the silence are the reservation's own, asked with
-// params and quiet. ok is false when the bound refuses.
-func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLeave int, ok bool) {
+// extraChecks are the extra's checks on a Provider, in ONE place for createExtras, which makes the extra, and
+// ensureAllocation, which retries one whose Allocation's create was cut short, so the two never drift (#708, finding 4):
+// the bound, the slot beyond its own handovers (alsoLeave) and the admission headroom (headroom, read under the Provider's
+// lock by the reservation). exclude is the Instance that retries (nil for a new extra). The per-user caps and the silence
+// are the reservation's own, asked with params and quiet. ok is false when the bound refuses.
+func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLeave int, headroom func(context.Context) (int, error), ok bool) {
 	if !p.extraBoundWithout(pv, exclude) {
-		return 0, false
+		return 0, nil, false
 	}
-	return p.extraAlsoLeaveWithout(pv, exclude), true
+	return p.extraAlsoLeaveWithout(pv, exclude), p.headroomOf(pv), true
+}
+
+// headroomOf is the admission headroom H of an extra on the Provider (HBEP-7, Over-allocation and qualification (beta), Its
+// checks, admission headroom; the science agent's ruling on #708's delta reviews, amendment #711): the number of OTHER
+// deployments with a missing primary that the Provider allows, and at least 1, so an extra never takes a slot a primary needs
+// at the time, and nothing is cancelled to make room. It is the callback a reservation calls under the Provider's lock
+// (slotAsk.headroom), reading through the uncached Reader: one List of the Providers and one of the ModelDeployments of
+// every namespace, and, for each deployment that allows the Provider, its Instances and Allocations by its model-deployment
+// label. A deployment with a missing primary may have NO Instance on this Provider, so no view of the Provider's own
+// Instances (deploymentViews) can tell. A deployment counts when it is not this one, not being deleted, serves, wants
+// Instances, has not passed its end time, allows the Provider (selectedProviderNames, as its own pass reads it) and its
+// shortage by Allocation presence (shortageOfDeployment) is above zero.
+func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
+	return func(ctx context.Context) (int, error) {
+		var mds v1alpha1.ModelDeploymentList
+		if err := p.r.Reader.List(ctx, &mds); err != nil {
+			return 0, fmt.Errorf("list ModelDeployments for the extra's headroom: %w", err)
+		}
+		var provs v1alpha1.ProviderList
+		if err := p.r.Reader.List(ctx, &provs); err != nil {
+			return 0, fmt.Errorf("list Providers for the extra's headroom: %w", err)
+		}
+		h := 0
+		for i := range mds.Items {
+			md := &mds.Items[i]
+			if md.Namespace == p.key.Namespace && md.Name == p.key.Name {
+				continue
+			}
+			if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 ||
+				(md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time)) {
+				continue
+			}
+			allowed, err := selectedProviderNames(md.Spec.Providers, provs.Items)
+			if err != nil || !slices.Contains(allowed, pv.name) {
+				continue
+			}
+			short, err := shortageOfDeployment(ctx, p.r.Reader, md)
+			if err != nil {
+				return 0, err
+			}
+			if short > 0 {
+				h++
+			}
+		}
+		return max(h, 1), nil
+	}
+}
+
+// shortageOf is how many primaries a deployment lacks, counted by ALLOCATION PRESENCE and never by the selection's
+// choice: its desired count less the units, one per hedge, that countable Instances make and that HAVE an Allocation. A
+// cut-short Instance (made, its Allocation's create failed, retried in ensureAllocation) adds nothing, so it counts as
+// missing; and the selection's tie between same-second pending Instances (select.go: the UID) can never turn a missing
+// primary into "chosen". The pass, the extra's classification in ensureAllocation and the headroom's reading of the other
+// deployments all use this one function.
+func shortageOf(sel selection, desired int) int {
+	has := 0
+	for _, u := range sel.units() {
+		for _, m := range u.members {
+			if sel.allocOf(m) != nil {
+				has++
+				break
+			}
+		}
+	}
+	return max(desired-has, 0)
+}
+
+// shortage is shortageOf this pass's Instances and Allocations.
+func (p *pass) shortage() int { return shortageOf(p.selection(nil), p.desiredCount()) }
+
+// shortageOfDeployment is shortageOf the deployment's own Instances and Allocations, read through the Reader by its
+// model-deployment label in its namespace, as its own pass reads them (selectionOfView).
+func shortageOfDeployment(ctx context.Context, r client.Reader, md *v1alpha1.ModelDeployment) (int, error) {
+	v := deploymentView{key: md.Namespace + "/" + md.Name, allocs: map[string]*v1alpha1.Allocation{}}
+	var il v1alpha1.InstanceList
+	if err := r.List(ctx, &il, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
+		return 0, fmt.Errorf("list Instances of %s for the extra's headroom: %w", v.key, err)
+	}
+	for i := range il.Items {
+		v.insts = append(v.insts, &il.Items[i])
+	}
+	var al v1alpha1.AllocationList
+	if err := r.List(ctx, &al, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
+		return 0, fmt.Errorf("list Allocations of %s for the extra's headroom: %w", v.key, err)
+	}
+	for i := range al.Items {
+		v.allocs[al.Items[i].Name] = &al.Items[i]
+	}
+	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances)), nil
 }
 
 // extraAlsoLeave is how many slots the extra leaves free beside itself on the Provider: one for each of the

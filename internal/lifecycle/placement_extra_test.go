@@ -1,10 +1,10 @@
 package lifecycle
 
-// The placement order beside #616 PR 4's extra and yield (HBEP-7, Over-allocation and qualification (beta), When the
-// extra is submitted, Its checks; amendment #674): a missing primary placed on a warm Allocation is no new Allocation,
-// so it brings no extra; a missing primary refused on one Provider for the submit limit alone and placed on the next
-// leaves no extra cancelled for it; the yield still fires when every allowed Provider refuses. The rows assert
-// outcomes, never the yield's mechanism, which #708's fix round reworks.
+// The placement order beside #616 PR 4's extra and its admission headroom (HBEP-7, Over-allocation and qualification
+// (beta), When the extra is submitted, Its checks; amendment #711): a missing primary placed on a warm Allocation is no
+// new Allocation, so it brings no extra; a missing primary takes the slot headroom leaves it on the first Provider with
+// room, and a missing primary refused on a full Provider goes on to the next, and in neither is anything cancelled. An
+// extra never costs a primary its slot, and no pending extra yields: there is no yield (#708).
 
 import (
 	"testing"
@@ -60,116 +60,92 @@ func TestAMissingPrimaryOnAWarmAllocationGetsNoExtra(t *testing.T) {
 	}
 }
 
-// yieldOnTwo is yield_rig_test.go's fixture with Provider B beside A: A's submit limit is 4 and four of md-a's and
-// md-b's Allocations (a primary and an extra each, k = 1, pending 10 h) fill it. md-c wants one Instance, hedgeWidth 1,
-// and allows A, then B, which has no limit.
-func yieldOnTwo(t *testing.T) (*rig, *rigExtra) {
+// limitOnA is the rig with A's submit limit set, the Provider B beside it with none, and a log of the Allocations the
+// controller deletes (cancelsOf): nothing in these rows may delete one.
+func limitOnA(t *testing.T, limit int32) (*rig, *causeLog) {
 	t.Helper()
-	rg := yieldRig(t, newCauseLog())
-	b := rg.addProvider(ordB, "gpu-b", 12*time.Hour, nil, nil)
-	rg.batch.Enqueue(pending10h(8)...)
-	rg.create(yieldMD("md-a"))
-	tick10(rg) // 08:00:10: md-a makes P1 and X1
-	tick10(rg) // 08:00:20: their jobs are submitted
-	rg.create(yieldMD("md-b"))
-	tick10(rg) // 08:00:30: md-b makes P2 and X2
-	tick10(rg) // 08:00:40: their jobs are submitted
-	c := mdSpec("md-c")
-	c.Spec.HedgeWidth = ptrTo(int32(1))
-	c.Spec.Providers.Names = []string{rigProvider, ordB}
-	rg.create(c)
-	if a, bb := len(rg.allocations("md-a")), len(rg.allocations("md-b")); a != 2 || bb != 2 {
-		t.Fatalf("md-a has %d Allocations and md-b %d before md-c, want 2 each: A's limit of 4 is full", a, bb)
-	}
-	return rg, b
+	log := newCauseLog()
+	rg := newRig(t, append(limitOpts(limit), withInterceptors(log.funcs()))...)
+	rg.addProvider(ordB, "gpu-b", 12*time.Hour, nil, nil)
+	return rg, log
 }
 
-// TestAMissingPrimaryRefusedOnAForTheLimitIsSubmittedOnBAndNoExtraIsCancelled: md-c's primary is refused on A for the
-// submit limit alone at 08:00:50 (4 listed Allocations at the limit of 4), and is submitted on B, which has room, in
-// the same pass. A missing primary that is placed is no shortage any more, so the yield protocol (yield.go; #708) keeps
-// no mark its refusal on A made: whether a mark was written at the refusal and cleared in the pass, or never, no
-// Instance of md-a or md-b carries one afterwards, and through 08:11:50 no extra is cancelled. md-a and md-b keep
-// two live Instances and two Allocations each, and md-c has its one Instance, on B.
-func TestAMissingPrimaryRefusedOnAForTheLimitIsSubmittedOnBAndNoExtraIsCancelled(t *testing.T) {
-	rg, _ := yieldOnTwo(t)
-	tick10(rg) // 08:00:50: md-c's primary is refused on A and placed on B
+// md-c's deployment: one Instance, allowed on A and then B, one member per hedge (the rows are about placement).
+func missingOnAThenB(name string) *v1alpha1.ModelDeployment {
+	md := mdSpec(name)
+	md.Spec.HedgeWidth = ptrTo(int32(1))
+	md.Spec.Providers.Names = []string{rigProvider, ordB}
+	return md
+}
+
+// TestAMissingPrimaryTakesTheSlotHeadroomLeavesItOnAAndNothingIsCancelled: A's submit limit is 4, B has none. md-a (k = 1,
+// an end time before its drain start, so its handover reserves no slot) makes its primary and its extra at 08:00:10: 1 listed
+// + 0 + 1 + H, with H floored at 1, is 3 <= 4. md-b (k = 1) and md-c arrive at 08:00:20, and md-b sorts before md-c, so at
+// md-b's pass md-c is a missing primary that A allows (H = 1): md-b's primary makes 3 listed, and its extra, 3 + 0 + 1 + 1 =
+// 5 > 4, is refused. md-c's primary then takes the fourth slot, on A, the first allowed Provider with room, and not on B: no
+// pending extra is cancelled for it, and none could be, since headroom kept its slot (HBEP-7, Its checks). md-a has 2
+// Allocations, md-b 1 and md-c 1, on A; B has none; no Allocation is deleted in ten minutes.
+func TestAMissingPrimaryTakesTheSlotHeadroomLeavesItOnAAndNothingIsCancelled(t *testing.T) {
+	rg, log := limitOnA(t, 4)
+	rg.batch.Enqueue(pending10h(8)...)
+	rg.create(extraMD("md-a"))
+	tick10(rg) // 08:00:10: md-a's primary and its extra
+	rg.create(extraMD("md-b"))
+	rg.create(missingOnAThenB("md-c"))
+	tick10(rg) // 08:00:20: md-b's primary, its extra refused, then md-c's primary
+	for range 60 {
+		tick10(rg) // to 08:10:20
+	}
+	if a, b, c := len(rg.allocations("md-a")), len(rg.allocations("md-b")), len(rg.allocations("md-c")); a != 2 || b != 1 || c != 1 {
+		t.Fatalf("md-a has %d Allocations, md-b %d and md-c %d, want 2, 1 and 1", a, b, c)
+	}
+	live := rg.liveInstances("md-c")
+	if len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != rigProvider {
+		t.Fatalf("md-c's live Instances are %v, want its primary on A: headroom left it the slot there", live)
+	}
+	for _, a := range rg.allAllocations() {
+		if a.Labels[v1alpha1.LabelProvider] == ordB {
+			t.Fatalf("Allocation %s was made on B: md-c's primary went past A's free slot", a.Name)
+		}
+	}
+	if n := cancelsOf(log); n != 0 {
+		t.Fatalf("%d Allocations were deleted, want none", n)
+	}
+}
+
+// TestAMissingPrimaryRefusedOnAForTheLimitGoesToBAndNothingIsCancelled: A's submit limit is 3, B has none. md-a (k = 1,
+// an end time) makes its primary and its extra at 08:00:10 (1 + 0 + 1 + H floored at 1 = 3 <= 3), and md-b (k = 0) its
+// primary at 08:00:30: 3 listed, A is full. md-c, allowed on A and then B, arrives at 08:00:40 and is refused on A for the
+// limit alone at 08:00:50, and its primary goes to B, the next allowed Provider, in the same pass. Nothing is cancelled for
+// it: md-a keeps its primary and its extra, md-b its primary, in ten minutes, and md-c has its one Instance on B.
+func TestAMissingPrimaryRefusedOnAForTheLimitGoesToBAndNothingIsCancelled(t *testing.T) {
+	rg, log := limitOnA(t, 3)
+	rg.batch.Enqueue(pending10h(8)...)
+	rg.create(extraMD("md-a"))
+	tick10(rg) // 08:00:10: md-a's primary and its extra
+	tick10(rg) // 08:00:20: their jobs are submitted
+	rg.create(mdSpec("md-b"))
+	tick10(rg) // 08:00:30: md-b's primary: A has 3 listed
+	tick10(rg) // 08:00:40
+	rg.create(missingOnAThenB("md-c"))
+	tick10(rg) // 08:00:50: md-c is refused on A, and placed on B
 	if !rg.clock.Now().Equal(hoT(8, 0, 50)) {
 		t.Fatalf("the rig is at %s, want 08:00:50", rg.clock.Now().Format(time.TimeOnly))
 	}
+	if a, b := len(rg.allocations("md-a")), len(rg.allocations("md-b")); a != 2 || b != 1 {
+		t.Fatalf("md-a has %d Allocations and md-b %d at 08:00:50, want 2 and 1: A's limit of 3 is full", a, b)
+	}
+	for range 60 {
+		tick10(rg) // to 08:10:50
+	}
+	if a, b := len(rg.liveInstances("md-a")), len(rg.liveInstances("md-b")); a != 2 || b != 1 {
+		t.Fatalf("md-a has %d live Instances and md-b %d, want 2 and 1: nothing is cancelled for md-c", a, b)
+	}
 	live := rg.liveInstances("md-c")
 	if len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != ordB {
-		t.Fatalf("md-c has %d live Instances at 08:00:50 (%v), want its primary, on B", len(live), live)
+		t.Fatalf("md-c's live Instances are %v, want its primary on B, refused on A for the limit", live)
 	}
-	for range 67 { // to 08:11:50
-		for _, name := range []string{"md-a", "md-b"} {
-			if n := len(rg.liveInstances(name)); n != 2 {
-				t.Fatalf("at %s %s has %d live Instances, want its primary and extra: the extra was cancelled for a primary that was placed on B", rg.clock.Now().Format(time.TimeOnly), name, n)
-			}
-		}
-		if ms := marks(rg); len(ms) != 0 {
-			t.Fatalf("at %s the marks %v are left, want none: md-c's primary was placed on B", rg.clock.Now().Format(time.TimeOnly), markNames(ms))
-		}
-		tick10(rg)
-	}
-	for _, name := range []string{"md-a", "md-b"} {
-		for _, a := range rg.allocations(name) {
-			if !a.DeletionTimestamp.IsZero() {
-				t.Fatalf("%s's Allocation %s is being deleted", name, a.Name)
-			}
-		}
-	}
-	if live := rg.liveInstances("md-c"); len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != ordB {
-		t.Fatalf("md-c has %d live Instances at 08:11:50 (%v), want its one, on B", len(live), live)
-	}
-}
-
-// TestTheYieldFiresWhenEveryAllowedProviderRefusesForTheLimit: A and B each have a submit limit of 2, and each is filled
-// by one deployment's primary and extra (md-a on A, md-d on B; k = 1, all four jobs pending 10 h). md-c allows A, then
-// B, and wants one Instance: both refuse it for the limit alone at 08:00:50, so the yield fires and an extra is
-// cancelled, and md-c's primary is placed, on a Provider it had been refused on, within 10 min. Nothing else could free a
-// slot, since every job pends: a yield that fired only at a Provider's refusal that another Provider then answered, or
-// not at all, leaves md-c without an Instance.
-func TestTheYieldFiresWhenEveryAllowedProviderRefusesForTheLimit(t *testing.T) {
-	o := newOrdRig(t, ordOpts{aLimit: 2, bLimit: 2}, withMaxTime(12*time.Hour))
-	o.batch.Enqueue(pending10h(2)...)
-	o.b.batch.Enqueue(pending10h(2)...)
-	a := yieldMD("md-a")
-	o.create(a)
-	tick10(o.rig) // 08:00:10: md-a makes P1 and X1
-	tick10(o.rig) // 08:00:20: their jobs are submitted
-	d := yieldMD("md-d")
-	d.Spec.Providers.Names = []string{ordB}
-	o.create(d)
-	tick10(o.rig) // 08:00:30: md-d makes P2 and X2
-	tick10(o.rig) // 08:00:40: their jobs are submitted
-	if x, y := len(o.allocations("md-a")), len(o.allocations("md-d")); x != 2 || y != 2 {
-		t.Fatalf("md-a has %d Allocations and md-d %d, want 2 each: both limits of 2 are full", x, y)
-	}
-	c := mdSpec("md-c")
-	c.Spec.HedgeWidth = ptrTo(int32(1))
-	c.Spec.Providers.Names = []string{rigProvider, ordB}
-	o.create(c)
-	tick10(o.rig) // 08:00:50: md-c's primary is refused on A and on B
-	if n := len(o.allocations("md-c")); n != 0 {
-		t.Fatalf("md-c has %d Allocations at 08:00:50, want none: both Providers are at their limit", n)
-	}
-	if len(marks(o.rig)) == 0 {
-		t.Fatal("no yield mark at 08:00:50: md-c's primary was refused on both Providers for the limit, and no extra yielded")
-	}
-	until := o.clock.Now().Add(10 * time.Minute)
-	for len(o.liveInstances("md-c")) == 0 {
-		if !o.clock.Now().Before(until) {
-			t.Fatalf("md-c has no Instance at %s: the yield did not free a slot", o.clock.Now().Format(time.TimeOnly))
-		}
-		tick10(o.rig)
-	}
-	cancelled := 0
-	for _, name := range []string{"md-a", "md-d"} {
-		if len(o.liveInstances(name)) < 2 {
-			cancelled++
-		}
-	}
-	if cancelled == 0 {
-		t.Fatal("md-c is placed but no extra was cancelled: it found its slot some other way")
+	if n := cancelsOf(log); n != 0 {
+		t.Fatalf("%d Allocations were deleted, want none", n)
 	}
 }

@@ -80,33 +80,16 @@ const listTimeout = 30 * time.Second
 // them. The extra's alsoLeave (slotAsk) is counted by the asking pass from its
 // own deployment's objects before it asks, so nothing under the lock reads it.
 //
-// The yield (yield.go; #616 PR 4) adds the only WRITES made under a Provider's
-// lock, always after slotTable.mu is released, and one more lock, yieldMu,
-// which serialises every decision to mark or cancel an extra for a yield, in
-// this process. yieldMu may be held while taking ONE Provider's lock
-// (slotLock); a Provider's lock is never held while taking yieldMu, and yieldMu
-// is never taken twice. A missing primary's marking takes yieldMu, then the
-// reservation takes the Provider's lock and calls slotAsk.onLimit under it,
-// when the limit alone refuses: the callback reads, through the uncached
-// Reader and no other lock, the marks that name the asking deployment (one List
-// of the Instances by the yield-mark label, across every Provider, one Get of
-// each mark's Allocation) and the Allocations being deleted for it (one List),
-// and patches the annotationYieldTo mark and the label on a pending extra's
-// Instance (any deployment's) by one merge patch. The owner's cancel takes
-// yieldMu, then the extra's Provider's lock (underLockCounted), re-reads
-// everything it decides on, and under both writes the release cause, deletes
-// the Allocation and ends the Instance's status; its memory and finalizer
-// writes follow after both are released. A pass clearing the marks that name
-// its deployment takes yieldMu and then each mark's Provider's lock in turn
-// (slotTable.underLock), never two together. Nothing else is taken or read by
-// them, so the order above holds.
+// The extra's admission headroom (extra.go, headroomOf; #616 PR 4) adds reads under the same lock, by slotAsk.headroom,
+// for an extra's reservation alone: one List of the Providers and one of the ModelDeployments of every namespace, and, for
+// each other deployment that allows the Provider, one List of its Instances and one of its Allocations (by its
+// model-deployment label, in its namespace), all through the uncached Reader, all under the context bounded by
+// listTimeout, and none under slotTable.mu. They take no lock of this package and write nothing, so the order above holds.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
 	listTimeout time.Duration
-	// yieldMu serialises the yield's decisions (see the lock order above).
-	yieldMu sync.Mutex
-	mu      sync.Mutex
+	mu          sync.Mutex
 	// locks holds one lock per Provider name, created on first use.
 	locks map[string]*sync.Mutex
 	// expect holds, per Provider, the Allocations (namespace/name) this
@@ -218,11 +201,11 @@ type slotAsk struct {
 	// The pass counts it from its own objects (extraAlsoLeave); it adds to what reservedOn reads from the
 	// other deployments' and the Running primaries' own slots. Zero for every other ask.
 	alsoLeave int
-	// onLimit, when set, is called under the Provider's lock, after slotTable.mu is released, when the reservation
-	// is refused for the submit limit alone (the per-user caps passed, which is checked first): a missing primary's
-	// yield (yield.go). It gets the reads the count was made from, with the pending surplus Instances of every
-	// deployment on the Provider.
-	onLimit func(ctx context.Context, rd slotReads) error
+	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
+	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
+	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each other deployment with a missing
+	// primary that the Provider allows, and at least one. It reads through the uncached Reader and adds to alsoLeave.
+	headroom func(ctx context.Context) (int, error)
 }
 
 // slotAnswer is a reservation's answer.
@@ -266,30 +249,25 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if q.limit == nil && q.params == nil {
 		return slotAnswer{ok: true, holds: holds}, nil
 	}
-	ans, limitRefused := t.reserveLocked(q, rd, holds, now())
-	if limitRefused && q.onLimit != nil {
-		cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
-		defer cancel()
-		rd.total = ans.count
-		if err := q.onLimit(cctx, rd); err != nil {
+	if q.headroom != nil && q.limit != nil {
+		hctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+		h, err := q.headroom(hctx)
+		cancel()
+		if err != nil {
 			return slotAnswer{}, err
 		}
+		q.alsoLeave += h
 	}
-	return ans, nil
-}
-
-// reserveLocked is reserveAsk's decision, made with slotTable.mu held and no read of the API: limitRefused is true
-// when the reservation was refused for the submit limit alone.
-func (t *slotTable) reserveLocked(q slotAsk, rd slotReads, holds bool, at time.Time) (ans slotAnswer, limitRefused bool) {
+	at := now() // read once the lock is held and every read is back, as the reservation always did
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(q.provider, rd.seen, rd.listed, at)
 	if t.holds(q.provider, q.key, c) {
-		return slotAnswer{ok: true, count: c.total(), holds: holds}, false
+		return slotAnswer{ok: true, count: c.total(), holds: holds}, nil
 	}
 	if q.params != nil {
 		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], *q.params); !ok {
-			return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, false
+			return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, nil
 		}
 	}
 	var n int
@@ -299,7 +277,7 @@ func (t *slotTable) reserveLocked(q slotAsk, rd slotReads, holds bool, at time.T
 		n, by = counted(rd.reserved, q.key, q.takers, t.expect[q.provider])
 		total += n
 		if total+q.alsoLeave >= int(*q.limit) {
-			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, true
+			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
 		}
 	}
 	if t.expect[q.provider] == nil {
@@ -312,40 +290,7 @@ func (t *slotTable) reserveLocked(q slotAsk, rd slotReads, holds bool, at time.T
 		}
 		t.params[q.provider][q.key] = *q.params
 	}
-	return slotAnswer{ok: true, count: total, reserved: n, reservedBy: by, holds: holds}, false
-}
-
-// underLock runs fn under the Provider's lock and a listTimeout of its own, holding no other lock of this package
-// (the yield's clearing of marks, which must not race the marking).
-func (t *slotTable) underLock(ctx context.Context, provider string, fn func(ctx context.Context) error) error {
-	l := t.slotLock(provider)
-	l.Lock()
-	defer l.Unlock()
-	cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
-	defer cancel()
-	return fn(cctx)
-}
-
-// underLockCounted runs fn under the Provider's lock, with a listTimeout of its own and the Provider's count at that
-// moment: what a new primary's reservation compares with the limit (listed + expected + reserved), counted from the same
-// reads and without reserving anything. The owner's cancel of a yielded extra asks it, to know whether freeing the extra's
-// slot would admit the primary it yields to (yield.go, commitYield).
-func (t *slotTable) underLockCounted(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, now time.Time, fn func(ctx context.Context, total int) error) error {
-	l := t.slotLock(provider)
-	l.Lock()
-	defer l.Unlock()
-	cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
-	defer cancel()
-	rd, err := t.readBounded(cctx, r, provider, true, profile)
-	if err != nil {
-		return err
-	}
-	t.mu.Lock()
-	c := t.observe(provider, rd.seen, rd.listed, now)
-	reserved, _ := counted(rd.reserved, "", nil, t.expect[provider])
-	total := c.total() + reserved
-	t.mu.Unlock()
-	return fn(cctx, total)
+	return slotAnswer{ok: true, count: total, reserved: n, reservedBy: by, holds: holds}, nil
 }
 
 // capsFit reports whether a new Allocation of size add fits the Provider's
@@ -447,11 +392,6 @@ type slotReads struct {
 	allocs       map[string]*v1alpha1.Allocation
 	// reserved are the Provider's reserved slots (reservedOn).
 	reserved []reservedSlot
-	// pendingSurplus are the surplus Instances of every deployment on the Provider whose Allocation holds a slot and
-	// whose job has not started, newest first (D8's views; read for the yield, with the reserved slots).
-	pendingSurplus []*v1alpha1.Instance
-	// total is the count that refused the reservation (listed + expected + reserved), set before onLimit is called.
-	total int
 }
 
 // readBounded makes the count's reads under one context bounded by the table's
@@ -465,7 +405,7 @@ func (t *slotTable) readBounded(ctx context.Context, r client.Reader, provider s
 		return slotReads{}, err
 	}
 	if withReserved {
-		if rd.reserved, rd.pendingSurplus, err = readReserved(ctx, r, provider, profile, rd.allocs); err != nil {
+		if rd.reserved, err = reservedOn(ctx, r, provider, profile, rd.allocs); err != nil {
 			return slotReads{}, err
 		}
 	}
@@ -547,10 +487,10 @@ func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []st
 }
 
 // reserveSlotWith is reserveSlotFor leaving alsoLeave slots free beside the new Allocation (slotAsk.alsoLeave), and,
-// with onLimit, calling it under the lock when the limit alone refuses it (slotAsk.onLimit).
-func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int, onLimit func(context.Context, slotReads) error) (ok, holds bool, err error) {
+// with headroom, the admission headroom of an extra (slotAsk.headroom).
+func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int, headroom func(context.Context) (int, error)) (ok, holds bool, err error) {
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits, alsoLeave: alsoLeave, onLimit: onLimit}
+		params: params, caps: pv.limits, alsoLeave: alsoLeave, headroom: headroom}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}

@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"context"
 	"errors"
 	"time"
 
@@ -267,13 +266,9 @@ func (p *pass) submitOn(pv *providerView, t *placeTarget, pred *v1alpha1.Instanc
 	if o.caps {
 		capsOf = &t.params
 	}
-	// A missing primary refused for the submit limit alone makes a pending extra yield its slot (yield.go). The
-	// trigger is this step's refusal: a warm step reserves nothing, so it never refuses.
-	var onLimit func(context.Context, slotReads) error
-	if pred == nil && !o.extra && o.hedgeGroup == "" {
-		onLimit = p.yieldOnLimit(pv)
-	}
-	ok, holds, err := p.reserveYielding(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
+	// A missing primary refused on a Provider simply goes on to the next step: nothing is cancelled to make room for it,
+	// since an extra is admitted only with headroom for the primaries that need a slot (o.headroom; #708).
+	ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, o.headroom)
 	if err != nil {
 		return stepStopped, err
 	}
