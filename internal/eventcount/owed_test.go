@@ -5,10 +5,15 @@ package eventcount
 // holds a fixed amount of state, however many times the log fails and returns.
 
 import (
+	"context"
 	"fmt"
+	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	coordinationv1 "k8s.io/api/coordination/v1"
 )
 
 // owedSpans is how many runs' spans the route holds as owed, or inside an outstanding closing job.
@@ -86,4 +91,63 @@ func notes(cs []recorded) []string {
 		out = append(out, c.note)
 	}
 	return out
+}
+
+// A span that is owed (its closing could not be raised) waits while a queue-full run is open: no closing is raised
+// at each publish the log takes while the queue is still above half its size, where it would be one raise a
+// publish on a slow live log, and the Lease is not read for it. When the queue has drained, ONE closing covers
+// both runs, since the earliest loss (the delta review of #697, 17 Nov 2026).
+func TestAnOwedClosingWaitsForAFullQueuesRunToEnd(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	var leaseUp atomic.Bool
+	var reads atomic.Int32
+	read := func(context.Context) (*coordinationv1.Lease, error) {
+		if !leaseUp.Load() {
+			return nil, fmt.Errorf("the Lease cannot be read")
+		}
+		reads.Add(1)
+		return lease("provider-p1"), nil
+	}
+	r := newRig(t, ctl, false, bigCaps, func(o *PublisherOptions) { o.QueueSize = 4 }, read)
+	rt := r.route(ctl)
+	// Run 1 ends, and its closing cannot be raised: the span is owed.
+	rt.lost(lostBudget, "JobStarted", "full-0", nil, nil)
+	within(t, 20*time.Second, "run 1's loss job to finish", rt.gateIdle)
+	rt.logged(&item{r: rt, id: "ok"})
+	within(t, 20*time.Second, "run 1's closing job to finish", rt.gateIdle)
+	rt.mu.Lock()
+	owed, since := rt.owed.count, rt.owed.since
+	rt.mu.Unlock()
+	if owed != 1 {
+		t.Fatalf("%d events owed after run 1, want 1", owed)
+	}
+	// The Lease is back. The queue fills on a live but slow log: run 2 stays open while the queue is above half.
+	leaseUp.Store(true)
+	_, drain := oscillation(t, r, 30)
+	within(t, 20*time.Second, "the notifier to settle", func() bool { return r.pendingJobs() == 0 })
+	time.Sleep(200 * time.Millisecond)
+	if got := len(r.inner.byReason(ReasonEventsNotLogged)); got > 1 {
+		t.Errorf("%d EventsNotLogged raised while the queue was full, want at most run 2's own first: no closing while a run is open", got)
+	}
+	if got := reads.Load(); got > 2 {
+		t.Errorf("%d Lease reads while the queue was full, want at most 2", got)
+	}
+	// The log drains: run 2 ends, and one closing covers both runs.
+	drain()
+	r.settled()
+	within(t, 30*time.Second, "the notifier to finish", func() bool { return r.pendingJobs() == 0 && rt.gateIdle() })
+	time.Sleep(200 * time.Millisecond)
+	var closings []string
+	for _, c := range r.inner.byReason(ReasonEventsNotLogged) {
+		if strings.Contains(c.note, "takes events again") {
+			closings = append(closings, c.note)
+		}
+	}
+	if len(closings) != 1 {
+		t.Fatalf("%d closings %q, want ONE for both runs", len(closings), closings)
+	}
+	m := regexp.MustCompile(`(\d+) events were not logged from (\S+) to`).FindStringSubmatch(closings[0])
+	if m == nil || m[2] != since.UTC().Format(time.RFC3339) || m[1] == "1" {
+		t.Errorf("the closing says %q, want the events of both runs, since run 1's first loss %s", closings[0], since.UTC().Format(time.RFC3339))
+	}
 }

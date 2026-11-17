@@ -17,7 +17,8 @@ package eventcount
 // one is handed to the recorder: the span of a run stays owed while its closing is queued, and if the
 // closing is itself lost, the next closing covers every unreported run, since the earliest unreported loss,
 // with the counts summed. A closing is raised at the end of a run and at any later publish the log takes
-// while a span is still owed. The runs not yet reported are kept as ONE aggregate (the earliest loss, the
+// while a span is still owed, but never while a run is open: on a live, slow log with a full queue the
+// publishes the log takes do not end the run, and the next run's closing covers the span owed as well. The runs not yet reported are kept as ONE aggregate (the earliest loss, the
 // summed count, the latest generation), however many there are, so that a controller that can never raise a
 // closing (it has no Lease) holds a fixed amount of state and does a fixed amount of work per publish.
 //
@@ -134,7 +135,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 
 // logged records that the log took an event, it, which may be a closing: the closing it was is then settled.
 // A run ends with it, unless the run holds a queue-full loss and the queue is not yet below half its size.
-// While a span is owed and no closing is outstanding, one is raised.
+// While a span is owed, no run is open and no closing is outstanding, one is raised.
 func (r *route) logged(it *item) {
 	pending := r.p.Pending() // before the route's lock: the publisher's lock is never taken inside it
 	now := r.p.now()
@@ -151,7 +152,10 @@ func (r *route) logged(it *item) {
 		r.losing = false
 		r.owed.add(span{gen: r.gen, since: r.runStart, count: r.runCount})
 	}
-	job := r.closingJobLocked(now)
+	var job *raiseJob
+	if !r.losing {
+		job = r.closingJobLocked(now)
+	}
 	r.mu.Unlock()
 	if job != nil {
 		r.p.notify.push(job)
