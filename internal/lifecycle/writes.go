@@ -163,6 +163,13 @@ func (p *pass) deleteAllocation(a *v1alpha1.Allocation, why string) error {
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("release Allocation %s (%s): %w", a.Name, cause, err)
 	}
+	// Its slot's expectation goes with it: while its deletion runs, the count lists it, and once the deletion
+	// completes its slot is free (HBEP-7, Hedging (beta), Interactions: "A pending loser's slot returns when its
+	// deletion completes"). An expectation no count saw before the delete would otherwise hold the slot until it
+	// expires, 5 min later.
+	if ref := a.Spec.ProviderConfigReference; ref != nil {
+		p.r.slots().release(ref.Name, a.Namespace+"/"+a.Name)
+	}
 	now := metav1.NewTime(p.now)
 	a.DeletionTimestamp = &now
 	return nil

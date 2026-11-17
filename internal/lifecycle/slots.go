@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,9 +71,11 @@ const listTimeout = 30 * time.Second
 // of those is held. The Provider's lock is held across the count's reads from
 // the API and no other call: one List of the Allocations of every namespace,
 // and, for a Provider with a submit limit, one List of the Instances that carry
-// the Provider's label and one Get of the ModelDeployment of each primary among
-// them (reservedOn), all under one context bounded by listTimeout. slotTable.mu
-// is never held across any of them.
+// the Provider's label, one List of the Instances of each deployment with an
+// Instance among them (deploymentViews, by its model-deployment label, in its
+// namespace) and one Get of the ModelDeployment of each primary among them
+// (reservedOn), all under one context bounded by listTimeout. slotTable.mu is
+// never held across any of them.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
@@ -84,10 +87,16 @@ type slotTable struct {
 	// controller reserved a slot for and its list has not shown yet, with
 	// when each was raised.
 	expect map[string]map[string]time.Time
+	// params holds, beside expect, the size of each expected Allocation whose
+	// reservation checked the Provider's per-user caps (slotAsk.params), so a
+	// later check counts it before the list shows it. It is cleared wherever
+	// expect is (observe, release).
+	params map[string]map[string]v1alpha1.BatchParameters
 }
 
 func newSlotTable() *slotTable {
-	return &slotTable{listTimeout: listTimeout, locks: map[string]*sync.Mutex{}, expect: map[string]map[string]time.Time{}}
+	return &slotTable{listTimeout: listTimeout, locks: map[string]*sync.Mutex{}, expect: map[string]map[string]time.Time{},
+		params: map[string]map[string]v1alpha1.BatchParameters{}}
 }
 
 func (t *slotTable) slotLock(provider string) *sync.Mutex {
@@ -128,6 +137,7 @@ func (t *slotTable) observe(provider string, seen, listed map[string]bool, now t
 	for k, raised := range exp {
 		if seen[k] || now.Sub(raised) >= expectationsTimeout {
 			delete(exp, k)
+			delete(t.params[provider], k)
 		}
 	}
 	return slotCount{listed: listed, expected: len(exp)}
@@ -169,6 +179,12 @@ type slotAsk struct {
 	// profile is the Provider's, for the drain starts of the reserved slots'
 	// primaries (reservedOn); with none, no primary's slot is reserved.
 	profile *v1alpha1.PlatformProfileSpec
+	// params, when set, is the new Allocation's size: the reservation then also
+	// checks the Provider's per-user caps (caps) for it beside our Allocations
+	// there (capsFit), and refuses it when they would be exceeded. A hedge's
+	// member asks it (HBEP-7, Hedging (beta), Which Provider is next).
+	params *v1alpha1.BatchParameters
+	caps   v1alpha1.QOSLimits
 }
 
 // slotAnswer is a reservation's answer.
@@ -189,13 +205,16 @@ type slotAnswer struct {
 	// the pass's first observation and the reservation (PR 214 review, Astra
 	// B1), and about which Provider it is on (B2).
 	holds bool
+	// capsWhy, when the reservation was refused for the per-user caps
+	// (slotAsk.params), says which and by how much.
+	capsWhy string
 }
 
 // reserveAsk reserves a slot as reserve does, counting the reserved slots the
 // question's profile and takers leave (counted), and reports on its holder.
 // With no limit and no holder nothing is read.
 func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, now func() time.Time) (slotAnswer, error) {
-	if q.limit == nil && q.holder == "" {
+	if q.limit == nil && q.holder == "" && q.params == nil {
 		return slotAnswer{ok: true}, nil
 	}
 	l := t.slotLock(q.provider)
@@ -206,7 +225,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 		return slotAnswer{}, err
 	}
 	holds := q.holder != "" && rd.listed[q.holder]
-	if q.limit == nil {
+	if q.limit == nil && q.params == nil {
 		return slotAnswer{ok: true, holds: holds}, nil
 	}
 	at := now()
@@ -216,16 +235,75 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if t.holds(q.provider, q.key, c) {
 		return slotAnswer{ok: true, count: c.total(), holds: holds}, nil
 	}
-	n, by := counted(rd.reserved, q.key, q.takers, t.expect[q.provider])
-	total := c.total() + n
-	if total >= int(*q.limit) {
-		return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
+	if q.params != nil {
+		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], *q.params); !ok {
+			return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, nil
+		}
+	}
+	var n int
+	var by []string
+	total := c.total()
+	if q.limit != nil {
+		n, by = counted(rd.reserved, q.key, q.takers, t.expect[q.provider])
+		total += n
+		if total >= int(*q.limit) {
+			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
+		}
 	}
 	if t.expect[q.provider] == nil {
 		t.expect[q.provider] = map[string]time.Time{}
 	}
 	t.expect[q.provider][q.key] = at
+	if q.params != nil {
+		if t.params[q.provider] == nil {
+			t.params[q.provider] = map[string]v1alpha1.BatchParameters{}
+		}
+		t.params[q.provider][q.key] = *q.params
+	}
 	return slotAnswer{ok: true, count: total, reserved: n, reservedBy: by, holds: holds}, nil
+}
+
+// capsFit reports whether a new Allocation of size add fits the Provider's
+// per-user caps on GPUs, CPUs and memory beside our Allocations there that
+// hold a slot (rd.listed) and those reserved and not listed yet (expected,
+// with their sizes), and if not, why (HBEP-7, Hedging (beta), Which Provider is
+// next: "the member and our Allocations on that Provider that have not ended
+// must fit its QOS's per-user caps"; the extra's check is the same, #616). "Ours"
+// is every Allocation the controller lists on the Provider, of every
+// deployment, the stricter reading (#616, Q9), so no new Allocation pends
+// behind a cap our own jobs hold. An Allocation with no batch parameters adds
+// nothing.
+func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected map[string]v1alpha1.BatchParameters, add v1alpha1.BatchParameters) (bool, string) {
+	gpus, cpus, mem := add.GPUs, add.CPUsPerTask, add.Memory.DeepCopy()
+	sum := func(b *v1alpha1.BatchParameters) {
+		gpus += b.GPUs
+		cpus += b.CPUsPerTask
+		mem.Add(b.Memory)
+	}
+	for k, a := range rd.allocs {
+		if rd.listed[k] && a.Spec.ForProvider.Batch != nil {
+			sum(a.Spec.ForProvider.Batch)
+		}
+	}
+	for k, b := range expected {
+		if !rd.listed[k] {
+			sum(&b)
+		}
+	}
+	var over []string
+	if q := caps.MaxGPUsPerUser; q != nil && gpus > *q {
+		over = append(over, fmt.Sprintf("%d GPUs, above the %s %d of QOS %s", gpus, v1alpha1.LimitMaxGPUsPerUser, *q, caps.From[v1alpha1.LimitMaxGPUsPerUser]))
+	}
+	if q := caps.MaxCPUsPerUser; q != nil && cpus > *q {
+		over = append(over, fmt.Sprintf("%d CPUs, above the %s %d of QOS %s", cpus, v1alpha1.LimitMaxCPUsPerUser, *q, caps.From[v1alpha1.LimitMaxCPUsPerUser]))
+	}
+	if q := caps.MaxMemPerUser; q != nil && mem.Cmp(*q) > 0 {
+		over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", mem.String(), v1alpha1.LimitMaxMemPerUser, q.String(), caps.From[v1alpha1.LimitMaxMemPerUser]))
+	}
+	if len(over) == 0 {
+		return true, ""
+	}
+	return false, fmt.Sprintf("our Allocations on Provider %s with a new one would need %s", provider, strings.Join(over, " and "))
 }
 
 // release gives back the slot reserved for the Allocation key: its creation
@@ -235,6 +313,7 @@ func (t *slotTable) release(provider, key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.expect[provider], key)
+	delete(t.params[provider], key)
 }
 
 // count returns the Provider's count against its submit limit now, excluding
@@ -369,15 +448,24 @@ func submitLimitText(pv *providerView) string {
 // list, whether the Allocation holder (namespace/name; "" for none) still holds
 // its slot. When none is free it records the Provider, its limit and the
 // handovers holding reserved slots there, for SubmitLimitReached, and returns
-// false.
-func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []string) (ok, holds bool, err error) {
-	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser}
+// false. With params, the reservation also checks the Provider's per-user caps
+// for an Allocation of that size (capsFit). quiet records nothing for a
+// condition: a hedge's member that finds no room is extra capacity, and the
+// Provider passed over sets no reason (HBEP-7, Hedging (beta)).
+func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool) (ok, holds bool, err error) {
+	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
+		params: params, caps: pv.limits}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}
 	a, err := p.r.slots().reserveAsk(p.ctx, p.r.Reader, q, p.reserveTime)
-	if err != nil || a.ok {
+	if err != nil || a.ok || quiet {
 		return a.ok, a.holds, err
+	}
+	if a.capsWhy != "" {
+		// Refused for the per-user caps, not the submit limit: no SubmitLimitReached words, and a Provider with
+		// no submit limit has none to name.
+		return false, a.holds, nil
 	}
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
