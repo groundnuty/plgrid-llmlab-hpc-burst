@@ -53,23 +53,29 @@ func (r *rig) beforeDrain(step string, in *v1alpha1.Instance) {
 }
 
 // replacementReady waits for the primary's replacement to be ready and
-// registered at the front, so the ring holds both before a key is chosen.
+// registered at the front, and for the front to route the model, so the ring
+// holds both before a key is chosen. The last is the model-level gate (#676):
+// with the primary routed it rules out no_ready_target for the key search that
+// follows, and does not show that the replacement has joined the ring; the
+// front reports nothing per Instance, so the key search is what settles which
+// Instance a key maps to.
 func (r *rig) replacementReady(p *v1alpha1.Instance) v1alpha1.Instance {
 	r.t.Helper()
 	var repl v1alpha1.Instance
-	stack.WaitFor(r.t, stack.WaitDeadline, "the primary and its replacement to be ready and registered at the front", func() bool {
-		if reg, known := stack.Registered(r.ports, p); !known || !reg {
-			return false
-		}
+	stack.WaitState(r.t, stack.WaitDeadline, "the primary and its replacement to be ready and registered at the front, and the front to route the model", func() (bool, string) {
+		last := "no Instance with the primary as its predecessor is ready"
 		for _, in := range r.instances() {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] == p.Name && in.Status.Phase == v1alpha1.InstanceReady {
-				if reg, known := stack.Registered(r.ports, &in); known && reg {
+				in := in
+				ok, why := r.routedNow(p, &in)
+				if ok {
 					repl = in
-					return true
+					return true, ""
 				}
+				last = why
 			}
 		}
-		return false
+		return false, last
 	})
 	return repl
 }
