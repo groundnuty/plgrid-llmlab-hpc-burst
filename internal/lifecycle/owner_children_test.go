@@ -14,7 +14,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
-	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
 // wantChild checks one created object against the hand-written maps. The Instance's deployment-ID label is the
@@ -182,26 +181,21 @@ func TestAHandoverReplacementCarriesTheOwnerBesideItsPredecessorMark(t *testing.
 	wantChild(t, a, hoMD, ann, hash)
 }
 
-// TestAHedgeMemberCarriesTheOwnerBesideItsHedgeGroup: the second member of a hedge, made through provisionWith with
-// placeOpts.hedgeGroup (the call the hedge's growth makes), is created with the hedge-group annotation, which the
-// create sets by assigning a whole map; the owner and purpose are beside it, on the Instance and on its Allocation,
-// on Provider B.
+// TestAHedgeMemberCarriesTheOwnerBesideItsHedgeGroup: the second member of a hedge, made by the hedge's growth in a
+// real pass (hedge_grow.go; A's queue waits of 10 h put the missing primary past its deadline, so B's member comes in
+// the first pass), is created with the hedge-group annotation, which the create sets by assigning a whole map; the
+// owner and purpose are beside it, on the Instance and on its Allocation, on Provider B.
 func TestAHedgeMemberCarriesTheOwnerBesideItsHedgeGroup(t *testing.T) {
 	log := &ownerLog{}
 	h := newHedgeRig(t, withInterceptors(log.funcs()))
-	h.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
-	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
-	h.Step() // the Providers' first status: Ready
-	md := ownedMD(hoMD, ownerA, "example purpose of a")
-	seededOnly(md)
-	h.create(md)
-	h.Step()
-	firsts := h.onProvider(hoMD, rigProvider)
-	if len(firsts) != 1 {
-		t.Fatalf("%d Instances on A after the first pass, want the missing primary's one", len(firsts))
+	first := missingPrimary(t, h, 10*time.Hour, func(md *v1alpha1.ModelDeployment) {
+		md.Annotations = ownedMD(hoMD, ownerA, "example purpose of a").Annotations
+	})
+	members := h.membersOn(hoMD, first, hedgeB)
+	if len(members) != 1 {
+		t.Fatalf("%d members of %s's hedge on %s after the first pass, want the one growth makes", len(members), first, hedgeB)
 	}
-	first := firsts[0].Name
-	second := h.seedHedgeMember(hoMD, first, "", hedgeB)
+	second := members[0].Name
 
 	hash := map[string]string{keyOwnerHash: hashA}
 	i := log.record(t, "Instance", second)
