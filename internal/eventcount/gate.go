@@ -60,6 +60,7 @@ type gate struct {
 	runStart  time.Time // its first loss
 	runCount  int       // the events it has not logged so far
 	runFull   bool      // it holds a queue-full loss, so it ends only at the low-water mark
+	fullSeq   uint64    // the publisher's attempt count at its latest queue-full loss: a depth sample older than it cannot end the run
 	lastRaise time.Time // when this run's latest loss raise was handed over; zero until one was
 
 	loss    *raiseJob // the outstanding loss job: waiting for the notifier or running
@@ -105,6 +106,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 	r.runCount++
 	if why == lostQueue {
 		r.runFull = true
+		r.fullSeq = r.p.seq.Load()
 	}
 	r.fullOpen.Store(r.losing && r.runFull)
 	var job *raiseJob
@@ -139,7 +141,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 // A run ends with it, unless the run holds a queue-full loss and the queue is not yet below half its size.
 // While a span is owed, no run is open and no closing is outstanding, one is raised.
 func (r *route) logged(it *item) {
-	pending := r.p.Pending() // before the route's lock: the publisher's lock is never taken inside it
+	pending, seq := r.p.sample() // before the route's lock: the publisher's lock is never taken inside it
 	now := r.p.now()
 	r.mu.Lock()
 	if r.dead {
@@ -150,7 +152,7 @@ func (r *route) logged(it *item) {
 		r.closingStoredLocked(it.closes)
 	}
 	// pending counts the event just stored, which is still in flight.
-	if r.losing && (!r.runFull || r.belowHalf(pending)) {
+	if r.losing && (!r.runFull || r.drained(pending, seq)) {
 		r.endRunLocked()
 	}
 	var job *raiseJob
@@ -163,9 +165,13 @@ func (r *route) logged(it *item) {
 	}
 }
 
-// belowHalf reports whether the publisher's queue, pending events including the one just stored and still in
-// flight, is below half its size: the low-water mark that ends a queue-full run.
-func (r *route) belowHalf(pending int) bool { return (pending-1)*2 < r.p.o.QueueSize }
+// drained reports whether a depth sample, pending events including the one just stored and still in flight,
+// taken when the publisher had counted seq attempts to queue an event, ends the open queue-full run: the queue was
+// below half its size, and the run's latest queue-full loss is not newer than the sample (the queue was not
+// refilled since, nor the run opened since).
+func (r *route) drained(pending int, seq uint64) bool {
+	return (pending-1)*2 < r.p.o.QueueSize && r.fullSeq <= seq
+}
 
 // endRunLocked ends the open run: its span is owed to a closing.
 func (r *route) endRunLocked() {
@@ -178,13 +184,13 @@ func (r *route) endRunLocked() {
 // the shared queue below half its size: the run's cause is the queue the routes share, and it has drained, so the
 // run need not wait for this route to publish (the science agent's ruling on #697, 17 Nov 2026). The closing the
 // ended run owes is raised as usual.
-func (r *route) queueDrained(pending int) {
+func (r *route) queueDrained(pending int, seq uint64) {
 	if !r.fullOpen.Load() { // the cheap test: no lock for a route that holds no queue-full run
 		return
 	}
 	now := r.p.now()
 	r.mu.Lock()
-	if r.dead || !r.losing || !r.runFull || !r.belowHalf(pending) {
+	if r.dead || !r.losing || !r.runFull || !r.drained(pending, seq) {
 		r.mu.Unlock()
 		return
 	}

@@ -35,6 +35,10 @@ func TestAQueueFullRunOfAnIdleRouteEndsWhenAnotherRoutesBacklogDrains(t *testing
 		defer rt.mu.Unlock()
 		return rt.losing && rt.runFull
 	})
+	// provider-p1's opening EventsNotLogged is raised by the notifier and meets the full queue too: it is the second
+	// event the route loses. Only after that does the queue drain, so that the route has nothing left in flight that
+	// could end its run through its OWN publish, and only another route's publish can.
+	within(t, 20*time.Second, "provider-p1's opening EventsNotLogged to meet the full queue", func() bool { return r.unlogged(ctl) >= 2 })
 	drain() // the log is live: the lifecycle backlog is stored, and the queue empties
 	r.settled()
 	within(t, 20*time.Second, "the notifier to settle", func() bool { return r.pendingJobs() == 0 })
@@ -105,9 +109,14 @@ func TestAnotherRoutesPublishWithTheQueueStillFullDoesNotEndARun(t *testing.T) {
 		defer rt.mu.Unlock()
 		return rt.losing && rt.runFull
 	})
+	swept := make(chan struct{}, 64)
+	r.pub.afterSweep = func() { swept <- struct{}{} }
 	gate <- struct{}{} // one publish of the lifecycle controller goes through: the queue is still full behind it
-	within(t, 20*time.Second, "the publisher to take the token", func() bool { return len(gate) == 0 })
-	time.Sleep(200 * time.Millisecond) // the publish's gate decisions are made by now
+	select {
+	case <-swept: // that publish's sweep of the other routes is complete
+	case <-time.After(20 * time.Second):
+		t.Fatal("the publish's sweep did not complete")
+	}
 	rt.mu.Lock()
 	open := rt.losing
 	rt.mu.Unlock()
@@ -117,6 +126,58 @@ func TestAnotherRoutesPublishWithTheQueueStillFullDoesNotEndARun(t *testing.T) {
 	drain()
 	r.settled()
 	within(t, 20*time.Second, "provider-p1's run to end once the queue drained", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return !rt.losing
+	})
+}
+
+// A run that a route opens after a publish has sampled the queue's depth is not ended by that sample: the sample is of
+// a queue that was refilled since. Between the sample and the visit to the routes, the lifecycle controller refills the
+// queue and provider-p1 drops an event, and the run that opens must still be open when the sweep is done (the review
+// of G1's fix, 17 Nov 2026).
+func TestARunOpenedAfterTheDepthSampleIsNotEndedByIt(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	r := newRig(t, ctl, false, bigCaps, func(o *PublisherOptions) { o.QueueSize = 4 }, leaseFor("provider-p1"))
+	life := Events(&recInner{}, r.counter, ControllerLifecycle, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("lifecycle")}))
+	rt := r.route(ctl)
+	gate, done := make(chan struct{}, 64), make(chan struct{})
+	r.pub.afterPublish = func(id string, ack *jetstream.PubAck, err error) error {
+		select {
+		case <-gate:
+		case <-done:
+		}
+		return err
+	}
+	var once, doneOnce sync.Once
+	drain := func() { doneOnce.Do(func() { close(done) }) }
+	t.Cleanup(drain)
+	swept := make(chan struct{}, 64)
+	r.pub.afterSweep = func() { swept <- struct{}{} }
+	r.pub.sweepHook = func() {
+		once.Do(func() { // the queue holds the one event in flight, so the sample says drained
+			for i := 0; i < 8; i++ {
+				life.EventfID(fmtID("late", i), alloc(crashUID), nil, provider.EventKindOrdinary, "JobStarted", "started", "%s", "a note")
+			}
+			r.raise(crashUID, "p1-late", "JobStarted") // meets the refilled queue: a run opens after the sample
+		})
+	}
+	life.EventfID("first", alloc(crashUID), nil, provider.EventKindOrdinary, "JobStarted", "started", "%s", "a note")
+	gate <- struct{}{} // the one event in flight is stored: its sweep samples a queue of one
+	select {
+	case <-swept:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the sweep did not complete")
+	}
+	rt.mu.Lock()
+	open := rt.losing && rt.runFull
+	rt.mu.Unlock()
+	if !open {
+		t.Fatal("provider-p1's queue-full run, opened after the sweep's depth sample, was ended by that sample")
+	}
+	drain()
+	r.settled()
+	within(t, 20*time.Second, "the run to end once the queue drained", func() bool {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
 		return !rt.losing
