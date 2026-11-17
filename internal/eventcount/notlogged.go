@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -114,9 +116,23 @@ func (j *raiseJob) run(stopped func() bool) {
 		r.finish(j, false)
 		return
 	}
+	r.finish(j, r.emit(spec, lease, j, data))
+}
+
+// emit hands the EventsNotLogged to the controller's recorder, unless the controller has stopped for good,
+// and says whether it did. It holds the route's retirement lock for reading across the dead check and the
+// recorder call, so that retirement (markDead) waits for an emit in flight, and an emit that starts after it
+// finds the route dead: a stopped manager's recorder is never called, and its series never come back. The
+// lock is not r.mu, which the recorder call takes again (route.publish); and nothing the call reaches takes
+// the retirement lock for writing.
+func (r *route) emit(spec routeSpec, lease *coordinationv1.Lease, j *raiseJob, data jobData) bool {
+	r.retire.RLock()
+	defer r.retire.RUnlock()
 	if r.isDead() {
-		r.finish(j, false)
-		return
+		return false
+	}
+	if h := r.p.emitHook; h != nil {
+		h()
 	}
 	// The wrapper counts the event and hands it to the Kubernetes recorder and the publisher, as it does
 	// any event. The call is through the recorder's interface, so the drift guard reads it as the emit
@@ -125,7 +141,7 @@ func (j *raiseJob) run(stopped func() bool) {
 	r.setEmitting(j)
 	spec.rec.Eventf(lease, nil, provider.EventKindWarning, ReasonEventsNotLogged, ActionDegraded, "%s", provider.CutNote(data.note()))
 	r.setEmitting(nil)
-	r.finish(j, true)
+	return true
 }
 
 // notifier raises the owed EventsNotLogged events in a goroutine of its own, so that neither the emit

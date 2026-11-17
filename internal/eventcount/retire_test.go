@@ -8,8 +8,34 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
+
+// raisedSeries is how many series of hpcburst_events_raised_total the counter holds for the controller and the
+// reason. Reading it creates none.
+func raisedSeries(c *Counter, controller, reason string) int {
+	ch := make(chan prometheus.Metric)
+	go func() { c.vec.Collect(ch); close(ch) }()
+	n := 0
+	for m := range ch {
+		var d dto.Metric
+		if err := m.Write(&d); err != nil {
+			continue
+		}
+		match := map[string]string{}
+		for _, l := range d.GetLabel() {
+			match[l.GetName()] = l.GetValue()
+		}
+		if match[LabelController] == controller && match[LabelReason] == reason {
+			n++
+		}
+	}
+	return n
+}
 
 // notLoggedSeries is the series Forget is told to delete for EventsNotLogged.
 var notLoggedSeries = []Series{{Reason: ReasonEventsNotLogged, Action: ActionDegraded, Type: provider.EventKindWarning}}
@@ -36,5 +62,46 @@ func TestAnEventLostInTheMiddleOfForgetLeavesNoSeries(t *testing.T) {
 	}
 	if n := r.inner.byReason(ReasonEventsNotLogged); len(n) != 0 {
 		t.Errorf("a forgotten controller raised %d EventsNotLogged", len(n))
+	}
+}
+
+// A raise that is between its dead check and its recorder call when Forget runs either completes before the
+// controller is retired, or is skipped as dead: retirement waits for it. Either way the series Forget deletes
+// stay deleted: the stopped manager's recorder is not called after Forget has finished.
+func TestAForgetBetweenARaisesDeadCheckAndItsEmitLeavesNoSeries(t *testing.T) {
+	clk := &fakeClock{t: base}
+	ctl := ControllerProvider("p1")
+	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
+	retired := make(chan struct{}) // Forget has retired the route
+	finished := make(chan struct{})
+	r.counter.forgetMid = func() { close(retired) }
+	r.pub.emitHook = func() {
+		go func() {
+			r.counter.Forget(ctl, notLoggedSeries)
+			close(finished)
+		}()
+		// Without retirement waiting for the emit, Forget retires at once. With it, Forget waits, so give it
+		// a second to show it does not.
+		select {
+		case <-retired:
+		case <-time.After(time.Second):
+		}
+	}
+	r.raise(crashUID, "retire-b", "JobStarted")
+	clk.set(base.Add(101 * time.Second)) // the event is lost, and its first loss starts a raise
+	within(t, 30*time.Second, "Forget to finish", func() bool {
+		select {
+		case <-finished:
+			return true
+		default:
+			return false
+		}
+	})
+	within(t, 30*time.Second, "the raise to finish", func() bool { return r.pendingJobs() == 0 && r.route(ctl).gateIdle() })
+	if n := raisedSeries(r.counter, ctl, ReasonEventsNotLogged); n != 0 {
+		t.Errorf("%d EventsNotLogged series of the forgotten controller are back: its recorder was called after Forget had deleted them", n)
+	}
+	if v, exists := r.counter.Unlogged(ctl); exists {
+		t.Errorf("the forgotten controller's unlogged series is back, at %v", v)
 	}
 }

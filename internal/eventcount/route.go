@@ -71,6 +71,10 @@ type route struct {
 	// counter's Forget): a late loss of its queued events is one log line, uncounted, raising nothing
 	// (the science agent's ruling on #697, 17 Nov 2026).
 	dead bool
+	// retire orders the final recorder call of a raise against retirement: raiseJob's emit holds it for
+	// reading across its dead check and the recorder call, and markDead takes it for writing. It is taken
+	// before mu, and never inside the recorder call's own path.
+	retire sync.RWMutex
 
 	gate // the loss gate (gate.go)
 

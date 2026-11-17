@@ -102,6 +102,8 @@ type Publisher struct {
 	// library returned it, and its result is what the publisher then sees: a test injects the loss of
 	// an acknowledgement after the broker has stored the message (spike S8's lostAckJS).
 	afterPublish func(id string, ack *jetstream.PubAck, err error) error
+	// emitHook, when set (tests only), is called by a raise between its dead check and its recorder call.
+	emitHook func()
 }
 
 // item is one event waiting for the log.

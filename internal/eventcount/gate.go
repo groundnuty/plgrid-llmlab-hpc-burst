@@ -259,8 +259,11 @@ func (r *route) isDead() bool {
 	return r.dead
 }
 
-// markDead ends the route: its controller's manager has stopped for good.
+// markDead ends the route: its controller's manager has stopped for good. It waits for a raise that is
+// handing its EventsNotLogged to the recorder, and after it no raise does (raiseJob.emit).
 func (r *route) markDead() {
+	r.retire.Lock()
+	defer r.retire.Unlock()
 	r.mu.Lock()
 	r.dead = true
 	r.mu.Unlock()
