@@ -40,7 +40,7 @@ func TestTheSelectionAndReservedOnReadAKeptLoser(t *testing.T) {
 		surplus []string
 		reserve []string // on A, "replacement:<Instance>"
 	}{
-		{"a kept loser beside a ready primary and its winner is surplus, though the count would choose it", 2,
+		{"a kept loser beside a ready primary and its winner is surplus, though the deployment is a primary short", 3,
 			[]v1alpha1.Instance{
 				crossInstance("p", provA, v1alpha1.InstanceReady, nil),
 				crossInstance("w", provB, v1alpha1.InstanceReady, nil),

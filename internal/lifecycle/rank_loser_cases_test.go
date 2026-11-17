@@ -22,12 +22,19 @@ import (
 // names (p is "" for n = 1).
 func klMissing(t *testing.T, n int32, tpotL time.Duration, bScripts ...pfake.Script) (h *klRig, p, m1, m2 string) {
 	t.Helper()
-	h = newKlRig(t)
+	a := []pfake.Script{{}}
 	if n == 2 {
-		h.batch.Enqueue(pfake.Script{}, pfake.Script{})
-	} else {
-		h.batch.Enqueue(pfake.Script{})
+		a = []pfake.Script{{}, {}}
 	}
+	return klMissingA(t, a, n, tpotL, bScripts...)
+}
+
+// klMissingA is klMissing with A's queue waits given: with n = 2 the first script is P's and the second M1's (the
+// order the fake submits in, the Allocations' names).
+func klMissingA(t *testing.T, aScripts []pfake.Script, n int32, tpotL time.Duration, bScripts ...pfake.Script) (h *klRig, p, m1, m2 string) {
+	t.Helper()
+	h = newKlRig(t)
+	h.batch.Enqueue(aScripts...)
 	if len(bScripts) == 0 {
 		bScripts = []pfake.Script{{}}
 	}
@@ -247,7 +254,11 @@ func TestAKeptLoserThatFailsACheckIsReleased(t *testing.T) {
 	if l.Status.EndReason != v1alpha1.ReasonQualificationFailed {
 		t.Fatalf("R1 ended for %q, want QualificationFailed", l.Status.EndReason)
 	}
-	h.until(2*time.Minute, 10*time.Second, "R1's Allocation released", func() bool { return h.released(w.r1A) })
+	// The release is made in the pass that ends it, not left to the next pass's sweep of a failed Instance's
+	// Allocation (tombstone), which would release it all the same and hide an end that kept it.
+	if !h.released(w.r1A) {
+		t.Fatal("R1's Allocation is not released in the pass that ended it: a broken node is no spare")
+	}
 	if f := h.classAFailures(); f != 1 {
 		t.Fatalf("A's class records %d failures, want 1 (R1's)", f)
 	}
@@ -259,6 +270,34 @@ func TestAKeptLoserThatFailsACheckIsReleased(t *testing.T) {
 	}
 	if win := h.mustInstance(w.r2); win.Status.Phase != v1alpha1.InstanceReady || win.Annotations[annotationRankedOut] != "" {
 		t.Fatalf("R2 is %s with ranked-out %q, want it serving, unmarked", win.Status.Phase, win.Annotations[annotationRankedOut])
+	}
+}
+
+// TestAKeptLoserIsSurplusWhileTheDeploymentIsShort: instances 2. The first primary P is still pending on A behind a 10 h
+// wait, and the second's hedge has M1 on A (started 08:00:20) and M2 on B, which wins at 08:01:10 measuring 20 ms. The
+// deployment is one primary short, so by its rank alone (started, above pending) M1 would be chosen; it is the surplus
+// of A all the same (HBEP-7, How it counts: a hedge's started loser kept as a candidate is surplus on its Provider
+// too), so it is ranked: at 08:11:00, measuring 18.0 ms against M2's 20, it ends HedgeLost, where a chosen M1 would
+// have become ready unranked. P stays pending and chosen, and no Allocation is made: three jobs in all, P's, M1's and
+// M2's. Members are seeded.
+func TestAKeptLoserIsSurplusWhileTheDeploymentIsShort(t *testing.T) {
+	h, p, m1, m2 := klMissingA(t, []pfake.Script{{QueueWait: 10 * time.Hour}, {}}, 2, rk180)
+	if in := h.mustInstance(m1); ended(in) || in.Annotations[annotationCandidateOf] != m2 {
+		t.Fatalf("M1 is %s with candidate-of %q at the win, want it kept as M2's candidate", in.Status.Phase, in.Annotations[annotationCandidateOf])
+	}
+	if a, _ := h.allocation(h.mustInstance(p).Spec.AllocationRef.Name); a == nil || jobStarted(a) {
+		t.Fatalf("P's job started, want it pending behind its 10 h wait: %+v", a)
+	}
+	hoStepTo(h.rig, hoT(8, 11, 0), 10*time.Second, nil)
+	l := h.mustInstance(m1)
+	if !ended(l) || l.Status.EndReason != v1alpha1.ReasonHedgeLost || l.Status.EndTime == nil || !l.Status.EndTime.Time.Equal(hoT(8, 11, 0)) {
+		t.Fatalf("M1 is %s (end %q at %v) at 08:11:00, want ended for HedgeLost at 08:11:00: it is surplus, so it is ranked and 18.0 ms is not faster than 20 ms by more than 10%%", l.Status.Phase, l.Status.EndReason, l.Status.EndTime)
+	}
+	if in := h.mustInstance(p); ended(in) || jobStarted(h.allocOrNil(in.Spec.AllocationRef.Name)) {
+		t.Fatalf("P is %s at 08:11:00, want it pending still", in.Status.Phase)
+	}
+	if subs := h.sbatches(); subs != 3 {
+		t.Fatalf("%d jobs submitted, want P's, M1's and M2's only", subs)
 	}
 }
 
