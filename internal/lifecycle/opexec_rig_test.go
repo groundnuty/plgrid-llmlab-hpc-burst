@@ -37,6 +37,13 @@ func (w *execWorld) wantCause(alloc string, op *v1alpha1.Operation) {
 	if m == nil || m[1] != op.Namespace || m[2] != op.Name || m[3] != string(op.UID) {
 		w.t.Errorf("Allocation %s: the cause %q does not parse as Operation %s/%s %s: %v", alloc, got, op.Namespace, op.Name, op.UID, m)
 	}
+	// The Provider's controller reads the cause with this parser to put the Operation in its JobEnded event's related object
+	// (internal/providerctl, operationOf; HBEP-8, Allocation events). JobEnded is raised by that controller, which the rig's
+	// Provider (pkg/provider/fake) is not, so the row asserts what the event reads: the cause names this Operation to the
+	// parser the event uses. providerctl/e2e (events_delete_test.go) shows the event naming the Operation from such a cause.
+	if ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(got); !ok || ns != op.Namespace || name != op.Name || uid != op.UID {
+		w.t.Errorf("Allocation %s: ParseReleaseCauseOperation(%q) = %q/%q %q %v, want Operation %s/%s %s: JobEnded's related would not name it", alloc, got, ns, name, uid, ok, op.Namespace, op.Name, op.UID)
+	}
 }
 
 // targetSet is a plan's or a commit's targets as "<Kind> <name>" with the effect.
