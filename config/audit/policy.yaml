@@ -1,0 +1,46 @@
+# The API server's audit policy (HBEP-10, Audit; HBEP-11, Single-user host; issue #660, PR B). hpcburst up
+# writes it to <state>/audit-policy.yaml at every start (internal/launcher), and internal/testenv's audit option
+# takes the same bytes, so the policy a test reads the log under is the one that is installed. Rules are
+# evaluated in order and the first match decides, so their order is part of the policy.
+#
+#   1. None             the controllers' Lease reads and renewals: they carry no decision, and they would fill
+#                       most of the log. A Lease CREATE is not listed here and stays at Metadata.
+#   2. RequestResponse  this framework's Operations, their status, Approvals and ApprovalPolicies, in every
+#                       verb: the log then holds each request with its purpose, the plan and the per-target
+#                       outcomes of the controller's status writes, and each Approval with the plan it names.
+#                       A subresource is its own resource here: operations/status is not matched by operations.
+#   3. Request          the lifecycle controller's writes to Allocations, so a release cause is logged before
+#                       the delete that follows.
+#   4. Metadata         everything else: the user, the verb, the object, the time and the answer, and never a
+#                       body, so no Secret's content is logged.
+#
+# RequestReceived is omitted, as in the policy this replaces: each request is logged once, when it is
+# answered (ResponseComplete), or when a watch's response starts.
+#
+# The three user names are the controllers' ServiceAccounts of hpcburst-system (config/rbac/controllers.yaml).
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  - level: None
+    users:
+      - system:serviceaccount:hpcburst-system:hpcburst-lifecycle
+      - system:serviceaccount:hpcburst-system:hpcburst-provider
+      - system:serviceaccount:hpcburst-system:hpcburst-front
+    verbs: ["get", "update", "list", "watch"]
+    resources:
+      - group: coordination.k8s.io
+        resources: ["leases"]
+  - level: RequestResponse
+    resources:
+      - group: hpcburst.groundnuty.github.io
+        resources: ["operations", "operations/status", "approvals", "approvalpolicies"]
+  - level: Request
+    users:
+      - system:serviceaccount:hpcburst-system:hpcburst-lifecycle
+    verbs: ["update", "patch", "delete"]
+    resources:
+      - group: hpcburst.groundnuty.github.io
+        resources: ["allocations"]
+  - level: Metadata
