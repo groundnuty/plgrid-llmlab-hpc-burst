@@ -302,6 +302,13 @@ func TestFrpcStartsFromWhatChangedDuringAStop(t *testing.T) {
 			})
 			r.f.Serve(uidA)
 			s := r.waitStarts(1, 5*time.Second)
+			// waitStarts returns once the supervisor has recorded the start,
+			// which can be before the stand-in's shell has run its TERM trap.
+			// A SIGSTOP that lands ahead of the trap freezes a process that
+			// the supervisor's TERM then kills. The stand-in writes its line
+			// after the trap, so waiting for the line proves the trap is in
+			// place (issue #726, the same class as #141).
+			r.waitRecorded(s[0], 30*time.Second)
 			if err := syscall.Kill(s[0].id.PID, syscall.SIGSTOP); err != nil {
 				t.Fatal(err)
 			}
