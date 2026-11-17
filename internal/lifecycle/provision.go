@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -162,7 +163,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			}
 			continue
 		}
-		warm, deferUntil := p.warmAllocation(pv, params)
+		warm, deferUntil := p.warmFor(pv, params, pred)
 		if warm == nil && !deferUntil.IsZero() {
 			p.at(deferUntil)
 			p.deferred = true
@@ -196,7 +197,12 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if o.caps {
 			capsOf = &params
 		}
-		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave)
+		// A missing primary refused for the submit limit alone makes a pending extra yield its slot (yield.go).
+		var onLimit func(context.Context, slotReads) error
+		if pred == nil && !o.extra && o.hedgeGroup == "" {
+			onLimit = p.yieldOnLimit(pv)
+		}
+		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
 		if err != nil {
 			return false, err
 		}
@@ -228,7 +234,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 // Instance, not pending release (releasePending) and whose relay has not ended for good (relayEnded), the latest
 // hard end first, then by name (HBEP-7, Over-allocation and qualification (beta), When the extra is submitted:
 // "Warm Allocations count toward k only here, in the extra's creation bound"). It checks no fit, no lease and no
-// registration: warmAllocation, which places on one, keeps those, and the extra's bound only asks whether one
+// registration: warmFor, which places on one, keeps those, and the extra's bound only asks whether one
 // exists. One predicate, so the placement and the bound never disagree about what is warm. An Allocation with no
 // hard end yet sorts last.
 func (p *pass) warmOf(pv *providerView) []*v1alpha1.Allocation {
@@ -256,28 +262,27 @@ func (p *pass) warmOf(pv *providerView) []*v1alpha1.Allocation {
 	return out
 }
 
-// warmAllocation returns a Running Allocation of this deployment on the
-// Provider that hosts no live Instance and has lease left above twice the
-// class's start-to-ready time plus the drain window (HBEP-7, open question 14).
-// It is the first of warmOf's, the latest hard end first, that fits and has a
-// registered agent, so its pick is the same on every pass (it ranged over a map
-// before).
+// warmFor returns the warm Allocation provisioning places an Instance of the given size on, and when the first one
+// has not registered, until when to wait for it (HBEP-7, open question 14; #616 PR 4, built to #604 PR 3's contract).
+// It is warmOf plus the placement's checks: a Running Allocation of this deployment that hosts no live Instance has
+// lease left above twice the class's start-to-ready time plus the drain window, fits the launch (the same partition,
+// so the same class, and GPU count, and at least the CPUs and memory a new Allocation would request: review of PR
+// 88), and has a registered agent. One marked RelayEndedForGood is passed over in warmOf (relayEnded): step 7, which
+// places, runs before step 9, which releases an empty one, so one pass would otherwise place an Instance on it and the
+// next would fail that Instance, which counts toward RestartLoop (issue #332). One whose agent has not registered
+// again yet, during the grace after the controller's own restart, is waited for rather than passed over.
 //
-// The Allocation must fit the launch: the same partition (so the same class)
-// and GPU count, and at least the CPUs and memory a new Allocation would
-// request (review of PR 88: a spec edit can change the GPUs an Instance needs).
-// One marked RelayEndedForGood is passed over (relayEnded, in warmOf): step 7, which
-// places, runs before step 9, which releases an empty one, so one pass would
-// otherwise place an Instance on it and the next would fail that Instance,
-// which counts toward RestartLoop (issue #332).
-// One whose agent has not registered again yet, during the grace after the
-// controller's own restart, is waited for rather than passed over: deferUntil
-// says until when.
-func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters) (warm *v1alpha1.Allocation, deferUntil time.Time) {
+// For a replacement (pred != nil) the warm Allocation's drain start must be STRICTLY later than pred's: HBEP-7,
+// Hedging (beta), Started losers are kept, and Over-allocation and qualification (beta), The lowest-ranked is
+// kept: "A replacement goes there only when the warm Allocation's drain start is later than its predecessor's".
+// One that drains with the predecessor, as the ranked-out extra's does, would end the replacement at the very
+// moment it is meant to take over. At exactly pred's it is not used (#604 PR 3's plan, Q4). The pick is the first
+// of warmOf's, the latest hard end first, so it is the same on every pass.
+func (p *pass) warmFor(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) (warm *v1alpha1.Allocation, deferUntil time.Time) {
 	need := 2*startToReady(p.md, pv.class) + drainWindowOf(pv, p.md)
 	for _, a := range p.warmOf(pv) {
 		obs := a.Status.AtProvider
-		if obs.HardEnd == nil || obs.HardEnd.Sub(p.now) <= need || !fits(a, params) {
+		if obs.HardEnd == nil || obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || !p.drainsAfter(pv, a, pred) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {
@@ -288,6 +293,29 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		}
 	}
 	return nil, deferUntil
+}
+
+// drainsAfter reports whether the warm Allocation's drain start (its hard end minus the Provider's drain window,
+// as v1alpha1.DrainStart reads it) is strictly later than the predecessor's (drainStart: its lease end, the
+// Provider's profile and the deployment's routing). It is true with no predecessor, and when the predecessor has no
+// drain start to compare with (it never started, so nothing serves that the replacement must outlive).
+func (p *pass) drainsAfter(pv *providerView, warm *v1alpha1.Allocation, pred *v1alpha1.Instance) bool {
+	if pred == nil {
+		return true
+	}
+	ps, ok := p.drainStart(pred, p.pvOf(pred.Labels))
+	if !ok {
+		return true
+	}
+	var routing *v1alpha1.Routing
+	if p.md != nil {
+		routing = p.md.Spec.Routing
+	}
+	if pv.profile == nil || warm.Status.AtProvider.HardEnd == nil {
+		return false
+	}
+	ws, err := v1alpha1.DrainStart(warm.Status.AtProvider.HardEnd.Time, pv.profile.Spec, routing)
+	return err == nil && ws.After(ps)
 }
 
 // releasePending reports whether an Instance on the Allocation failed, so the

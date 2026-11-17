@@ -79,6 +79,16 @@ const listTimeout = 30 * time.Second
 // context bounded by listTimeout. slotTable.mu is never held across any of
 // them. The extra's alsoLeave (slotAsk) is counted by the asking pass from its
 // own deployment's objects before it asks, so nothing under the lock reads it.
+//
+// The yield (yield.go; #616 PR 4) adds the only WRITES made under a Provider's
+// lock, always after slotTable.mu is released: when a missing primary's
+// reservation is refused for the submit limit alone, slotAsk.onLimit is
+// called with the reads just made, under the same Provider's lock and a
+// listTimeout of its own, and patches the one annotationYieldTo mark on a
+// pending extra's Instance (any deployment's) by a merge patch; a pass
+// clearing the marks that name its deployment does the same through
+// slotTable.underLock. Nothing else is taken or read by them, and no other
+// Provider's lock, so the order above holds.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
@@ -195,6 +205,11 @@ type slotAsk struct {
 	// The pass counts it from its own objects (extraAlsoLeave); it adds to what reservedOn reads from the
 	// other deployments' and the Running primaries' own slots. Zero for every other ask.
 	alsoLeave int
+	// onLimit, when set, is called under the Provider's lock, after slotTable.mu is released, when the reservation
+	// is refused for the submit limit alone (the per-user caps passed, which is checked first): a missing primary's
+	// yield (yield.go). It gets the reads the count was made from, with the pending surplus Instances of every
+	// deployment on the Provider.
+	onLimit func(ctx context.Context, rd slotReads) error
 }
 
 // slotAnswer is a reservation's answer.
@@ -238,16 +253,29 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if q.limit == nil && q.params == nil {
 		return slotAnswer{ok: true, holds: holds}, nil
 	}
-	at := now()
+	ans, limitRefused := t.reserveLocked(q, rd, holds, now())
+	if limitRefused && q.onLimit != nil {
+		cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+		defer cancel()
+		if err := q.onLimit(cctx, rd); err != nil {
+			return slotAnswer{}, err
+		}
+	}
+	return ans, nil
+}
+
+// reserveLocked is reserveAsk's decision, made with slotTable.mu held and no read of the API: limitRefused is true
+// when the reservation was refused for the submit limit alone.
+func (t *slotTable) reserveLocked(q slotAsk, rd slotReads, holds bool, at time.Time) (ans slotAnswer, limitRefused bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(q.provider, rd.seen, rd.listed, at)
 	if t.holds(q.provider, q.key, c) {
-		return slotAnswer{ok: true, count: c.total(), holds: holds}, nil
+		return slotAnswer{ok: true, count: c.total(), holds: holds}, false
 	}
 	if q.params != nil {
 		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], *q.params); !ok {
-			return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, nil
+			return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, false
 		}
 	}
 	var n int
@@ -257,7 +285,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 		n, by = counted(rd.reserved, q.key, q.takers, t.expect[q.provider])
 		total += n
 		if total+q.alsoLeave >= int(*q.limit) {
-			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
+			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, true
 		}
 	}
 	if t.expect[q.provider] == nil {
@@ -270,7 +298,18 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 		}
 		t.params[q.provider][q.key] = *q.params
 	}
-	return slotAnswer{ok: true, count: total, reserved: n, reservedBy: by, holds: holds}, nil
+	return slotAnswer{ok: true, count: total, reserved: n, reservedBy: by, holds: holds}, false
+}
+
+// underLock runs fn under the Provider's lock and a listTimeout of its own, holding no other lock of this package
+// (the yield's clearing of marks, which must not race the marking).
+func (t *slotTable) underLock(ctx context.Context, provider string, fn func(ctx context.Context) error) error {
+	l := t.slotLock(provider)
+	l.Lock()
+	defer l.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+	defer cancel()
+	return fn(cctx)
 }
 
 // capsFit reports whether a new Allocation of size add fits the Provider's
@@ -372,6 +411,9 @@ type slotReads struct {
 	allocs       map[string]*v1alpha1.Allocation
 	// reserved are the Provider's reserved slots (reservedOn).
 	reserved []reservedSlot
+	// pendingSurplus are the surplus Instances of every deployment on the Provider whose Allocation holds a slot and
+	// whose job has not started, newest first (D8's views; read for the yield, with the reserved slots).
+	pendingSurplus []*v1alpha1.Instance
 }
 
 // readBounded makes the count's reads under one context bounded by the table's
@@ -385,7 +427,7 @@ func (t *slotTable) readBounded(ctx context.Context, r client.Reader, provider s
 		return slotReads{}, err
 	}
 	if withReserved {
-		if rd.reserved, err = reservedOn(ctx, r, provider, profile, rd.allocs); err != nil {
+		if rd.reserved, rd.pendingSurplus, err = readReserved(ctx, r, provider, profile, rd.allocs); err != nil {
 			return slotReads{}, err
 		}
 	}
@@ -463,13 +505,14 @@ func submitLimitText(pv *providerView) string {
 // condition: a hedge's member that finds no room is extra capacity, and the
 // Provider passed over sets no reason (HBEP-7, Hedging (beta)).
 func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool) (ok, holds bool, err error) {
-	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, 0)
+	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, 0, nil)
 }
 
-// reserveSlotWith is reserveSlotFor leaving alsoLeave slots free beside the new Allocation (slotAsk.alsoLeave).
-func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int) (ok, holds bool, err error) {
+// reserveSlotWith is reserveSlotFor leaving alsoLeave slots free beside the new Allocation (slotAsk.alsoLeave), and,
+// with onLimit, calling it under the lock when the limit alone refuses it (slotAsk.onLimit).
+func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int, onLimit func(context.Context, slotReads) error) (ok, holds bool, err error) {
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits, alsoLeave: alsoLeave}
+		params: params, caps: pv.limits, alsoLeave: alsoLeave, onLimit: onLimit}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}

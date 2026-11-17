@@ -73,6 +73,14 @@ func (p *pass) capacity() error {
 	if err := p.createExtras(placed); err != nil {
 		return err
 	}
+	// This deployment's yield marks that this pass's refusals no longer support are cleared, and the marks on its own
+	// Instances are settled (clear, wait or yield) before step 7 takes anything (yield.go).
+	if err := p.clearYieldMarks(); err != nil {
+		return err
+	}
+	if err := p.settleYields(); err != nil {
+		return err
+	}
 	// The chosen primaries are read again: the loop above made Instances, which the selection counts. The surplus,
 	// ready or not, is taken every pass, not only when the count is lowered (scaleDownTargets).
 	return p.scaleDown(p.primaries(), 0)

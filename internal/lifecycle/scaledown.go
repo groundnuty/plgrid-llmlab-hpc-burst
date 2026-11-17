@@ -74,15 +74,29 @@ func frontAdmitsAt(in *v1alpha1.Instance) (time.Time, bool) {
 	return c.LastTransitionTime.Add(frontProbeInterval), true
 }
 
-// scaleUnit is one hedge that a scale-down takes: its representative, whether it is taken as over-allocation's own
-// trim (non-ready surplus beyond k, or a marked peer), and, for a marked peer, when its drain is due: not before
-// notTo, and never while the Instance it made way for is not healthy (waiting).
+// scaleUnit is what a scale-down takes of one hedge: its representative and, when it takes less than the whole hedge,
+// the members it takes (only). A surplus hedge goes member by member where its Providers' room under k decides it
+// (trimSurplusMembers): a member beyond k is a unit of its own, so the effect cancels that member and no other. trim
+// is whether it is taken as over-allocation's own trim (non-ready surplus beyond k, a marked peer, or an extra that
+// yielded its submit slot), yield names the deployment an extra yielded to (annotationYieldTo), and, for a marked
+// peer, notTo is when its drain is due: not before notTo, and never while the Instance it made way for is not
+// healthy (waiting).
 type scaleUnit struct {
 	rep     *v1alpha1.Instance
+	only    []*v1alpha1.Instance
 	trim    bool
 	marked  bool
 	waiting bool
 	notTo   time.Time
+	yield   string
+}
+
+// members are the Instances the unit takes: the members it names, or the whole hedge.
+func (p *pass) unitMembers(u scaleUnit) []*v1alpha1.Instance {
+	if len(u.only) > 0 {
+		return u.only
+	}
+	return p.membersOf(u.rep)
 }
 
 // scaleUnits is what step 7 takes when the deployment keeps desired primaries, the least advanced first.
@@ -92,9 +106,13 @@ type scaleUnit struct {
 // left alone, taken in one fixed order that does not depend on desired (the selection's: most advanced, then the
 // earlier job start, then the older, then the UID), and the rest are taken: pending ones first, newest first, then
 // started ones. A surplus Instance with a live replacement is never left alone: it goes with its replacement, which
-// is never promoted (the science agent's ruling on #616's plan, Q4). A hedge with several live members is never left
-// alone either: it spans Providers, and k is counted per Provider. A marked peer is taken once the Instance it
-// made way for has been healthy for the front's probe interval (frontAdmitsAt), and not before.
+// is never promoted (the science agent's ruling on #616's plan, Q4). A surplus hedge with several live members is
+// charged to each member's OWN Provider: a member is kept where its Provider has room under k, taking one unit of
+// it there, and only the members whose Provider has none are taken, each alone, as over-allocation's own trim; the
+// whole hedge goes only when no member's Provider has room (the science agent's ruling on #616, D9, 17 Nov 2026:
+// "Queue age is capacity in waiting"; trimSurplusMembers). A marked peer is taken once the Instance it made way for
+// has been healthy for the front's probe interval (frontAdmitsAt), and not before. A pending surplus Instance that
+// yields its submit slot (p.yielding, settleYields) is taken alone and takes no room.
 func (p *pass) scaleUnits(desired int) []scaleUnit {
 	_, surplus := selectPrimaries(p.selection(nil), desired)
 	k := p.keepRoom()
@@ -102,19 +120,48 @@ func (p *pass) scaleUnits(desired int) []scaleUnit {
 	for _, in := range p.insts {
 		byName[in.Name] = in
 	}
-	left, used := map[*v1alpha1.Instance]bool{}, map[string]int{}
+	room := map[string]int{} // per Provider, how many more non-ready surplus Instances may be left alone
+	left := map[*v1alpha1.Instance]bool{}
+	parts := map[*v1alpha1.Instance][]scaleUnit{}
 	for _, rep := range surplus {
-		if rep.Status.Phase == v1alpha1.InstanceReady || len(p.membersOf(rep)) > 1 || p.replaced(rep) {
+		if rep.Status.Phase == v1alpha1.InstanceReady || p.replaced(rep) {
 			continue
 		}
-		if prov := rep.Labels[v1alpha1.LabelProvider]; used[prov] < k {
+		var yields, rest []*v1alpha1.Instance
+		for _, m := range p.membersOf(rep) {
+			if _, ok := p.yielding[m.UID]; ok {
+				yields = append(yields, m)
+			} else {
+				rest = append(rest, m)
+			}
+		}
+		for _, m := range rest {
+			if _, ok := room[m.Labels[v1alpha1.LabelProvider]]; !ok {
+				room[m.Labels[v1alpha1.LabelProvider]] = k
+			}
+		}
+		kept, trimmed := trimSurplusMembers(rest, room)
+		switch {
+		case len(yields) == 0 && len(trimmed) == 0:
 			left[rep] = true
-			used[prov]++
+		case len(yields) == 0 && len(kept) == 0:
+			// no member's Provider has room: the whole hedge goes, as one unit
+		default:
+			for _, m := range yields {
+				parts[rep] = append(parts[rep], scaleUnit{rep: rep, only: []*v1alpha1.Instance{m}, trim: true, yield: p.yielding[m.UID]})
+			}
+			for _, m := range trimmed {
+				parts[rep] = append(parts[rep], scaleUnit{rep: rep, only: []*v1alpha1.Instance{m}, trim: true})
+			}
 		}
 	}
 	var out []scaleUnit
 	for _, rep := range slices.Backward(surplus) {
 		if left[rep] {
+			continue
+		}
+		if us, ok := parts[rep]; ok {
+			out = append(out, us...)
 			continue
 		}
 		u := scaleUnit{rep: rep, trim: rep.Status.Phase != v1alpha1.InstanceReady}
@@ -129,6 +176,26 @@ func (p *pass) scaleUnits(desired int) []scaleUnit {
 		out = append(out, u)
 	}
 	return out
+}
+
+// trimSurplusMembers splits a surplus hedge's live members by their Providers' room under k: a member is kept when
+// its own Provider still has room, which it then charges one unit of, and trimmed when it has none (D9; the science
+// agent's ruling on #616, 17 Nov 2026: "the trim is per Provider, not all or nothing"). room holds, for every
+// Provider a member is on, how many more non-ready surplus Instances may be left alone there; the caller fills it
+// with k for a Provider it has not charged yet, and it is charged here, so the surplus units that follow in the
+// selection's fixed order see what this hedge took. Members come in the order given. This is the one place the
+// per-Provider rule lives.
+func trimSurplusMembers(members []*v1alpha1.Instance, room map[string]int) (kept, trimmed []*v1alpha1.Instance) {
+	for _, m := range members {
+		prov := m.Labels[v1alpha1.LabelProvider]
+		if room[prov] > 0 {
+			room[prov]--
+			kept = append(kept, m)
+			continue
+		}
+		trimmed = append(trimmed, m)
+	}
+	return kept, trimmed
 }
 
 // membersOf is the members of the hedge the Instance represents, or the Instance alone.
@@ -172,18 +239,23 @@ func (p *pass) rankedOutPeer(peer *v1alpha1.Instance) {
 // Over-allocation and qualification (beta), How it counts). Step 7 calls it with surplus 0, every pass; a Scale
 // Operation's plan calls it with the count it would lower to.
 //
-// A hedge goes whole: each member is a target with its own effect, and its replacement hedge goes with it, never
-// promoted, its members first. The targets come least advanced first. It is monotone: a lower count takes every
+// A hedge that a lowered count drops goes whole: each member is a target with its own effect, and its replacement
+// hedge goes with it, never promoted, its members first. A surplus hedge left over by the selection goes member by
+// member where k allows (scaleUnits): a trimmed member is a target of its own, and its hedge-mates are left alone.
+// The targets come least advanced first. It is monotone: a lower count takes every
 // target a higher one takes, and more, since the surplus only grows and the order that decides what is left alone
 // does not depend on the count.
 //
 // Each target carries its cause (scaleCause): overAllocationTrim only when the selection at the current count,
-// len(prim), takes it too and it is non-ready surplus beyond k or a marked peer; lowered for the rest.
+// len(prim), takes it too and it is non-ready surplus beyond k, a marked peer or an extra that yielded its submit
+// slot; lowered for the rest.
 func (p *pass) scaleDownTargets(prim []*v1alpha1.Instance, surplus int) []scaleTarget {
 	now := len(prim)
 	trim := map[*v1alpha1.Instance]bool{}
 	for _, u := range p.scaleUnits(now) {
-		trim[u.rep] = u.trim
+		for _, m := range p.unitMembers(u) {
+			trim[m] = u.trim
+		}
 	}
 	var out []scaleTarget
 	for _, u := range p.scaleUnits(max(now-surplus, 0)) {
@@ -195,24 +267,34 @@ func (p *pass) scaleDownTargets(prim []*v1alpha1.Instance, surplus int) []scaleT
 			continue
 		}
 		// The words are the release cause of a cancelled Allocation too (endCause): "scaled down" for every target but a
-		// marked peer, whose own are the ranking's.
-		cause, why := scaleLowered, "scaled down"
-		if trim[u.rep] {
-			cause = scaleOverAllocationTrim
-		}
+		// marked peer, whose own are the ranking's, and an extra that yielded its slot.
+		why := "scaled down"
 		if u.marked {
 			why = "ranked out: its successor serves"
 		}
-		for _, m := range p.membersOf(u.rep) {
+		if u.yield != "" {
+			why = "yielded its submit slot to " + u.yield
+		}
+		members := p.unitMembers(u)
+		for _, m := range members {
 			for _, r := range p.replacementMembers(m) {
 				if countable(r) {
-					out = append(out, scaleTarget{instance: r, allocation: p.allocOf(r), effect: effectOf(r, p.allocOf(r)), why: "its predecessor was scaled down", cause: cause})
+					out = append(out, scaleTarget{instance: r, allocation: p.allocOf(r), effect: effectOf(r, p.allocOf(r)), why: "its predecessor was scaled down", cause: scaleCauseOf(trim[m])})
 				}
 			}
 		}
-		for _, m := range p.membersOf(u.rep) {
-			out = append(out, scaleTarget{instance: m, allocation: p.allocOf(m), effect: effectOf(m, p.allocOf(m)), why: why, cause: cause})
+		for _, m := range members {
+			out = append(out, scaleTarget{instance: m, allocation: p.allocOf(m), effect: effectOf(m, p.allocOf(m)), why: why, cause: scaleCauseOf(trim[m])})
 		}
 	}
 	return out
+}
+
+// scaleCauseOf is the cause of a target: overAllocationTrim when the selection at the current count takes it as
+// over-allocation's own trim, else lowered.
+func scaleCauseOf(trimmed bool) scaleCause {
+	if trimmed {
+		return scaleOverAllocationTrim
+	}
+	return scaleLowered
 }

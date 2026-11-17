@@ -134,7 +134,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	// A retained warm Allocation of this deployment takes the replacement
 	// without a new submission, so it needs neither a slot nor room under the
 	// caps: both jobs already run (HBEP-7, Provisioning, open question 14).
-	if p.reusableWarm(pv, params) {
+	if p.reusableWarm(pv, params, in) {
 		return overlapCheck{beside: true}, nil
 	}
 	for _, q := range p.providers {
@@ -152,7 +152,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		if err != nil {
 			return overlapCheck{}, err
 		}
-		if free || p.reusableWarm(q, qparams) {
+		if free || p.reusableWarm(q, qparams, in) {
 			return overlapCheck{}, nil // another Provider has room: not no-overlap mode
 		}
 	}
@@ -164,11 +164,12 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 }
 
 // reusableWarm reports whether the Provider has a warm Allocation of this
-// deployment that takes a replacement of the given size: one that provisioning
-// would place it on (warmAllocation), or one whose agent has not registered
-// again yet after the controller's restart, which provisioning waits for.
-func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters) bool {
-	warm, deferUntil := p.warmAllocation(pv, params)
+// deployment that takes the replacement of pred, of the given size: one that
+// provisioning would place it on (warmFor, the one predicate, so placement and
+// this decision agree), or one whose agent has not registered again yet after
+// the controller's restart, which provisioning waits for.
+func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) bool {
+	warm, deferUntil := p.warmFor(pv, params, pred)
 	return warm != nil || !deferUntil.IsZero()
 }
 

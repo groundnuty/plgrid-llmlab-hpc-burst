@@ -118,6 +118,12 @@ type pass struct {
 	// never a placement on a warm Allocation). capacity() reads what its missing-primary loop appended, to give each
 	// such Provider its extra (extra.go).
 	submitted []string
+	// limitRefused is the Providers where a missing primary of this pass was refused for the submit limit alone
+	// (yield.go): its yield marks there stay, and the ones elsewhere are cleared.
+	limitRefused map[string]bool
+	// yielding is the Instances of this deployment that yield their submit slot, by UID, with the deployment they
+	// yield to (settleYields; read by scaleUnits).
+	yielding map[types.UID]string
 	// overlaps memoizes the no-overlap decision per primary (nooverlap.go).
 	overlaps map[types.UID]overlapCheck
 	// overlapErrs collects the failed no-overlap checks of the replacement
