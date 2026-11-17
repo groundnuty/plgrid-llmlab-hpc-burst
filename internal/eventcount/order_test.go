@@ -45,7 +45,6 @@ func TestALossIsNeverEmittedAfterAClosingThatCoversItsRun(t *testing.T) {
 	}
 }
 
-
 // A loss job marked covered is retargeted when a later run starts before the notifier takes it: it then raises for
 // the later run, which no closing covers. Were the mark kept, the notifier would drop the loss of a run that is
 // still open, and the log would never say that events are being lost.

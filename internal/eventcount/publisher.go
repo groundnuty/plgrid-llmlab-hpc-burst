@@ -108,6 +108,13 @@ type Publisher struct {
 	leaseTimeoutFor time.Duration
 	// jobsDone counts the raise jobs the notifier has finished, handed over or not (tests read it).
 	jobsDone atomic.Uint64
+	// seq counts the attempts to queue an event (enqueue, under mu; read without it). A depth sample carries the
+	// count at the time it was taken, and a queue-full run is ended by a sample only if its latest queue-full loss
+	// has a smaller count: the queue was refilled after a sample that would otherwise end the run.
+	seq atomic.Uint64
+	// sweepHook, when set (tests only), is called by a sweep between its depth sample and its visits; afterSweep,
+	// when set, after the last visit.
+	sweepHook, afterSweep func()
 }
 
 // item is one event waiting for the log.
@@ -186,6 +193,7 @@ func (p *Publisher) pendingLocked() int {
 func (p *Publisher) enqueue(it *item) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.seq.Add(1) // every attempt, taken or refused, so that a queue-full loss is dated against a depth sample
 	if p.stopping || p.pendingLocked() >= p.o.QueueSize {
 		return false
 	}
@@ -257,6 +265,7 @@ func (p *Publisher) deliver(it *item) {
 		switch {
 		case err == nil:
 			it.r.logged(it)
+			p.sweepFullRuns(it.r)
 			return
 		case full:
 			it.r.lost(lostFull, it.reason, it.id, err, it.closes)
@@ -270,6 +279,39 @@ func (p *Publisher) deliver(it *item) {
 		case <-p.ctx.Done():
 		}
 	}
+}
+
+// sweepFullRuns offers every route but stored's, which has just taken its own path (route.logged), the
+// chance to end its queue-full run: each ends it only if the queue the routes share is below half its size
+// (route.queueDrained). The routes are
+// copied under the publisher's lock and visited after it is released, each under its own lock, so the order
+// of the two locks is never inverted.
+func (p *Publisher) sweepFullRuns(stored *route) {
+	pending, seq := p.sample() // pending counts the event just stored, which is still in flight
+	if h := p.sweepHook; h != nil {
+		h()
+	}
+	p.mu.Lock()
+	routes := make([]*route, 0, len(p.routes))
+	for _, r := range p.routes {
+		if r != stored {
+			routes = append(routes, r)
+		}
+	}
+	p.mu.Unlock()
+	for _, r := range routes {
+		r.queueDrained(pending, seq)
+	}
+	if h := p.afterSweep; h != nil {
+		h()
+	}
+}
+
+// sample reads the queue's depth, with the event in flight, and the count of attempts to queue an event, as one.
+func (p *Publisher) sample() (pending int, seq uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pendingLocked(), p.seq.Load()
 }
 
 // attempt connects if it must and publishes once, each bounded by what is left of the event's

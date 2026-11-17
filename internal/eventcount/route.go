@@ -82,6 +82,9 @@ type route struct {
 	retire sync.RWMutex
 
 	gate // the loss gate (gate.go)
+	// fullOpen is true while the route holds an open queue-full run (under mu; read without it by the sweep that
+	// ends such runs when another route's publish finds the shared queue drained, Publisher.sweepFullRuns).
+	fullOpen atomic.Bool
 
 	warnedAt time.Time
 
