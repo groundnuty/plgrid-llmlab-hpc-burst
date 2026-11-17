@@ -97,6 +97,9 @@ func (p *pass) writeStatus() error {
 			s.StartToReady = append(s.StartToReady, m)
 		}
 	}
+	// Each class's start-up outcomes, beside its start-to-ready time (HBEP-7, Hedging (beta), The start-up failure
+	// rate; outcomes.go).
+	p.recordStartOutcomes(s)
 	s.Retention = &v1alpha1.RetentionStatus{EffectiveMode: md.Spec.RetentionPolicy.EffectiveMode()}
 	gen := md.Generation
 	if ready >= desired {
