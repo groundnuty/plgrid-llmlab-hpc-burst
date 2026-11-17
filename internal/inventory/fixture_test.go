@@ -121,7 +121,7 @@ func dur(s string) *v1alpha1.Duration { d := v1alpha1.Duration(s); return &d }
 //	                        alloc-a4 (no owner of its own, hosts inst-a4-old, which has none either), alloc-a5 (alice's, hosts the
 //	                        unlabelled inst-a5-old, no idle anchor)
 //	md-bob    bob    helios alloc-b1 (no anchor), alloc-b2 (an anchor that is no time, only an ended Instance on it), alloc-b3
-//	                        (Ended, on ghost), alloc-b4 (ReleaseWhenIdle, idle)
+//	                        (Ended, on ghost), alloc-b4 (ReleaseWhenIdle, idle), alloc-b5 (a stale anchor, and inst-b5 is on it)
 //	md-old    none   helios alloc-old (hosts inst-old)
 //	alloc-bare names nothing and has no status.
 func world() []client.Object {
@@ -144,6 +144,7 @@ func world() []client.Object {
 		alloc(owned("team", "alloc-b1", bob, bobHash, "ablation"), "md-bob", "helios", v1alpha1.AllocationRunning, mt(t0.Add(time.Hour)), nil),
 		alloc(withIdleSince(owned("team", "alloc-b2", bob, bobHash, "ablation"), "not a time"), "md-bob", "helios", v1alpha1.AllocationRunning, mt(t0.Add(time.Hour)), nil),
 		alloc(withIdleSince(owned("team", "alloc-b3", bob, bobHash, "ablation"), "2026-11-20T08:00:00Z"), "md-bob", "ghost", v1alpha1.AllocationEnded, mt(t0.Add(-time.Hour)), nil),
+		alloc(withIdleSince(owned("team", "alloc-b5", bob, bobHash, "ablation"), "2026-11-20T09:00:00Z"), "md-bob", "helios", v1alpha1.AllocationRunning, mt(t0.Add(time.Hour)), nil),
 		alloc(withIdleSince(owned("team", "alloc-b4", bob, bobHash, "ablation"), "2026-11-20T09:50:00Z"), "md-bob", "helios", v1alpha1.AllocationRunning,
 			mt(t0.Add(time.Hour)), &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur("30m")}),
 		alloc(bare("team", "alloc-old"), "md-old", "helios", v1alpha1.AllocationRunning, mt(t0.Add(time.Hour)), nil),
@@ -155,6 +156,7 @@ func world() []client.Object {
 		inst(bare("team", "inst-a4-old"), "alloc-a4", v1alpha1.InstanceReady),
 		inst(bare("team", "inst-a5-old"), "alloc-a5", v1alpha1.InstanceReady),
 		inst(owned("team", "inst-b2-ended", bob, bobHash, "ablation"), "alloc-b2", v1alpha1.InstanceEnded),
+		inst(owned("team", "inst-b5", bob, bobHash, "ablation"), "alloc-b5", v1alpha1.InstanceReady),
 		inst(bare("team", "inst-old"), "alloc-old", ""),
 
 		op("team", "op-wait", "md-alice", alice, v1alpha1.OperationActionScale, v1alpha1.OperationPhaseAwaitingApproval, "plan-1"),

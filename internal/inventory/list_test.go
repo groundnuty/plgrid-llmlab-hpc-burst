@@ -93,6 +93,9 @@ func TestTheFullViewOfANamespaceIsWrittenByHand(t *testing.T) {
 			{Namespace: "team", Name: "alloc-b4", ModelDeployment: inventory.Text("md-bob"), Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"),
 				Phase: inventory.Text("Running"), Provider: inventory.Text("helios"), HardEnd: at("2026-11-20T11:00:00Z"),
 				Retention: inventory.RetentionRow{Mode: "ReleaseWhenIdle", IdleLimit: inventory.Span(30 * time.Minute)}, IdleSince: at("2026-11-20T09:50:00Z")},
+			{Namespace: "team", Name: "alloc-b5", ModelDeployment: inventory.Text("md-bob"), Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"),
+				Phase: inventory.Text("Running"), Provider: inventory.Text("helios"), HardEnd: at("2026-11-20T11:00:00Z"), Retention: keep(),
+				IdleSince: at("2026-11-20T09:00:00Z")},
 			{Namespace: "team", Name: "alloc-bare", ModelDeployment: inventory.Unknown("the Allocation names no ModelDeployment"),
 				Owner: inventory.Unknown(reasonNoOwner), Purpose: inventory.Unknown(reasonNoPurpose), Phase: inventory.Unknown("no phase reported yet"),
 				Provider: inventory.Unknown("the Allocation names no Provider"), HardEnd: inventory.Unknown("not observed yet"),
@@ -106,6 +109,7 @@ func TestTheFullViewOfANamespaceIsWrittenByHand(t *testing.T) {
 			{Namespace: "team", Name: "inst-a4-old", Owner: inventory.Unknown(reasonNoOwner), Purpose: inventory.Unknown(reasonNoPurpose), Phase: inventory.Text("ready"), Allocation: "alloc-a4"},
 			{Namespace: "team", Name: "inst-a5-old", Owner: inventory.Unknown(reasonNoOwner), Purpose: inventory.Unknown(reasonNoPurpose), Phase: inventory.Text("ready"), Allocation: "alloc-a5"},
 			{Namespace: "team", Name: "inst-b2-ended", Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"), Phase: inventory.Text("ended"), Allocation: "alloc-b2"},
+			{Namespace: "team", Name: "inst-b5", Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"), Phase: inventory.Text("ready"), Allocation: "alloc-b5"},
 			{Namespace: "team", Name: "inst-old", Owner: inventory.Unknown(reasonNoOwner), Purpose: inventory.Unknown(reasonNoPurpose),
 				Phase: inventory.Unknown("no phase reported yet"), Allocation: "alloc-old"},
 		},
@@ -155,8 +159,8 @@ func TestOwnerSelectsEachOwnersObjectsAlone(t *testing.T) {
 			"modelDeployments": {"md-alice"}, "allocations": {"alloc-a1", "alloc-a2", "alloc-a3", "alloc-a5"},
 			"instances": {"inst-a1", "inst-a3"}, "providers": providers, "operations": {"op-wait"}}},
 		{bob, map[string][]string{
-			"modelDeployments": {"md-bob"}, "allocations": {"alloc-b1", "alloc-b2", "alloc-b3", "alloc-b4"},
-			"instances": {"inst-b2-ended"}, "providers": providers, "operations": {"op-bob"}}},
+			"modelDeployments": {"md-bob"}, "allocations": {"alloc-b1", "alloc-b2", "alloc-b3", "alloc-b4", "alloc-b5"},
+			"instances": {"inst-b2-ended", "inst-b5"}, "providers": providers, "operations": {"op-bob"}}},
 		{"example-nobody", map[string][]string{
 			"modelDeployments": {}, "allocations": {}, "instances": {}, "providers": providers, "operations": {}}},
 	} {
@@ -226,6 +230,7 @@ func TestAKeptAllocationWithNoInstanceIsMarked(t *testing.T) {
 		"alloc-b1": false, // no idle-since
 		"alloc-b3": false, // Ended, though idle-since is set
 		"alloc-b4": false, // ReleaseWhenIdle: its policy does not keep it
+		"alloc-b5": false, // a stale anchor, and inst-b5 is on it: the Instance of the listing wins
 	} {
 		if marked[name] != want {
 			t.Errorf("%s: marked %v, want %v", name, marked[name], want)
