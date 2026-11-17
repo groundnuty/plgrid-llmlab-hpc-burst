@@ -131,6 +131,15 @@ func RaisedEvents() []eventcount.Series {
 // event it hands over in a raised-events counter of its own, one per front,
 // which it carries as Counter for Run to export (HBEP-8, Raised events).
 func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
+	return NewKubeRecorderWithLog(cs, nil)
+}
+
+// NewKubeRecorderWithLog is NewKubeRecorder for a front that runs with the durable log (beta; HBEP-8,
+// The durable log, Who writes): the recorder also publishes each typed event to the log through log,
+// the process's publisher, and raises EventsNotLogged regarding the front's own Lease when the log
+// cannot take one. The front opens this second client to the log beside E3's usage forwarder's, which
+// is the forwarder's own and is not shared. A nil log is NewKubeRecorder.
+func NewKubeRecorderWithLog(cs kubernetes.Interface, log *eventcount.Publisher) (KubeRecorder, func(), error) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return KubeRecorder{}, nil, err
@@ -144,7 +153,8 @@ func NewKubeRecorder(cs kubernetes.Interface) (KubeRecorder, func(), error) {
 	stop := make(chan struct{})
 	b.StartRecordingToSink(stop)
 	counted := eventcount.New()
-	return KubeRecorder{R: eventcount.Events(b.NewRecorder(scheme, fieldManagerFront), counted, eventcount.ControllerFront), Counter: counted},
+	logOpt := log.Option(scheme, fieldManagerFront, eventcount.LeaseFromClientset(cs, v1alpha1.ControllerNamespace, v1alpha1.LeaseFront))
+	return KubeRecorder{R: eventcount.Events(b.NewRecorder(scheme, fieldManagerFront), counted, eventcount.ControllerFront, logOpt), Counter: counted},
 		func() { close(stop); b.Shutdown() }, nil
 }
 

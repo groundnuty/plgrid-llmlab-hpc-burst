@@ -13,9 +13,12 @@ import (
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // LeaseFunc reads the controller's own Lease from the API, for its UID: the regarding object of
@@ -23,6 +26,26 @@ import (
 // lifecycle and the front's front, both in hpcburst-system, and a Provider manager's is
 // provider-<name>.
 type LeaseFunc func(ctx context.Context) (*coordinationv1.Lease, error)
+
+// LeaseOf reads the Lease namespace/name through a controller-runtime reader, an uncached one so that
+// the read is of the API, for the controllers that run in a manager.
+func LeaseOf(reader client.Reader, namespace, name string) LeaseFunc {
+	return func(ctx context.Context) (*coordinationv1.Lease, error) {
+		var l coordinationv1.Lease
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &l); err != nil {
+			return nil, err
+		}
+		return &l, nil
+	}
+}
+
+// LeaseFromClientset reads the Lease namespace/name through a clientset, for the front, which has no
+// manager.
+func LeaseFromClientset(cs kubernetes.Interface, namespace, name string) LeaseFunc {
+	return func(ctx context.Context) (*coordinationv1.Lease, error) {
+		return cs.CoordinationV1().Leases(namespace).Get(ctx, name, metav1.GetOptions{})
+	}
+}
 
 // routeSpec is what the latest wrapper of a controller registered. A Provider's manager is built
 // again after a failure under the same label, so the latest registration replaces the earlier.

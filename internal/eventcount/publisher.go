@@ -371,6 +371,8 @@ func (p *Publisher) routeFor(controller string, counter *Counter) *route {
 	}
 	r := &route{p: p, controller: controller, counter: counter}
 	p.routes[k] = r
+	// The controller's manager stopped for good (its series are forgotten): its gate goes with it.
+	counter.forgetHook(controller, func() { p.Unregister(controller, counter) })
 	return r
 }
 

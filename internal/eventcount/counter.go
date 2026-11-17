@@ -20,6 +20,8 @@
 package eventcount
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -81,6 +83,21 @@ type Counter struct {
 	// take. A controller's series is created, at 0, when its recorder is wrapped with a log
 	// (WithLog), so a copy with no log exports none.
 	unlogged *prometheus.CounterVec
+
+	// onForget are run when a controller's series are forgotten: the publisher drops the controller's
+	// route and its loss gate then, since its manager has stopped for good.
+	mu       sync.Mutex
+	onForget map[string][]func()
+}
+
+// forgetHook registers f to run when the controller's series are forgotten.
+func (c *Counter) forgetHook(controller string, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.onForget == nil {
+		c.onForget = map[string][]func(){}
+	}
+	c.onForget[controller] = append(c.onForget[controller], f)
 }
 
 // New returns a Counter with no series.
@@ -144,6 +161,13 @@ func (c *Counter) Forget(controller string, series []Series) {
 		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
 	}
 	c.unlogged.DeleteLabelValues(controller)
+	c.mu.Lock()
+	hooks := c.onForget[controller]
+	delete(c.onForget, controller)
+	c.mu.Unlock()
+	for _, f := range hooks {
+		f()
+	}
 }
 
 // count adds one event to its series.
@@ -213,6 +237,17 @@ type Log struct {
 	// Lease reads the controller's own Lease from the API, for EventsNotLogged to regard it. Nil
 	// raises none: the loss is counted all the same.
 	Lease LeaseFunc
+}
+
+// Option returns WithLog for this process's publisher, for a controller whose recorder is built with
+// scheme and reports its events under reporting, and whose own Lease lease reads. It is safe on a nil
+// publisher, a process with no log, and then does nothing: a call site wraps its recorder with it
+// whether or not the process has a log.
+func (p *Publisher) Option(scheme *runtime.Scheme, reporting string, lease LeaseFunc) Option {
+	if p == nil {
+		return func(*options) {}
+	}
+	return WithLog(Log{Publisher: p, Scheme: scheme, ReportingController: reporting, Lease: lease})
 }
 
 // WithLog makes the wrapper publish each typed event, an event with an action, to the durable log as

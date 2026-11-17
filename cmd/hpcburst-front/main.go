@@ -60,7 +60,7 @@ func run(args []string) error {
 	health := fs.String("health-addr", "", "loopback host:port for GET /healthz")
 	kubeconfig := fs.String("kubeconfig", "", "the control plane's kubeconfig (default: <state-dir>/kubeconfig)")
 	bulkPath := fs.Bool("bulk-path", false, "beta: the bulk path (HBEP-6): split the dial-home listener by TLS server name, and send each non-streamed request through the Instance's bulk transport while it is registered; the launcher passes it with up --bulk-path")
-	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it the front copies each synced usage record into the log's HB_USAGE stream; the usage files stay the record")
+	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it the front copies each synced usage record into the log's HB_USAGE stream, the usage files staying the record, and publishes its typed events to the log's HB_EVENTS stream as well as to the API, counted in hpcburst_events_unlogged_total when the log cannot take one")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
@@ -103,7 +103,15 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	rec, stopEvents, err := front.NewKubeRecorder(cs)
+	// The durable log's publisher, with --event-log-token-file: the front's typed events go to the
+	// log as well as to the API (beta; HBEP-8, The durable log, Who writes). It is a second client
+	// beside the usage forwarder's. Without the flag there is none.
+	logPub, err := newEventPublisher(*eventLogTokenFile, agentapi.Host{StateDir: *stateDir, PortBase: *portBase})
+	if err != nil {
+		return err
+	}
+	defer stopEventPublisher(logPub)
+	rec, stopEvents, err := front.NewKubeRecorderWithLog(cs, logPub)
 	if err != nil {
 		return err
 	}

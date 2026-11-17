@@ -593,8 +593,10 @@ func mutantOverlay(t *testing.T) map[string][]byte {
 		// #256: the reconciler's recorder is built without its counting wrapper
 		// (the wrapper dropped from the one call), and recorders built and not
 		// wrapped in two more packages.
-		filepath.Join(root, "internal/lifecycle/manager.go"): replaceOnce(t, "internal/lifecycle/manager.go",
-			"eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle)",
+		// (The log option the call took is kept in use, so the changed file still compiles.)
+		filepath.Join(root, "internal/lifecycle/manager.go"): replaceIn(t, replaceOnce(t, "internal/lifecycle/manager.go",
+			"logOpt := o.EventLog.Option(", "_ = o.EventLog.Option("), "internal/lifecycle/manager.go",
+			"eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle, logOpt)",
 			"mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)"),
 		filepath.Join(root, "internal/lifecycle/zz_mutant_recorders.go"): []byte(mutantLifecycleRecorders),
 		filepath.Join(root, "internal/front/zz_mutant_recorders.go"):     []byte(mutantFrontRecorders),
