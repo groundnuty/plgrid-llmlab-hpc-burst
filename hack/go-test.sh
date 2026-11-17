@@ -34,10 +34,11 @@
 # output names every group that failed. Each lane's output goes to a file of its own and is printed whole
 # when the lane ends, so that no two groups' lines interleave, under a ::group:: in GitHub Actions (a lane
 # that failed stays unfolded). While the lanes run, one line is printed at each group's start and end, and a
-# table at the end gives each group's start, end and time, so that the overlap can be read from the log. A
-# stop signal (INT, TERM, HUP) is passed to every lane's process group; each lane has one of its own (set -m),
-# so nothing a lane started is left behind, and the partial output is printed. "own <group>" runs that group
-# alone, in the foreground, exactly as before.
+# table at the end gives each group's start, end and WALL time (its build and checks included, so not a
+# margin to -timeout: that is the ok line of the group's output), so that the overlap can be read from the
+# log. A stop signal (INT, TERM, HUP) is passed to every lane's process group; each lane has one of its own
+# (set -m), so nothing a lane started is left behind, and the partial output is printed. (SIGKILL of this
+# script cannot be passed on.) "own <group>" runs that group alone, in the foreground, exactly as before.
 #
 # A warm-up build runs first in "own" (not in "all", whose package run has just compiled every test
 # variant): one go test of every group package with -exec true, which compiles and links the test binaries
@@ -318,7 +319,7 @@ own_lanes() {
   done
   set +m
 
-  echo "== own: each group's start, end and time in seconds since own began, and its -timeout"
+  echo "== own: each group's start, end and WALL time in seconds since own began, which includes its build and its checks: read a margin to -timeout from the ok line of the group's own output above, not from this"
   for g in "${groups[@]}"; do
     name=$(field "$g" 1)
     pkg=$(field "$g" 2)
@@ -326,7 +327,7 @@ own_lanes() {
     if [ -f "$dir/$name.result" ] && read -r st b e < "$dir/$name.result"; then
       tag=ok
       [ "$st" -eq 0 ] || tag=FAIL
-      printf '%-5s %-24s %-28s +%ss..+%ss, %ss of %s\n' "$tag" "$name" "$pkg" "$b" "$e" "$((e - b))" "$(field "$g" 4)"
+      printf '%-5s %-24s %-28s +%ss..+%ss, %ss wall (build and checks included), -timeout %s\n' "$tag" "$name" "$pkg" "$b" "$e" "$((e - b))" "$(field "$g" 4)"
       serial=$((serial + e - b))
       if [ "$st" -ne 0 ]; then
         failed+=" $name"
@@ -339,7 +340,7 @@ own_lanes() {
     fi
   done
   wall=$SECONDS
-  echo "own: ${wall} s in all; the groups' own times add to ${serial} s"
+  echo "own: ${wall} s in all; the groups' wall times add to ${serial} s"
   if [ -n "$failed" ]; then
     echo "FAIL hack/go-test.sh: own: the groups that failed:${failed}"
     [ "${GITHUB_ACTIONS:-}" != true ] || echo "::error title=hack/go-test.sh own::the groups that failed:${failed}"

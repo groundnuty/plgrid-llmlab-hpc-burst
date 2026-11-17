@@ -130,11 +130,17 @@ printf '%s\n' "$$" > "$LD/pid-$$"
 i=0
 while :; do
   missing=0
+  held=0
   for k in $LD_KEYS; do [ -e "$LD/started-$k" ] || missing=1; done
-  if [ "$LD_HOLD" = 1 ] && [ ! -e "$LD/release" ]; then missing=1; fi
-  [ "$missing" -eq 0 ] && break
+  if [ "$LD_HOLD" = 1 ] && [ ! -e "$LD/release" ]; then held=1; fi
+  [ "$missing" -eq 0 ] && [ "$held" -eq 0 ] && break
   i=$((i + 1))
-  if [ "$i" -gt 1000 ]; then printf 'waited 20 s: %s still not all started\n' "$last" >> "$LD/problems"; break; fi
+  # A lane that never starts is given up on after about 20 s. A group held for the test is not: it ends when
+  # the test creates "release" (its cleanup always does), so a process the script failed to stop is still
+  # there when the test looks, however long the test takes. The last bound, about 10 minutes, only keeps a
+  # test that was killed from leaving a double polling for ever.
+  if [ "$missing" -eq 1 ] && [ "$i" -gt 1000 ]; then printf 'waited 20 s: %s still not all started\n' "$last" >> "$LD/problems"; break; fi
+  if [ "$i" -gt 30000 ]; then break; fi
   sleep 0.02
 done
 sleep 0.2
@@ -299,7 +305,7 @@ func TestGoTestScriptOwnRunsLanesAtOnceAndEachLaneOneGroupAtATime(t *testing.T) 
 	}
 	// The table at the end has a row for every group, each ok.
 	for _, g := range groups {
-		if !regexp.MustCompile(`(?m)^ok +` + regexp.QuoteMeta(g.name) + ` +` + regexp.QuoteMeta(g.pkg) + ` +\+\d+s\.\.\+\d+s, \d+s of ` + g.timeout + `$`).MatchString(l.out.String()) {
+		if !regexp.MustCompile(`(?m)^ok +` + regexp.QuoteMeta(g.name) + ` +` + regexp.QuoteMeta(g.pkg) + ` +\+\d+s\.\.\+\d+s, \d+s wall \(build and checks included\), -timeout ` + g.timeout + `$`).MatchString(l.out.String()) {
 			t.Errorf("the table has no ok row for group %s; output:\n%s", g.name, l.out)
 		}
 	}
@@ -431,7 +437,9 @@ func TestGoTestScriptOwnStopsEveryLaneOnTermAndLeavesNothingRunning(t *testing.T
 	if err != nil || len(pids) != len(lanePackages()) {
 		t.Fatalf("pid files %q (%v), want one for each of the %d lanes", pids, err, len(lanePackages()))
 	}
-	deadline := time.Now().Add(20 * time.Second)
+	// The doubles wait for a release that comes only after this test ends, so a lane process the script did
+	// not stop is still running when this looks, and a stopped one is gone in moments.
+	deadline := time.Now().Add(5 * time.Second)
 	for _, f := range pids {
 		pid := strings.TrimPrefix(filepath.Base(f), "pid-")
 		for l.runsWithToken(pid) {
