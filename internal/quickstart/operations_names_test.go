@@ -12,6 +12,8 @@ import (
 	"testing"
 	"unicode"
 
+	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
@@ -138,6 +140,14 @@ var guideNames = map[string]string{
 	// Retention modes (HBEP-7, Retention).
 	"Keep":            string(v1alpha1.RetentionKeep),
 	"ReleaseWhenIdle": string(v1alpha1.RetentionReleaseWhenIdle),
+
+	// The audit policy's levels, and the stage it omits (HBEP-10, Audit): the API server's own, from the audit API of
+	// k8s.io/apiserver, which the policy's evaluator test (config/audit) uses too. RequestReceived is a stage, not a level.
+	"None":            string(auditv1.LevelNone),
+	"Metadata":        string(auditv1.LevelMetadata),
+	"Request":         string(auditv1.LevelRequest),
+	"RequestResponse": string(auditv1.LevelRequestResponse),
+	"RequestReceived": string(auditv1.StageRequestReceived),
 }
 
 // unexportedNames are names the guide gives whose constant is unexported in its package, so this
