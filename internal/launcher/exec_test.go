@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 )
 
 // The exec-loop helper: the test binary, started with execLoopEnv=N, re-executes itself N times,
@@ -51,6 +53,7 @@ func TestMain(m *testing.M) {
 	}
 	code := m.Run()
 	removeFakeController()
+	nodetest.Cleanup() // the controller binary the event TTL's log row built, unless HPCBURST_CONTROLLER_BIN named one
 	os.Exit(code)
 }
 
