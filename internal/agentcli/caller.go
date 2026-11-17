@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -71,16 +72,16 @@ func loadCaller(ctx context.Context, flagPath, envPath string, stderr io.Writer)
 	}
 	cfg, err := clientcmd.LoadFromFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read the kubeconfig %s: %w", path, err)
+		return nil, kubeconfigFault(path, err)
 	}
 	cc := clientcmd.NewDefaultClientConfig(*cfg, &clientcmd.ConfigOverrides{})
 	rc, err := cc.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("the kubeconfig %s is not usable: %w", path, err)
+		return nil, kubeconfigUnusable(path)
 	}
 	ns, _, err := cc.Namespace()
 	if err != nil {
-		return nil, fmt.Errorf("the kubeconfig %s is not usable: %w", path, err)
+		return nil, kubeconfigUnusable(path)
 	}
 	rc.Timeout, rc.UserAgent = requestTimeout, "hpcburst"
 	user, groups, err := whoAmI(ctx, rc)
@@ -105,6 +106,28 @@ func loadCaller(ctx context.Context, flagPath, envPath string, stderr io.Writer)
 		return nil, fmt.Errorf("make the API client: %w", err)
 	}
 	return &caller{c: c, user: user, groups: groups, namespace: ns}, nil
+}
+
+// kubeconfigFault is the message for a kubeconfig that cannot be read or parsed. It names the file and the kind
+// of fault and never the text of the error: client-go's parse errors can quote the file, and the file holds
+// the caller's credentials (two users of one name make it print the whole list of users, bearer tokens
+// included).
+func kubeconfigFault(path string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("the kubeconfig %s does not exist", path)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("the kubeconfig %s cannot be read: permission denied", path)
+	case clientcmd.IsEmptyConfig(err):
+		return fmt.Errorf("the kubeconfig %s holds no configuration", path)
+	}
+	return fmt.Errorf("the kubeconfig %s is not a valid kubeconfig (what is wrong with it is not shown, because the file holds credentials)", path)
+}
+
+// kubeconfigUnusable is the message for a kubeconfig that parses but names no cluster, user or context that
+// fits together. Like kubeconfigFault it never prints the error of client-go.
+func kubeconfigUnusable(path string) error {
+	return fmt.Errorf("the kubeconfig %s is not usable: its current context, cluster or user is missing or invalid (what is wrong with it is not shown, because the file holds credentials)", path)
 }
 
 // whoAmI asks the API server who the configuration's credential is: one SelfSubjectReview.

@@ -241,3 +241,69 @@ func TestRunUsage(t *testing.T) {
 		contains(t, "usage", errs.String(), "usage: hpcburst scale")
 	}
 }
+
+// Two tokens of an invented shape, for a kubeconfig with two users of one name. client-go's own error for that
+// names the whole list of users, bearer tokens included, so a parser error must never be printed as it is.
+const (
+	leakTokenOne = "tok-invented-one-0123456789"
+	leakTokenTwo = "tok-invented-two-9876543210"
+)
+
+func duplicateUserKubeconfig(t *testing.T, dir string) string {
+	t.Helper()
+	body := `apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "http://127.0.0.1:1"}}]
+users:
+- {name: u, user: {token: ` + leakTokenOne + `}}
+- {name: u, user: {token: ` + leakTokenTwo + `}}
+contexts: [{name: x, context: {cluster: c, user: u}}]
+current-context: x
+`
+	p := filepath.Join(dir, "dup")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// A kubeconfig that cannot be parsed or used is reported by a fixed message that names the file and the kind
+// of fault, and never by the parser's text, which can hold the credentials of the file.
+func TestAKubeconfigErrorNeverPrintsACredential(t *testing.T) {
+	dir := t.TempDir()
+	dup := duplicateUserKubeconfig(t, dir)
+	garbled := filepath.Join(dir, "garbled")
+	if err := os.WriteFile(garbled, []byte("users: [{name: u, user: {token: "+leakTokenOne+"}"+"\n\t not yaml: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Valid, but its current context does not exist: ClientConfig's own error, which must not be printed either.
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.WriteFile(dangling, []byte("apiVersion: v1\nkind: Config\nclusters: [{name: c, cluster: {server: \"http://127.0.0.1:1\"}}]\n"+
+		"users: [{name: other, user: {token: "+leakTokenTwo+"}}]\ncontexts: [{name: x, context: {cluster: c, user: other}}]\ncurrent-context: nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"two users of one name": dup, "unparsable": garbled, "a current context that does not exist": dangling} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadFor(path)
+			if err == nil {
+				t.Fatal("no error")
+			}
+			lacks(t, "the error", err.Error(), leakTokenOne, leakTokenTwo)
+			contains(t, "the error", err.Error(), path)
+
+			// Through the command: nothing printed holds a token either.
+			var out, errs bytes.Buffer
+			if code := Run(context.Background(), []string{"approvals"}, Env{Kubeconfig: path}, strings.NewReader(""), &out, &errs); code != exitFail {
+				t.Errorf("exit %d, want 1", code)
+			}
+			lacks(t, "output", out.String()+errs.String(), leakTokenOne, leakTokenTwo)
+		})
+	}
+	_, err := loadFor(dup)
+	contains(t, "the message for two users of one name", err.Error(), "is not a valid kubeconfig")
+}
+
+// loadFor is loadCaller on one kubeconfig file, with no variable and nothing to say on stderr.
+func loadFor(path string) (*caller, error) {
+	return loadCaller(context.Background(), path, "", &bytes.Buffer{})
+}
