@@ -348,6 +348,10 @@ func TestAgentCLIOnAControlPlane(t *testing.T) {
 		}
 	})
 
+	t.Run("row 11: inventory shows the world, selects by owner, shows an object with no owner as unknown, and only reads", func(t *testing.T) {
+		w.inventoryRow(t, asA, asB)
+	})
+
 	if errs := w.unexpectedStepErrors(); len(errs) > 0 {
 		t.Errorf("the Operations step failed %d times: %v", len(errs), errors.Join(errs...))
 	}
@@ -367,7 +371,7 @@ func cancelPendingTarget(p *v1alpha1.OperationPlan, name string) *v1alpha1.PlanT
 func allCommands() [][]string {
 	return [][]string{
 		{"scale", opMD, "--instances", "1"}, {"end", opMD}, {"release", "alloc-r"}, {"confirm", "row1", "--plan", "p"},
-		{"approvals"}, {"approve", "row1", "--plan", "p"}, {"operation", "row1"},
+		{"approvals"}, {"approve", "row1", "--plan", "p"}, {"operation", "row1"}, {"inventory"},
 	}
 }
 
