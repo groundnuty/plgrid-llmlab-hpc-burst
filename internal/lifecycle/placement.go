@@ -179,10 +179,10 @@ func (p *pass) replacementDeadline(pred *v1alpha1.Instance) (time.Time, bool) {
 // waitsBeforeOwnSubmit answers one question of the placement order: a replacement with a slot on its predecessor's
 // Provider, while a warm Allocation on ANOTHER Provider has not registered again after the controller's restart.
 // False: it submits on the predecessor's Provider at once. HBEP-7 gives that Provider first ("when it has a slot"),
-// and amendment #719 (as reworded, fee93eb9, 17 Nov 2026) holds only the new submissions that come AFTER the warm
-// Allocation's step in the order, so a replacement's own-Provider submission, which comes first, does not wait. True
-// is the literal reading the amendment dropped: wait for such an Allocation before any submission. It is kept as a
-// predicate, false (k616, 17 Nov 2026), so a different ruling is one edit.
+// and amendment #719 holds only the new submissions that come AFTER the warm Allocation's step in the order, so a
+// replacement's own-Provider submission, which comes first, does not wait. True is the literal reading the amendment
+// dropped: wait for such an Allocation before any submission. It is kept as a predicate, false (k616, 17 Nov 2026), so
+// a different ruling is one edit.
 func (p *pass) waitsBeforeOwnSubmit() bool {
 	if p.r.waitsBeforeOwnSubmit != nil {
 		return p.r.waitsBeforeOwnSubmit()

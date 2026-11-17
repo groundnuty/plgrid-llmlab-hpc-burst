@@ -93,7 +93,10 @@ func TestTwoNeedsInOnePassNeverTakeOneWarmAllocation(t *testing.T) {
 // on A, not submitted on B, which comes first: a ranked-out Allocation is warm capacity (#635).
 func TestARankedOutAllocationTakesTheNextMissingPrimary(t *testing.T) {
 	h := newRkRig(t, false)
-	p, x := h.start(func(md *v1alpha1.ModelDeployment) { endsAt(rigStart.Add(20 * time.Hour))(md) },
+	p, x := h.start(func(md *v1alpha1.ModelDeployment) {
+		endsAt(rigStart.Add(20 * time.Hour))(md)
+		md.Spec.HedgeWidth = ptrTo(int32(1)) // the row is about placement, not hedging: growth adds no member
+	},
 		pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: rkXWait})
 	h.engineOf(p, rk200, 0)
 	h.engineOf(x, rk180, 0)
