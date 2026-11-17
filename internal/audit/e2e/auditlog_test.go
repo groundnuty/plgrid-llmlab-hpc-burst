@@ -306,7 +306,7 @@ func (w *world) waitLog(r *reader, what string, ok func(*logSet) bool) *logSet {
 			return set
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s: not in the audit log within 90 s (%d events in %d files)\n%s", what, len(set.events), len(set.files), refusals(set))
+			t.Fatalf("%s: not in the audit log within 90 s (%d events in %d files)\n%s\ncontroller log:\n%s", what, len(set.events), len(set.files), refusals(set), w.logs.tail(40))
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +27,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -72,6 +75,35 @@ func (stubCheckpoints) TemplateSources(context.Context, v1alpha1.CheckpointSpec,
 	return deploymentid.TemplateSources{}, nil
 }
 
+// logBuffer keeps what the controllers log through controller-runtime's logger, bounded, for a failing wait to print.
+type logBuffer struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (b *logBuffer) line(s string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.lines) >= 2000 {
+		b.lines = b.lines[1:]
+	}
+	if len(s) > 400 {
+		s = s[:400]
+	}
+	b.lines = append(b.lines, s)
+}
+
+// tail is the last n lines.
+func (b *logBuffer) tail(n int) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	from := len(b.lines) - n
+	if from < 0 {
+		from = 0
+	}
+	return strings.Join(b.lines[from:], "\n")
+}
+
 // who is one identity of the run: its user name and groups as the API server reports them, and a client that acts
 // as it.
 type who struct {
@@ -87,6 +119,9 @@ type world struct {
 	t   *testing.T
 	ctx context.Context
 	cp  *testenv.ControlPlane
+
+	// logs is what the controllers logged.
+	logs *logBuffer
 
 	// logPath is the audit log's file; its directory also holds the rotated files.
 	logPath string
@@ -176,7 +211,8 @@ func newWorld(t *testing.T) *world {
 	if err := os.WriteFile(policy, audit.Policy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	w := &world{t: t, ctx: ctx, logPath: filepath.Join(dir, "audit", "audit.log"), state: filepath.Join(dir, "state")}
+	w := &world{t: t, ctx: ctx, logs: &logBuffer{}, logPath: filepath.Join(dir, "audit", "audit.log"), state: filepath.Join(dir, "state")}
+	ctrl.SetLogger(funcr.New(func(prefix, args string) { w.logs.line(prefix + " " + args) }, funcr.Options{}))
 	cp, err := testenv.Start(ctx, filepath.Join(dir, "cp"), testenv.Options{
 		BeforeControllerManager: installCRDs,
 		Audit:                   &testenv.AuditOptions{PolicyFile: policy, LogPath: w.logPath, MaxSizeMB: rotationMB},
