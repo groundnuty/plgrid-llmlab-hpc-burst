@@ -105,8 +105,10 @@ func RaisedEvents() []eventcount.Series {
 // object (nil for none), and the id <Allocation UID>/<reason>/<fact> that marks
 // the transition (HBEP-8, The durable log, Streams, The event's id): fact is
 // the status value that marks it, so a transition raised again after a failed
-// status write keeps its id. Until the durable log's publisher exists (PR E2,
-// #625) the id is handed to the recorder and not read.
+// status write keeps its id. The recorder's wrapper (eventcount.Events) publishes
+// the event to the durable log under the id as its Nats-Msg-Id when the process runs
+// with the log, where a second publish of the id inside the log's duplicate window
+// stores nothing; the API's Event holds no id (PR E2, #625).
 //
 // The type comes from allocationEventType, and the note is cut to
 // provider.MaxEventNote. A note that holds the Allocation's job ID as a token

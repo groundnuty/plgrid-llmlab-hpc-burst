@@ -202,7 +202,7 @@ func TestTheTypedSeriesAreCreatedAtZero(t *testing.T) {
 		"JobEnded": {"ended", "Normal"}, "AllocationEndedEarly": {"failing", "Warning"}, "AllocationFailed": {"failing", "Warning"},
 		"Requeued": {"failing", "Warning"}, "SubmittedAsOther": {"failing", "Warning"}, "AllocationRefused": {"failing", "Warning"},
 		"JobLost": {"failing", "Warning"}, "AdminHold": {"degraded", "Warning"}, "JobCompleting": {"degraded", "Warning"},
-		"ObservationGap": {"degraded", "Warning"},
+		"ObservationGap": {"degraded", "Warning"}, "EventsNotLogged": {"degraded", "Warning"},
 	}
 	readAll := func() (present, nonZero int) {
 		for reason, at := range reasons {
