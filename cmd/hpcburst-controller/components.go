@@ -90,6 +90,10 @@ type deps struct {
 	// newEventPublisher. A test of the wiring gives one that keeps the publisher, to ask which recorders
 	// were built with it.
 	eventPublisher func(flags) (*eventcount.Publisher, error)
+	// wrapConfig, when set, changes the lifecycle manager's client configuration after it is read from its
+	// kubeconfig: a test puts a transport on it that faults one request (identities_operation_test.go). The Provider
+	// managers' configuration is not touched. nil leaves it as read.
+	wrapConfig func(*rest.Config)
 }
 
 // listeners binds through deps.listen and remembers each listener it bound, so

@@ -257,6 +257,9 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
+	if d.wrapConfig != nil {
+		d.wrapConfig(cfg)
+	}
 	// The Provider managers' own identity, when the launcher gave one (HBEP-10, Audit; #660): a configuration
 	// of its own, never the lifecycle one's object. Without --provider-kubeconfig they share cfg, as before.
 	providerCfg := cfg

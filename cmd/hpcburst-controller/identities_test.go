@@ -31,6 +31,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -365,6 +366,28 @@ func TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan(t *testing.T) {
 		t.Errorf("hpcburst-lifecycle updating its own Lease, the control: %v", err)
 	}
 
+	// What the lifecycle's Operation execution calls (#664: opexec.go), asked of the API server's own authorizer under the
+	// lifecycle identity (a SelfSubjectAccessReview made with its token), since no suite here runs an Operation: update and
+	// delete of a ModelDeployment (an End, a Scale's spec write, the kept-warm finalizer), and the get of an Operation through
+	// the API reader that recovers a commit whose status write returned an error (afterCommitError: refused, the commit is
+	// left unknown on every such pass). The Operation's get and delete of the 7-day removal are the audit PR's, not granted.
+	for _, c := range []struct {
+		verb, resource string
+		want           bool
+	}{
+		{"update", "modeldeployments", true}, {"delete", "modeldeployments", true}, {"get", "operations", true},
+		{"create", "modeldeployments", false}, {"patch", "modeldeployments", false}, {"update", "operations", false},
+		{"delete", "operations", false}, {"create", "operations", false}, {"update", "modeldeployments/status", true},
+	} {
+		resource, sub, _ := strings.Cut(c.resource, "/")
+		if sub == "status" && c.verb == "update" && resource == "modeldeployments" {
+			c.want = true
+		}
+		if got := canI(t, lifecycleKC, c.verb, v1alpha1.GroupVersion.Group, resource, sub); got != c.want {
+			t.Errorf("hpcburst-lifecycle may %s %s: the API server says %v, want %v", c.verb, c.resource, got, c.want)
+		}
+	}
+
 	// The control: the lifecycle identity, whose role grants delete, deletes it. A refusal above that came from a
 	// missing object or an admission rule, and not from RBAC, would have shown here as a different answer.
 	if err := lifecycleC.Delete(ctx, alloc); err != nil {
@@ -550,4 +573,23 @@ func (w *boundedWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return string(w.b)
+}
+
+// canI asks the API server's authorizer, as the identity of the kubeconfig at path (a SelfSubjectAccessReview made with
+// its token), whether the identity may do verb on the resource: RBAC's own answer, with no object needed.
+func canI(t testing.TB, path, verb, group, resource, subresource string) bool {
+	t.Helper()
+	cs, err := kubernetes.NewForConfig(restFor(t, path, negativeRowAgent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := cs.AuthorizationV1().SelfSubjectAccessReviews().Create(context.Background(), &authorizationv1.SelfSubjectAccessReview{
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authorizationv1.ResourceAttributes{
+			Verb: verb, Group: group, Resource: resource, Subresource: subresource,
+		}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("a SelfSubjectAccessReview with %s: %v", path, err)
+	}
+	return r.Status.Allowed
 }
