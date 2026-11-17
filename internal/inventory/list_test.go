@@ -81,7 +81,8 @@ func TestTheFullViewOfANamespaceIsWrittenByHand(t *testing.T) {
 			{Namespace: "team", Name: "alloc-a4", ModelDeployment: inventory.Text("md-alice"), Owner: inventory.Unknown(reasonNoOwner), Purpose: inventory.Unknown(reasonNoPurpose),
 				Phase: inventory.Text("Running"), Provider: inventory.Text("sano"), HardEnd: at("2026-11-20T13:00:00Z"), Retention: keep(hour)},
 			{Namespace: "team", Name: "alloc-a5", ModelDeployment: inventory.Text("md-alice"), Owner: inventory.Text(alice), Purpose: inventory.Text("nightly run"),
-				Phase: inventory.Text("Running"), Provider: inventory.Text("sano"), HardEnd: at("2026-11-20T13:00:00Z"), Retention: keep(hour)},
+				Phase: inventory.Text("Running"), Provider: inventory.Text("sano"), HardEnd: at("2026-11-20T13:00:00Z"), Retention: keep(hour),
+				IdleSince: at("2026-11-20T09:40:00Z")},
 			{Namespace: "team", Name: "alloc-b1", ModelDeployment: inventory.Text("md-bob"), Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"),
 				Phase: inventory.Text("Running"), Provider: inventory.Text("helios"), HardEnd: at("2026-11-20T11:00:00Z"), Retention: keep()},
 			{Namespace: "team", Name: "alloc-b2", ModelDeployment: inventory.Text("md-bob"), Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"),
@@ -92,7 +93,7 @@ func TestTheFullViewOfANamespaceIsWrittenByHand(t *testing.T) {
 				Retention: keep(inventory.Unknown("PlatformProfile missing not found")), IdleSince: at("2026-11-20T08:00:00Z")},
 			{Namespace: "team", Name: "alloc-b4", ModelDeployment: inventory.Text("md-bob"), Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"),
 				Phase: inventory.Text("Running"), Provider: inventory.Text("helios"), HardEnd: at("2026-11-20T11:00:00Z"),
-				Retention: inventory.RetentionRow{Mode: "ReleaseWhenIdle", IdleLimit: inventory.Span(30 * time.Minute)}, IdleSince: at("2026-11-20T09:50:00Z")},
+				Retention: inventory.RetentionRow{Mode: "ReleaseWhenIdle", IdleLimit: inventory.Span(30 * time.Minute)}, IdleSince: at("2026-11-20T09:50:00Z"), KeptNoInstance: true},
 			{Namespace: "team", Name: "alloc-b5", ModelDeployment: inventory.Text("md-bob"), Owner: inventory.Text(bob), Purpose: inventory.Text("ablation"),
 				Phase: inventory.Text("Running"), Provider: inventory.Text("helios"), HardEnd: at("2026-11-20T11:00:00Z"), Retention: keep(),
 				IdleSince: at("2026-11-20T09:00:00Z")},
@@ -213,33 +214,56 @@ func TestADeploymentCreatedBeforeTheAnnotationIsUnknownAndSoAreItsChildren(t *te
 	}
 }
 
-// A kept Allocation with no Instance shows its mode, its keep date, its idle-since and the marker. Each of the others
-// lacks one of the four conditions of the marker.
-func TestAKeptAllocationWithNoInstanceIsMarked(t *testing.T) {
+// Capacity held with nothing serving shows its mode, its keep date, its idle-since and the marker, whatever keeps it: a keep
+// date (alloc-a2), no date at all (alloc-b2, whose anchor is unreadable), and ReleaseWhenIdle still inside its limit
+// (alloc-b4: idle since 09:50, limit 30 minutes, the clock at 10:01:30). Each of the others lacks one of the conditions of the
+// marker: a Running job, the anchor, and no live Instance in the full listing.
+func TestHeldCapacityWithNoInstanceIsMarkedWhateverKeepsIt(t *testing.T) {
 	inv := list(t, inventory.Options{Namespace: "team"})
 	marked := map[string]bool{}
 	for _, a := range inv.Allocations {
 		marked[a.Name] = a.KeptNoInstance
 	}
 	for name, want := range map[string]bool{
-		"alloc-a2": true,  // Running, Keep, idle-since set, no Instance
+		"alloc-a2": true,  // Running, a keep date, idle-since set, no Instance
 		"alloc-b2": true,  // the same, though its anchor is no time: the anchor is there, only its value is unreadable; its one Instance has ended
+		"alloc-b4": true,  // ReleaseWhenIdle, inside its limit: held, nothing serving
 		"alloc-a1": false, // hosts inst-a1
-		"alloc-a3": false, // Pending, hosts inst-a3, and ReleaseWhenIdle
-		"alloc-a5": false, // no idle-since: the controller has not said it is idle (its Instance is unlabelled, so a selection by owner never lists it)
+		"alloc-a3": false, // Pending, and hosts inst-a3
+		"alloc-a5": false, // an anchor, but inst-a5-old is on it, and carries no owner label
 		"alloc-b1": false, // no idle-since
 		"alloc-b3": false, // Ended, though idle-since is set
-		"alloc-b4": false, // ReleaseWhenIdle: its policy does not keep it
 		"alloc-b5": false, // a stale anchor, and inst-b5 is on it: the Instance of the listing wins
 	} {
 		if marked[name] != want {
 			t.Errorf("%s: marked %v, want %v", name, marked[name], want)
 		}
 	}
-	// Under --owner the listing lacks alloc-a5's unlabelled Instance, and alloc-a5 stays unmarked because the anchor is absent.
+}
+
+// Under --owner the lister selects the owner's Instances, which leaves out inst-a5-old, an Instance of alloc-a5 that predates
+// the label. alloc-a5 carries an anchor, so only the full listing says it hosts an Instance: it stays unmarked, and the
+// Allocations the selection holds are marked as in the full view.
+func TestOwnerNeverMakesAnAllocationLookEmpty(t *testing.T) {
+	for _, owner := range []string{alice, bob} {
+		sel := list(t, inventory.Options{Namespace: "team", Owner: owner})
+		full := list(t, inventory.Options{Namespace: "team"})
+		fullMarks := map[string]bool{}
+		for _, a := range full.Allocations {
+			fullMarks[a.Name] = a.KeptNoInstance
+		}
+		if len(sel.Allocations) == 0 {
+			t.Fatalf("--owner %s lists no Allocation", owner)
+		}
+		for _, a := range sel.Allocations {
+			if a.KeptNoInstance != fullMarks[a.Name] {
+				t.Errorf("--owner %s: %s is marked %v, and %v in the full view", owner, a.Name, a.KeptNoInstance, fullMarks[a.Name])
+			}
+		}
+	}
 	for _, a := range list(t, inventory.Options{Namespace: "team", Owner: alice}).Allocations {
 		if a.Name == "alloc-a5" && a.KeptNoInstance {
-			t.Error("alloc-a5 is marked under --owner: the listing without its unlabelled Instance made it look empty")
+			t.Error("alloc-a5 is marked under --owner: the selection without its unlabelled Instance made it look empty")
 		}
 	}
 }
@@ -302,7 +326,8 @@ func TestOnlyAnOperationAwaitingApprovalIsListed(t *testing.T) {
 }
 
 // The lister sends every selection to the API server: the namespace, and for an owner the label selector on Allocations
-// and Instances, which no other kind gets. A full view sends none.
+// and Instances, which no other kind gets. With an owner it also reads every Instance in scope, with no selector, to say which
+// Allocation hosts one. A full view sends no selector.
 func TestTheOwnerSelectionIsALabelSelectorOnTheServer(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -311,10 +336,10 @@ func TestTheOwnerSelectionIsALabelSelectorOnTheServer(t *testing.T) {
 	}{
 		{"a namespace, one owner", inventory.Options{Namespace: "team", Owner: alice}, []listCall{
 			{"ModelDeployments", "team", ""}, {"Allocations", "team", "hpcburst.groundnuty.github.io/owner-hash=" + aliceHash},
-			{"Instances", "team", "hpcburst.groundnuty.github.io/owner-hash=" + aliceHash}, {"Operations", "team", ""}, {"Providers", "", ""}, {"PlatformProfiles", "", ""}}},
+			{"Instances", "team", "hpcburst.groundnuty.github.io/owner-hash=" + aliceHash}, {"Instances", "team", ""}, {"Operations", "team", ""}, {"Providers", "", ""}, {"PlatformProfiles", "", ""}}},
 		{"every namespace, one owner", inventory.Options{AllNamespaces: true, Owner: bob}, []listCall{
 			{"ModelDeployments", "", ""}, {"Allocations", "", "hpcburst.groundnuty.github.io/owner-hash=" + bobHash},
-			{"Instances", "", "hpcburst.groundnuty.github.io/owner-hash=" + bobHash}, {"Operations", "", ""}, {"Providers", "", ""}, {"PlatformProfiles", "", ""}}},
+			{"Instances", "", "hpcburst.groundnuty.github.io/owner-hash=" + bobHash}, {"Instances", "", ""}, {"Operations", "", ""}, {"Providers", "", ""}, {"PlatformProfiles", "", ""}}},
 		{"a namespace, every owner", inventory.Options{Namespace: "team"}, []listCall{
 			{"ModelDeployments", "team", ""}, {"Allocations", "team", ""}, {"Instances", "team", ""}, {"Operations", "team", ""}, {"Providers", "", ""}, {"PlatformProfiles", "", ""}}},
 	} {
@@ -322,9 +347,9 @@ func TestTheOwnerSelectionIsALabelSelectorOnTheServer(t *testing.T) {
 		if _, err := inventory.List(context.Background(), rr, c.o, now); err != nil {
 			t.Fatal(err)
 		}
-		slices.SortFunc(rr.calls, func(a, b listCall) int { return strings.Compare(a.kind, b.kind) })
+		slices.SortStableFunc(rr.calls, func(a, b listCall) int { return strings.Compare(a.kind, b.kind) })
 		want := slices.Clone(c.want)
-		slices.SortFunc(want, func(a, b listCall) int { return strings.Compare(a.kind, b.kind) })
+		slices.SortStableFunc(want, func(a, b listCall) int { return strings.Compare(a.kind, b.kind) })
 		if !reflect.DeepEqual(rr.calls, want) {
 			t.Errorf("%s: lists %+v, want %+v", c.name, rr.calls, want)
 		}

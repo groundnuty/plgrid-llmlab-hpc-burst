@@ -81,7 +81,18 @@ func List(ctx context.Context, c client.Reader, o Options, now time.Time) (*Inve
 		inv.Scope.Namespace = ""
 	}
 	maxIdles := profileMaxIdles(provs.Items, profs.Items)
-	live := liveInstances(insts.Items)
+	// Whether an Allocation hosts an Instance is read from every Instance in scope, never from the owner's selection
+	// alone: an Instance that predates the owner label is not in that selection, and an Allocation of the owner's
+	// that hosts it would look empty.
+	hosting := insts.Items
+	if o.Owner != "" {
+		var every v1alpha1.InstanceList
+		if err := c.List(ctx, &every, scope...); err != nil {
+			return nil, fmt.Errorf("list Instances: %w", err)
+		}
+		hosting = every.Items
+	}
+	live := liveInstances(hosting)
 	uses := map[string]map[string]bool{} // namespace/deployment -> the Providers of its Allocations that are not over
 	for i := range allocs.Items {
 		a := &allocs.Items[i]
@@ -252,10 +263,10 @@ func allocationRow(a *v1alpha1.Allocation, maxIdles maxIdle, hostsInstance bool)
 			row.IdleSince = Instant(t)
 		}
 	}
-	// A kept Allocation with no Instance: its job runs, its policy keeps it, the controller's anchor says it
-	// is idle, and no Instance of the listing is on it. Both the anchor and the listing must say so: under
-	// --owner the listing holds only the Instances that carry the owner label.
-	row.KeptNoInstance = obs.Phase == v1alpha1.AllocationRunning && pol.EffectiveMode() == v1alpha1.RetentionKeep && idle && !hostsInstance
+	// Capacity held with nothing serving, whatever keeps it (Keep, a keep date, or ReleaseWhenIdle still inside
+	// its limit; the mode column says which): the job runs, the controller's anchor says it is idle, and no
+	// live Instance of the full listing is on it.
+	row.KeptNoInstance = obs.Phase == v1alpha1.AllocationRunning && idle && !hostsInstance
 	return row
 }
 

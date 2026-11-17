@@ -344,6 +344,16 @@ func (w *cliWorld) inventoryRow(t *testing.T, asA, asB agentcli.Env) {
 	if !selected["allocations"] || !selected["instances"] || len(selected) != 2 {
 		t.Errorf("the label selector %q went with the reads of %v, want allocations and instances only", selector, invKeys(selected))
 	}
+	// Which Allocation hosts an Instance is read from every Instance in scope: a second read of the Instances, with no selector.
+	reads := map[string]int{}
+	for _, r := range log.all() {
+		if r.method == http.MethodGet {
+			reads[r.path[strings.LastIndex(r.path, "/")+1:]]++
+		}
+	}
+	if reads["instances"] != 2 || reads["allocations"] != 1 || reads["modeldeployments"] != 1 {
+		t.Errorf("--owner A read %v, want the Instances twice (selected, then all) and every other kind once", reads)
+	}
 
 	// --owner B, as agent B: its own, and none of A's.
 	onlyB := w.inventoryAs(t, asB, "--owner", invUserB)

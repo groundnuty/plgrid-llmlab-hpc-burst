@@ -118,10 +118,10 @@ func dur(s string) *v1alpha1.Duration { d := v1alpha1.Duration(s); return &d }
 // team holds most of it; namespace other holds one deployment of alice's.
 //
 //	md-alice  alice  sano   alloc-a1 (hosts inst-a1), alloc-a2 (kept, idle, no Instance), alloc-a3 (pending, hosts inst-a3),
-//	                        alloc-a4 (no owner of its own, hosts inst-a4-old, which has none either), alloc-a5 (alice's, hosts the
-//	                        unlabelled inst-a5-old, no idle anchor)
+//	                        alloc-a4 (no owner of its own, hosts inst-a4-old, which has none either), alloc-a5 (alice's, with an idle
+//	                        anchor, and hosts the unlabelled inst-a5-old)
 //	md-bob    bob    helios alloc-b1 (no anchor), alloc-b2 (an anchor that is no time, only an ended Instance on it), alloc-b3
-//	                        (Ended, on ghost), alloc-b4 (ReleaseWhenIdle, idle), alloc-b5 (a stale anchor, and inst-b5 is on it)
+//	                        (Ended, on ghost), alloc-b4 (ReleaseWhenIdle, idle, inside its limit), alloc-b5 (a stale anchor, and inst-b5 is on it)
 //	md-old    none   helios alloc-old (hosts inst-old)
 //	alloc-bare names nothing and has no status.
 func world() []client.Object {
@@ -140,7 +140,7 @@ func world() []client.Object {
 		alloc(owned("team", "alloc-a3", alice, aliceHash, "nightly run"), "md-alice", "sano", v1alpha1.AllocationPending, nil,
 			&v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur("15m")}),
 		alloc(bare("team", "alloc-a4"), "md-alice", "sano", v1alpha1.AllocationRunning, mt(t0.Add(3*time.Hour)), nil),
-		alloc(owned("team", "alloc-a5", alice, aliceHash, "nightly run"), "md-alice", "sano", v1alpha1.AllocationRunning, mt(t0.Add(3*time.Hour)), nil),
+		alloc(withIdleSince(owned("team", "alloc-a5", alice, aliceHash, "nightly run"), "2026-11-20T09:40:00Z"), "md-alice", "sano", v1alpha1.AllocationRunning, mt(t0.Add(3*time.Hour)), nil),
 		alloc(owned("team", "alloc-b1", bob, bobHash, "ablation"), "md-bob", "helios", v1alpha1.AllocationRunning, mt(t0.Add(time.Hour)), nil),
 		alloc(withIdleSince(owned("team", "alloc-b2", bob, bobHash, "ablation"), "not a time"), "md-bob", "helios", v1alpha1.AllocationRunning, mt(t0.Add(time.Hour)), nil),
 		alloc(withIdleSince(owned("team", "alloc-b3", bob, bobHash, "ablation"), "2026-11-20T08:00:00Z"), "md-bob", "ghost", v1alpha1.AllocationEnded, mt(t0.Add(-time.Hour)), nil),
