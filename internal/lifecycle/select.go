@@ -254,7 +254,7 @@ func selectPrimaries(s selection, desired int) (chosen, surplus []*v1alpha1.Inst
 }
 
 // selectionOfView is the selection a deployment's own pass makes, from its Instances and Allocations read by label
-// (reservedOn's views, the yield's re-read of a deployment): its Instances in the pass's order, the ones an earlier
+// (reservedOn's views and the headroom's re-read of the other deployments): its Instances in the pass's order, the ones an earlier
 // ModelDeployment of the same name owned marked stale, and its Allocations by name.
 func selectionOfView(md *v1alpha1.ModelDeployment, v deploymentView) selection {
 	var insts []*v1alpha1.Instance

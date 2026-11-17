@@ -117,6 +117,9 @@ type placeOpts struct {
 	// will once Running (extraAlsoLeave), left free beside the new Allocation: the extra's slot is beyond its own
 	// handovers (HBEP-7, Its checks, a slot beyond its own handovers). Set with extra, on the Provider named by only.
 	alsoLeave int
+	// headroom is the extra's admission headroom (extraChecks): how many more slots the reservation leaves free, read
+	// under the Provider's lock (slotAsk.headroom). Set with extra.
+	headroom func(context.Context) (int, error)
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
@@ -197,12 +200,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if o.caps {
 			capsOf = &params
 		}
-		// A missing primary refused for the submit limit alone makes a pending extra yield its slot (yield.go).
-		var onLimit func(context.Context, slotReads) error
-		if pred == nil && !o.extra && o.hedgeGroup == "" {
-			onLimit = p.yieldOnLimit(pv)
-		}
-		ok, holds, err := p.reserveYielding(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
+		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, o.headroom)
 		if err != nil {
 			return false, err
 		}
@@ -577,32 +575,28 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	}
 	// It takes the reserved slot of its predecessor's chain, and a no-overlap successor its own, which is held
 	// for it while its Allocation waits for the slot its predecessor frees (slots_reserved.go).
-	// An Instance with no Allocation is one of three things (#708): a successor or replacement or a hedge's member, which
-	// wait as they always did (a refused replacement does not yield: #713); the deployment's EXTRA, when the units that
-	// have an Allocation already number its desired count (shortageOf), which takes the extra's own checks, the bound,
-	// the slot beyond its primary's handover and the caps, silently, and is ended when one refuses; or a primary, whose
-	// refusal for the submit limit alone makes a pending extra yield (yield.go), as at its creation.
+	// An Instance with no Allocation is one of two things: a successor, a replacement or a hedge's member, which waits as
+	// it always did, or a deployment's first-round Instance. When the units that have an Allocation already number the
+	// deployment's desired count (shortageOf, never the selection's tie) it is THE EXTRA, whose retry takes the extra's own
+	// checks, the bound, the slot beyond its primary's handover, the admission headroom and the caps, silently, and is ended
+	// when one refuses (#708, finding 4); otherwise it is a primary, which waits for a slot.
 	takers := p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor]))
-	var onLimit func(context.Context, slotReads) error
+	var headroom func(context.Context) (int, error)
 	var capsOf *v1alpha1.BatchParameters
 	alsoLeave, quiet := 0, false
-	switch {
-	case handover || in.Annotations[v1alpha1.AnnotationHedgeGroup] != "":
-	case p.shortage() == 0:
+	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() == 0 {
 		var admitted bool
-		if alsoLeave, admitted = p.extraChecks(pv, in); !admitted {
+		if alsoLeave, headroom, admitted = p.extraChecks(pv, in); !admitted {
 			return p.endCutShortExtra(in, "the bound on extras")
 		}
 		capsOf, quiet = &params, true
-	default:
-		onLimit = p.yieldOnLimit(pv)
 	}
-	ok, holds, err := p.reserveYielding(pv, name, holder, takers, capsOf, quiet, alsoLeave, onLimit)
+	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, alsoLeave, headroom)
 	if err != nil {
 		return err
 	}
 	if !ok && quiet {
-		return p.endCutShortExtra(in, "the slot beyond its primary's handover and the caps")
+		return p.endCutShortExtra(in, "the slot beyond its primary's handover, the admission headroom or the caps")
 	}
 	if !ok {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
