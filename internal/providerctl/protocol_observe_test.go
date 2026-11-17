@@ -212,7 +212,7 @@ func TestFakeFailedReadsAreNotAbsence(t *testing.T) {
 					t.Fatalf("after %d min of failed reads: phase %s, absentSince %v; want neither Lost nor absent", 5*(i+1), p, a.Status.AtProvider.AbsentSince)
 				}
 			}
-			if e.rec.has("JobLost") {
+			if e.typed.has("JobLost") {
 				t.Error("a JobLost event during failed reads")
 			}
 			if n := ptCountSince(e, mark, "sbatch"); n != 0 {
@@ -269,14 +269,14 @@ func TestLostGraceAndReappearance(t *testing.T) {
 			if p := ptPhase(e, "a"); p == v1alpha1.AllocationLost {
 				t.Fatalf("phase Lost at exactly lostGrace, want it only after")
 			}
-			if e.rec.has("JobLost") {
+			if e.typed.has("JobLost") {
 				t.Fatal("JobLost event before lostGrace")
 			}
 			ptStep(e, "a", time.Second)
 			if p := ptPhase(e, "a"); p != v1alpha1.AllocationLost {
 				t.Fatalf("phase %s after lostGrace, want Lost", p)
 			}
-			if !e.rec.has("JobLost") {
+			if !e.typed.has("JobLost") {
 				t.Error("no JobLost event")
 			}
 
@@ -286,7 +286,7 @@ func TestLostGraceAndReappearance(t *testing.T) {
 			if p := a.Status.AtProvider.Phase; p != v1alpha1.AllocationRunning || a.Status.AtProvider.AbsentSince != nil {
 				t.Errorf("phase %s absentSince %v after reappearance, want Running and none", p, a.Status.AtProvider.AbsentSince)
 			}
-			if !e.rec.has("JobReappeared") {
+			if !e.typed.has("JobReappeared") {
 				t.Error("no JobReappeared event")
 			}
 			if n := e.count("sbatch"); n != 1 {
@@ -321,7 +321,7 @@ func TestReadBackDifferentTimeLimitSetsSubmittedAsOther(t *testing.T) {
 		if p := a.Status.AtProvider.Phase; p == v1alpha1.AllocationHeld {
 			t.Errorf("phase %s, want the job's own phase after its lift", p)
 		}
-		if !e.rec.has("SubmittedAsOther") {
+		if !e.typed.has("SubmittedAsOther") {
 			t.Error("no SubmittedAsOther event")
 		}
 	})

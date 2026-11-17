@@ -1,7 +1,12 @@
 package front
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -27,13 +32,57 @@ func (e recorderPathEvents) PathProbeFailing(in *v1alpha1.Instance, r ProbeResul
 	if e.rec == nil {
 		return
 	}
-	last := r.Error
-	if last == "" {
-		last = fmt.Sprintf("status %d", r.Status)
-	}
+	last := probeFailureText(r)
 	e.rec.Event(in, true, eventDegraded, reasonPathProbeFailing,
 		fmt.Sprintf("the front's probe of Instance %s through its tunnel failed %d times in a row while its TunnelConnected is True; it is not eligible until a probe passes; the controller restarts nothing on this (last: %s)",
 			r.Instance, r.Failures, last))
+}
+
+// The closed set a failed probe's cause falls in. The note of PathProbeFailing
+// says one of these, never the text of the failed dial or reply, which can name
+// an address, a path or a status line that frps sent: the event goes to a
+// durable log that is kept and may be exported (HBEP-8, Allocation events, No
+// job ID, path or name in a note). The text stays in the front's log.
+const (
+	probeCauseTimeout = "timeout"
+	probeCauseRefused = "refused"
+	probeCauseNoProxy = "noProxy"
+	probeCauseOther   = "other"
+)
+
+// probeCauseOf classifies a failed probe's error by its kind, never by its
+// text.
+func probeCauseOf(err error) string {
+	var ne net.Error
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, errNoProxy):
+		return probeCauseNoProxy
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return probeCauseRefused
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return probeCauseTimeout
+	}
+	return probeCauseOther
+}
+
+// probeFailureText is the fixed description of a failed probe's last result for
+// a note: its HTTP status when /health answered, else one text of the closed
+// set of causes. A result with no cause is "other".
+func probeFailureText(r ProbeResult) string {
+	if r.Status != 0 {
+		return fmt.Sprintf("its health check answered status %d", r.Status)
+	}
+	switch r.Cause {
+	case probeCauseTimeout:
+		return "no answer within the probe's deadline"
+	case probeCauseRefused:
+		return "the connection was refused"
+	case probeCauseNoProxy:
+		return "frps has no proxy for the Instance"
+	}
+	return "the probe failed for another reason, which the front's log names"
 }
 
 // probeStaleAfter is how many probeIntervals the probe's last result may age

@@ -31,7 +31,7 @@ func (p *pass) startingWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation
 		return nil
 	}
 	if st2 := ir.Staging; st2 != nil && st2.Phase == agentapi.StagingFailed && ir.Generation == restartGeneration(in, v1alpha1.PartInstance) {
-		return p.restart(in, alloc, signalStaging, v1alpha1.PartInstance, st, "staging failed: "+st2.Message)
+		return p.restart(in, alloc, signalStaging, v1alpha1.PartInstance, st, stagingFailedNote)
 	}
 	names := workerNames(in)
 	if in.Status.Phase == v1alpha1.InstanceStarting && everyWorker(names, func(w string) bool { return workerAt(ir, in, w, agentapi.PartRunning) }) {
@@ -389,7 +389,7 @@ func (p *pass) workerVerifiedResult(in *v1alpha1.Instance, alloc *v1alpha1.Alloc
 	}
 	return p.failedVerification(in, alloc, name, data, st,
 		func() (bool, error) { return p.r.earlierWorkerRehashFailure(p.ctx, in, name) },
-		func() error { return p.restartWorker(in, alloc, signalVerifyRead, w, st, data.Message) })
+		func() error { return p.restartWorker(in, alloc, signalVerifyRead, w, st, verificationNote(data.Cause)) })
 }
 
 // earlierWorkerRehashFailure reports whether an earlier verification of the Instance, of any of its

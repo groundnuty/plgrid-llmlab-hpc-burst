@@ -71,8 +71,8 @@ func TestSetManagedReadinessIsTheBatchStalenessRule(t *testing.T) {
 
 func TestEventNotes(t *testing.T) {
 	long := strings.Repeat("n", 300)
-	if n := SkippedNote(SkippedEntry{Name: long, Why: "a name of 300 characters, above 253"}); strings.Contains(n, long) || !strings.Contains(n, strings.Repeat("n", 64)+"...") {
-		t.Fatalf("note %q: want the name shortened to 64 characters", n)
+	if n := SkippedNote(SkippedEntry{Name: long, Why: "a name of 300 characters, above 253"}); strings.Contains(n, long) || !strings.Contains(n, `"`+strings.Repeat("n", 128)+`..."`) {
+		t.Fatalf("note %q: want the name shortened to 128 characters", n)
 	}
 	if n := TruncatedNote(6); n != "the gateway listed 6 entries more than status.catalog holds (1024); the first 1024 by name are kept" {
 		t.Fatalf("note = %q", n)
@@ -80,7 +80,8 @@ func TestEventNotes(t *testing.T) {
 }
 
 // restOf returns skipped entries whose names are the given lengths, distinct
-// where the length allows and at most the 64 characters a note shows whole. A
+// where the length allows and at most 64 characters, within the 128 a note shows
+// whole, so every name is quoted whole as refSummary quotes it. A
 // length of 0 is the empty name (SkipEmptyName), and 1 is one character.
 func restOf(lengths ...int) []SkippedEntry {
 	var out []SkippedEntry
@@ -97,7 +98,8 @@ func restOf(lengths ...int) []SkippedEntry {
 	return out
 }
 
-// sixtyFours is n names of 64 characters, the longest a note shows whole.
+// sixtyFours is n names of 64 characters, which a note shows whole (it cuts a name
+// only above 128).
 func sixtyFours(n int) []int {
 	out := make([]int, n)
 	for i := range out {
@@ -239,18 +241,44 @@ func TestSkippedSummaryNoteNamesAsManyAsFit(t *testing.T) {
 	}
 }
 
+// A catalog entry's name keeps its place in the note, but the name is the
+// gateway's own text and the note goes to the log that keeps it, so its control
+// characters are stripped, it is cut at 128 characters, and it is quoted
+// (`@hpc-burst-science-agent`, 16 Nov 2026, on #640). A name of 321 characters
+// holding a newline and a tab shows as its first 128 characters with neither,
+// then "...", in its own event and in the summary. A name at the cap once
+// stripped shows whole.
+func TestSkippedNoteStripsControlCharactersAndCapsTheName(t *testing.T) {
+	name := "model-a\nINJECTED\tline" + strings.Repeat("x", 300)
+	shown := `"model-aINJECTEDline` + strings.Repeat("x", 109) + `..."` // 19 + 109 = 128 characters
+	want := "catalog entry " + shown + " skipped: a name of 321 characters, above 253"
+	if n := SkippedNote(SkippedEntry{Name: name, Why: "a name of 321 characters, above 253"}); n != want {
+		t.Fatalf("note = %q, want %q", n, want)
+	}
+	sum := SkippedSummaryNote([]SkippedEntry{{Name: name}})
+	if !strings.Contains(sum, shown) || strings.ContainsAny(sum, "\n\t") || strings.Contains(sum, `\n`) || strings.Contains(sum, `\t`) {
+		t.Fatalf("summary %q: want the name stripped of its newline and tab and cut at 128 characters", sum)
+	}
+	exact := strings.Repeat("y", 64) + "\n" + strings.Repeat("y", 64)
+	if n := SkippedNote(SkippedEntry{Name: exact, Why: "w"}); n != `catalog entry "`+strings.Repeat("y", 128)+`" skipped: w` {
+		t.Fatalf("note = %q, want the 128 characters left after the newline whole, with no ellipsis", n)
+	}
+}
+
 // A long name is shortened in the summary as in its own event, and a name with
 // an escaped character is counted by the bytes it takes quoted.
 func TestSkippedSummaryNoteShortensAndCountsQuotedBytes(t *testing.T) {
 	rest := []SkippedEntry{{Name: strings.Repeat("n", 300)}, {Name: "a\"b"}}
 	want := `2 more catalog entries skipped (at most 10 skipped entries are named in an hour): "` +
-		strings.Repeat("n", 64) + `...", "a\"b"`
+		strings.Repeat("n", 128) + `...", "a\"b"`
 	if got := SkippedSummaryNote(rest); got != want {
 		t.Fatalf("note = %q, want %q", got, want)
 	}
-	// Forty names whose characters each take 4 bytes quoted (\x01) cannot all
-	// fit: the note stays within 1,024 bytes and keeps whole names.
-	hard := strings.Repeat("\x01", 64)
+	// Forty names whose characters each take 6 bytes quoted (U+200B, a format
+	// character, which is not stripped as a control character is, and which %q
+	// escapes as \u200b) cannot all fit: the note stays within 1,024 bytes and
+	// keeps whole names.
+	hard := strings.Repeat("\u200b", 64)
 	var many []SkippedEntry
 	for i := range 40 {
 		many = append(many, SkippedEntry{Name: fmt.Sprintf("%02d", i) + hard})

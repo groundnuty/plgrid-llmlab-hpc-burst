@@ -194,7 +194,7 @@ func (s *pathState) reportBulkOrphans(ctx context.Context, rep frpsplugin.Report
 func (s *pathState) bulkOrphanEvent(ctx context.Context, proxy string) {
 	subject, how := s.bulkOrphanSubject(ctx, proxy)
 	s.rec.Event(subject, nil, lifecycle.EventDegraded, v1alpha1.EventReasonTunnelOrphaned,
-		fmt.Sprintf("frps-bulk lists the proxy %s online, and no current Instance has that UID (an orphan, HBEP-6, The bulk path); %s", proxy, how))
+		fmt.Sprintf("frps-bulk lists the proxy %s online, and no current Instance has that UID (an orphan, HBEP-6, The bulk path); %s", proxyRef(proxy), how))
 }
 
 func (s *pathState) bulkOrphanSubject(ctx context.Context, proxy string) (client.Object, string) {

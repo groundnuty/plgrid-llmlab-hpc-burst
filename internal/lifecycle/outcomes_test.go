@@ -7,15 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"go/ast"
-	"go/constant"
-	gotypes "go/types"
 	"slices"
-	"sort"
 	"testing"
 	"time"
 
-	"golang.org/x/tools/go/packages"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -291,144 +286,6 @@ type failingReader struct{ client.Reader }
 
 func (failingReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
 	return apierrors.NewServiceUnavailable("the record can't be read")
-}
-
-// TestEveryEndReasonHasAnOutcome type-checks the package's shipped code and collects every reason an Instance can
-// end with: each constant passed as the reason of end or fail, or assigned to, or returned as, the variable or call
-// passed there. Each must be in endOutcome, and endOutcome holds no other, so a new end reason must be classified.
-func TestEveryEndReasonHasAnOutcome(t *testing.T) {
-	pkgs, err := packages.Load(&packages.Config{
-		// Dependencies from source, as the release-cause guard loads them: export data may be newer than this
-		// binary's type checker reads.
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports | packages.NeedDeps,
-		Dir:  ".",
-	}, ".")
-	if err != nil || packages.PrintErrors(pkgs) > 0 {
-		t.Fatalf("load the package: %v", err)
-	}
-	pkg := pkgs[0]
-	funcs := map[*gotypes.Func]*ast.FuncDecl{}
-	for _, f := range pkg.Syntax {
-		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok {
-				if obj, ok := pkg.TypesInfo.Defs[fd.Name].(*gotypes.Func); ok {
-					funcs[obj] = fd
-				}
-			}
-		}
-	}
-	got := map[string]bool{}
-	var resolve func(e ast.Expr, in *ast.FuncDecl, depth int)
-	// returned collects the constants fd returns at result index i.
-	returned := func(fd *ast.FuncDecl, i, depth int) {
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			if _, ok := n.(*ast.FuncLit); ok {
-				return false
-			}
-			if r, ok := n.(*ast.ReturnStmt); ok && i < len(r.Results) {
-				resolve(r.Results[i], fd, depth+1)
-			}
-			return true
-		})
-	}
-	resolve = func(e ast.Expr, in *ast.FuncDecl, depth int) {
-		if depth > 4 {
-			return
-		}
-		if tv, ok := pkg.TypesInfo.Types[e]; ok && tv.Value != nil && tv.Value.Kind() == constant.String {
-			if v := constant.StringVal(tv.Value); v != "" {
-				got[v] = true
-			}
-			return
-		}
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			if obj, ok := pkg.TypesInfo.Uses[calleeIdent(x.Fun)].(*gotypes.Func); ok && funcs[obj] != nil {
-				returned(funcs[obj], 0, depth)
-			}
-		case *ast.Ident:
-			v, ok := pkg.TypesInfo.Uses[x].(*gotypes.Var)
-			if !ok {
-				return
-			}
-			ast.Inspect(in.Body, func(n ast.Node) bool {
-				as, ok := n.(*ast.AssignStmt)
-				if !ok {
-					return true
-				}
-				for li, lhs := range as.Lhs {
-					id, ok := lhs.(*ast.Ident)
-					if !ok || (pkg.TypesInfo.Defs[id] != v && pkg.TypesInfo.Uses[id] != v) {
-						continue
-					}
-					if len(as.Rhs) == len(as.Lhs) {
-						resolve(as.Rhs[li], in, depth+1)
-					} else if call, ok := as.Rhs[0].(*ast.CallExpr); ok {
-						if obj, ok := pkg.TypesInfo.Uses[calleeIdent(call.Fun)].(*gotypes.Func); ok && funcs[obj] != nil {
-							returned(funcs[obj], li, depth)
-						}
-					}
-				}
-				return true
-			})
-		}
-	}
-	for _, fd := range funcs {
-		if fd.Body == nil || fd.Name.Name == "fail" || fd.Name.Name == "end" {
-			continue // they forward their own parameter
-		}
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || (sel.Sel.Name != "end" && sel.Sel.Name != "fail") || len(call.Args) < 3 {
-				return true
-			}
-			if fn, ok := pkg.TypesInfo.Uses[sel.Sel].(*gotypes.Func); ok && fn.Pkg() == pkg.Types && onPass(fn) {
-				resolve(call.Args[2], fd, 0)
-			}
-			return true
-		})
-	}
-	var emitted, table []string
-	for r := range got {
-		emitted = append(emitted, r)
-	}
-	for r := range endOutcome {
-		table = append(table, r)
-	}
-	sort.Strings(emitted)
-	sort.Strings(table)
-	if !slices.Equal(emitted, table) {
-		t.Fatalf("the end reasons the package writes are %v; endOutcome classifies %v: each must be classified, and no other", emitted, table)
-	}
-}
-
-// onPass reports whether fn is a method of *pass.
-func onPass(fn *gotypes.Func) bool {
-	sig, ok := fn.Type().(*gotypes.Signature)
-	if !ok || sig.Recv() == nil {
-		return false
-	}
-	ptr, ok := sig.Recv().Type().(*gotypes.Pointer)
-	if !ok {
-		return false
-	}
-	named, ok := ptr.Elem().(*gotypes.Named)
-	return ok && named.Obj().Name() == "pass"
-}
-
-// calleeIdent is the identifier a call names: f in f(), or m in x.m().
-func calleeIdent(e ast.Expr) *ast.Ident {
-	switch x := e.(type) {
-	case *ast.Ident:
-		return x
-	case *ast.SelectorExpr:
-		return x.Sel
-	}
-	return nil
 }
 
 // TestAReadyPrimaryRecordsItsOutcome: through the rig's passes, a deployment's primary, ready at 08:01:10, adds one

@@ -47,6 +47,9 @@ type handOver struct {
 	reason, action, typ, msg string
 	annotations              map[string]string
 	countAtHandOver          float64
+	// regarding and related are the objects the call carried (events.k8s.io
+	// recorders only).
+	regarding, related runtime.Object
 }
 
 // innerEvents stands for client-go's events.k8s.io recorder: it records each
@@ -59,7 +62,7 @@ type innerEvents struct {
 	got        []handOver
 }
 
-func (f *innerEvents) Eventf(_ runtime.Object, _ runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+func (f *innerEvents) Eventf(regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
 	a := action
 	if a == "" {
 		a = NoAction
@@ -67,7 +70,8 @@ func (f *innerEvents) Eventf(_ runtime.Object, _ runtime.Object, eventtype, reas
 	n, _ := value(f.t, f.c, Key{f.controller, reason, a, eventtype})
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.got = append(f.got, handOver{method: "Eventf", reason: reason, action: action, typ: eventtype, msg: fmt.Sprintf(note, args...), countAtHandOver: n})
+	f.got = append(f.got, handOver{method: "Eventf", reason: reason, action: action, typ: eventtype, msg: fmt.Sprintf(note, args...), countAtHandOver: n,
+		regarding: regarding, related: related})
 }
 
 // innerLegacy stands for client-go's core/v1 recorder.
@@ -139,6 +143,51 @@ func TestEventsCountsInTheCallThatHandsOver(t *testing.T) {
 		if got, _ := value(t, c, k); got != n {
 			t.Errorf("%s = %g, want %g", k, got, n)
 		}
+	}
+}
+
+// TestEventfIDCountsAndHandsOverAsEventfDoes: an event raised with an id is
+// counted under the reason, action and type it carries, before the recorder's
+// queue, and handed over with every argument unchanged (the regarding object,
+// the related one, the type, the reason, the action and the formatted note
+// with its arguments), exactly as the same event raised with Eventf is; the id
+// is not an argument of the inner recorder, and not a label. The expectations
+// are the arguments written out here, not what either method does.
+func TestEventfIDCountsAndHandsOverAsEventfDoes(t *testing.T) {
+	c := New()
+	inner := &innerEvents{t: t, c: c, controller: "provider-example-batch"}
+	r := Events(inner, c, "provider-example-batch")
+	related := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "related"}}
+	k := Key{"provider-example-batch", "JobEnded", "ended", provider.EventKindOrdinary}
+
+	r.EventfID("uid/JobEnded/2026-11-16T10:00:00Z", subject, related, provider.EventKindOrdinary, "JobEnded", "ended", "ended after %d s on %s", 7, "a node")
+	r.EventfID("uid/JobEnded/another-fact", subject, nil, provider.EventKindOrdinary, "JobEnded", "ended", "again")
+	r.Eventf(subject, nil, provider.EventKindOrdinary, "JobEnded", "ended", "by Eventf")
+	r.EventfID("an-id", subject, nil, provider.EventKindOrdinary, "Unmarked", "", "no action")
+
+	if got, ok := value(t, c, k); !ok || got != 3 {
+		t.Errorf("%s reads %g (present %v) after two EventfID calls and one Eventf call, want 3: the id is no label and no dedupe", k, got, ok)
+	}
+	if got, ok := value(t, c, Key{"provider-example-batch", "Unmarked", NoAction, provider.EventKindOrdinary}); !ok || got != 1 {
+		t.Errorf("an EventfID with no action reads %g (present %v) under action none, want 1", got, ok)
+	}
+	if len(inner.got) != 4 {
+		t.Fatalf("the recorder received %d calls, want 4: %+v", len(inner.got), inner.got)
+	}
+	first := inner.got[0]
+	if first.regarding != runtime.Object(subject) || first.related != runtime.Object(related) ||
+		first.typ != provider.EventKindOrdinary || first.reason != "JobEnded" || first.action != "ended" ||
+		first.msg != "ended after 7 s on a node" {
+		t.Errorf("the first EventfID was handed over as %+v, want the arguments unchanged", first)
+	}
+	if first.countAtHandOver != 1 {
+		t.Errorf("the count was %g when the recorder received the first EventfID, want 1: it is counted before the recorder's queue", first.countAtHandOver)
+	}
+	if second := inner.got[1]; second.related != nil || second.msg != "again" || second.countAtHandOver != 2 {
+		t.Errorf("the second EventfID was handed over as %+v, want no related object, the note \"again\" and the count 2", second)
+	}
+	if third := inner.got[2]; third.countAtHandOver != 3 || third.msg != "by Eventf" {
+		t.Errorf("the Eventf that follows was handed over as %+v, want the count 3: both methods count one series", third)
 	}
 }
 

@@ -35,8 +35,8 @@ func (p *pass) readyWorkers(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, a
 		// ready on its siblings, and exhausted attempts climb to the whole-Instance rung (HBEP-7, Several
 		// workers; the science agent's ruling on #439, PR 3b's question). A contradiction verdict, in
 		// verifyWorkers, still ends the Instance, as with one worker.
-		if ok, err := p.warmWorkers(in, alloc, ir, sh, func(w, msg string) error {
-			return p.restartWorker(in, alloc, signalWarmUp, w, st, w+": "+msg)
+		if ok, err := p.warmWorkers(in, alloc, ir, sh, func(w, _ string) error {
+			return p.restartWorker(in, alloc, signalWarmUp, w, st, w+": the warm-up failed")
 		}); !ok || err != nil {
 			return err
 		}

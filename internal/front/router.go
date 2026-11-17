@@ -1,10 +1,13 @@
 package front
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -488,12 +491,31 @@ const usageEventEvery = time.Hour
 // front holds the Lease: until then the failure is counted by the sink,
 // logged and shown in /healthz, and nothing else (@hpc-burst-science-agent,
 // 31 Oct 2026; no fallback to a ModelDeployment).
+//
+// The note names no text of the sink's error, which holds the usage file's
+// path: the event goes to a durable log that is kept and may be exported
+// (HBEP-8, Allocation events, No job ID, path or name in a note), so it gives
+// a fixed description chosen by usageCause. The error itself stays in the
+// front's log line for the failed write and in the usage member of /healthz.
 func (r *Router) usageFailed(requestID string, err error) {
 	r.mu.Lock()
 	r.usageFailing = true
-	r.usageNote = "usage records are not being written (request " + requestID + "): " + err.Error()
+	r.usageNote = "usage records are not being written (request " + requestID + "): " + usageCause(err) +
+		"; the error is in the front's log and in the usage member of its health report"
 	r.mu.Unlock()
 	r.flushUsageEvent()
+}
+
+// usageCause is the fixed description of a usage write failure for an event's
+// note: one of a closed set, chosen by the error's kind and never by its text.
+func usageCause(err error) string {
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return "the disk is full"
+	case errors.Is(err, fs.ErrPermission):
+		return "the usage directory refused the write"
+	}
+	return "a write or sync of the usage log failed"
 }
 
 // flushUsageEvent raises the UsageWriteFailed event of a failure that lasts,

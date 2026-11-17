@@ -41,8 +41,10 @@ const (
 
 var camelReason = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
 
-// hbep8Actions are HBEP-8's six types.
-var hbep8Actions = map[string]bool{"started": true, "ready": true, "degraded": true, "failing": true, "ending-soon": true, "replaced": true}
+// hbep8Actions are HBEP-8's types: six in alpha, and in beta ended. They are
+// internal/reasondrift's Actions, which a test of this package pins this list to
+// (this package does not import it: it is test support and stays small).
+var hbep8Actions = map[string]bool{"started": true, "ready": true, "degraded": true, "failing": true, "ending-soon": true, "replaced": true, "ended": true}
 
 // TypedEvent reports whether HBEP-8's form applies to an event: one the
 // lifecycle controller or the front emitted, or any about an Instance or a
@@ -57,14 +59,14 @@ func TypedEvent(e eventsv1.Event) bool {
 }
 
 // formProblems holds one typed event to HBEP-8's form: an action that is one
-// of the six types; a reason that is the CamelCase code alone; Warning exactly
+// of HBEP-8's types; a reason that is the CamelCase code alone; Warning exactly
 // for degraded and failing; a regarding object; a note of at most 1,024
 // bytes; and a reporting controller.
 func formProblems(e eventsv1.Event) []string {
 	var out []string
 	id := fmt.Sprintf("event %s (%s/%s regarding %s %s)", e.Name, e.Action, e.Reason, e.Regarding.Kind, e.Regarding.Name)
 	if !hbep8Actions[e.Action] {
-		out = append(out, id+": action is not one of HBEP-8's six types")
+		out = append(out, id+": action is not one of HBEP-8's types")
 	}
 	if !camelReason.MatchString(e.Reason) {
 		out = append(out, id+": reason is not a CamelCase code alone")
