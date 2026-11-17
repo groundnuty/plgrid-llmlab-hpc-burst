@@ -38,6 +38,8 @@ type ordRig struct {
 	b, c *rigExtra
 	// warm is the warm Allocation each Provider got from warmUp, by Provider name.
 	warm map[string]string
+	// offset is ordOpts.primaryOffset.
+	offset time.Duration
 }
 
 // ordOpts are what a row varies: A's and B's submit limits (0: none; the limit is declared in the profile's QOS and
@@ -47,6 +49,9 @@ type ordOpts struct {
 	aGPUCap        int32
 	bMaxTime       time.Duration
 	withC          bool
+	// primaryOffset delays the primary's job start (09:00:20 plus it) and so its lease end, drain start and replacement
+	// time, by that much: a row puts a warm spare's drain start one second short of the lead with it.
+	primaryOffset time.Duration
 }
 
 func newOrdRig(t *testing.T, o ordOpts, opts ...rigOption) *ordRig {
@@ -74,7 +79,7 @@ func newOrdRig(t *testing.T, o ordOpts, opts ...rigOption) *ordRig {
 		ropts = append(ropts, withProfile(func(s *v1alpha1.PlatformProfileSpec) { s.QOS = qos }))
 	}
 	rg := newRig(t, append(ropts, opts...)...)
-	r := &ordRig{rig: rg, warm: map[string]string{}}
+	r := &ordRig{rig: rg, warm: map[string]string{}, offset: o.primaryOffset}
 	bMax := o.bMaxTime
 	if bMax == 0 {
 		bMax = 12 * time.Hour
@@ -150,24 +155,26 @@ func (o *ordRig) primaryOnA(md string, provs ...string) *v1alpha1.Instance {
 		o.t.Fatalf("the warm-ups ended at %s, after 09:00:00", o.clock.Now().Format(time.TimeOnly))
 	}
 	hoStepTo(o.rig, hoT(9, 0, 0), 5*time.Minute, nil)
+	o.clock.Advance(o.offset)
 	o.allowOn(md, 1, rigProvider)
-	hoStepTo(o.rig, hoT(9, 1, 20), 10*time.Second, nil)
+	hoStepTo(o.rig, hoT(9, 1, 20).Add(o.offset), 10*time.Second, nil)
 	live := o.liveInstances(md)
 	if len(live) != 1 || live[0].Status.Phase != v1alpha1.InstanceReady || live[0].Labels[v1alpha1.LabelProvider] != rigProvider ||
-		live[0].Status.LeaseEnd == nil || !live[0].Status.LeaseEnd.Time.Equal(hoT(13, 0, 20)) {
-		o.t.Fatalf("want one ready primary on %s with lease end 13:00:20 at 09:01:20, got %+v", rigProvider, live)
+		live[0].Status.LeaseEnd == nil || !live[0].Status.LeaseEnd.Time.Equal(hoT(13, 0, 20).Add(o.offset)) {
+		o.t.Fatalf("want one ready primary on %s with lease end 13:00:20 plus %s at 09:01:20 plus the same, got %+v", rigProvider, o.offset, live)
 	}
 	o.allowOn(md, 1, provs...)
 	p := live[0]
 	return &p
 }
 
-// replacementAt steps to just after the primary's replacement time, 10:19:30, and returns the primary's one
+// replacementAt steps to just after the primary's replacement time, 10:19:30 plus the offset, and returns the primary's one
 // replacement, which the row's order has just placed.
 func (o *ordRig) replacementAt(p *v1alpha1.Instance) v1alpha1.Instance {
 	o.t.Helper()
-	hoStepTo(o.rig, hoT(10, 19, 20), 5*time.Minute, nil)
-	hoStepTo(o.rig, hoT(10, 19, 40), 10*time.Second, nil)
+	planned := hoT(10, 19, 30).Add(o.offset)
+	hoStepTo(o.rig, planned.Add(-10*time.Second), 5*time.Minute, nil)
+	hoStepTo(o.rig, planned.Add(10*time.Second), 10*time.Second, nil)
 	reps := hoRepl(o.rig, p.Name)
 	if len(reps) != 1 {
 		o.t.Fatalf("%d replacements of %s at 10:19:40, want one (planned 10:19:30)", len(reps), p.Name)
@@ -214,4 +221,25 @@ func (o *ordRig) setMaxIdle(d time.Duration) {
 	if err := o.rig.c.Update(o.ctx, &prof); err != nil {
 		o.t.Fatal(err)
 	}
+}
+
+// mustAllocation returns the named Allocation, or fails.
+func (rg *rig) mustAllocation(name string) *v1alpha1.Allocation {
+	rg.t.Helper()
+	a, ok := rg.allocation(name)
+	if !ok {
+		rg.t.Fatalf("Allocation %s is gone", name)
+	}
+	return a
+}
+
+// liveOnAllocation returns the live Instances of any deployment that run in the Allocation.
+func (rg *rig) liveOnAllocation(alloc string) []v1alpha1.Instance {
+	var out []v1alpha1.Instance
+	for _, in := range rg.liveInstances(hoMD) {
+		if in.Spec.AllocationRef.Name == alloc {
+			out = append(out, in)
+		}
+	}
+	return out
 }

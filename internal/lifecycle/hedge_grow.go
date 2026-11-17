@@ -209,7 +209,14 @@ func (p *pass) growHedges() error {
 		}
 		// The new member names the hedge's key, never a surviving member's name: once the first member has left, a
 		// survivor's name would start a second hedge for the same need (#627's review).
-		if _, err := p.provisionWith(need.pred, placeOpts{hedgeGroup: need.key, skipProviders: skip, quiet: true, caps: true}); err != nil {
+		o := placeOpts{hedgeGroup: need.key, skipProviders: skip, quiet: true, caps: true}
+		if replacement {
+			// The replacement's start deadline, which a nil predecessor (gone after a restart) cannot give the
+			// placement: a deferral for an unregistered warm Allocation never runs past it (Astra's review of #724,
+			// point 3). A missing primary's hedge has no start deadline in that sense.
+			o.deadline = deadline
+		}
+		if _, err := p.provisionWith(need.pred, o); err != nil {
 			errs = append(errs, err)
 		}
 	}

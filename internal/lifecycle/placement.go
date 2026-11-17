@@ -37,8 +37,12 @@ const (
 	stepPassed stepResult = iota
 	// stepPlaced: an Instance was created.
 	stepPlaced
-	// stepStopped: the placement ends with nothing placed: it is deferred, the deployment is gone, or an error came.
+	// stepStopped: the placement ends with nothing placed: the deployment is gone, or an error came.
 	stepStopped
+	// stepDeferred: nothing was placed here because a warm Allocation of the deployment on this Provider has not
+	// registered again after the controller's restart. The walk goes on to the later warm steps, and holds the
+	// submissions after this step until the deferral ends.
+	stepDeferred
 )
 
 // placeTarget is what a Provider that passed the per-Provider checks of a placement gives its steps: the class's
@@ -140,22 +144,26 @@ func (p *pass) targetOf(pv *providerView, o placeOpts, record bool) *placeTarget
 
 // deferralEnd is when a placement that waits for an unregistered warm Allocation next looks again, and false when it
 // does not wait. until is the end of agentGrace after the controller's start (warmFor), zero when no warm Allocation
-// waits. A replacement never waits past its start deadline, its ReplacementLate deadline (replacementDeadline): the
-// wait ends there, and at that deadline the deferral lapses and the placement goes on to a submission, since the
-// replacement is late and its predecessor's drain start is near. A missing primary has no start deadline, so
-// agentGrace alone bounds it (the science agent's ruling on #604 PR 3's plan, Q3, 16 Nov 2026; HBEP-7 amendment #719).
-func (p *pass) deferralEnd(pred *v1alpha1.Instance, until time.Time) (time.Time, bool) {
+// waits. A replacement never waits past its start deadline, its ReplacementLate deadline: the wait ends there, and
+// at that deadline the deferral lapses and the placement goes on to a submission, since the replacement is late and
+// its predecessor's drain start is near. The deadline is o.deadline when the caller read one (a hedge member's, whose
+// predecessor may be gone), else the predecessor's (replacementDeadline). A missing primary has no start deadline,
+// so agentGrace alone bounds it (the science agent's ruling on #604 PR 3's plan, Q3, 16 Nov 2026; HBEP-7 amendment
+// #719). decideOverlap asks it too (reusableWarm), so an unregistered spare is room beside only until the deadline.
+func (p *pass) deferralEnd(pred *v1alpha1.Instance, o placeOpts, until time.Time) (time.Time, bool) {
 	if until.IsZero() {
 		return time.Time{}, false
 	}
-	if pred != nil {
-		if deadline, ok := p.replacementDeadline(pred); ok {
-			if !p.now.Before(deadline) {
-				return time.Time{}, false
-			}
-			if until.After(deadline) {
-				until = deadline
-			}
+	deadline, ok := o.deadline, !o.deadline.IsZero()
+	if !ok && pred != nil {
+		deadline, ok = p.replacementDeadline(pred)
+	}
+	if ok {
+		if !p.now.Before(deadline) {
+			return time.Time{}, false
+		}
+		if until.After(deadline) {
+			until = deadline
 		}
 	}
 	return until, true
@@ -192,13 +200,13 @@ func (p *pass) waitsBeforeOwnSubmit() bool {
 
 // waitsForWarmBefore reports whether the placement waits, before the replacement's submit step on its predecessor's
 // Provider, for an unregistered warm Allocation on a Provider of the steps that follow (waitsBeforeOwnSubmit), and
-// if so asks to run again when the wait ends and marks the placement deferred.
-func (p *pass) waitsForWarmBefore(pred *v1alpha1.Instance, st step, later []step, o placeOpts) bool {
+// if so until when.
+func (p *pass) waitsForWarmBefore(pred *v1alpha1.Instance, st step, later []step, o placeOpts) (time.Time, bool) {
 	if pred == nil || st.kind != stepSubmit || !p.waitsBeforeOwnSubmit() {
-		return false
+		return time.Time{}, false
 	}
 	if own := p.pvOf(pred.Labels); own == nil || own.name != st.pv.name {
-		return false
+		return time.Time{}, false
 	}
 	for _, l := range later {
 		if l.kind != stepWarm {
@@ -209,28 +217,24 @@ func (p *pass) waitsForWarmBefore(pred *v1alpha1.Instance, st step, later []step
 			continue
 		}
 		if warm, deferUntil := p.warmFor(l.pv, t.params, pred); warm == nil {
-			if until, ok := p.deferralEnd(pred, deferUntil); ok {
-				p.at(until)
-				p.deferred = true
-				return true
+			if until, ok := p.deferralEnd(pred, o, deferUntil); ok {
+				return until, true
 			}
 		}
 	}
-	return false
+	return time.Time{}, false
 }
 
 // placeOnWarm is a warm step: it places the Instance on the Provider's warm Allocation that warmFor picks. An
-// Allocation whose agent has not registered again yet, during the grace after the controller's restart, defers the
-// whole placement (deferralEnd).
-func (p *pass) placeOnWarm(pv *providerView, t *placeTarget, pred *v1alpha1.Instance, o placeOpts) (stepResult, error) {
+// Allocation whose agent has not registered again yet, during the grace after the controller's restart, is waited for
+// (stepDeferred, with the wait's end; deferralEnd) while none is placed here.
+func (p *pass) placeOnWarm(pv *providerView, t *placeTarget, pred *v1alpha1.Instance, o placeOpts) (stepResult, time.Time, error) {
 	warm, deferUntil := p.warmFor(pv, t.params, pred)
 	if warm == nil {
-		if until, ok := p.deferralEnd(pred, deferUntil); ok {
-			p.at(until)
-			p.deferred = true
-			return stepStopped, nil
+		if until, ok := p.deferralEnd(pred, o, deferUntil); ok {
+			return stepDeferred, until, nil
 		}
-		return stepPassed, nil
+		return stepPassed, time.Time{}, nil
 	}
 	// An Instance placed on a warm Allocation creates no Allocation, so nothing is marked: the mark
 	// is written once, in an Allocation's create request, and an existing one is never marked later
@@ -238,12 +242,12 @@ func (p *pass) placeOnWarm(pv *providerView, t *placeTarget, pred *v1alpha1.Inst
 	// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
 	if err := p.createInstance(pv, t.cid, pred, warm.Name, o); err != nil {
 		if errors.Is(err, errDeploymentGone) {
-			return stepStopped, nil
+			return stepStopped, time.Time{}, nil
 		}
-		return stepStopped, err
+		return stepStopped, time.Time{}, err
 	}
 	// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
-	return stepPlaced, p.writeIdleSince(warm, nil)
+	return stepPlaced, time.Time{}, p.writeIdleSince(warm, nil)
 }
 
 // submitOn is a submit step: it reserves a slot on the Provider and makes the Instance and its Allocation. A

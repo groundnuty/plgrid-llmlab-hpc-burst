@@ -114,10 +114,18 @@ type placeOpts struct {
 	// will once Running (extraAlsoLeave), left free beside the new Allocation: the extra's slot is beyond its own
 	// handovers (HBEP-7, Its checks, a slot beyond its own handovers). Set with extra, on the Provider named by only.
 	alsoLeave int
+	// deadline, when set, is the start deadline of the replacement a hedge member is for, which the pass read from
+	// the hedge's need: a deferral never runs past it. It carries the deadline of a replacement hedge whose
+	// predecessor is gone, which a nil predecessor cannot give (growHedges; Astra's review of #724, point 3).
+	deadline time.Time
 }
 
-// provisionWith places one Instance by the steps placementOrder gives: the first that places it, or defers the
-// placement, ends the walk. It returns false when no step could take it.
+// provisionWith places one Instance by the steps placementOrder gives: the first that places it ends the walk. A warm
+// step that finds an unregistered warm Allocation (placeOnWarm: stepDeferred) holds the NEW SUBMISSIONS that come
+// after it, and no more: the walk goes on to the later warm steps, so a registered spare on a later Provider is still
+// taken, and retention cannot release it during the wait (HBEP-7, Provisioning, Where; amendment #719 as reworded,
+// and Astra's review of #724, point 4). With nothing placed and a hold standing, the placement is deferred until the
+// hold's end. It returns false when no step could take it.
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
@@ -125,25 +133,45 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 	if o.extra {
 		o.quiet = true // see placeOpts.extra
 	}
+	var holdUntil time.Time // when the submissions held by a deferral may go on; zero: none are held
+	hold := func(until time.Time) {
+		if holdUntil.IsZero() || until.Before(holdUntil) {
+			holdUntil = until
+		}
+	}
 	steps := p.placementOrder(pred, o)
 	for i, st := range steps {
+		if st.kind == stepSubmit && !holdUntil.IsZero() {
+			continue // held: a warm Allocation of this deployment is awaited
+		}
 		t := p.targetOf(st.pv, o, st.kind == stepSubmit)
 		if t == nil {
 			continue
 		}
 		var res stepResult
+		var until time.Time
 		var err error
 		switch {
 		case st.kind == stepWarm:
-			res, err = p.placeOnWarm(st.pv, t, pred, o)
-		case p.waitsForWarmBefore(pred, st, steps[i+1:], o):
-			res = stepStopped
+			res, until, err = p.placeOnWarm(st.pv, t, pred, o)
 		default:
+			if until, ok := p.waitsForWarmBefore(pred, st, steps[i+1:], o); ok {
+				hold(until)
+				continue
+			}
 			res, err = p.submitOn(st.pv, t, pred, o)
+		}
+		if res == stepDeferred {
+			hold(until)
+			continue
 		}
 		if res != stepPassed || err != nil {
 			return res == stepPlaced, err
 		}
+	}
+	if !holdUntil.IsZero() {
+		p.at(holdUntil)
+		p.deferred = true // a placement that waits is not a missing Provider
 	}
 	return false, nil
 }

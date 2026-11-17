@@ -242,38 +242,6 @@ func TestARestartDefersAMissingPrimaryForAnUnregisteredWarmAllocation(t *testing
 	}
 }
 
-// TestARestartWaitsForAnEarlierProvidersUnregisteredWarmAllocation: A's and B's warm Allocations, the deployment allows A,
-// then B, and the controller restarts at 09:00:00. B's agent registers again at once, A's does not. The placement waits
-// for A's, the earlier one in the order, though B's could take it (HBEP-7's order and the plan's Q3: a deferral
-// defers the whole placement, so a registered Allocation later in the order does not jump it). At 09:00:45 A's is
-// passed over, and the missing primary is placed on B's, with no submission.
-func TestARestartWaitsForAnEarlierProvidersUnregisteredWarmAllocation(t *testing.T) {
-	o := newOrdRig(t, ordOpts{})
-	o.create(ordMD(hoMD))
-	wa := o.warmUp(hoMD, rigProvider)
-	wb := o.warmUp(hoMD, ordB)
-	hoStepTo(o.rig, hoT(9, 0, 0), 5*time.Minute, nil)
-	o.allowOn(hoMD, 1, rigProvider, ordB)
-	o.restartedWith(wa)
-	start := o.clock.Now()
-	o.Step() // the first pass, at the restart: the grace counts from it
-	for i := 1; i <= 9; i++ {
-		o.clock.Advance(5 * time.Second)
-		o.Step()
-		at := o.clock.Now().Sub(start)
-		live := o.liveInstances(hoMD)
-		if at < agentGrace {
-			if len(live) != 0 {
-				t.Fatalf("at %s after the restart, inside the grace, %d live Instances: B's registered Allocation took the placement ahead of A's", at, len(live))
-			}
-			continue
-		}
-		if len(live) != 1 || live[0].Spec.AllocationRef.Name != wb || !sameAllocs(o.allocsOn(hoMD, rigProvider), []string{wa}) || !sameAllocs(o.allocsOn(hoMD, ordB), []string{wb}) {
-			t.Fatalf("at %s after the restart, the grace's end: %d live Instances (%v); want the missing primary on B's warm Allocation %s, with no new Allocation", at, len(live), live, wb)
-		}
-	}
-}
-
 // TestAReplacementsDeferralLapsAtItsStartDeadline (the plan's Q3, ruled 16 Nov 2026): P is on A, whose submit limit of
 // 1 P fills, and B holds a warm Allocation. The controller is down from 10:19:20 and restarts at 10:49:00, when P's
 // replacement, planned for 10:19:30, has not been made. B's agent has not registered again, so the warm step defers
