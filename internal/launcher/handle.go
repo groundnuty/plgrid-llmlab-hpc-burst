@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,8 +20,8 @@ import (
 // Process handles. A PID is only a number: the kernel gives it to the next process once the
 // recorded one has exited and been reaped. A pidfd is a handle on one process. It never comes to
 // mean another one, a signal sent through it reaches that process or nobody, and it turns
-// readable once the whole process (every thread) has exited. So the launcher decides "alive" and
-// "ours" only through a pidfd it holds:
+// readable once the process has exited. So the launcher decides "alive" and "ours" only through
+// a pidfd it holds:
 //
 //  1. take a pidfd for the recorded PID (pidfd_open; at launch, from clone itself);
 //  2. read the start time from /proc/<pid>/stat;
@@ -30,6 +31,31 @@ import (
 // /proc entry read in step 2 was its own. A matching start time and boot ID then make it the
 // recorded process, and the held pidfd pins it for every signal sent afterwards. Death is read
 // from the pidfd only, never from a /proc read that failed or came back empty.
+//
+// One poll of the pidfd can still read an exit that has not happened (#690). On Linux 6.15 and
+// later, pidfd_poll reads the task under RCU only, and its test is
+// `task->exit_state && !delay_group_leader(task)` (fs/pidfs.c; up to 6.14 it was
+// `exit_state && thread_group_empty(task)`, which reads the instant below as alive). While a
+// thread other than the leader runs execve, de_thread (fs/exec.c), holding tasklist_lock for
+// writing, hands the PID to that thread (exchange_tids) and only then sets the old leader's
+// exit_signal to -1. A poll that took the old leader before the hand-over and reads exit_signal
+// after it sees a zombie that is no longer a delayed group leader, and answers "readable" for a
+// process that is alive. On arm64 the two stores can be seen out of order, so even a second
+// poll at once is not a timing-free answer. k3s does exactly this when it re-executes itself.
+//
+// So a readable poll is confirmed before it counts as an exit (confirmExit, through
+// sysPidfd.exited), with waitid on the same pidfd (WEXITED|WNOHANG|WNOWAIT, which consumes
+// nothing). For the launcher's own child, waitid applies the kernel's wait predicate under
+// read_lock(tasklist_lock), which excludes de_thread: it reports the exit only for a group that
+// has really exited, and nothing at all for a live one. That is exact. For a process that is not
+// the launcher's child (one an earlier invocation started, which was reparented), waitid answers
+// ECHILD, and the answer is one more poll, final. This branch is exact only because waitid has
+// already taken tasklist_lock before it finds that the process is not a child, which orders the
+// next poll after any hand-over in progress. That is an implementation detail of the kernel's
+// __do_wait, verified at v6.8, v6.15 and master, not a documented guarantee. It is a stated
+// limit: if a kernel dropped that lock, this branch would degrade to a plain re-poll, which is
+// still exact on x86-64 and, on arm64, wrong only until the hand-over's first store reaches the
+// polling CPU.
 
 // pidfdAPI is the kernel's pidfd interface. Tests replace it to run the identity logic on a fake
 // /proc tree, whose PIDs are not real processes.
@@ -40,14 +66,88 @@ type pidfdAPI interface {
 	close(fd int)
 }
 
-type sysPidfd struct{}
+// sysPidfd is the kernel's pidfds. poll and wait are seams for tests: nil means pollPidfd and
+// waitPidfd, the real calls.
+type sysPidfd struct {
+	poll func(fd int) (bool, error)
+	wait func(fd int) (waitResult, error)
+}
 
 func (sysPidfd) open(pid int) (int, error) { return unix.PidfdOpen(pid, 0) }
 
-// exited polls the pidfd without waiting. The kernel makes it readable once every thread of the
-// process has exited (a leader that is a zombie while another thread runs, as during execve from
-// that thread, does not count), and reports a hang-up once the process has been reaped.
-func (sysPidfd) exited(fd int) (bool, error) {
+// waitResult is what waitid says about a pidfd whose poll read readable.
+type waitResult int
+
+const (
+	// childExited: the process is the caller's child, and it has really exited.
+	childExited waitResult = iota + 1
+	// childAlive: the process is the caller's child, and it is alive.
+	childAlive
+	// notChild: waitid answered ECHILD: the process is not the caller's child, or was reaped.
+	notChild
+)
+
+// pidfdOverturnedChild and pidfdOverturnedRepoll count the readable polls that confirmExit
+// overturned, one for each way it does it: waitid found the child alive, or waitid found no
+// child and the re-poll read not readable. Each is a transient of #690 that did not become a
+// false exit. Tests and the exec test's NUMBERS line read them.
+var (
+	pidfdOverturnedChild  atomic.Uint64
+	pidfdOverturnedRepoll atomic.Uint64
+)
+
+// confirmExit decides whether a process has exited from a poll of its pidfd and, when the poll
+// reads readable, one wait on it. poll reports whether the pidfd reads readable; wait is waitid
+// on the same pidfd. There is no count, no loop and no sleep.
+//
+//   - A poll that does not read readable means the process is alive: one call, no wait.
+//   - A readable poll is followed by wait. childExited means exited. childAlive means alive: the
+//     poll read the hand-over of an execve. notChild means one more poll, whose answer is final.
+//   - An error from poll or wait, or a result wait has no name for, is returned as the error.
+func confirmExit(poll func() (bool, error), wait func() (waitResult, error)) (bool, error) {
+	readable, err := poll()
+	if err != nil || !readable {
+		return false, err
+	}
+	w, err := wait()
+	if err != nil {
+		return false, err
+	}
+	switch w {
+	case childExited:
+		return true, nil
+	case childAlive:
+		pidfdOverturnedChild.Add(1)
+		return false, nil
+	case notChild:
+		readable, err = poll()
+		if err != nil {
+			return false, err
+		}
+		if !readable {
+			pidfdOverturnedRepoll.Add(1)
+		}
+		return readable, nil
+	}
+	return false, fmt.Errorf("a pidfd wait gave the result %d, which has no meaning", int(w))
+}
+
+// exited reports whether the process has exited, through confirmExit, so that a transient
+// readable poll (see the top of this file, #690) never reads as an exit. A live process costs one
+// poll; an exit costs the poll and a waitid, and a re-poll when the process is not a child.
+func (s sysPidfd) exited(fd int) (bool, error) {
+	poll, wait := s.poll, s.wait
+	if poll == nil {
+		poll = pollPidfd
+	}
+	if wait == nil {
+		wait = waitPidfd
+	}
+	return confirmExit(func() (bool, error) { return poll(fd) }, func() (waitResult, error) { return wait(fd) })
+}
+
+// pollPidfd polls the pidfd once without waiting and reports whether it is readable or hung up.
+func pollPidfd(fd int) (bool, error) {
 	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 	for {
 		_, err := unix.Poll(pfd, 0)
@@ -61,6 +161,30 @@ func (sysPidfd) exited(fd int) (bool, error) {
 			return false, fmt.Errorf("poll of pidfd %d: revents %#x", fd, pfd[0].Revents)
 		}
 		return pfd[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0, nil
+	}
+}
+
+// waitPidfd asks waitid whether the process behind the pidfd has exited, without waiting and
+// without reaping it (WNOWAIT leaves the zombie). The kernel decides this under tasklist_lock:
+// it reports SIGCHLD only for a child whose whole thread group has exited, and reports nothing
+// for a live child. A process that is not a child, or was reaped, gives ECHILD.
+func waitPidfd(fd int) (waitResult, error) {
+	for {
+		var info unix.Siginfo
+		err := unix.Waitid(unix.P_PIDFD, fd, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil)
+		switch {
+		case errors.Is(err, unix.EINTR):
+			continue
+		case errors.Is(err, unix.ECHILD):
+			return notChild, nil
+		case err != nil:
+			return 0, fmt.Errorf("waitid of pidfd %d: %w", fd, err)
+		case info.Signo == int32(unix.SIGCHLD):
+			return childExited, nil
+		case info.Signo == 0:
+			return childAlive, nil
+		}
+		return 0, fmt.Errorf("waitid of pidfd %d: unexpected si_signo %d", fd, info.Signo)
 	}
 }
 
@@ -137,8 +261,9 @@ func (h *procHandle) exited() (bool, error) {
 var errExited = errors.New("the process has exited")
 
 // statWhileHeld reads /proc/<pid>/stat, then confirms through the pidfd that the process had not
-// exited after the read, so the entry was its own. A read that fails while the pidfd says the
-// process lives is retried, and then reported as an error: never as an exit.
+// exited after the read, so the entry was its own. The pidfd's "exited" is the confirmed one
+// (confirmExit), since one readable poll can be a transient (#690). A read that fails while the
+// pidfd says the process lives is retried, and then reported as an error: never as an exit.
 func (h *procHandle) statWhileHeld() (procStat, error) {
 	var last error
 	for try := 0; try < 5; try++ {
