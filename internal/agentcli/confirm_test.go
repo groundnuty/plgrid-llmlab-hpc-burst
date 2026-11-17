@@ -1,0 +1,199 @@
+package agentcli
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+)
+
+const planCD = "fedcba9876543210"
+
+// planned is an Operation of agent A with a plan, not confirmed.
+func planned(name, planID string) *v1alpha1.Operation {
+	return opObject(name, userA, scaleSpec("m", 1), v1alpha1.OperationStatus{Phase: v1alpha1.OperationPhasePlanned, Plan: simplePlan(planID)})
+}
+
+// moveStatus is what the controller does between the CLI's read and its write: it writes the Operation's
+// status, which moves the resourceVersion, with a plan of the given ID.
+func moveStatus(w *world, name, planID string) {
+	op := w.operation(name)
+	op.Status.Plan = simplePlan(planID)
+	if err := w.store.Status().Update(context.Background(), op); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// conflictingStore makes a control plane whose first n updates of an Operation are overtaken by a status
+// write with the plan of ID after(i), so that the CLI's update carries a stale resourceVersion.
+func conflictingStore(t *testing.T, objs []client.Object, n int, after func(i int) string) (*world, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	var w *world
+	f := interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		i := int(calls.Add(1))
+		if i <= n {
+			moveStatus(w, obj.GetName(), after(i))
+		}
+		return c.Update(ctx, obj, opts...)
+	}}
+	w = newWorld(t, objs, f)
+	return w, &calls
+}
+
+func TestConfirmConfirmsTheNamedPlan(t *testing.T) {
+	w := newWorld(t, []client.Object{planned("op", planAB)})
+	w.controller("op", simplePlan(planAB), "")
+	if code := w.run("", "confirm", "op", "--plan", planAB); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	if op := w.operation("op"); op.Spec.Confirm == nil || op.Spec.Confirm.PlanID != planAB {
+		t.Errorf("confirm %v, want the plan", op.Spec.Confirm)
+	}
+	contains(t, "stdout", w.out.String(), "confirmed plan "+planAB+" of op", "phase: AwaitingApproval")
+	if got := w.writes(); len(got) != 1 || got[0] != "update *v1alpha1.Operation" {
+		t.Errorf("writes %v, want one Operation update and nothing else", got)
+	}
+}
+
+func TestConfirmRefusesAPlanThatIsNotTheCurrentOne(t *testing.T) {
+	w := newWorld(t, []client.Object{planned("op", planAB)})
+	if code := w.run("", "confirm", "op", "--plan", planCD); code != exitFail {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	contains(t, "stderr", w.errs.String(), "the current plan is "+planAB, "nothing was confirmed")
+	contains(t, "stdout", w.out.String(), "plan "+planAB)
+	if op := w.operation("op"); op.Spec.Confirm != nil {
+		t.Errorf("confirm %v: a plan that is not current was confirmed", op.Spec.Confirm)
+	}
+	if got := w.writes(); len(got) != 0 {
+		t.Errorf("writes %v, want none", got)
+	}
+}
+
+// Row 7: a status write that keeps the plan ID makes the confirm conflict; it reads again and is accepted.
+func TestConfirmRetriesAConflictWhileThePlanHolds(t *testing.T) {
+	w, calls := conflictingStore(t, []client.Object{planned("op", planAB)}, 2, func(int) string { return planAB })
+	w.controller("op", simplePlan(planAB), "")
+	if code := w.run("", "confirm", "op", "--plan", planAB); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	if n := calls.Load(); n != 3 {
+		t.Errorf("%d updates, want 3: two conflicts and the accepted one", n)
+	}
+	if op := w.operation("op"); op.Spec.Confirm == nil || op.Spec.Confirm.PlanID != planAB {
+		t.Errorf("confirm %v, want the plan", op.Spec.Confirm)
+	}
+}
+
+// Row 7: a re-plan during the retry makes it stop: exit 1, the new plan shown, nothing confirmed.
+func TestConfirmStopsWhenTheConflictBroughtANewPlan(t *testing.T) {
+	w, calls := conflictingStore(t, []client.Object{planned("op", planAB)}, 1, func(int) string { return planCD })
+	if code := w.run("", "confirm", "op", "--plan", planAB); code != exitFail {
+		t.Fatalf("exit %d, want 1; stdout %q", code, w.out.String())
+	}
+	contains(t, "stderr", w.errs.String(), "the current plan is "+planCD, "nothing was confirmed")
+	contains(t, "stdout", w.out.String(), "plan "+planCD)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("%d updates, want 1: the retry must not write a plan the caller has not seen", n)
+	}
+	if op := w.operation("op"); op.Spec.Confirm != nil {
+		t.Errorf("confirm %v after a re-plan", op.Spec.Confirm)
+	}
+}
+
+func TestConfirmGivesUpAfterFiveConflicts(t *testing.T) {
+	w, calls := conflictingStore(t, []client.Object{planned("op", planAB)}, 100, func(int) string { return planAB })
+	if code := w.run("", "confirm", "op", "--plan", planAB); code != exitFail {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if n := calls.Load(); n != 5 {
+		t.Errorf("%d updates, want 5", n)
+	}
+	contains(t, "stderr", w.errs.String(), "changed under 5 confirms")
+}
+
+func TestConfirmWhenAlreadyConfirmed(t *testing.T) {
+	op := planned("op", planAB)
+	op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planAB}
+	w := newWorld(t, []client.Object{op})
+	if code := w.run("", "confirm", "op", "--plan", planAB); code != exitOK {
+		t.Errorf("confirmed with the same plan: exit %d, want 0; stderr %q", code, w.errs.String())
+	}
+	contains(t, "stdout", w.out.String(), "already confirmed")
+	if got := w.writes(); len(got) != 0 {
+		t.Errorf("writes %v, want none", got)
+	}
+
+	// Confirmed with another plan, which is also the current one: the ask is for a different plan.
+	other := planned("op2", planAB)
+	other.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planCD}
+	w = newWorld(t, []client.Object{other})
+	if code := w.run("", "confirm", "op2", "--plan", planAB); code != exitFail {
+		t.Errorf("confirmed with another plan: exit %d, want 1", code)
+	}
+	contains(t, "stderr", w.errs.String(), "already confirmed with another plan ("+planCD+")")
+}
+
+func TestConfirmRefusalsAndErrors(t *testing.T) {
+	noPlan := opObject("noplan", userA, scaleSpec("m", 1), v1alpha1.OperationStatus{})
+	w := newWorld(t, []client.Object{noPlan})
+	if code := w.run("", "confirm", "noplan", "--plan", planAB); code != exitFail {
+		t.Errorf("no plan: exit %d", code)
+	}
+	contains(t, "stderr", w.errs.String(), "has no plan yet")
+	if code := w.run("", "confirm", "absent", "--plan", planAB); code != exitFail {
+		t.Errorf("absent: exit %d", code)
+	}
+	// The owner pin refuses another identity's confirm; the CLI reports it and exits 1.
+	forbid := interceptor.Funcs{Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: "operations"}, "op", errString("only an Operation's owner confirms its plan"))
+	}}
+	w = newWorld(t, []client.Object{planned("op", planAB)}, forbid)
+	if code := w.run("", "confirm", "op", "--plan", planAB); code != exitFail {
+		t.Errorf("forbidden: exit %d", code)
+	}
+	contains(t, "stderr", w.errs.String(), "only an Operation's owner confirms its plan")
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func TestConfirmJSON(t *testing.T) {
+	w := newWorld(t, []client.Object{planned("op", planAB)})
+	w.controller("op", simplePlan(planAB), "")
+	if code := w.run("", "confirm", "op", "--plan", planAB, "--json"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	var doc struct {
+		SchemaVersion int    `json:"schemaVersion"`
+		Result        string `json:"result"`
+		Operation     struct {
+			ConfirmedPlan string `json:"confirmedPlan"`
+			Phase         string `json:"phase"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(w.out.Bytes(), &doc); err != nil {
+		t.Fatalf("%v\n%s", err, w.out.String())
+	}
+	if doc.SchemaVersion != 1 || doc.Result != "confirmed" || doc.Operation.ConfirmedPlan != planAB || doc.Operation.Phase != "AwaitingApproval" {
+		t.Errorf("document %+v", doc)
+	}
+	// A changed plan: exit 1, the new plan on stdout as JSON.
+	w = newWorld(t, []client.Object{planned("op", planCD)})
+	if code := w.run("", "confirm", "op", "--plan", planAB, "--json"); code != exitFail {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if err := json.Unmarshal(w.out.Bytes(), &doc); err != nil || doc.Result != "planChanged" || !strings.Contains(w.out.String(), planCD) {
+		t.Errorf("document %q (%v), want result planChanged with the new plan", w.out.String(), err)
+	}
+}
