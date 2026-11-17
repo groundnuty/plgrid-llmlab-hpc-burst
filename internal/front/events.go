@@ -108,8 +108,9 @@ func raisedEvents(rec Recorder) *eventcount.Counter {
 
 // RaisedEvents returns the series the front can raise, each created at 0 on
 // its /metrics (HBEP-8, Raised events): the rows of HBEP-8's Reasons table
-// whose emitter is the front, with ObservationGap at its start and
-// HeartbeatMissed for its probe and the lifecycle Lease. Every one is
+// whose emitter is the front, with ObservationGap at its start,
+// HeartbeatMissed for its probe and the lifecycle Lease, and EventsNotLogged,
+// which the durable log's publisher raises through the front's recorder. Every one is
 // degraded or failing, so every one is a Warning. The drift guard checks this
 // list against the emit sites.
 func RaisedEvents() []eventcount.Series {
@@ -117,6 +118,7 @@ func RaisedEvents() []eventcount.Series {
 	for _, r := range []struct{ action, reason string }{
 		{eventDegraded, reasonCapacityDrop}, {eventDegraded, reasonCountsDrift}, {eventDegraded, reasonDrainWinShort},
 		{eventDegraded, reasonPathProbeFailing}, {eventDegraded, reasonObservationGap},
+		{eventDegraded, eventcount.ReasonEventsNotLogged},
 		{eventFailing, reasonHeartbeatMissed}, {eventFailing, reasonUsageWriteFailed},
 	} {
 		out = append(out, eventcount.Series{Reason: r.reason, Action: r.action, Type: provider.EventKindWarning})

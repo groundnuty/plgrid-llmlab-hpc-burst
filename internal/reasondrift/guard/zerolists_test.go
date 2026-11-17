@@ -15,6 +15,12 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
+// notLoggedPackage holds the one emit site of EventsNotLogged: the durable log's publisher raises it
+// through the recorder of whichever controller it serves (lifecycle, front, each Provider manager, the
+// managed one included), so each controller's list holds it, and the package's emit sites are read
+// into each list's pairs (HBEP-8, The durable log, When it is down).
+const notLoggedPackage = "internal/eventcount"
+
 // pair is one series of a controller without its controller and type: an event
 // of this action with this reason.
 type pair struct{ action, reason string }
@@ -96,6 +102,12 @@ func managedPairs(code *reasondrift.Code) (pairs map[pair]bool, bad []string) {
 	for p := range gapPairs(code) {
 		pairs[p] = true
 	}
+	// EventsNotLogged, which the durable log's publisher raises through the manager's recorder.
+	extra, more := emitPairs(code, notLoggedPackage)
+	bad = append(bad, more...)
+	for p := range extra {
+		pairs[p] = true
+	}
 	return pairs, bad
 }
 
@@ -105,7 +117,7 @@ func managedPairs(code *reasondrift.Code) (pairs map[pair]bool, bad []string) {
 // none), and the ObservationGap its manager raises at its start. A site the
 // scan could not resolve is returned in bad.
 func providerPairs(code *reasondrift.Code) (pairs map[pair]bool, bad []string) {
-	pairs, bad = emitPairs(code, "internal/providerctl")
+	pairs, bad = emitPairs(code, "internal/providerctl", notLoggedPackage)
 	for p := range pairs {
 		if p.action == reasondrift.NoAction {
 			delete(pairs, p)
@@ -173,10 +185,10 @@ type zeroList struct {
 
 var zeroLists = []zeroList{
 	{"lifecycle", lifecycle.RaisedEvents, func(c *reasondrift.Code) (map[pair]bool, []string) {
-		return emitPairs(c, "internal/lifecycle", "cmd/hpcburst-controller")
+		return emitPairs(c, "internal/lifecycle", "cmd/hpcburst-controller", notLoggedPackage)
 	}},
 	{"front", front.RaisedEvents, func(c *reasondrift.Code) (map[pair]bool, []string) {
-		return emitPairs(c, "internal/front")
+		return emitPairs(c, "internal/front", notLoggedPackage)
 	}},
 	{"managed", managed.RaisedEvents, managedPairs},
 	{"provider", providerctl.RaisedEvents, providerPairs},

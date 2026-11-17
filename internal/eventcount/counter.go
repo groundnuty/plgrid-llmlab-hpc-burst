@@ -21,6 +21,7 @@ package eventcount
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/tools/record"
@@ -30,6 +31,14 @@ import (
 const (
 	Name = "hpcburst_events_raised_total"
 	Help = "events handed to the event recorder, not events delivered: the recorder may aggregate or drop them"
+)
+
+// The unlogged counter's name and help text (HBEP-8, The durable log, When it is down; #625).
+// It exists only on a copy that runs with the durable log: without it nothing is published, so
+// nothing can be missed.
+const (
+	UnloggedName = "hpcburst_events_unlogged_total"
+	UnloggedHelp = "typed events the durable log did not take: the publisher's queue was full, its retries ran out, the events stream was full, the event had no subject, or the event's note was refused. They are in the cluster's own events only"
 )
 
 // Label names, in the counter's order.
@@ -68,19 +77,51 @@ type Series struct {
 // use.
 type Counter struct {
 	vec *prometheus.CounterVec
+	// unlogged is hpcburst_events_unlogged_total{controller}, the events the durable log did not
+	// take. A controller's series is created, at 0, when its recorder is wrapped with a log
+	// (WithLog), so a copy with no log exports none.
+	unlogged *prometheus.CounterVec
 }
 
 // New returns a Counter with no series.
 func New() *Counter {
-	return &Counter{vec: prometheus.NewCounterVec(prometheus.CounterOpts{Name: Name, Help: Help},
-		[]string{LabelController, LabelReason, LabelAction, LabelType})}
+	return &Counter{
+		vec: prometheus.NewCounterVec(prometheus.CounterOpts{Name: Name, Help: Help},
+			[]string{LabelController, LabelReason, LabelAction, LabelType}),
+		unlogged: prometheus.NewCounterVec(prometheus.CounterOpts{Name: UnloggedName, Help: UnloggedHelp}, []string{LabelController}),
+	}
 }
 
 // Describe implements prometheus.Collector.
-func (c *Counter) Describe(ch chan<- *prometheus.Desc) { c.vec.Describe(ch) }
+func (c *Counter) Describe(ch chan<- *prometheus.Desc) {
+	c.vec.Describe(ch)
+	c.unlogged.Describe(ch)
+}
 
 // Collect implements prometheus.Collector.
-func (c *Counter) Collect(ch chan<- prometheus.Metric) { c.vec.Collect(ch) }
+func (c *Counter) Collect(ch chan<- prometheus.Metric) {
+	c.vec.Collect(ch)
+	c.unlogged.Collect(ch)
+}
+
+// Unlogged is the value of the controller's hpcburst_events_unlogged_total series, and whether the
+// series exists. Reading it creates none.
+func (c *Counter) Unlogged(controller string) (value float64, exists bool) {
+	ch := make(chan prometheus.Metric)
+	go func() { c.unlogged.Collect(ch); close(ch) }()
+	for m := range ch {
+		var d dto.Metric
+		if err := m.Write(&d); err != nil {
+			continue
+		}
+		for _, l := range d.GetLabel() {
+			if l.GetName() == LabelController && l.GetValue() == controller {
+				value, exists = d.GetCounter().GetValue(), true
+			}
+		}
+	}
+	return value, exists
+}
 
 // Zero creates the controller's series at 0, so that an event never raised
 // shows a real 0 rather than an absent series (HBEP-8, Raised events: series
@@ -102,6 +143,7 @@ func (c *Counter) Forget(controller string, series []Series) {
 	for _, s := range series {
 		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
 	}
+	c.unlogged.DeleteLabelValues(controller)
 }
 
 // count adds one event to its series.
@@ -124,11 +166,14 @@ func mustCounter(c *Counter, controller string) {
 }
 
 // eventsRecorder counts each event, then hands it to client-go's events.k8s.io
-// recorder, in the same call.
+// recorder, in the same call. With a log (WithLog) it also hands a typed event to the durable
+// log's publisher, built from the same call's arguments.
 type eventsRecorder struct {
 	inner      events.EventRecorder
 	c          *Counter
 	controller string
+	// rt is the controller's route into the publisher, nil for a wrapper with no log.
+	rt *route
 }
 
 // IDRecorder is the recorder Events returns: client-go's events.k8s.io
@@ -137,38 +182,93 @@ type eventsRecorder struct {
 // an events.EventRecorder is unaffected.
 type IDRecorder interface {
 	events.EventRecorder
-	// EventfID raises the event as Eventf does and gives it the id. The id is
-	// the Nats-Msg-Id the durable log's publisher will store the event under;
-	// until PR E2 adds that publisher (#625) nothing reads it, so the call
-	// counts the event and hands it over exactly as Eventf does and drops the
-	// id. An event raised through Eventf gets a fresh UUID when the publisher
-	// exists.
+	// EventfID raises the event as Eventf does and gives it the id: the Nats-Msg-Id the durable
+	// log's publisher stores the event under. An event raised through Eventf takes a fresh UUID,
+	// kept across the publisher's retries. A wrapper with no log reads no id.
 	EventfID(id string, regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{})
+	// NotLogged counts an event the caller refused to raise, so that it reached neither the
+	// Kubernetes recorder nor the publisher, in hpcburst_events_unlogged_total, as any event the log
+	// did not take: the Provider controller refuses a typed note that names its job ID, and a refused
+	// note is not silently lost. It does nothing on a wrapper with no log.
+	NotLogged(regarding runtime.Object, reason string)
 }
+
+// Option changes what Events builds.
+type Option func(*options)
+
+type options struct{ log *Log }
+
+// Log is what a wrapper needs to publish its typed events to the durable log (beta; HBEP-8, The
+// durable log, Who writes). One Publisher serves the whole process; each wrapper brings its own
+// controller's way of describing and regarding its events.
+type Log struct {
+	// Publisher is the process's publisher. Nil is no log: the option does nothing, so a command
+	// without --event-log-token-file builds exactly what it built before.
+	Publisher *Publisher
+	// Scheme gives the kind of each object an event names, for the subject and the envelope.
+	Scheme *runtime.Scheme
+	// ReportingController is the field manager the wrapped recorder reports its events under, which
+	// is what the Kubernetes copy's reportingController says and so what the envelope's data does.
+	ReportingController string
+	// Lease reads the controller's own Lease from the API, for EventsNotLogged to regard it. Nil
+	// raises none: the loss is counted all the same.
+	Lease LeaseFunc
+}
+
+// WithLog makes the wrapper publish each typed event, an event with an action, to the durable log as
+// well as to the Kubernetes recorder, and count what the log did not take in
+// hpcburst_events_unlogged_total{controller}, whose series starts at 0 here. Every wrapper of one
+// controller shares one loss gate, so the controller raises one EventsNotLogged between them.
+func WithLog(l Log) Option { return func(o *options) { o.log = &l } }
 
 // Events wraps client-go's events.k8s.io recorder: each Eventf or EventfID call
 // counts the event under controller, with the reason, action and type it hands
 // over, and then hands it over. It panics on a nil recorder or Counter, or an
-// empty controller.
-func Events(inner events.EventRecorder, c *Counter, controller string) IDRecorder {
+// empty controller. With WithLog it also publishes the typed events to the durable log.
+func Events(inner events.EventRecorder, c *Counter, controller string, opts ...Option) IDRecorder {
 	if inner == nil {
 		panic("eventcount: Events wraps no recorder")
 	}
 	mustCounter(c, controller)
-	return eventsRecorder{inner: inner, c: c, controller: controller}
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	r := eventsRecorder{inner: inner, c: c, controller: controller}
+	if o.log != nil && o.log.Publisher != nil {
+		if o.log.Scheme == nil || o.log.ReportingController == "" {
+			panic("eventcount: a recorder wrapped with a log needs the scheme and the reporting controller")
+		}
+		r.rt = o.log.Publisher.routeFor(controller, c)
+		c.unlogged.WithLabelValues(controller) // the series starts at 0
+		r.rt.attach(routeSpec{scheme: o.log.Scheme, reporting: o.log.ReportingController, lease: o.log.Lease, rec: r})
+	}
+	return r
 }
 
-// Eventf implements events.EventRecorder.
+// Eventf implements events.EventRecorder. The time of the log's copy is read once, just before the
+// Kubernetes recorder's own call, which reads its own clock for eventTime inside it: the two copies
+// agree on their fields and on their times within microseconds (HBEP-8, The durable log, The
+// envelope; the science agent's ruling on #625's PR E2).
 func (r eventsRecorder) Eventf(regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
 	r.c.count(r.controller, reason, action, eventtype)
+	at := r.rt.clock()
 	r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)
+	r.rt.publish(at, "", regarding, related, eventtype, reason, action, note, args)
 }
 
-// EventfID implements IDRecorder: it counts and hands the event over exactly
-// as Eventf does. The id is unused until PR E2 adds the log's publisher.
-func (r eventsRecorder) EventfID(_ string, regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+// EventfID implements IDRecorder: it counts and hands the event over exactly as Eventf does, and
+// publishes it to the log, if there is one, under the id.
+func (r eventsRecorder) EventfID(id string, regarding runtime.Object, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
 	r.c.count(r.controller, reason, action, eventtype)
+	at := r.rt.clock()
 	r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)
+	r.rt.publish(at, id, regarding, related, eventtype, reason, action, note, args)
+}
+
+// NotLogged implements IDRecorder.
+func (r eventsRecorder) NotLogged(regarding runtime.Object, reason string) {
+	r.rt.refused(regarding, reason)
 }
 
 // legacyRecorder counts each event, then hands it to client-go's core/v1

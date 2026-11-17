@@ -94,6 +94,9 @@ func RaisedEvents() []eventcount.Series {
 	// ObservationGap, which each Provider manager raises at its start through the
 	// same recorder (gap.go), regarding its Lease.
 	out = append(out, eventcount.Series{Reason: reasonObservationGap, Action: eventDegraded, Type: provider.EventKindWarning})
+	// EventsNotLogged, which the durable log's publisher raises through the same recorder when the
+	// manager has one (internal/eventcount).
+	out = append(out, eventcount.Series{Reason: eventcount.ReasonEventsNotLogged, Action: eventDegraded, Type: provider.EventKindWarning})
 	sort.Slice(out, func(i, k int) bool { return out[i].Reason < out[k].Reason })
 	return out
 }
@@ -143,12 +146,17 @@ func (e *external) typedUnmarked(a *v1alpha1.Allocation, reason, note string, re
 }
 
 // refuseNote reports whether note names the Allocation's job ID as a token, and
-// counts and logs the refusal if so.
+// counts and logs the refusal if so. The refused event reaches neither the API nor
+// the durable log's publisher, so the recorder it was to go through counts it as not
+// logged (eventcount.IDRecorder.NotLogged): in hpcburst_events_unlogged_total under
+// provider-<name>, with the rest of the events the log did not take, and never silently
+// lost (HBEP-8, The durable log, When it is down; team-lead, 16 Nov 2026).
 func (e *external) refuseNote(a *v1alpha1.Allocation, reason, note string) bool {
 	for _, id := range recordedJobIDs(a) {
 		if containsToken(note, id) {
 			e.s.refusedNotes.Add(1)
 			e.s.o.Log.Info("a typed event whose note names the job ID is not raised", "reason", reason, "allocation", a.Namespace+"/"+a.Name)
+			e.s.o.TypedRecorder.NotLogged(a, reason)
 			return true
 		}
 	}
@@ -309,5 +317,7 @@ func (*nopTypedRecorder) Eventf(runtime.Object, runtime.Object, string, string, 
 
 func (*nopTypedRecorder) EventfID(string, runtime.Object, runtime.Object, string, string, string, string, ...interface{}) {
 }
+
+func (*nopTypedRecorder) NotLogged(runtime.Object, string) {}
 
 var _ eventcount.IDRecorder = &nopTypedRecorder{}
