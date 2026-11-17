@@ -187,8 +187,15 @@ func TestTheSpecRecordIsWrittenBeforeAnyAct(t *testing.T) {
 	w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
 	dead := false
 	w.fc.set(func(method string, obj client.Object) error {
-		switch obj.(type) {
-		case *v1alpha1.Instance, *v1alpha1.Allocation:
+		switch o := obj.(type) {
+		case *v1alpha1.Allocation:
+			// The kept-warm mark is written before the spec write and is no act (markBeforeActing): only a write that carries a
+			// release cause, or any other Allocation write, is the Operation's first act.
+			if method == "Update" && o.Annotations[v1alpha1.AnnotationKeptWarm] != "" && o.Annotations[v1alpha1.AnnotationReleaseCause] == "" {
+				break
+			}
+			dead = true // the first act of the Operation: the process dies with it
+		case *v1alpha1.Instance:
 			dead = true // the first act of the Operation: the process dies with it
 		}
 		if dead {
