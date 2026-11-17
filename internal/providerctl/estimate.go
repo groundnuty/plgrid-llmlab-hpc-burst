@@ -60,8 +60,10 @@ type estimator struct {
 	// apply writes the Provider's entries of the Operation by server-side apply, under
 	// FieldManagerProviderEstimate. It is a field so that the unit tests can see what is written.
 	apply func(ctx context.Context, op *v1alpha1.Operation, entries []v1alpha1.OperationEstimate) error
-	// bound is the time one Estimate may take (provider.EstimateTimeout; a test makes it short).
-	bound time.Duration
+	// bound is the time one Estimate may take, and window the age of a plan past which none is started: both
+	// provider.EstimateTimeout in production, where they are EQUAL (HBEP-10, The release cost: an estimate not filled in
+	// within 60 s reads as unknown). A test that scales one down scales the other with it.
+	bound, window time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]struct{}
@@ -115,7 +117,7 @@ func setupEstimates(mgr manager.Manager, c *Controller) error {
 	name := c.shared.o.Provider
 	e := &estimator{
 		s: c.shared, provider: name, cache: mgr.GetClient(), api: mgr.GetAPIReader(),
-		bound: provider.EstimateTimeout, inflight: map[string]struct{}{},
+		bound: provider.EstimateTimeout, window: provider.EstimateTimeout, inflight: map[string]struct{}{},
 	}
 	kube := mgr.GetClient()
 	e.apply = func(ctx context.Context, op *v1alpha1.Operation, entries []v1alpha1.OperationEstimate) error {
@@ -150,8 +152,8 @@ func writable(op *v1alpha1.Operation) *v1alpha1.OperationPlan {
 // in within that bound reads as unknown (HBEP-10, The release cost; `@hpc-burst-science-agent`, 17 Nov 2026, #661, Q3: none is
 // asked for a plan older than 60 s). The caller reads now once, for the decision; an estimate that started in time and ends
 // after the bound is written all the same, as a timeout is an entry with an unknown start (HBEP-4, Estimate).
-func tooOldToStart(plan *v1alpha1.OperationPlan, now time.Time) bool {
-	return now.Sub(plan.ObservedAt.Time) > provider.EstimateTimeout
+func (e *estimator) tooOldToStart(plan *v1alpha1.OperationPlan, now time.Time) bool {
+	return now.Sub(plan.ObservedAt.Time) > e.window
 }
 
 // ownTargets are the plan's targets this Provider estimates: a target with a
@@ -213,7 +215,7 @@ func (e *estimator) Reconcile(ctx context.Context, req reconcile.Request) (recon
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	plan := writable(&op)
-	if plan == nil || tooOldToStart(plan, e.now()) {
+	if plan == nil || e.tooOldToStart(plan, e.now()) {
 		return reconcile.Result{}, nil
 	}
 	targets := e.ownTargets(plan)
@@ -313,7 +315,7 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, ui
 	if err != nil || fresh == nil {
 		return err
 	}
-	if tooOldToStart(fresh.Status.Plan, e.now()) {
+	if e.tooOldToStart(fresh.Status.Plan, e.now()) {
 		return nil // this estimate's turn comes after the bound: it is not started, and the target reads as unknown
 	}
 	if slices.ContainsFunc(e.mine(fresh, planID), func(est v1alpha1.OperationEstimate) bool { return est.Shape == g.shape }) {
@@ -327,12 +329,16 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, ui
 
 	ectx, cancel := context.WithTimeout(ctx, e.bound)
 	res, estErr := platform.Estimate(ectx, g.req)
+	// A time-out is decided from THIS controller's own deadline, never from the runner's error: the deadline set here fires
+	// before the runner's own command time-out, and the runner then reports a transport error whose text names the context's
+	// error but does not wrap it (internal/slurm/sshrun, runClient). Read before cancel, which would set Canceled.
+	timedOut := estErr != nil && errors.Is(ectx.Err(), context.DeadlineExceeded)
 	cancel()
 	if estErr != nil {
 		// A fixed class, never the error's text: Slurm's own message keeps the account, a node's name and a job ID.
-		e.s.o.Log.Info("the estimate failed", "operation", req.String(), "class", estimateFailureClass(estErr))
+		e.s.o.Log.Info("the estimate failed", "operation", req.String(), "class", estimateFailureClass(estErr, timedOut))
 	}
-	entry := e.entry(planID, g, res, estErr)
+	entry := e.entry(planID, g, res, estErr, timedOut)
 
 	// The Operation again: the answer is written only onto the plan it was asked for, and with every
 	// entry of this Provider's for that plan, since an apply removes the entries it leaves out.
@@ -371,7 +377,7 @@ func (e *estimator) freshPlan(ctx context.Context, req reconcile.Request, uid ty
 // entry is one estimate's entry: the time, or why it is unknown. A failure is a
 // final unknown with a fixed reason, never an absent entry (the science agent,
 // 17 Nov 2026), and never an error's text.
-func (e *estimator) entry(planID string, g group, res provider.EstimateResult, err error) v1alpha1.OperationEstimate {
+func (e *estimator) entry(planID string, g group, res provider.EstimateResult, err error, timedOut bool) v1alpha1.OperationEstimate {
 	readAt := res.ReadAt
 	if readAt.IsZero() {
 		readAt = e.now()
@@ -380,7 +386,7 @@ func (e *estimator) entry(planID string, g group, res provider.EstimateResult, e
 	fig := v1alpha1.TimeFigure{ObservedAt: &observed, Advisory: true}
 	switch {
 	case err != nil:
-		fig.Unknown = estimateFailure(err)
+		fig.Unknown = estimateFailure(err, timedOut)
 	case res.Start != nil:
 		t := metav1.NewTime(res.Start.UTC())
 		fig.Time = &t
@@ -394,9 +400,9 @@ func (e *estimator) entry(planID string, g group, res provider.EstimateResult, e
 
 // estimateFailureClass is the fixed class of an estimate that failed, for the log: timeout, refused (before any call),
 // transport (no connection, or one that broke), or command (the command ran and failed, or the answer could not be had).
-func estimateFailureClass(err error) string {
+func estimateFailureClass(err error, timedOut bool) string {
 	switch {
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, slurm.ErrTimeout):
+	case timedOut, errors.Is(err, context.DeadlineExceeded), errors.Is(err, slurm.ErrTimeout):
 		return "timeout"
 	case errors.Is(err, provider.ErrInvalidRequest):
 		return "refused"
@@ -407,9 +413,9 @@ func estimateFailureClass(err error) string {
 }
 
 // estimateFailure is the fixed reason of an estimate that failed.
-func estimateFailure(err error) string {
+func estimateFailure(err error, timedOut bool) string {
 	switch {
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, slurm.ErrTimeout):
+	case timedOut, errors.Is(err, context.DeadlineExceeded), errors.Is(err, slurm.ErrTimeout):
 		return provider.EstimateTimedOut
 	case errors.Is(err, provider.ErrInvalidRequest):
 		return estimateRefused

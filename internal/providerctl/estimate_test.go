@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -95,7 +96,7 @@ func newEstEnv(t *testing.T) *estEnv {
 	e := newEnv(t)
 	log := &applyLog{c: e.c}
 	est := &estimator{s: e.ctl.shared, provider: testProvider, cache: e.c, api: e.c, apply: log.apply,
-		bound: time.Second, inflight: map[string]struct{}{}}
+		bound: time.Second, window: provider.EstimateTimeout, inflight: map[string]struct{}{}}
 	return &estEnv{env: e, est: est, log: log}
 }
 
@@ -733,6 +734,47 @@ func TestAnEstimateThatHangsIsUnknownAtTheBound(t *testing.T) {
 	}
 }
 
+// sshLikePlatform is a Platform whose Estimate hangs until its context ends and then fails as internal/slurm/sshrun does for a
+// parent's deadline (sshrun.go, runClient): ErrTransport with the context's error as TEXT, not wrapped, since the caller's
+// deadline fires before the runner's own command time-out. While it hangs, time moves: the shared fake clock is advanced past the
+// plan's window, as the real clock is by the time a call has run the whole bound.
+type sshLikePlatform struct {
+	*fakePlatform
+	advance time.Duration
+}
+
+func (p *sshLikePlatform) Estimate(ctx context.Context, _ provider.SubmitRequest) (provider.EstimateResult, error) {
+	<-ctx.Done()
+	p.clock.Advance(p.advance)
+	return provider.EstimateResult{}, fmt.Errorf("%w: %v", slurm.ErrTransport, ctx.Err())
+}
+
+// The production relation between the estimate's bound and the plan's window: they are EQUAL (provider.EstimateTimeout, 60 s;
+// scaled down together here), the plan is observed at T and the estimate starts at T, and time moves past T plus the window
+// while the call hangs. The runner reports the hang as sshrun does, ErrTransport with the context's error as text. The entry
+// is still applied, with the time-out reason: the controller decides a time-out from its own context, never from the runner's
+// error, which does not wrap one on a parent's deadline.
+func TestAHangReportedAsTheRealRunnerReportsItIsATimedOutEntry(t *testing.T) {
+	e := newEstEnv(t)
+	e.est.bound = 80 * time.Millisecond
+	setEstimateWindow(e.est, e.est.bound) // the bound IS the window
+	e.ctl.shared.o.NewPlatform = func(slurm.Validated) (Platform, io.Closer, error) {
+		return &sshLikePlatform{fakePlatform: e.platform, advance: e.est.bound + time.Millisecond}, io.NopCloser(nil), nil
+	}
+	a1 := e.newAlloc("alloc-1")
+	e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1)) // observed at T
+	if err := e.reconcileOp("op-1"); err != nil {                                     // starts at T
+		t.Fatal(err)
+	}
+	if !e.clock.Now().After(at(12, 0, 0).Add(e.est.bound)) {
+		t.Fatalf("the clock is at %v, want it past T plus the window: time did not move while the call hung", e.clock.Now())
+	}
+	got := e.stored("op-1")
+	if len(got) != 1 || got[0].Start.Time != nil || got[0].Start.Unknown != provider.EstimateTimedOut {
+		t.Fatalf("entries %+v, want one applied entry with the time-out reason (a hang the runner reports as a transport error)", got)
+	}
+}
+
 // The default platform (no answer set) is undecided: the entry says so.
 func TestAnUndecidedPlatformsEntryNamesTheReason(t *testing.T) {
 	e := newEstEnv(t)
@@ -863,3 +905,6 @@ func TestEstimateControllerStopsWithWorkInFlight(t *testing.T) {
 		stopWithWorkInFlight(t, round, controllerOptions(estimateWorkers))
 	}
 }
+
+// setEstimateWindow scales the plan's window together with the call's bound.
+func setEstimateWindow(e *estimator, w time.Duration) { e.window = w }

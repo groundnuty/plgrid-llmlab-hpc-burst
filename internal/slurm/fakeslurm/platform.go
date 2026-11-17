@@ -285,7 +285,10 @@ func (p *Platform) MaxConcurrent() int {
 }
 
 // ctxErr turns an ended context into the runner error the plugin reads: a
-// deadline is slurm.ErrTimeout, a cancellation slurm.ErrTransport.
+// deadline is slurm.ErrTimeout, a cancellation slurm.ErrTransport. It differs from the
+// real runner, which returns ErrTimeout only for the command's own time-out and
+// ErrTransport, with the context's error as text, for any end of the CALLER's context
+// (internal/slurm/sshrun, runClient); the test-only hang (testonly.go) uses that shape.
 func ctxErr(ctx context.Context) error {
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("%w: %v", slurm.ErrTimeout, ctx.Err())

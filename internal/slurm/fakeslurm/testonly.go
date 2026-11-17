@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 )
 
 // envVarTimeFormat is the one variable the plugin sets before sbatch, and
@@ -91,8 +93,9 @@ func (p *Platform) FailTestOnly(text string) {
 // HangTestOnly makes every later sbatch --test-only wait at the returned gate,
 // after it has been logged and with no lock held, until Release or until the
 // call's context ends: a command that does not answer. A context that ends first
-// fails the command with the runner error a time-out is (slurm.ErrTimeout for a
-// deadline). The test waits on the gate's Blocked, never on a sleep.
+// fails the command as the real runner does when the caller's deadline fires before
+// its own: slurm.ErrTransport with the context's error as text (hang below). The test
+// waits on the gate's Blocked, never on a sleep.
 func (p *Platform) HangTestOnly() *Gate {
 	g := &Gate{blocked: make(chan struct{}), release: make(chan struct{})}
 	p.mu.Lock()
@@ -240,7 +243,10 @@ func (sh *shell) hang(g *Gate) bool {
 	case <-g.release:
 		return true
 	case <-sh.ctx.Done():
-		sh.runErr = ctxErr(sh.ctx)
+		// The shape the real runner returns when the CALLER's context ends first (internal/slurm/sshrun, runClient): ErrTransport
+		// with the context's error as text, not wrapped. ErrTimeout is for the command's own time-out, which the caller's deadline
+		// beats when the caller bounds the call as Estimate does; ctxErr, which the other gates use, differs from this.
+		sh.runErr = fmt.Errorf("%w: %v", slurm.ErrTransport, sh.ctx.Err())
 		return false
 	}
 }

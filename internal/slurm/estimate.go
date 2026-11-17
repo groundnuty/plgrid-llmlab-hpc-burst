@@ -6,6 +6,7 @@ package slurm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -67,6 +68,13 @@ func (b *Batch) Estimate(ctx context.Context, req provider.SubmitRequest) (provi
 	}
 	res, runErr := b.runner.Run(ctx, Command{Line: line, Timeout: provider.EstimateTimeout})
 	if runErr != nil {
+		// A deadline of this call, its own bound or the caller's, that ran out is a time-out, whatever shape the runner reports it
+		// in: the real runner returns ErrTimeout only for its own command time-out, and for a deadline that fires first, as this
+		// call's does, a transport error whose text names the context's error but does not wrap it (internal/slurm/sshrun,
+		// runClient). Without this a hang would read as a transport failure.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && !errors.Is(runErr, ErrTimeout) {
+			return provider.EstimateResult{}, fmt.Errorf("sbatch --test-only: %w: it did not answer before its deadline", ErrTimeout)
+		}
 		return provider.EstimateResult{}, fmt.Errorf("sbatch --test-only: %w", runErr)
 	}
 	if res.ExitCode != 0 {

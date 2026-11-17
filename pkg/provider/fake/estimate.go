@@ -111,6 +111,9 @@ func (b *Batch) Estimate(ctx context.Context, req provider.SubmitRequest) (provi
 		select {
 		case <-hold.release:
 		case <-ctx.Done():
+			// The context's own error. The real plugin returns an error that wraps slurm.ErrTimeout for a deadline (and
+			// ErrTransport for another end), which this package cannot name; a caller therefore decides a time-out from its own
+			// context, never from this error, and gets the same answer from both (providerctl's estimator does).
 			return provider.EstimateResult{}, ctx.Err()
 		}
 	}

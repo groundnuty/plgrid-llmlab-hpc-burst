@@ -172,12 +172,14 @@ func TestTestOnlyHangEndsOnTheContextAndOnTheRelease(t *testing.T) {
 	r.p.SetTestOnlyStart(jan2027)
 	g := r.p.HangTestOnly()
 
-	// A deadline that passes while the command waits is the runner's time-out.
+	// A deadline that passes while the command waits ends it as the real runner ends a command whose CALLER's deadline fires
+	// before its own: ErrTransport, with the context's error as text only (sshrun.go, runClient), never ErrTimeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	res, err := r.s.Run(ctx, slurm.Command{Line: epochLine})
-	if !errors.Is(err, slurm.ErrTimeout) || len(res.Stdout)+len(res.Stderr) != 0 {
-		t.Fatalf("hung command = (%+v, %v), want slurm.ErrTimeout and no output", res, err)
+	if !errors.Is(err, slurm.ErrTransport) || errors.Is(err, slurm.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) ||
+		!strings.Contains(err.Error(), "deadline exceeded") || len(res.Stdout)+len(res.Stderr) != 0 {
+		t.Fatalf("hung command = (%+v, %v), want slurm.ErrTransport with the deadline as text only, and no output", res, err)
 	}
 	select {
 	case <-g.Blocked():
