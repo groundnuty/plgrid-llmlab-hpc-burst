@@ -1,0 +1,33 @@
+# DO NOT MERGE: a throwaway that runs #693's evidence (the diagnosis's T4) on a hosted runner, whose kernel
+# (6.15 or later) can show the race; the development VM's 6.8 cannot. The script builds the fix and a
+# mutant of it (a single pidfd poll, no waitid) and runs them interleaved, alone and under load. The step
+# log is the evidence, read by its "T4" lines.
+name: t4-690
+on:
+  pull_request:
+    paths:
+      - .github/workflows/t4-690.yml
+permissions:
+  contents: read
+jobs:
+  t4:
+    name: t4-pidfd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      - name: Run T4 (the fix and the mutant, interleaved)
+        run: ROUNDS=1 COUNT=10 EXEC_COUNT=3000 WORK="$RUNNER_TEMP/t4" bash .github/t4/hosted-t4.sh
