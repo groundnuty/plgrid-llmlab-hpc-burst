@@ -317,6 +317,10 @@ func (w *world) controller(name string, plan *v1alpha1.OperationPlan, waiting st
 	}
 }
 
+// reasonExecutionNotBuilt is the reason the controller of the test gives, written out: where the execution is built (PR 664) no
+// such constant exists, and the test only needs the controller to say something and leave the phase alone.
+const reasonExecutionNotBuilt = "ExecutionNotBuilt"
+
 // controllerNoApproval is the controller of a plan that needs no approval, as it is where the execution is not built (HBEP-10,
 // beta step 1): it writes the plan, and on the confirm it records that it has seen the generation and says that nothing runs,
 // and the phase stays Planned.
@@ -328,7 +332,7 @@ func (w *world) controllerNoApproval(name string, plan *v1alpha1.OperationPlan) 
 			w.planFor(name, plan)
 		case op.Spec.Confirm != nil && op.Status.ObservedGeneration < op.Generation:
 			op.Status.ObservedGeneration = op.Generation
-			op.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonExecutionNotBuilt,
+			op.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionFalse, Reason: reasonExecutionNotBuilt,
 				Message: "confirmed, and no target needs approval; this release plans Operations and does not execute them", LastTransitionTime: metav1.NewTime(w.now)}}
 			if err := w.store.Status().Update(context.Background(), op); err != nil {
 				w.t.Fatal(err)
