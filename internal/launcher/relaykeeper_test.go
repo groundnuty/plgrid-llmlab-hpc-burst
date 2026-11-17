@@ -103,7 +103,9 @@ func TestTheKeeperEntryOnlyWithRelayKeeper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--state-dir", l.dir, "--port-base", "28020", "--health-addr", ports.ControllerAddr(), "--front-mode", "host-dialed"}
+	want := []string{"--state-dir", l.dir, "--port-base", "28020", "--health-addr", ports.ControllerAddr(),
+		"--kubeconfig", l.dir + "/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", l.dir + "/identities/system/hpcburst-provider.kubeconfig",
+		"--front-mode", "host-dialed"}
 	if len(alpha) != 1 || !slices.Equal(alpha[0].Args, want) {
 		t.Fatalf("the supervised set without the keeper: %+v; want the controller alone, with %q", alpha, want)
 	}

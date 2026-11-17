@@ -45,6 +45,9 @@ type UpgradeReport struct {
 	StopToReady  int64        `json:"stop_to_ready_ms"`
 	RSSMiB       float64      `json:"rss_mib"`
 	Warnings     []string     `json:"warnings,omitempty"`
+	// ControllerIdentities are the identities issued for the controllers and the front before the supervisor
+	// started again (controller_identities.go); never the tokens. Empty when no controllers run.
+	ControllerIdentities []ControllerIdentity `json:"controller_identities,omitempty"`
 }
 
 // Upgrade moves a running host one step up (the next minor, or a newer patch of the same minor):
@@ -177,7 +180,11 @@ func Upgrade(ctx context.Context, o UpgradeOptions) (*UpgradeReport, error) {
 				return rep, err
 			}
 		}
-		if err := startSupervisor(ctx, l, nst, argv, superviseStartTimeout, o.Log); err != nil {
+		// The controllers' identities first, as up does: a host that an earlier release started has neither the
+		// roles nor the kubeconfigs, and the controller is told to read its own (controller_identities.go).
+		ids, err := startControllerSupervisor(ctx, l, nst, argv, superviseStartTimeout, o.Log)
+		rep.ControllerIdentities = ids
+		if err != nil {
 			return rep, fmt.Errorf("the new host is running and kept every object, but the controllers did not start again (hpcburst down, then up): %w", err)
 		}
 		// The restarted log can be held back for space although the upgrade passed its floor: that

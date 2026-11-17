@@ -10,13 +10,22 @@ import (
 
 // auditEvent is the part of an audit.k8s.io/v1 event the tests read.
 type auditEvent struct {
-	Level     string `json:"level"`
-	Verb      string `json:"verb"`
+	Level string `json:"level"`
+	Verb  string `json:"verb"`
+	// User is who made the request, as the API server authenticated it (user.username): a controller's
+	// ServiceAccount, an agent's, or the administrator.
+	User struct {
+		Username string `json:"username"`
+	} `json:"user"`
 	ObjectRef struct {
 		Resource  string `json:"resource"`
 		Namespace string `json:"namespace"`
 		Name      string `json:"name"`
 	} `json:"objectRef"`
+	// ResponseStatus is how the API server answered: the code is 403 for a request RBAC refused.
+	ResponseStatus struct {
+		Code int `json:"code"`
+	} `json:"responseStatus"`
 	hasBody bool // requestObject or responseObject is present
 }
 

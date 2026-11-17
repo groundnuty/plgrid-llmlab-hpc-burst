@@ -151,7 +151,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	profile := failoverProfile("failover-slurm")
 	prov := batchProvider("failover-batch", profile.Name, partX86, sshCredentials(t))
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "failover-allocs"}}
-	for _, o := range []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}, profile, prov, ns} {
+	for _, o := range []client.Object{profile, prov, ns} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}

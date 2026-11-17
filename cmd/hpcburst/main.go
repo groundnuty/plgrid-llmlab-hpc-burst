@@ -36,6 +36,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/version"
@@ -259,6 +260,9 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case launcher.GlobalPolicyNoCRD:
 		fmt.Fprintf(stdout, "global ApprovalPolicy: not written, the definition does not exist\n")
 	}
+	for _, id := range rep.ControllerIdentities {
+		fmt.Fprintf(stdout, "controller identity %s: issued, expires %s (%s)\n", id.Name, id.Expires.Format(time.RFC3339), id.Kubeconfig)
+	}
 	printAgentBuilds(stdout, rep.AgentBuilds)
 	return done()
 }
@@ -392,6 +396,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	printAdmission(w, r.AdmissionPolicies)
 	printGlobalPolicy(w, r.GlobalApprovalPolicy)
 	printAgents(w, r)
+	printControllerIdentities(w, r)
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
 	switch addr := r.Front != nil && r.Front.Set(); {
