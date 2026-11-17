@@ -10,8 +10,10 @@ package alpha
 //   - A's Scale of a deployment on P: planned, confirmed by A, and run on A's own approval;
 //   - A's Scale of a deployment on Q: A's approval and B's count under no policy that applies to Q, so it waits, and the
 //     person's approval runs it;
-//   - the person's End of the deployment on P, approved by the person: its Instances drain and its Allocations are released,
-//     and the fake Slurm's own record shows every job of the deployment ended.
+//   - the person's End of the deployment on Q, approved by the person (Provider Q has no policy of its own, so the global policy
+//     applies, and names the person; the person's approval would count for nothing on P, whose policy names agent A alone):
+//     its Instances drain and its Allocations are released, and the fake Slurm's own record shows every job of the deployment
+//     ended; no Instance is created after its commit.
 //
 // It proves the wiring on one host, not a cluster: a real cluster's queue, nodes and network are a live run's to show. It runs
 // only with HPCBURST_ALPHA_STANDIN=1, as the other stand-ins do (standin_test.go), and needs what they need: the four
@@ -27,10 +29,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -86,6 +90,62 @@ type opsStand struct {
 	cl     *stack.Cluster
 	person opsWho
 	a, b   opsWho
+
+	// causes are the release causes the Allocations carried, by UID, as a watch of every Allocation saw them: a cause is
+	// written before the delete and the object goes with its finalizer, so a read after the fact finds none.
+	mu     sync.Mutex
+	causes map[types.UID]string
+}
+
+// watchCauses starts the watch that fills causes, from the start of the run. A watch the API server closes is started again,
+// and the objects it lists again carry their annotations, so nothing a closed watch would have missed is lost.
+func (s *opsStand) watchCauses() {
+	t := s.t
+	t.Helper()
+	wc, err := client.NewWithWatch(stack.RestConfig(t, s.h.State), client.Options{Scheme: stack.APIScheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.causes = map[types.UID]string{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	started := make(chan struct{})
+	go func() {
+		first := true
+		for ctx.Err() == nil {
+			w, err := wc.Watch(ctx, &v1alpha1.AllocationList{}, client.InNamespace(stack.Namespace))
+			if err != nil {
+				time.Sleep(time.Second) // a failed start is tried again; nothing waits on this
+				continue
+			}
+			if first {
+				first = false
+				close(started)
+			}
+			for ev := range w.ResultChan() {
+				if a, ok := ev.Object.(*v1alpha1.Allocation); ok {
+					if c := a.Annotations[v1alpha1.AnnotationReleaseCause]; c != "" {
+						s.mu.Lock()
+						s.causes[a.UID] = c
+						s.mu.Unlock()
+					}
+				}
+			}
+			w.Stop()
+		}
+	}()
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the watch of Allocations did not start within 30 s")
+	}
+}
+
+// causeOf is the release cause the Allocation with the UID carried when the watch saw it, or "".
+func (s *opsStand) causeOf(uid types.UID) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.causes[uid]
 }
 
 // addIdentity runs hpcburst identity add NAME against the running host and returns the identity's client, made from the
@@ -527,6 +587,34 @@ func (s *opsStand) afterScale(op, md string, before map[types.UID]bool) map[stri
 		return len(open) == 0 && len(primaries) == 1 && ready >= 1, fmt.Sprintf("victims not ended Drained: %v; %d primaries; %d ready: %s", open, len(primaries), ready, s.instancesLine(md))
 	})
 	s.instanceLines(op+" settled", md)
+	// An Allocation the Scale committed as Keep is left to retention, which releases it (here, release-when-idle after 10 s)
+	// under its own cause, never under the Operation's (HBEP-10, The release cause).
+	for _, c := range s.op(op).Status.Committed {
+		if c.Kind != v1alpha1.TargetKindAllocation || c.Effect != v1alpha1.PlanEffectKeep {
+			continue
+		}
+		stack.WaitState(t, 3*time.Minute, "Operation "+op+"'s Keep Allocation "+c.Name+" to be released by retention", func() (bool, string) {
+			var a v1alpha1.Allocation
+			err := s.person.get(t, client.ObjectKey{Namespace: stack.Namespace, Name: c.Name}, &a)
+			switch {
+			case apierrors.IsNotFound(err) || (err == nil && a.UID != c.UID):
+				return true, ""
+			case err != nil:
+				return false, err.Error()
+			}
+			return false, fmt.Sprintf("still there, deleting %v, cause %q", !a.DeletionTimestamp.IsZero(), a.Annotations[v1alpha1.AnnotationReleaseCause])
+		})
+		cause := s.causeOf(c.UID)
+		ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(cause)
+		switch {
+		case cause == "":
+			t.Errorf("the watch saw no release cause on Allocation %s, which Operation %s committed as Keep and retention released", c.Name, op)
+		case ok:
+			t.Errorf("Allocation %s, committed as Keep by Operation %s, was released with the cause %q, which is Operation %s/%s %s's: a Keep is retention's to release, under retention's own cause", c.Name, op, cause, ns, name, uid)
+		default:
+			s.t.Logf("%s: allocation %s kept by the Operation, released by retention, cause %q", op, c.Name, cause)
+		}
+	}
 	return victims
 }
 
@@ -579,6 +667,7 @@ func TestStandInOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &opsStand{t: t, h: h, cl: cl, person: opsWhoIs(t, "person", admin, adminCS)}
+	s.watchCauses()
 	// Whatever wait times out, or check fails, the state it read is logged once, before the stack is stopped (a cleanup runs
 	// ahead of those StartCluster and StartHost registered): the run keeps no artifacts, so the log is all there is.
 	t.Cleanup(func() {
@@ -704,17 +793,22 @@ func TestStandInOperations(t *testing.T) {
 	}
 	victimsQ := s.afterScale("scale-q", opsMDQ, beforeQ)
 
-	s.settle("before end-p", opsMDP)
-	// The person's End of the deployment on P. The tags of its Allocations' jobs are read first: the fake Slurm's own record
-	// of those jobs is the end of the example.
+	s.settle("before end-q", opsMDQ)
+	// The person's End of the deployment on Q (the person's approval counts on Q, whose Provider has no policy of its own, so the
+	// global policy applies and names the person alone; on P it would not, since P's policy names agent A alone and an approval
+	// from an identity outside every policy that applies counts for nothing, HBEP-10). The tags of its Allocations' jobs are read
+	// first: the fake Slurm's own record of those jobs is the end of the example.
 	var tags []string
-	for _, a := range s.allocationsOf(opsMDP) {
+	tagUID := map[string]types.UID{}
+	for _, a := range s.allocationsOf(opsMDQ) {
 		if a.DeletionTimestamp.IsZero() {
-			tags = append(tags, v1alpha1.JobTag(a.Namespace, a.Name, a.UID))
+			tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
+			tags = append(tags, tag)
+			tagUID[tag] = a.UID
 		}
 	}
 	if len(tags) == 0 {
-		t.Fatal("the deployment on P has no Allocation to end")
+		t.Fatal("the deployment on Q has no Allocation to end")
 	}
 	// jobsOf is the fake Slurm's own record of the jobs under the tags, by tag.
 	jobsOf := func() map[string]string {
@@ -730,7 +824,7 @@ func TestStandInOperations(t *testing.T) {
 	}
 	// Before the approval every job of the deployment RUNS: the End is then what ends them, and a job that had ended by its
 	// own time limit before it could not pass the check below.
-	stack.WaitState(t, 3*time.Minute, "every job of the deployment on P to be running before the End is approved", func() (bool, string) {
+	stack.WaitState(t, 3*time.Minute, "every job of the deployment on Q to be running before the End is approved", func() (bool, string) {
 		got := jobsOf()
 		for _, tag := range tags {
 			if got[tag] != fakeslurm.Running {
@@ -739,25 +833,36 @@ func TestStandInOperations(t *testing.T) {
 		}
 		return true, ""
 	})
-	s.request(s.person, "end-p", opsMDP, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
-	s.confirm(s.person, "end-p")
-	s.waitOp("end-p", "AwaitingApproval", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseAwaitingApproval })
+	s.request(s.person, "end-q", opsMDQ, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
+	s.confirm(s.person, "end-q")
+	s.waitOp("end-q", "AwaitingApproval", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseAwaitingApproval })
 	// Before the approval nothing is released: a sentinel (an End of the same deployment, only ever planned) reads Planned
 	// once a pass of its key has run after the End waits, and only then is the End read, still waiting, with nothing committed,
-	// no end time, every Allocation alive and every job running.
-	s.request(s.person, "sentinel-p", opsMDP, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
-	if op := s.op("end-p"); op.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval || len(op.Status.Committed) != 0 {
-		t.Fatalf("Operation end-p is %s with %d committed targets before the approval, want it waiting with none", opsDescribe(op), len(op.Status.Committed))
+	// no end time, a live Instance, and none of the Allocations of ITS OWN plan being deleted nor its job anything but running
+	// (an earlier Operation's Allocation, a Scale's Keep that retention released, is not this End's to hold).
+	s.request(s.person, "sentinel-end-q", opsMDQ, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
+	endPlanned := s.op("end-q")
+	if endPlanned.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval || len(endPlanned.Status.Committed) != 0 {
+		t.Fatalf("Operation end-q is %s with %d committed targets before the approval, want it waiting with none", opsDescribe(endPlanned), len(endPlanned.Status.Committed))
 	}
-	if md := s.deployment(opsMDP); md.Spec.EndTime != nil {
-		t.Errorf("the deployment on P has the end time %v before the End is approved", md.Spec.EndTime)
+	ownAllocs := map[string]bool{}
+	for _, pt := range endPlanned.Status.Plan.Targets {
+		if pt.Kind == v1alpha1.TargetKindAllocation {
+			ownAllocs[pt.Name] = true
+		}
 	}
-	if live, _ := s.instancesOf(opsMDP); len(live) == 0 {
-		t.Error("the deployment on P has no live Instance before the End is approved")
+	if len(ownAllocs) == 0 {
+		t.Fatalf("the plan of the End of the deployment on Q has no Allocation target: %s", opsDescribe(endPlanned))
 	}
-	for _, a := range s.allocationsOf(opsMDP) {
-		if !a.DeletionTimestamp.IsZero() {
-			t.Errorf("Allocation %s is being deleted before the End is approved", a.Name)
+	if md := s.deployment(opsMDQ); md.Spec.EndTime != nil {
+		t.Errorf("the deployment on Q has the end time %v before the End is approved", md.Spec.EndTime)
+	}
+	if live, _ := s.instancesOf(opsMDQ); len(live) == 0 {
+		t.Error("the deployment on Q has no live Instance before the End is approved")
+	}
+	for _, a := range s.allocationsOf(opsMDQ) {
+		if ownAllocs[a.Name] && !a.DeletionTimestamp.IsZero() {
+			t.Errorf("Allocation %s, a target of the End's own plan, is being deleted before the End is approved", a.Name)
 		}
 	}
 	for tag, state := range jobsOf() {
@@ -765,41 +870,31 @@ func TestStandInOperations(t *testing.T) {
 			t.Errorf("the job %s is %s before the End is approved, want RUNNING", tag, state)
 		}
 	}
-	beforeEnd := uidsOf(s.allInstancesOf(opsMDP))
-	s.approve(s.person, "end-p")
-	// The End is Done once every target is. The Allocations are read while it runs: the release cause each carries, which is
-	// written before the delete, is the End's own proof that it, and not the end of a time limit, released the job.
-	causes := map[string]string{}
-	stack.WaitState(t, 10*time.Minute, "Operation end-p: Done", func() (bool, string) {
-		for _, a := range s.allocationsOf(opsMDP) {
-			if c := a.Annotations[v1alpha1.AnnotationReleaseCause]; c != "" {
-				causes[v1alpha1.JobTag(a.Namespace, a.Name, a.UID)] = c
-			}
-		}
-		op := s.op("end-p")
-		return op.Status.Phase == v1alpha1.OperationPhaseDone, opsDescribe(op)
-	})
-	end := s.op("end-p")
+	beforeEnd := uidsOf(s.allInstancesOf(opsMDQ))
+	s.approve(s.person, "end-q")
+	// The End is Done once every target is.
+	s.waitOp("end-q", "Done", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseDone })
+	end := s.op("end-q")
 	for _, o := range end.Status.Targets {
 		if o.State != v1alpha1.TargetStateDone {
 			t.Errorf("target %s %s of the End is %s, want Done", o.Kind, o.Name, o.State)
 		}
 	}
-	if md := s.deployment(opsMDP); md.Spec.EndTime == nil {
-		t.Error("the deployment on P has no end time after its End")
+	if md := s.deployment(opsMDQ); md.Spec.EndTime == nil {
+		t.Error("the deployment on Q has no end time after its End")
 	}
-	if live, _ := s.instancesOf(opsMDP); len(live) != 0 {
-		t.Errorf("the deployment on P still has %d live Instances after its End is Done: %s", len(live), s.instancesLine(opsMDP))
+	if live, _ := s.instancesOf(opsMDQ); len(live) != 0 {
+		t.Errorf("the deployment on Q still has %d live Instances after its End is Done: %s", len(live), s.instancesLine(opsMDQ))
 	}
 	// The End's shutdown provisions nothing: no Instance was created after its commit, whatever its predecessor.
-	s.instanceLines("end-p Done", opsMDP)
-	for _, in := range s.allInstancesOf(opsMDP) {
+	s.instanceLines("end-q Done", opsMDQ)
+	for _, in := range s.allInstancesOf(opsMDQ) {
 		if !beforeEnd[in.UID] {
-			t.Errorf("Instance %s of the deployment on P was created after the End's commit (predecessor %q): the shutdown provisions nothing", in.Name, in.Annotations[v1alpha1.AnnotationPredecessor])
+			t.Errorf("Instance %s of the deployment on Q was created after the End's commit (predecessor %q): the shutdown provisions nothing", in.Name, in.Annotations[v1alpha1.AnnotationPredecessor])
 		}
 	}
 	// The fake Slurm's own record: every job of the deployment's Allocations has ended, none is left running or pending.
-	stack.WaitState(t, 3*time.Minute, "the fake Slurm to show every job of the deployment on P ended", func() (bool, string) {
+	stack.WaitState(t, 3*time.Minute, "the fake Slurm to show every job of the deployment on Q ended", func() (bool, string) {
 		got := jobsOf()
 		for _, tag := range tags {
 			if !fakeslurm.IsTerminal(got[tag]) {
@@ -808,9 +903,9 @@ func TestStandInOperations(t *testing.T) {
 		}
 		return true, ""
 	})
-	// Each job ended because the End released it: the fake Slurm says CANCELLED (the Provider's finalizer cancelled it), or
-	// the release cause its Allocation carried names this End by namespace, name and UID. A job that ran out its time limit
-	// (TIMEOUT), or failed, is neither: it fails the check, whatever else holds.
+	// Each job ended because the End released it: the fake Slurm says CANCELLED (the Provider's finalizer cancelled it), or the
+	// release cause its Allocation carried, which the watch saw, names this End by namespace, name and UID. A job that ran out
+	// its time limit (TIMEOUT), or failed, is neither: it fails the check, whatever else holds.
 	got := jobsOf()
 	for _, tag := range tags {
 		state, seen := got[tag]
@@ -818,27 +913,28 @@ func TestStandInOperations(t *testing.T) {
 			t.Errorf("the fake Slurm holds no job under the tag %s: the check read nothing", tag)
 			continue
 		}
-		ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(causes[tag])
+		cause := s.causeOf(tagUID[tag])
+		ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(cause)
 		byThisEnd := ok && ns == end.Namespace && name == end.Name && uid == end.UID
 		switch {
 		case state == fakeslurm.Timeout || state == fakeslurm.NodeFail || state == fakeslurm.Failed:
 			t.Errorf("the job %s ended %s: it ran out its time limit or failed, the End did not end it", tag, state)
 		case state != fakeslurm.Cancelled && !byThisEnd:
-			t.Errorf("the job %s ended %s, and its Allocation's release cause was %q: want CANCELLED or the cause of Operation %s/%s %s", tag, state, causes[tag], end.Namespace, end.Name, end.UID)
+			t.Errorf("the job %s ended %s, and its Allocation's release cause was %q: want CANCELLED or the cause of Operation %s/%s %s", tag, state, cause, end.Namespace, end.Name, end.UID)
 		}
 	}
 	// At the end of the run, again: a late re-provision after a Scale, or any Instance after the End's commit, is caught too.
-	allP := s.allInstancesOf(opsMDP)
-	if bad := reprovisioned(allP, beforeP, victimsP); len(bad) > 0 {
+	if bad := reprovisioned(s.allInstancesOf(opsMDP), beforeP, victimsP); len(bad) > 0 {
 		t.Errorf("at the end, the deployment on P has Instances that are not a handover replacement of a primary that stays: %s", strings.Join(bad, "; "))
 	}
-	for _, in := range allP {
-		if !beforeEnd[in.UID] {
-			t.Errorf("at the end, Instance %s of the deployment on P was created after the End's commit", in.Name)
-		}
-	}
-	if bad := reprovisioned(s.allInstancesOf(opsMDQ), beforeQ, victimsQ); len(bad) > 0 {
+	allQ := s.allInstancesOf(opsMDQ)
+	if bad := reprovisioned(allQ, beforeQ, victimsQ); len(bad) > 0 {
 		t.Errorf("at the end, the deployment on Q has Instances that are not a handover replacement of a primary that stays: %s", strings.Join(bad, "; "))
+	}
+	for _, in := range allQ {
+		if !beforeEnd[in.UID] {
+			t.Errorf("at the end, Instance %s of the deployment on Q was created after the End's commit", in.Name)
+		}
 	}
 	s.instanceLines("end of the run, P", opsMDP)
 	s.instanceLines("end of the run, Q", opsMDQ)
