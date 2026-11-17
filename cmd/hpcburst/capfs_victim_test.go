@@ -39,6 +39,10 @@ type capVictimRecord struct {
 	Server testenv.ProcID `json:"server"` // the process that serves its volume
 	Mount  string         `json:"mount"`
 	Ctl    string         `json:"ctl"` // the volume's control directory, outside the mount
+	// Scratch is the directory that holds the victim's temporary directories (the server's output file is in one of them). The victim is
+	// killed, so the testing package never removes it, and the test that killed the victim does. No mount is under it: a volume's directory
+	// is made beside it, by os.MkdirTemp.
+	Scratch string `json:"scratch"`
 }
 
 // TestCapVictimWritesToItsVolume is the victim of TestAKilledTestProcessMidWriteLeavesADeadMountNotAWedgedOne: it makes a volume, records
@@ -48,6 +52,7 @@ func TestCapVictimWritesToItsVolume(t *testing.T) {
 	if _, ok := testenv.ChildRecordPath(); !ok {
 		return // an ordinary run of the tests: this is no victim
 	}
+	scratch := filepath.Dir(t.TempDir())
 	v := newCapVolume(t, capChildLimit)
 	victim, err := testenv.IdentityOf(os.Getpid())
 	if err != nil {
@@ -57,7 +62,7 @@ func TestCapVictimWritesToItsVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testenv.WriteChildRecord(t, capVictimRecord{Victim: victim, Server: server, Mount: v.mount, Ctl: v.ctl.dir})
+	testenv.WriteChildRecord(t, capVictimRecord{Victim: victim, Server: server, Mount: v.mount, Ctl: v.ctl.dir, Scratch: scratch})
 	v.stall()
 	err = os.WriteFile(filepath.Join(v.mount, "victim"), []byte("written by the victim"), 0o600)
 	t.Fatalf("the victim's write returned (%v), so the victim was not killed while its volume held the write", err)
@@ -90,12 +95,20 @@ func capThreadStates(pid int) string {
 
 // capCleanUpAfterVictim ends what the victim may have left, whatever state the test left it in: the server of its volume, if it still
 // runs (through a pidfd that was checked against its start time), a fusermount3 left for the mount point, and a mount left dead, with the
-// directory. A mount that is not dead is reported and left, with its directory.
+// directory, and the victim's scratch directory, which holds no mount. A mount that is not dead is reported and left, with its directory.
 func capCleanUpAfterVictim(t *testing.T, rec capVictimRecord) {
 	t.Helper()
 	if rec.Mount == "" {
 		return // the victim never made its volume
 	}
+	defer func() {
+		// Only the directory the victim's testing package made for it: under the temp directory, and named for the victim's test.
+		if rec.Scratch != "" && filepath.Dir(rec.Scratch) == filepath.Clean(os.TempDir()) && strings.HasPrefix(filepath.Base(rec.Scratch), capVictimTest) {
+			if err := os.RemoveAll(rec.Scratch); err != nil {
+				t.Errorf("removing the victim's scratch directory: %v", err)
+			}
+		}
+	}()
 	if p, err := testenv.OpenProc(rec.Server); err == nil {
 		_ = p.Kill()
 		if !p.WaitExit(capChildBound) {
