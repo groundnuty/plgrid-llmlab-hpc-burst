@@ -76,10 +76,14 @@ func (w *cliWorld) cliAllocation(t *testing.T, name, md string, status v1alpha1.
 	if err := w.e.admin.c.Create(w.e.ctx, a); err != nil {
 		t.Fatalf("create Allocation %s: %v", name, err)
 	}
-	a.Status = status
-	if err := w.e.admin.c.Status().Update(w.e.ctx, a); err != nil {
-		t.Fatalf("write the status of Allocation %s: %v", name, err)
-	}
+	w.retryConflict(t, "write the status of Allocation "+name, func() error {
+		var cur v1alpha1.Allocation
+		if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: name}, &cur); err != nil {
+			return err
+		}
+		cur.Status = status
+		return w.e.admin.c.Status().Update(w.e.ctx, &cur)
+	})
 }
 
 // cliInstance is an Instance on an Allocation, with its status.
@@ -97,10 +101,14 @@ func (w *cliWorld) cliInstance(t *testing.T, name, alloc string, status v1alpha1
 	if err := w.e.admin.c.Create(w.e.ctx, in); err != nil {
 		t.Fatalf("create Instance %s: %v", name, err)
 	}
-	in.Status = status
-	if err := w.e.admin.c.Status().Update(w.e.ctx, in); err != nil {
-		t.Fatalf("write the status of Instance %s: %v", name, err)
-	}
+	w.retryConflict(t, "write the status of Instance "+name, func() error {
+		var cur v1alpha1.Instance
+		if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: name}, &cur); err != nil {
+			return err
+		}
+		cur.Status = status
+		return w.e.admin.c.Status().Update(w.e.ctx, &cur)
+	})
 }
 
 // storeWorld makes the person's world: the Provider with its status, the deployment md of two Instances, and the two
@@ -332,13 +340,36 @@ func (w *cliWorld) storeKept(t *testing.T, name, alloc string) {
 	started, hardEnd := metav1.NewTime(now.Add(-time.Hour)), metav1.NewTime(now.Add(3*time.Hour))
 	w.cliAllocation(t, alloc, name, v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{
 		Phase: v1alpha1.AllocationRunning, StartTime: &started, HardEnd: &hardEnd}})
-	var a v1alpha1.Allocation
-	if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: alloc}, &a); err != nil {
-		t.Fatal(err)
-	}
-	a.Labels["tier"] = "kept"
-	if err := w.e.admin.c.Update(w.e.ctx, &a); err != nil {
-		t.Fatalf("label Allocation %s: %v", alloc, err)
+	w.retryConflict(t, "label Allocation "+alloc, func() error {
+		var a v1alpha1.Allocation
+		if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: alloc}, &a); err != nil {
+			return err
+		}
+		a.Labels["tier"] = "kept"
+		return w.e.admin.c.Update(w.e.ctx, &a)
+	})
+}
+
+// retryConflict runs a person-side write until it lands: a Conflict means the stepper (or the API server) wrote the same object
+// between the write's read and its update, which is no fault of the test, so the write reads again and tries again, with a
+// generous bound, and fails the test for any other error. fn reads the object afresh on every call, so what it writes is built on
+// what the stepper wrote.
+func (w *cliWorld) retryConflict(t *testing.T, what string, fn func() error) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := fn()
+		switch {
+		case err == nil:
+			return
+		case !apierrors.IsConflict(err):
+			t.Errorf("%s: %v", what, err)
+			return
+		case time.Now().After(deadline):
+			t.Errorf("%s: still a conflict after 30 s: %v", what, err)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -472,32 +503,29 @@ func (h *putHook) sequence() []string {
 // meets a Conflict.
 func (w *cliWorld) personWritesStatus(t *testing.T, name string) {
 	t.Helper()
-	op := &v1alpha1.Operation{}
-	if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: name}, op); err != nil {
-		t.Errorf("read Operation %s: %v", name, err)
-		return
-	}
-	apimeta.SetStatusCondition(&op.Status.Conditions, metav1.Condition{Type: "PersonNote", Status: metav1.ConditionTrue, Reason: "Noted",
-		Message: "written between a command's read and its update", LastTransitionTime: metav1.Now()})
-	if err := w.e.admin.c.Status().Update(w.e.ctx, op); err != nil {
-		t.Errorf("write the status of Operation %s: %v", name, err)
-	}
+	w.retryConflict(t, "write the status of Operation "+name, func() error {
+		op := &v1alpha1.Operation{}
+		if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: name}, op); err != nil {
+			return err
+		}
+		apimeta.SetStatusCondition(&op.Status.Conditions, metav1.Condition{Type: "PersonNote", Status: metav1.ConditionTrue, Reason: "Noted",
+			Message: "written between a command's read and its update", LastTransitionTime: metav1.Now()})
+		return w.e.admin.c.Status().Update(w.e.ctx, op)
+	})
 }
 
 // personReplans edits the deployment's spec, which moves its generation and so the plan's ID, and waits until the stepper has
 // written the Operation's new plan: the Operation's resourceVersion has moved and its plan is another.
 func (w *cliWorld) personReplans(t *testing.T, name, oldID string) {
 	t.Helper()
-	var md v1alpha1.ModelDeployment
-	if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: opMD}, &md); err != nil {
-		t.Errorf("read the deployment: %v", err)
-		return
-	}
-	md.Spec.Workload.TargetSessions++
-	if err := w.e.admin.c.Update(w.e.ctx, &md); err != nil {
-		t.Errorf("edit the deployment: %v", err)
-		return
-	}
+	w.retryConflict(t, "edit the deployment", func() error {
+		var md v1alpha1.ModelDeployment
+		if err := w.e.admin.c.Get(w.e.ctx, types.NamespacedName{Namespace: rigNS, Name: opMD}, &md); err != nil {
+			return err
+		}
+		md.Spec.Workload.TargetSessions++
+		return w.e.admin.c.Update(w.e.ctx, &md)
+	})
 	w.operationIs(t, name, "is planned again", func(o *v1alpha1.Operation) bool { return o.Status.Plan != nil && o.Status.Plan.ID != oldID })
 }
 
