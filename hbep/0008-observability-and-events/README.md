@@ -172,7 +172,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 |---|---|---|---|
 | `started` | `AgentRegistered` | Instance | lifecycle controller |
 | `ready` | `Ready`; `ShapesFit` | Instance; ModelDeployment | lifecycle controller |
-| `degraded` | `ReplacementLate`, `RestartLoop`, `IdentityUnresolved` | ModelDeployment | lifecycle controller |
+| `degraded` | `ReplacementLate`, `RestartLoop`, `IdentityUnresolved`, `ReferenceSuspect` | ModelDeployment | lifecycle controller |
 | `degraded` | `VerificationFailed`, `CapacityDropped` | ModelDeployment, else the Instance once the ModelDeployment is gone | lifecycle controller |
 | `degraded` | `CapacityDropped`, `CountsDrift` | ModelDeployment | front |
 | `degraded` | `DrainWindowShort` | PlatformProfile | front |
@@ -790,6 +790,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: the science agent's decisions on the billing count, memory per GPU, records and the comparison.
 - 2026-11-16: revised by its Fable review (PR #621): the documented GH200 share is settled by the comparison's GH200 window, and the records' names rest on the owner's decision of 28 Oct 2026.
 - 2026-11-16: erratum: `RankedOut`, the `replaced` event regarding each ranked-out Instance, with the Instance it ranked below, or that outranked it, in `related`, joins the Reasons table with the code that raises it (#616), as HBEP-7's Over-allocation and qualification (beta) says.
+- 2026-11-16: erratum: `ReferenceSuspect`, the `degraded` event regarding the ModelDeployment, naming the entry, when an expected-performance entry is suspended after two Allocations in a row missed it, joins the Reasons table with the code that raises it (#616), as HBEP-7's Over-allocation and qualification (beta) says.
 - 2026-11-16: the durable log's build rulings for #625: no job ID in any note the log keeps; the forwarder on an empty stream starts within the cap; the store's size on disk for the floor; the log's copy is paired with its backup; ids and the deletion trigger fixed.
 - 2026-11-16: no path, user name, account or grant in a note the log keeps; a copied error gives the reason code and a fixed description (for #640).
 - 2026-11-16: erratum: `PlanStale`, the `degraded` event regarding an Operation whose plan, recomputed once before it was committed, was no longer the approved one, joins the Reasons table with the code that raises it (#589, PR 5), as HBEP-10's Proposed event reasons says.

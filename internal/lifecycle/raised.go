@@ -20,7 +20,7 @@ var raisedByLifecycle = map[string][]string{
 	eventDegraded: {
 		v1alpha1.ReasonReplacementLate, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonIdentityUnresolved,
 		v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonCapacityDropped, v1alpha1.EventReasonTunnelOrphaned,
-		reasonObservationGap, v1alpha1.ReasonPlanStale,
+		reasonObservationGap, v1alpha1.ReasonPlanStale, v1alpha1.ReasonReferenceSuspect,
 	},
 	eventFailing: {
 		v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonInstanceRestart, v1alpha1.ReasonRestartLoop,

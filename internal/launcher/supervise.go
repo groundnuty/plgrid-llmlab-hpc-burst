@@ -149,7 +149,8 @@ type supervised struct {
 	startAfter <-chan struct{}
 	settle     func()
 	// ready, when set, is what "healthy" means for settle, instead of GET /healthz alone: the log is
-	// ready once its two streams exist, which /healthz does not say.
+	// ready once its two streams exist and a client with its token connects (eventlog_ready.go),
+	// which /healthz does not say.
 	ready func() bool
 }
 
