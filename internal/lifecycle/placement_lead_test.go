@@ -224,6 +224,8 @@ func TestAStartedLoserThirtyMinutesAfterItsPredecessorIsNotPlacedOn(t *testing.T
 		return next.Name != ""
 	})
 	prov, alloc := where(next)
+	h.clock.Advance(10 * time.Second)
+	h.Step() // the provider submits the new Allocation's job in the step after its creation
 	if prov != rigProvider || alloc == r1Alloc || h.batch.Count("sbatch") != subsA+1 {
 		t.Fatalf("P's new replacement is on %s, Allocation %s, with %d new submissions on A; want a new Allocation on A (1 submission), not R1's kept %s: it drains only 30 min after P", prov, alloc, h.batch.Count("sbatch")-subsA, r1Alloc)
 	}
