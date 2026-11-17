@@ -6,7 +6,7 @@ package lifecycle
 // reviews). The rows put a spare's drain start EXACTLY the lead after the primary's, where it is taken, and one second
 // short, where the placement goes on to the next step, through the three paths that place on warm capacity: the
 // replacement's cross-Provider sweep, a hedge member, and the no-overlap decision. The primary starts at 09:00:20 with
-// a 4 h limit (hard end 13:00:20, drain start 10:50:20); B's spare started at 08:00:20 on an 8 h 20 min partition,
+// a 4 h limit (hard end 13:00:20, drain start 10:50:20); B's spare started at 08:00:20 on an 8 h 40 min partition,
 // hard end 16:40:20, drain start 14:30:20, which is 3 h 40 min after the primary's; one second short is the primary
 // starting a second later (ordOpts.primaryOffset), its drain start 10:50:21.
 
@@ -20,7 +20,7 @@ import (
 )
 
 // ordLeadBMax is B's partition limit for the lead rows: its spare, started at 08:00:20, has its hard end at 16:40:20.
-const ordLeadBMax = 8*time.Hour + 20*time.Minute
+const ordLeadBMax = 8*time.Hour + 40*time.Minute
 
 // leadCases are the two sides of the boundary: the primary's start offset, and whether the spare is taken.
 var leadCases = []struct {
