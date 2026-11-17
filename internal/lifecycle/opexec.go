@@ -537,10 +537,24 @@ func (p *pass) committedAllocation(t v1alpha1.CommittedTarget) (*v1alpha1.Alloca
 
 // operationCause is the release cause of an Allocation that an Executing Operation committed to release: the
 // Operation's, whichever path of the pass deletes it (the Operation's own act, step 6's shutdown, retention).
+// A failure that releases the Allocation first keeps the failure's own cause (releasePending: an Instance on it ended with a
+// failure reason, releaseRequired): a committed target that a gate miss, RestartLoop, or a failed or lost Allocation
+// releases keeps the failure's cause, whichever path of the pass deletes it; the plan, not the cause, shows that the Operation
+// would also have released it (HBEP-10, The release cause, as amended by the science agent's ruling on #664, 17 Nov 2026).
+// The Operation's own act passes its cause itself (actOnTarget), and an Instance that ends cleanly, by the Operation or by the
+// shutdown, is no failure.
+func (p *pass) operationCause(a *v1alpha1.Allocation) (string, bool) {
+	if p.releasePending(a) {
+		return "", false
+	}
+	return p.committedReleaseCause(a)
+}
+
+// committedReleaseCause is the cause of an Allocation that an Executing Operation committed to release, when there is one.
 // Only a releasing effect counts. A Keep stays retention's: when retention releases it later, its cause is its own. So does a
 // target recorded as failed for good (recordedFinal): the Operation did not release it, and a later release of it is
 // retention's or the shutdown's, never the Operation's.
-func (p *pass) operationCause(a *v1alpha1.Allocation) (string, bool) {
+func (p *pass) committedReleaseCause(a *v1alpha1.Allocation) (string, bool) {
 	for _, op := range p.ops {
 		if !isExecuting(op) {
 			continue
@@ -554,10 +568,21 @@ func (p *pass) operationCause(a *v1alpha1.Allocation) (string, bool) {
 	return "", false
 }
 
+// failureOn returns the reason, and the Instance's name, of an Instance on the named Allocation that ended with a failure
+// (releaseRequired).
+func (p *pass) failureOn(alloc string) (reason, instance string, ok bool) {
+	for _, in := range p.insts {
+		if in.Spec.AllocationRef.Name == alloc && releaseRequired(in) {
+			return in.Status.EndReason, in.Name, true
+		}
+	}
+	return "", "", false
+}
+
 // committedForRelease reports whether an Executing Operation committed the Allocation for release: nothing is placed on it
 // (warmAllocation).
 func (p *pass) committedForRelease(a *v1alpha1.Allocation) bool {
-	_, ok := p.operationCause(a)
+	_, ok := p.committedReleaseCause(a)
 	return ok
 }
 

@@ -403,7 +403,9 @@ type TargetOutcome struct {
 	// +kubebuilder:validation:MaxLength=256
 	Reason string `json:"reason,omitempty"`
 
-	// Message says what failed.
+	// Message says what failed. On a done Allocation that a failure released before the Operation did (a gate miss,
+	// RestartLoop, an Allocation failed or lost), it names that failure ("released by QualificationFailed"): the
+	// Allocation's release cause is the failure's, not the Operation's (HBEP-10, The release cause).
 	//
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024

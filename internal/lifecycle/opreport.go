@@ -229,6 +229,9 @@ func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, dele
 			}
 			if done {
 				o.State = v1alpha1.TargetStateDone
+				if t.Kind == v1alpha1.TargetKindAllocation && releasingEffect(t.Effect) {
+					o.Message = p.releasedByMessage(t, was)
+				}
 			} else if reason, msg, bad, err = p.targetFailure(t, failed[t.UID], deleting); err != nil {
 				return nil, err
 			}
@@ -242,6 +245,21 @@ func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, dele
 		out = append(out, o)
 	}
 	return out, nil
+}
+
+// releasedByMessage is the message of a releasing Allocation target that is gone: when a failure released it first (an
+// Instance on it ended with a failure reason: a gate miss, RestartLoop, an Allocation failed or lost), the report names
+// that failure, and never says the Operation released it (HBEP-10, The report, as amended by the science agent's ruling on
+// #664, 17 Nov 2026). Once said, it is kept while the Instance's tombstone goes. It is empty when the Operation, or the
+// controller's own scale-down or retention, released it.
+func (p *pass) releasedByMessage(t v1alpha1.CommittedTarget, was *v1alpha1.TargetOutcome) string {
+	if reason, instance, ok := p.failureOn(t.Name); ok {
+		return eventNote(fmt.Sprintf("released by %s: Instance %s failed, and its failure released the Allocation before the Operation did, so the release cause is the failure's", reason, instance))
+	}
+	if was != nil && was.State == v1alpha1.TargetStateDone && strings.HasPrefix(was.Message, "released by ") {
+		return was.Message
+	}
+	return ""
 }
 
 // failureLines says each failed target of the report in a line: its kind, name, reason and message.

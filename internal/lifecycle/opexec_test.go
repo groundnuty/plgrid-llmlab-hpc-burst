@@ -190,17 +190,22 @@ func TestAReleaseCauseIsTheOperationsOnlyForAReleasingCommittedTarget(t *testing
 		queued    bool // the Allocation's job has not started
 		finished  bool
 		recorded  string // the reason of the target's recorded outcome, when it is Failed
+		endedWith string // the end reason of an Instance that ran on the Allocation and has ended
 		wantOwnOp bool
 	}{
-		{"a committed ReleaseStarted", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, "", true},
-		{"a committed CancelPending of a job still queued", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhasePartlyFailed, true, false, "", true},
-		{"a committed CancelPending whose job started: it is not the Operation's release", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhaseExecuting, false, false, "", false},
-		{"a committed ReleaseKept", v1alpha1.PlanEffectReleaseKept, v1alpha1.OperationPhaseExecuting, false, false, "", true},
-		{"a committed Keep keeps retention's cause", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false, false, "", false},
-		{"an Operation that is Done counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseDone, false, false, "", false},
-		{"a PartlyFailed Operation with a finish time counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhasePartlyFailed, false, true, "", false},
-		{"a committed ReleaseStarted recorded as failed for good (LastReadySinceCommit): not the Operation's release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, reasonLastReadySinceCommit, false},
-		{"a committed ReleaseStarted recorded as failed, but by a failure a retry can fix: still the Operation's release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, reasonReleaseFailed, true},
+		{"a committed ReleaseStarted", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, "", "", true},
+		{"a committed CancelPending of a job still queued", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhasePartlyFailed, true, false, "", "", true},
+		{"a committed CancelPending whose job started: it is not the Operation's release", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhaseExecuting, false, false, "", "", false},
+		{"a committed ReleaseKept", v1alpha1.PlanEffectReleaseKept, v1alpha1.OperationPhaseExecuting, false, false, "", "", true},
+		{"a committed Keep keeps retention's cause", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false, false, "", "", false},
+		{"an Operation that is Done counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseDone, false, false, "", "", false},
+		{"a PartlyFailed Operation with a finish time counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhasePartlyFailed, false, true, "", "", false},
+		{"a committed ReleaseStarted recorded as failed for good (LastReadySinceCommit): not the Operation's release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, reasonLastReadySinceCommit, "", false},
+		{"a committed ReleaseStarted recorded as failed, but by a failure a retry can fix: still the Operation's release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, reasonReleaseFailed, "", true},
+		{"a committed ReleaseStarted whose Instance a failure ended: the failure releases it, with the failure's own cause", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, "", v1alpha1.ReasonQualificationFailed, false},
+		{"a committed ReleaseStarted whose Instance ended with a lost Allocation: the failure's cause", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, "", v1alpha1.ReasonAllocationLost, false},
+		{"a committed ReleaseStarted whose Instance ended clean (drained): the Operation's own release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, "", v1alpha1.ReasonDrained, true},
+		{"a committed Keep whose Instance a failure ended: the failure's cause, a Keep never being the Operation's", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false, false, "", v1alpha1.ReasonQualificationFailed, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpFixture(t, 1)
@@ -213,6 +218,12 @@ func TestAReleaseCauseIsTheOperationsOnlyForAReleasingCommittedTarget(t *testing
 			op.Status.Phase = tc.phase
 			if tc.finished {
 				op.Status.FinishedAt = opTime(opAt)
+			}
+			if tc.endedWith != "" {
+				ended := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Name: "ended-on-k", Namespace: opNS, UID: "uid-ended-on-k"}}
+				ended.Spec.AllocationRef.Name = "alloc-k"
+				ended.Status.Phase, ended.Status.EndReason = v1alpha1.InstanceEnded, tc.endedWith
+				f.insts = append(f.insts, ended)
 			}
 			if tc.recorded != "" {
 				op.Status.Targets = []v1alpha1.TargetOutcome{{Kind: v1alpha1.TargetKindAllocation, Name: "alloc-k", UID: a.UID, State: v1alpha1.TargetStateFailed, Reason: tc.recorded}}
