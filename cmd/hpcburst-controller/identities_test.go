@@ -529,3 +529,25 @@ func recordRoleCoverage(t testing.TB, evs []auditEvent) {
 		fmt.Fprintf(f, "%s\n", b)
 	}
 }
+
+// boundedWriter keeps the first max bytes written to it, for an output that must be looked at only when something fails.
+type boundedWriter struct {
+	mu  sync.Mutex
+	max int
+	b   []byte
+}
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if room := w.max - len(w.b); room > 0 {
+		w.b = append(w.b, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
+}
+
+func (w *boundedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.b)
+}

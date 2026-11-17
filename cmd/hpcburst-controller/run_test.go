@@ -154,22 +154,28 @@ func startAPIServer(t *testing.T) *apiServer {
 			t.Fatal(err)
 		}
 	}
+	// What the API server printed while it started, kept (its first bytes) so that a start that fails says why.
+	apiOut := &boundedWriter{max: 16 << 10}
 	env := &envtest.Environment{
 		BinaryAssetsDirectory: filepath.Dir(bins.KubeAPIServer),
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd")},
 		ErrorIfCRDPathMissing: true,
 		ControlPlane: envtest.ControlPlane{
 			Etcd:      &envtest.Etcd{DataDir: etcdDir},
-			APIServer: &envtest.APIServer{CertDir: certDir},
+			APIServer: &envtest.APIServer{CertDir: certDir, Out: apiOut, Err: apiOut},
 		},
 	}
 	// The API server writes an audit log of what the controllers' identities ask, so that a request an
 	// identity is refused fails the test even when the controller retries it or logs it and carries on
 	// (identities_test.go): a role that lacks a verb must not pass as a slow test.
 	auditLog := configureControllerAudit(t, env, dir)
+	// Loopback only, and the address it advertises named: without it the API server looks for a default route to
+	// advertise, and in a network namespace with only a loopback (a Sano job's container) it stops with "Unable to
+	// find suitable network address"; the way internal/testenv starts its own server.
+	env.ControlPlane.GetAPIServer().Configure().Set("bind-address", "127.0.0.1").Set("advertise-address", "127.0.0.1")
 	cfg, err := env.Start()
 	if err != nil {
-		t.Fatalf("start the API server: %v", err)
+		t.Fatalf("start the API server: %v\nits first output:\n%s", err, apiOut)
 	}
 	t.Cleanup(func() {
 		if err := env.Stop(); err != nil {
