@@ -157,6 +157,14 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 	// Synced=False it carried before its delete says nothing about the delete).
 	deleting := p.deletingBeforeThePass(op)
 	specOK := true
+	// Marked before acting: every committed CancelPending Allocation target carries the kept-warm mark before the spec is written
+	// and before any act, so a job that starts after the commit is never one the Operation could release by another rule. Until
+	// every mark has landed nothing else happens: the Operation stays Executing, nothing is created, and the next pass retries
+	// (HBEP-10, The report, Kept warm: protect first).
+	if err := p.markBeforeActing(op); err != nil {
+		p.opsHold = true
+		return err
+	}
 	if err := p.applySpec(op); err != nil {
 		if errors.Is(err, errSpecChanged) {
 			return p.failSpecChanged(op)
@@ -407,18 +415,77 @@ func (p *pass) holdDeletionForKeptWarm(md *v1alpha1.ModelDeployment) error {
 	return nil
 }
 
-// releaseKeptWarmFinalizer removes FinalizerKeptWarm once the deployment is being deleted and none of its Allocations carries the
-// kept-warm mark, an update with the resourceVersion read: the delete then completes. It is the last write of a pass, since the
-// deployment may be gone after it.
-func (p *pass) releaseKeptWarmFinalizer() error {
-	md := p.md
-	if md == nil || md.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm) {
-		return nil
+// markBeforeActing writes the kept-warm mark on every committed Allocation target approved only as a queued cancel (CancelPending)
+// that does not carry this Operation's mark, and returns the errors of the writes that failed. It runs first in every pass of an
+// executing Operation, before the spec write and before any act, and nothing else happens in a pass in which a mark did not land
+// (executing). An Allocation that is gone is skipped: there is nothing to protect.
+func (p *pass) markBeforeActing(op *v1alpha1.Operation) error {
+	var errs []error
+	for _, t := range op.Status.Committed {
+		if t.Kind != v1alpha1.TargetKindAllocation || t.Effect != v1alpha1.PlanEffectCancelPending {
+			continue
+		}
+		a, err := p.committedAllocation(t)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if a == nil || !a.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := p.keepWarm(op, a); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// endWithDelete reports whether the Operation is an End with delete.
+func endWithDelete(op *v1alpha1.Operation) bool {
+	return op.Spec.Action == v1alpha1.OperationActionEnd && op.Spec.End != nil && op.Spec.End.Delete
+}
+
+// endWithDeleteUnfinished reports whether an End with delete that is committed and not finished names the pass's deployment: the one
+// that adds FinalizerKeptWarm before its delete. It reads the Operation's committed state and nothing about a delete that was
+// sent, so a restart between the finalizer's add and the delete changes nothing.
+func (p *pass) endWithDeleteUnfinished() bool {
+	for _, op := range p.ops {
+		if !isExecuting(op) || !endWithDelete(op) {
+			continue
+		}
+		if p.md == nil || op.Status.Plan == nil || op.Status.Plan.ModelDeployment.UID == p.md.UID {
+			return true
+		}
+	}
+	return false
+}
+
+// keptWarmFinalizerWanted is the finalizer's level rule: the deployment carries held-by-kept-warm exactly while it has an End with
+// delete that is committed and not finished, or while it is being deleted and one of its Allocations is marked and started. It
+// reads no Operation that is gone: a finished Operation, removed by its 7 days or by a person, changes nothing (HBEP-10, The report,
+// Kept warm: protect first).
+func (p *pass) keptWarmFinalizerWanted() bool {
+	if p.endWithDeleteUnfinished() {
+		return true
+	}
+	if p.md == nil || p.md.DeletionTimestamp.IsZero() {
+		return false
 	}
 	for _, a := range p.allocs {
-		if keptWarm(a) && a.DeletionTimestamp.IsZero() {
-			return nil // held: an Allocation is kept warm
+		if a.DeletionTimestamp.IsZero() && keptWarmStarted(a) {
+			return true
 		}
+	}
+	return false
+}
+
+// releaseKeptWarmFinalizer removes FinalizerKeptWarm on any pass where the level rule no longer wants it (keptWarmFinalizerWanted),
+// an update with the resourceVersion read. It runs every pass, so a removal that failed, or a restart between the finish and the
+// removal, is made by a later pass. It is the last write of a pass, since the deployment may be gone after it.
+func (p *pass) releaseKeptWarmFinalizer() error {
+	md := p.md
+	if md == nil || !controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm) || p.keptWarmFinalizerWanted() {
+		return nil
 	}
 	next := md.DeepCopy()
 	controllerutil.RemoveFinalizer(next, v1alpha1.FinalizerKeptWarm)
@@ -522,9 +589,10 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		}
 		if startedSinceCommit(t, a) {
 			// The approval was to cancel a QUEUED job, which costs a queue position; its job has started since, and releasing a
-			// running one is another price (ReleaseStarted). It is kept warm, by a mark written here, before the report records the
-			// failure for good, and no step of an Operation's passes releases it (HBEP-10, The report, as amended by #698).
-			return p.keepWarm(op, a)
+			// running one is another price (ReleaseStarted). The Operation's own cancel is made only while the job is pending: a job
+			// seen started is never released under this approval, and its target fails finally with JobStartedSinceCommit. It
+			// carries the mark since before the first act (markBeforeActing), so no other rule releases it either.
+			return nil
 		}
 		if len(p.liveOn(a.Name)) > 0 {
 			// An Instance still runs on it (a drain that has not finished): its release waits until it has ended,
@@ -534,6 +602,9 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		if p.releasePending(a) {
 			return nil // a failure owes this release: its own path makes it, with its cause
 		}
+		// A STATED LIMIT, which no design here closes (HBEP-10, The report, Kept warm): a job that starts at the very instant this
+		// cancel is sent is released started and unpriced, since the scheduler applies the cancel to a job whatever its state. Closing
+		// it needs a cancel that is applied only to a pending job (HBEP-4, a proposed question).
 		return p.deleteAllocation(a, v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID))
 	}
 	return nil
@@ -545,18 +616,20 @@ func scaleAboveZero(op *v1alpha1.Operation) bool {
 	return op.Spec.Action == v1alpha1.OperationActionScale && op.Spec.Scale != nil && op.Spec.Scale.Instances > 0
 }
 
-// keepWarm writes the kept-warm mark on an Allocation whose job started since the Operation committed to cancel it as queued,
-// once: its value is the Operation in the release cause's form. The mark outlives the Operation; retention, the shutdown and the
-// deployment-deletion rule skip it (retention.go, keptWarm).
+// keepWarm writes the kept-warm mark on an Allocation the Operation committed to cancel as queued, once: its value is the Operation in
+// the release cause's form, and an older Operation's mark is replaced by this one's. The mark outlives the Operation. While the job is
+// pending the Allocation follows the usual rules; once it has started, retention's policy rules and the shutdown skip it, and the
+// deletion rule too while its deployment holds the finalizer (retention.go, keptWarmStarted).
 func (p *pass) keepWarm(op *v1alpha1.Operation, a *v1alpha1.Allocation) error {
-	if keptWarm(a) {
+	want := v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID)
+	if a.Annotations[v1alpha1.AnnotationKeptWarm] == want {
 		return nil
 	}
 	next := a.DeepCopy()
 	if next.Annotations == nil {
 		next.Annotations = map[string]string{}
 	}
-	next.Annotations[v1alpha1.AnnotationKeptWarm] = v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID)
+	next.Annotations[v1alpha1.AnnotationKeptWarm] = want
 	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil // gone already
