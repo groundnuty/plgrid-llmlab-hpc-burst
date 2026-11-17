@@ -176,6 +176,14 @@ func TestControllerIdentitiesOnARealK3s(t *testing.T) {
 		}
 	}
 
+	// No request of a controller identity was refused: the real front ran under its role, and a verb it
+	// lacked would be a 403 here, whatever the front did with the answer.
+	for _, e := range evs {
+		if e.ResponseStatus.Code == 403 && strings.HasPrefix(e.User.Username, controllerSA) {
+			t.Errorf("a controller identity was refused (403): %s %s %q by %s", e.Verb, e.ObjectRef.Resource, e.ObjectRef.Name, e.User.Username)
+		}
+	}
+
 	// ---- status: each identity valid, with its expiry and no warning ----
 	r := cli(t, h.args("status", "--json", "--no-gc-probe")...)
 	var st struct {

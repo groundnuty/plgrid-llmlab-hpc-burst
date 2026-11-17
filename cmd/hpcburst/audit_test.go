@@ -22,6 +22,10 @@ type auditEvent struct {
 		Namespace string `json:"namespace"`
 		Name      string `json:"name"`
 	} `json:"objectRef"`
+	// ResponseStatus is how the API server answered: the code is 403 for a request RBAC refused.
+	ResponseStatus struct {
+		Code int `json:"code"`
+	} `json:"responseStatus"`
 	hasBody bool // requestObject or responseObject is present
 }
 
