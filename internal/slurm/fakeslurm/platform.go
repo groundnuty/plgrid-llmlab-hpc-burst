@@ -135,6 +135,7 @@ type Platform struct {
 	script   []SubmitStep
 	late     []lateJob
 	gates    map[string][]*Gate
+	to       testOnlyControls // sbatch --test-only's answer (testonly.go)
 
 	inflight, maxInflight int
 }
@@ -251,7 +252,7 @@ func (s *Session) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, err
 		return slurm.Result{Stderr: []byte("bash: " + perr.Error() + "\n"), ExitCode: 2}, nil
 	}
 	if len(cmds) > 0 {
-		if err := p.waitGate(ctx, cmds[0].words[0]); err != nil {
+		if err := p.waitGate(ctx, commandWords(cmds[0].words)[0]); err != nil {
 			return slurm.Result{}, err
 		}
 	}
@@ -314,7 +315,7 @@ func (p *Platform) CountFor(user, word string) int {
 	defer p.mu.Unlock()
 	n := 0
 	for _, c := range p.calls {
-		if c.Words[0] == word && (user == "" || c.User == user) {
+		if c.Command()[0] == word && (user == "" || c.User == user) {
 			n++
 		}
 	}

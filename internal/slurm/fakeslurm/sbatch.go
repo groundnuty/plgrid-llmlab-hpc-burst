@@ -17,7 +17,7 @@ import (
 // sbatchDefs are the options slurm.submitLine builds. Every one takes its value
 // after "=" or as the next word.
 var sbatchDefs = []optDef{
-	{name: "parsable"}, {name: "no-requeue"}, {name: "requeue"}, {name: "hold"},
+	{name: "parsable"}, {name: "no-requeue"}, {name: "requeue"}, {name: "hold"}, {name: "test-only"},
 	{name: "job-name", value: valRequired},
 	{name: "partition", value: valRequired},
 	{name: "account", value: valRequired},
@@ -47,7 +47,7 @@ type sbatchSpec struct {
 	constraint, qos                                 string
 	minutes, cpus, nodes, gpus                      int
 	memMiB                                          int64
-	hold, requeue, parsable                         bool
+	hold, requeue, parsable, testOnly               bool
 }
 
 var gresGPU = regexp.MustCompile(`^gpu(?::([0-9]+))?$`)
@@ -62,7 +62,7 @@ func parseSbatch(args []string) (sbatchSpec, error) {
 	if len(p.rest) > 0 {
 		return sbatchSpec{}, fmt.Errorf("the fake takes no script file, only --wrap")
 	}
-	s := sbatchSpec{nodes: 1, cpus: 1, parsable: p.has("parsable"), hold: p.has("hold")}
+	s := sbatchSpec{nodes: 1, cpus: 1, parsable: p.has("parsable"), hold: p.has("hold"), testOnly: p.has("test-only")}
 	s.requeue = !p.has("no-requeue") // sbatch's default is the cluster's; the plugin always says
 	s.name, _ = p.get("job-name")
 	s.partition, _ = p.get("partition")
@@ -144,6 +144,9 @@ func (sh *shell) sbatch(args []string) int {
 	}
 	if spec.partition == "" {
 		spec.partition = sh.p.defaultPartition()
+	}
+	if spec.testOnly {
+		return sh.sbatchTestOnly(spec) // read-only: no scripted step, no late job, nothing registered
 	}
 	step := sh.p.nextStep()
 	sh.p.registerLate(sh.now) // a job whose reply was lost earlier registers now (qos.go)
