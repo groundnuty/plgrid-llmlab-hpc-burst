@@ -35,6 +35,13 @@ func (p *pass) capacity() error {
 	}
 	prim := p.primaries()
 	desired := int(p.md.Spec.Instances)
+	// While a Scale Operation is Executing, the deployment keeps at most the Operation's count, whatever the spec says
+	// before its write has landed or after a person raised it: the committed targets are the Operation's to take, and
+	// step 7 takes nothing of its own (below; HBEP-10, Approval and execution).
+	scaling := p.executingScale()
+	if scaling != nil {
+		desired = min(desired, int(scaling.Spec.Scale.Instances))
+	}
 	// A missing primary whose predecessor drained in no-overlap mode, or whose
 	// predecessor was such a primary's successor that failed, is that
 	// predecessor's successor, marked, on its Provider first (HBEP-7,
@@ -67,6 +74,14 @@ func (p *pass) capacity() error {
 			}
 			break
 		}
+	}
+	if p.holdsSelection() {
+		// An Executing Operation's committed targets are acted on by the Operations step, before this one. The controller's
+		// own selection is never called here, beside any Operation: it could pick another victim than the one that was
+		// approved, or one the Operation did not commit to (HBEP-7, step 7).
+		// No extra is made beside an Executing Operation either: the Operation holds the deployment's count, and an
+		// extra would add an Allocation the plan did not count (k616's merge of #664 into #708).
+		return nil
 	}
 	// Each Provider where the loop made a new Allocation gets its extra, after every missing primary it could place
 	// (extra.go). An extra no check admits is silent, so it never reaches noProvider() above.
@@ -209,6 +224,9 @@ func (p *pass) replacements() error {
 		hedges[g.key] = g.members
 	}
 	for _, in := range p.primaries() {
+		if p.committedInstance(in) {
+			continue // an Executing Operation takes it: a drain that failed to start is retried, not replaced
+		}
 		// A hedge of more than one live member with no winner yet is one need still being met: its replacement
 		// waits for the winner, so none is planned for a member that then loses (#611's review).
 		if m := hedges[hedgeKey(in)]; len(m) > 1 && hedgeWinner(m) == nil {

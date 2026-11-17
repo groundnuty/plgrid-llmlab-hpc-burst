@@ -62,7 +62,8 @@ type Reconciler struct {
 	slotsOnce sync.Once
 	slotTab   *slotTable
 	// hedgeFrozen, when set, says whether an executing Operation holds a hedge, so growHedges adds no member to it
-	// (HBEP-7, Hedging (beta), Operations). Nil reads false: #589's execution sets it from the committed targets.
+	// (HBEP-7, Hedging (beta), Operations). Nil reads the pass's own Operations (frozenByOperation, ophedge.go): this field
+	// is the seam tests set to pin growth on or off.
 	hedgeFrozen func(hedgeGroup) bool
 }
 
@@ -99,8 +100,20 @@ type pass struct {
 
 	allocs map[string]*v1alpha1.Allocation
 	insts  []*v1alpha1.Instance
-	// ops are the Operations that name this ModelDeployment, read by the Operations step (operations.go).
-	ops []*v1alpha1.Operation
+	// ops are the Operations that name this ModelDeployment, in the order they were created (operations.go). They are
+	// read at the start of run, before step 6, so every Allocation delete of the pass sees which one an Executing
+	// Operation committed (deleteAllocation, operationCause); opsLoaded says they were.
+	ops       []*v1alpha1.Operation
+	opsLoaded bool
+	// opsHold: an Executing Operation's spec write failed this pass, so nothing is created or replaced until it lands
+	// (opexec.go, applySpec).
+	opsHold bool
+	// commitUnknown: an Operation's commit write returned an error and the Operation could not be read again, so whether it
+	// landed is not known: no other Operation commits in this pass (afterCommitError).
+	commitUnknown bool
+	// opAllocs caches the Allocations an Operation's committed targets name, by UID, nil for one that is gone
+	// (opexec.go, committedAllocation).
+	opAllocs map[types.UID]*v1alpha1.Allocation
 	// stale marks Instances an earlier ModelDeployment of this name owned.
 	stale map[types.UID]bool
 	// deferred: a placement waits for a warm Allocation's agent to register
@@ -183,20 +196,36 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{RequeueAfter: wait}, nil
 }
 
-func (p *pass) run() error {
+// shutsDown reports whether the pass shuts the deployment down: it is gone, has a managed source, is being deleted, asks
+// for no Instance, or has reached its end time (HBEP-7, Release). The Operations step asks it again after it writes the
+// spec (applySpec), so a Scale to zero and an End take effect in the pass that commits them.
+func (p *pass) shutsDown() bool {
 	md := p.md
 	switch {
 	case md == nil:
-		p.shutdown = true
+		return true
 	case md.Spec.Source.Managed != nil:
-		p.shutdown = true
+		return true
 	case !md.DeletionTimestamp.IsZero(), md.Spec.Instances == 0:
-		p.shutdown = true
+		return true
 	case md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time):
-		p.shutdown = true
+		return true
 	}
+	return false
+}
+
+func (p *pass) run() error {
+	md := p.md
+	p.shutdown = p.shutsDown()
 	if md != nil && md.Spec.EndTime != nil {
 		p.at(md.Spec.EndTime.Time)
+	}
+	// The Operations are read before step 6: its deletes of an Allocation, and the shutdown's, must know which
+	// Allocations an Executing Operation committed to release. A failed read fails the pass, as a failed read of the
+	// Allocations does (observe): a pass that went on with no Operations would let step 7 make its own selection
+	// beside an Executing Scale, and release a committed Allocation with another cause.
+	if err := p.loadOperations(); err != nil {
+		return err
 	}
 	if md != nil && md.Spec.Source.Served != nil {
 		if err := p.prepareServed(); err != nil {
@@ -217,10 +246,14 @@ func (p *pass) run() error {
 		return errors.Join(instErr, err)
 	}
 	// The Operations step (HBEP-7, Reconcile loop; HBEP-10): Operations that name this ModelDeployment are planned,
-	// and a confirmed one's approvals counted, with no side effect but their own status. It runs before step 7, and
-	// whether or not the deployment exists. Its failure does not hold back the rest of the pass.
+	// a confirmed one's approvals counted, and an approved one checked for staleness, committed and executed. It runs
+	// before step 7, and whether or not the deployment exists. Its failure does not hold back the rest of the pass.
 	instErr = errors.Join(instErr, p.operations())
-	if md != nil && md.Spec.Source.Served != nil && !p.shutdown {
+	// An Operation may have written the spec and set p.md: a Scale to zero, an End, a delete (opexec.go, applySpec).
+	// The rest of the pass works from what it wrote, never from the object read at the start, and a spec that could
+	// not be written holds back every creation of this pass.
+	md = p.md
+	if md != nil && md.Spec.Source.Served != nil && !p.shutdown && !p.opsHold && !p.creationHeld() {
 		if err := p.capacity(); err != nil {
 			return errors.Join(instErr, err)
 		}
@@ -240,10 +273,14 @@ func (p *pass) run() error {
 	if md == nil {
 		return instErr
 	}
+	var statusErr error
 	if md.Spec.Source.Managed != nil {
-		return errors.Join(instErr, p.writeManagedStatus())
+		statusErr = p.writeManagedStatus()
+	} else {
+		statusErr = p.writeStatus()
 	}
-	return errors.Join(instErr, p.writeStatus())
+	// The kept-warm finalizer last: the deployment may be gone after it (HBEP-10, The report, as amended by #698).
+	return errors.Join(instErr, statusErr, p.releaseKeptWarmFinalizer())
 }
 
 // observe lists the ModelDeployment's Allocations (by its model-deployment
