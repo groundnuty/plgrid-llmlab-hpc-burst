@@ -6,8 +6,8 @@ package lifecycle
 // ModelDeployment stops requeueing once its Operations are finished, and an Operation of a deleted deployment would
 // never be reached by it.
 //
-// It is NOT wired into the manager yet: the audit log is still Metadata-only, so a removal would lose the Operation's plan
-// and report. #660 wires it (addOperationTTL) with the audit policy (HBEP-10, The report, as amended by #665, #666 and #668).
+// It is wired into the manager (NewManager) with the audit policy: the API server's audit log holds each Operation's plan, costs
+// and report (config/audit; HBEP-10, The report, as amended by #665, #666 and #668), so the removal loses nothing (#660, PR B).
 
 import (
 	"context"

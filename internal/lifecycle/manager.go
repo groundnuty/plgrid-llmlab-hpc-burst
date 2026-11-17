@@ -391,13 +391,14 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: controller: %w", err)
 	}
-	// The removal of finished Operations, 7 days after they finish (HBEP-10, Removal), is built (opttl.go) and NOT wired
-	// here: the audit log is still Metadata-only, so removing an Operation would lose its plan, its costs and its report. #660
-	// wires it with the audit policy, as a controller of its own under the same leader election and queue options:
-	//
-	//	if err := addOperationTTL(mgr, clock); err != nil { return nil, nil, err }
-	//
-	// A running manager removes no Operation (TestLifecycleManagerReleasesItsLeaseOnEveryStop, round 0).
+	// The removal of finished Operations, 7 days after they finish (HBEP-10, Removal), as a controller of its own under the same
+	// leader election and queue options. It is wired with the audit policy (config/audit): by then the log holds each Operation's
+	// plan, its costs and its report, so removing the Operation loses nothing (HBEP-10, Audit; #660, PR B). It reads the
+	// Operation through the API reader and deletes it with a UID precondition, so the lifecycle role holds get and delete of
+	// Operations (config/rbac/controllers.yaml).
+	if err := addOperationTTL(mgr, clock); err != nil {
+		return nil, nil, err
+	}
 	if renewals != nil {
 		// A clean stop releases the lifecycle Lease after Start even when the
 		// elector's release read failed (issue #160).
