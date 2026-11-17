@@ -171,8 +171,18 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			r.killAt(kill)
 			// Down past the retries: every event still queued is lost within the budget, and so is the
 			// EventsNotLogged the first loss raises, which the log cannot take either.
-			eventually(t, "every event to be stored or lost", func() bool { return r.pub.Pending() == 0 })
 			rt := r.route(ctl)
+			// The first loss raises EventsNotLogged from the notifier, a goroutine of its own, and that event runs
+			// out too, one budget later. Wait for the raise first: a queue that is empty before it is made is no
+			// proof that the EventsNotLogged has been settled, and counting before it ran out reads one lost
+			// event too few.
+			eventually(t, "the loss to be raised", func() bool {
+				raised := len(r.inner.byReason(ReasonEventsNotLogged))
+				rt.mu.Lock()
+				defer rt.mu.Unlock()
+				return raised >= 1 && rt.loss == nil
+			})
+			eventually(t, "every event, the EventsNotLogged too, to be stored or lost", func() bool { return r.pub.Pending() == 0 })
 			eventually(t, "every loss to be handled", func() bool { return rt.handled.Load() == uint64(r.unlogged(ctl)) })
 			lost := r.unlogged(ctl)
 			if lost < 1 {
