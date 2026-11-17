@@ -156,6 +156,10 @@ var unexportedNames = map[string]struct{ dir, ident string }{
 	"HeartbeatMissed":  {"internal/lifecycle", "reasonHeartbeatMissed"},
 	"ObservationGap":   {"internal/lifecycle", "reasonObservationGap"},
 	"PathProbeFailing": {"internal/front", "reasonPathProbeFailing"},
+	// HBEP-10, The report, as amended by #665 and #666: the final failures of a committed target.
+	"JobStartedSinceCommit":  {"internal/lifecycle", "reasonJobStartedSinceCommit"},
+	"SpecChangedSinceCommit": {"internal/lifecycle", "reasonSpecChangedSinceCommit"},
+	"LastReadySinceCommit":   {"internal/lifecycle", "reasonLastReadySinceCommit"},
 }
 
 // notCodeNames are capitalised names the guide gives that no code of the framework defines, each
