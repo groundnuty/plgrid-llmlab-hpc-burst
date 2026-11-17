@@ -65,16 +65,14 @@ type route struct {
 
 	mu   sync.Mutex
 	spec routeSpec
+	// wrapped counts the recorders built with the log for this controller (Publisher.Wrapped).
+	wrapped int
+	// dead is set when the controller's manager has stopped for good (Publisher.Unregister, from the
+	// counter's Forget): a late loss of its queued events is one log line, uncounted, raising nothing
+	// (the science agent's ruling on #697, 17 Nov 2026).
+	dead bool
 
-	// The loss gate (HBEP-8, Repeating conditions): a run of losses starts at the first loss after a
-	// success, where the process's start counts as one (R10, #625), and ends at the next success.
-	losing     bool
-	runStart   time.Time
-	runCount   int
-	lastRaise  time.Time // when the run's latest EventsNotLogged was handed over; zero until one was
-	lossRaise  bool      // a raise for the run is queued or running
-	recovery   *raiseJob // the closing event of a run, owed until it is handed over
-	recoveryAt bool      // it is queued or running
+	gate // the loss gate (gate.go)
 
 	warnedAt time.Time
 
@@ -87,6 +85,7 @@ func (r *route) attach(s routeSpec) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.spec = s
+	r.wrapped++
 }
 
 func (r *route) snapshot() routeSpec {
@@ -123,6 +122,9 @@ func (r *route) publish(at time.Time, id string, regarding, related runtime.Obje
 	if id == "" {
 		id = string(uuid.NewUUID())
 	}
+	// An EventsNotLogged raised by the notifier carries the job that raised it, so that its own outcome,
+	// stored or lost, settles the closing it may be (gate.go).
+	closes := r.takeEmitting(reason)
 	c := call{id: id, controller: r.controller, reportingController: spec.reporting, eventtype: eventtype, reason: reason,
 		action: action, note: fmt.Sprintf(note, args...), regarding: regarding, related: related}
 	body, subject, err := c.envelope(spec.scheme, at)
@@ -130,12 +132,12 @@ func (r *route) publish(at time.Time, id string, regarding, related runtime.Obje
 		// The event cannot be a CloudEvent on a subject: one with no UID, or of a kind the scheme lacks.
 		// One log line names the kind and name of the object, never a job ID.
 		r.p.log.Warn("an event cannot be logged: it has no subject", "controller", r.controller, "reason", reason, "regarding", describe(regarding, spec.scheme), "error", err)
-		r.counter.unlogged.WithLabelValues(r.controller).Inc()
+		r.countEmitterSide(closes)
 		return
 	}
-	it := &item{r: r, id: id, reason: reason, subject: subject, body: body, queuedAt: at}
+	it := &item{r: r, id: id, reason: reason, subject: subject, body: body, queuedAt: at, closes: closes}
 	if !r.p.enqueue(it) {
-		r.lost(lostQueue, reason, id, nil)
+		r.lost(lostQueue, reason, id, nil, closes)
 	}
 }
 
@@ -148,6 +150,21 @@ func (r *route) refused(regarding runtime.Object, reason string) {
 		return
 	}
 	r.p.log.Warn("a typed event was refused by its emitter and so is not logged", "controller", r.controller, "reason", reason, "regarding", describe(regarding, r.snapshot().scheme))
+	r.countEmitterSide(nil)
+}
+
+// countEmitterSide counts an event that cannot be logged for what it is, unless the controller has stopped
+// for good, whose events count nothing. closes is the job whose event it was, if it was an EventsNotLogged:
+// that closing then stays owed.
+func (r *route) countEmitterSide(closes *raiseJob) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if closes != nil {
+		r.closingLostLocked(closes)
+	}
+	if r.dead {
+		return
+	}
 	r.counter.unlogged.WithLabelValues(r.controller).Inc()
 }
 
@@ -164,86 +181,3 @@ func describe(obj runtime.Object, scheme *runtime.Scheme) string {
 
 // warnEvery rate-limits the loss warnings of one controller.
 const warnEvery = time.Minute
-
-// lost counts an event the log did not take, decides whether EventsNotLogged is due, and, if it
-// is, queues it for the notifier. why is the reason for the log line; reason is the lost event's own,
-// and an EventsNotLogged that is itself lost counts but never raises another (HBEP-8, Raised events;
-// #625).
-func (r *route) lost(why, reason, id string, err error) {
-	r.counter.unlogged.WithLabelValues(r.controller).Inc()
-	now := r.p.now()
-	r.mu.Lock()
-	if now.Sub(r.warnedAt) >= warnEvery || r.warnedAt.IsZero() {
-		r.warnedAt = now
-		r.mu.Unlock()
-		r.p.log.Warn("an event was not logged", "controller", r.controller, "why", why, "reason", reason, "id", id, "error", err)
-		r.mu.Lock()
-	}
-	if reason == ReasonEventsNotLogged {
-		r.mu.Unlock()
-		r.handled.Add(1)
-		return
-	}
-	if !r.losing {
-		r.losing, r.runStart, r.runCount, r.lastRaise = true, now, 0, time.Time{}
-		r.recovery = nil
-	}
-	r.runCount++
-	var job *raiseJob
-	if !r.lossRaise && (r.lastRaise.IsZero() || now.Sub(r.lastRaise) >= repeatEvery) {
-		r.lossRaise = true
-		job = &raiseJob{r: r, kind: jobLoss, count: r.runCount, since: r.runStart, at: now}
-	}
-	r.mu.Unlock()
-	if job == nil {
-		r.handled.Add(1)
-		return
-	}
-	r.p.notify.push(job)
-}
-
-// logged records that the log took an event: the end of a run of losses owes one EventsNotLogged
-// with this first success, so the log itself shows the span it lacks (HBEP-8, When it is down).
-func (r *route) logged() {
-	now := r.p.now()
-	r.mu.Lock()
-	var job *raiseJob
-	switch {
-	case r.losing:
-		r.losing = false
-		job = &raiseJob{r: r, kind: jobRecovery, count: r.runCount, since: r.runStart, at: now}
-		r.recovery, r.recoveryAt = job, true
-	case r.recovery != nil && !r.recoveryAt:
-		// The closing event of an earlier run was not handed over (its Lease could not be read): try
-		// again with this success.
-		job = r.recovery
-		r.recoveryAt = true
-	}
-	r.mu.Unlock()
-	if job != nil {
-		r.p.notify.push(job)
-	}
-}
-
-// finish records the outcome of a raise: handed over, or not (the Lease could not be read, or the
-// publisher is stopping). A gate is marked only once its event is handed over, so a raise that could
-// not be made is tried again with the next loss.
-func (r *route) finish(j *raiseJob, handedOver bool) {
-	r.mu.Lock()
-	switch j.kind {
-	case jobLoss:
-		r.lossRaise = false
-		if handedOver {
-			r.lastRaise = j.at
-		}
-	case jobRecovery:
-		r.recoveryAt = false
-		if handedOver {
-			r.recovery = nil
-		}
-	}
-	r.mu.Unlock()
-	if j.kind == jobLoss {
-		r.handled.Add(1)
-	}
-}
