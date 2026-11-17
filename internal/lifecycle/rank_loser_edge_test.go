@@ -2,7 +2,8 @@ package lifecycle
 
 // Two edges of a hedge's started loser kept as a candidate (#616, PR 5): D1's guard that only a loser that has never
 // been ready is kept, and what a candidate does when it restarts after it outranked its winner and before the winner's
-// drain starts, which is an OPEN POINT: the rows pin what the code does today, for the design to rule on.
+// drain starts, a STATED LIMIT (HBEP-7, Hedging's started losers, erratum of 17 Nov 2026; issue #730): the rows pin
+// what the code does today.
 
 import (
 	"testing"
@@ -64,7 +65,7 @@ func TestAStartedLoserThatHasBeenReadyIsNotKept(t *testing.T) {
 	}
 }
 
-// TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains pins an OPEN POINT, not a ruling. A candidate that
+// TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains pins a stated limit (#730), not a goal. A candidate that
 // outranked its winner and restarts inside the front's 10 s window, before the winner's drain starts, is verifying
 // again with its readyTime set, so it is no longer a waiting candidate (candidateWinnerOf needs a never-ready Instance)
 // and takes PR 3's general path on re-passing. Today that has two consequences, found by tracing and pinned here:
