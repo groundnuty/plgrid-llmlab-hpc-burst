@@ -760,10 +760,12 @@ func TestAnExtraGetsNoMember(t *testing.T) {
 }
 
 // TestASurplusHedgeGetsNoNewMember (#616; agreed with k616): hedgeWidth 3, and A, B and C allowed. A deployment of two
-// makes R and M1 on A at 08:00:00, M1 pending 10 h; as R's job starts at 08:00:10, M1's hedge gets M2 on B (pending 10
-// h). Its count is then lowered to 1, so R is chosen and M1's hedge is surplus, and the clock is moved to 08:30:10, past
-// M2's hedge time, 08:30:00 (C has no wait), with the Providers' controllers syncing every minute and no reconcile
-// pass in between. A pass's growth adds no third member on C, though C is usable and M1's hedge is due one.
+// makes R and M1 on A at 08:00:00, M1 pending 10 h. R's job starts at 08:00:10, so A has one observed wait, 0 s, and M1
+// is submitted at 08:00:10. M1's hedge time is its submission plus hedgeMinWait, 08:10:10 (the 0 s wait alone would
+// have made it 08:00:10), and there M1's hedge gets M2 on B (pending 10 h). Its count is then lowered to 1, so R is
+// chosen and M1's hedge is surplus, and the clock is moved to 08:40:10, past M2's hedge time, 08:30:00 (C has no wait),
+// with the Providers' controllers syncing every minute and no reconcile pass in between. A pass's growth adds no third
+// member on C, though C is usable and M1's hedge is due one.
 //
 // On main a surplus hedge of two never reaches growth: step 7, which runs first, takes it whole (#635's scaleUnits).
 // So growth is called on its own here, on the pass's state: the filter's contract, for when #616 keeps such a hedge.
@@ -780,14 +782,16 @@ func TestASurplusHedgeGetsNoNewMember(t *testing.T) {
 	h.create(md)
 	h.Step() // 08:00:00
 	h.clock.Advance(10 * time.Second)
-	h.Step() // 08:00:10: R's job starts; M1's hedge gets M2 on B
+	h.Step() // 08:00:10: R's job starts and its 0 s wait is recorded; M1 is submitted
+	// M1's hedge time is its submission plus hedgeMinWait, 08:10:10: its hedge gets M2 on B then, not at 08:00:10.
+	stepUntilClock(h.rig, hoT(8, 10, 10), 10*time.Second, nil)
 	onB := h.onProvider(hoMD, hedgeB)
 	if len(onB) != 1 || onB[0].Annotations[v1alpha1.AnnotationHedgeGroup] == "" {
-		t.Fatalf("B has %+v at 08:00:10, want M1's hedge member: the fixture has no hedge of two, so the test proves nothing", onB)
+		t.Fatalf("B has %+v at 08:10:10, want M1's hedge member: the fixture has no hedge of two, so the test proves nothing", onB)
 	}
 	m1, m2 := onB[0].Annotations[v1alpha1.AnnotationHedgeGroup], onB[0].Name
 	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
-	// To 08:30:10 with no reconcile pass, the Providers' controllers syncing each minute so their heartbeats stay
+	// To 08:40:10 with no reconcile pass, the Providers' controllers syncing each minute so their heartbeats stay
 	// fresh: a Provider unsynced for 30 min reads unusable, and growth would have nowhere to go.
 	for range 30 {
 		h.clock.Advance(time.Minute)
@@ -806,7 +810,7 @@ func TestASurplusHedgeGetsNoNewMember(t *testing.T) {
 		t.Fatalf("the chosen primaries are %v, want R alone: M1's hedge must be surplus, or the test proves nothing", names(chosen))
 	}
 	if pv := p.pvByName["example-c"]; pv == nil || !pv.usable() {
-		t.Fatal("C is not usable at 08:30:10: growth could place nothing there anyway, so the test proves nothing")
+		t.Fatal("C is not usable at 08:40:10: growth could place nothing there anyway, so the test proves nothing")
 	}
 	if err := p.growHedges(); err != nil {
 		t.Fatal(err)
