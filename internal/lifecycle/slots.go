@@ -81,10 +81,15 @@ const listTimeout = 30 * time.Second
 // own deployment's objects before it asks, so nothing under the lock reads it.
 //
 // The extra's admission headroom (extra.go, headroomOf; #616 PR 4) adds reads under the same lock, by slotAsk.headroom,
-// for an extra's reservation alone: one List of the Providers and one of the ModelDeployments of every namespace, and, for
-// each other deployment that allows the Provider, one List of its Instances and one of its Allocations (by its
-// model-deployment label, in its namespace), all through the uncached Reader, all under the context bounded by
-// listTimeout, and none under slotTable.mu. They take no lock of this package and write nothing, so the order above holds.
+// for an extra's reservation alone, made after the count's: one List of the Providers and one of the ModelDeployments of
+// every namespace, and, for each other deployment that allows the Provider, one List of its Instances and one of its
+// Allocations (by its model-deployment label, in its namespace), all through the uncached Reader, and none under
+// slotTable.mu. The count's reads and the headroom's share ONE deadline, listTimeout from the lock's acquisition. They take
+// no lock of this package and write nothing, so the order above holds.
+//
+// A primary placed on a warm Allocation creates no Allocation to reserve, yet the Instance it makes reserves a handover
+// slot and ends its deployment's missing primary: so placeOnWarm (provision.go) creates it under this same lock, with two
+// API writes and no other lock of this package, and a count and a headroom read in one reservation never straddle it.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
@@ -203,8 +208,9 @@ type slotAsk struct {
 	alsoLeave int
 	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
 	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
-	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each other deployment with a missing
-	// primary that the Provider allows, and at least one. It reads through the uncached Reader and adds to alsoLeave.
+	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
+	// deployments that the Provider allows, and 0 when there are none. It reads through the uncached Reader and adds to
+	// alsoLeave.
 	headroom func(ctx context.Context) (int, error)
 }
 
@@ -241,7 +247,11 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	l := t.slotLock(q.provider)
 	l.Lock()
 	defer l.Unlock()
-	rd, err := t.readBounded(ctx, r, q.provider, q.limit != nil, q.profile)
+	// ONE deadline for every read made under the lock, the count's and the headroom's: a long count leaves the headroom
+	// what remains of listTimeout, so no primary of this Provider waits for two timeouts.
+	sctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+	defer cancel()
+	rd, err := t.readBounded(sctx, r, q.provider, q.limit != nil, q.profile)
 	if err != nil {
 		return slotAnswer{}, err
 	}
@@ -249,16 +259,17 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if q.limit == nil && q.params == nil {
 		return slotAnswer{ok: true, holds: holds}, nil
 	}
+	// Read once the lock is held and the count's reads are back, as the reservation always did, and BEFORE the headroom's:
+	// the expectations expire against the moment the Allocations were listed, so an Allocation created during a long
+	// headroom scan is still counted by its expectation, which the scan's own time cannot lapse.
+	at := now()
 	if q.headroom != nil && q.limit != nil {
-		hctx, cancel := context.WithTimeout(ctx, t.listTimeout)
-		h, err := q.headroom(hctx)
-		cancel()
+		h, err := q.headroom(sctx)
 		if err != nil {
 			return slotAnswer{}, err
 		}
 		q.alsoLeave += h
 	}
-	at := now() // read once the lock is held and every read is back, as the reservation always did
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(q.provider, rd.seen, rd.listed, at)

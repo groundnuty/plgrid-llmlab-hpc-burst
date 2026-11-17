@@ -122,6 +122,22 @@ type placeOpts struct {
 	headroom func(context.Context) (int, error)
 }
 
+// placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
+// every reservation takes (slots.go), and clears the Allocation's idle anchor: the Allocation is no longer idle
+// (v1alpha1.ClearIdleSince). The Instance becomes a Running primary that reserves a handover slot and ends its
+// deployment's missing primary, so both the reserved slots and the admission headroom an extra reads change with
+// it; made outside the lock, another pass could read the one before and the other after (#708, the delta review of the
+// headroom). The lock is held across two API writes of no other lock of this package.
+func (p *pass) placeOnWarm(pv *providerView, cid *classID, pred *v1alpha1.Instance, warm *v1alpha1.Allocation, o placeOpts) error {
+	l := p.r.slots().slotLock(pv.name)
+	l.Lock()
+	defer l.Unlock()
+	if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+		return err
+	}
+	return p.writeIdleSince(warm, nil)
+}
+
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
@@ -177,14 +193,13 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			// is written once, in an Allocation's create request, and an existing one is never marked later
 			// (HBEP-7, Handover, No-overlap mode: "fixed at creation"). A reusable warm Allocation also
 			// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
-			if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+			if err := p.placeOnWarm(pv, cid, pred, warm, o); err != nil {
 				if errors.Is(err, errDeploymentGone) {
 					return false, nil
 				}
 				return false, err
 			}
-			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
-			return true, p.writeIdleSince(warm, nil)
+			return true, nil
 		}
 		name, err := randomName(pv.name)
 		if err != nil {
@@ -471,6 +486,7 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 			}
 		}
 	}
+	stampOwner(&in.ObjectMeta, p.md) // last: the blocks above may assign a whole annotation map
 	if err := p.confirmDeployment(); err != nil {
 		return err
 	}
@@ -508,6 +524,7 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 	if queuedOf != "" {
 		a.Annotations = map[string]string{v1alpha1.AnnotationQueuedSuccessor: queuedOf}
 	}
+	stampOwner(&a.ObjectMeta, p.md) // after the mark, which assigns the annotation map
 	if err := p.confirmDeployment(); err != nil {
 		p.releaseSlot(pv, name)
 		return err

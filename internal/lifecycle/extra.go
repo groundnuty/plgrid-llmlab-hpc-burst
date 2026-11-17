@@ -97,14 +97,14 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLe
 }
 
 // headroomOf is the admission headroom H of an extra on the Provider (HBEP-7, Over-allocation and qualification (beta), Its
-// checks, admission headroom; the science agent's ruling on #708's delta reviews, amendment #711): the number of OTHER
-// deployments with a missing primary that the Provider allows, and at least 1, so an extra never takes a slot a primary needs
-// at the time, and nothing is cancelled to make room. It is the callback a reservation calls under the Provider's lock
+// checks, admission headroom; the science agent's ruling on #708's delta reviews, amendment #711): the number of missing
+// PRIMARIES, counted as primaries, of the OTHER deployments that the Provider allows, at the time of the check, and 0 when
+// there are none, so an extra never takes a slot a primary needs at the time, and nothing is cancelled to make room. It is the callback a reservation calls under the Provider's lock
 // (slotAsk.headroom), reading through the uncached Reader: one List of the Providers and one of the ModelDeployments of
 // every namespace, and, for each deployment that allows the Provider, its Instances and Allocations by its model-deployment
 // label. A deployment with a missing primary may have NO Instance on this Provider, so no view of the Provider's own
 // Instances (deploymentViews) can tell. A deployment counts when it is not this one, not being deleted, serves, wants
-// Instances, has not passed its end time, allows the Provider (selectedProviderNames, as its own pass reads it) and its
+// Instances, has not passed its end time (by the clock read under the lock), allows the Provider (selectedProviderNames, as its own pass reads it) and its
 // shortage by Allocation presence (shortageOfDeployment) is above zero.
 func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 	return func(ctx context.Context) (int, error) {
@@ -116,6 +116,9 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 		if err := p.r.Reader.List(ctx, &provs); err != nil {
 			return 0, fmt.Errorf("list Providers for the extra's headroom: %w", err)
 		}
+		// The clock is read here, with the lock held and every read back, never the pass's p.now from before it: a pass that
+		// waited for the lock must not count a deployment whose end time passed meanwhile.
+		now := p.reserveTime()
 		h := 0
 		for i := range mds.Items {
 			md := &mds.Items[i]
@@ -123,7 +126,7 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 				continue
 			}
 			if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 ||
-				(md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time)) {
+				(md.Spec.EndTime != nil && !now.Before(md.Spec.EndTime.Time)) {
 				continue
 			}
 			allowed, err := selectedProviderNames(md.Spec.Providers, provs.Items)
@@ -134,11 +137,9 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			if short > 0 {
-				h++
-			}
+			h += short
 		}
-		return max(h, 1), nil
+		return h, nil
 	}
 }
 

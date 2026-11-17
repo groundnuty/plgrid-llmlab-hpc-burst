@@ -150,6 +150,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	default:
 		p.md = &md
 	}
+	// The ModelDeployment's owner-hash label (owner.go). Its failure does not hold back the pass, which would stop
+	// provisioning for a label; it joins the pass's error below, so the key is retried with backoff.
+	labelErr := p.syncOwnerLabel()
 	if err := p.observe(); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -164,7 +167,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Healthy's transition, the class's start-to-ready time and the status
 	// times, follows what the pass saw. Nothing before this line reads p.now.
 	p.now = r.Clock.Now().UTC().Truncate(time.Second)
-	if err := p.run(); err != nil {
+	if err := errors.Join(p.run(), labelErr); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.sweepSecrets(ctx); err != nil {
