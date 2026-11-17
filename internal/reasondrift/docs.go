@@ -23,8 +23,9 @@ import (
 )
 
 // Actions are HBEP-8's event types, which go in an event's action (HBEP-8,
-// Events, Form).
-var Actions = []string{"started", "ready", "degraded", "failing", "ending-soon", "replaced"}
+// Events, Form): six in alpha, and in beta `ended`, a job that ended at its
+// planned end (amended 2026-11-16).
+var Actions = []string{"started", "ready", "degraded", "failing", "ending-soon", "replaced", "ended"}
 
 // Kinds are the kinds of object an event in alpha can regard (HBEP-8, Reasons
 // in alpha, Regarding column). A Regarding cell names its kinds by these words.
@@ -49,6 +50,11 @@ type Docs struct {
 	// Managed lists the reasons of the managed catalog controller's events, with
 	// their types, as HBEP-8's bullet under the table states them.
 	Managed []ManagedEntry
+	// ObserverReasons are the reasons of HBEP-8's Observers table, its "Event
+	// when stale" column, sorted: the reasons an observer's staleness raises
+	// (today HeartbeatMissed). They regard the stale observer's resource, not
+	// the object a reason's own subject is.
+	ObserverReasons []string
 }
 
 // ManagedEntry is a reason and the type of the event the managed catalog
@@ -84,11 +90,15 @@ func ParseDocs(hbep8, hbep7 []byte) (*Docs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HBEP-8: %w", err)
 	}
+	observers, err := ParseObserverReasons(hbep8)
+	if err != nil {
+		return nil, fmt.Errorf("HBEP-8: %w", err)
+	}
 	ranking, err := ParseRanking(hbep7)
 	if err != nil {
 		return nil, fmt.Errorf("HBEP-7: %w", err)
 	}
-	return &Docs{Table: table, Ranking: ranking, Managed: managed}, nil
+	return &Docs{Table: table, Ranking: ranking, Managed: managed, ObserverReasons: observers}, nil
 }
 
 // TableReasons returns the distinct reasons of the table, sorted.
@@ -118,9 +128,12 @@ var (
 	kindWord      = regexp.MustCompile(`\b(` + strings.Join(Kinds, "|") + `)\b`)
 	separatorCell = regexp.MustCompile(`^:?-{3,}:?$`)
 	// reasonsRow is the shape of a row of the reasons table: its first cell is
-	// one of HBEP-8's six types in backticks.
+	// one of HBEP-8's types (Actions) in backticks.
 	reasonsRow  = regexp.MustCompile("^\\|\\s*`(" + strings.Join(Actions, "|") + ")`\\s*\\|")
 	rankingName = regexp.MustCompile("^`([A-Z][A-Za-z0-9]*)`")
+	// observerReason is a reason in a cell of the Observers table, before its
+	// "regarding": a backticked CamelCase word.
+	observerReason = regexp.MustCompile("`([A-Z][A-Za-z0-9]*)`")
 )
 
 // wantReasonsHeader is the header HBEP-8's reasons table must have.
@@ -128,7 +141,7 @@ var wantReasonsHeader = []string{"Type", "Reasons", "Regarding", "Emitter"}
 
 // ParseEventTable reads HBEP-8's "Reasons in alpha" table. It returns an error
 // for a table it cannot read: a missing marker or table, a different header, a
-// row of the wrong width, a type that is not one of HBEP-8's six, a reasons
+// row of the wrong width, a type that is not one of HBEP-8's (Actions), a reasons
 // cell with anything but reason names (and parenthetical remarks), or a
 // Regarding cell that names no kind.
 //
@@ -263,6 +276,43 @@ func ParseObserverKinds(md []byte) ([]string, error) {
 	out := make([]string, 0, len(seen))
 	for k := range seen {
 		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ParseObserverReasons reads HBEP-8's Observers table and returns the reasons
+// its "Event when stale" column names, sorted and without repeats. A cell reads
+// "`type`, `Reason`, regarding the kind": the reasons are the backticked
+// CamelCase words before "regarding" (the type is in lower case, and a kind
+// after it, such as `Lease`, is no reason). Every row must name at least one,
+// so a table whose column holds something else is an error, never an empty set.
+func ParseObserverReasons(md []byte) ([]string, error) {
+	header, rows, _, _, err := tableAfter(strings.Split(string(md), "\n"), observersMarker)
+	if err != nil {
+		return nil, fmt.Errorf("the Observers table: %w", err)
+	}
+	col := slices.Index(header, "Event when stale")
+	if col < 0 {
+		return nil, fmt.Errorf("the Observers table's header %q has no \"Event when stale\" column", header)
+	}
+	seen := map[string]bool{}
+	for n, row := range rows {
+		if len(row) != len(header) {
+			return nil, fmt.Errorf("the Observers table, row %d has %d cells, want %d", n+1, len(row), len(header))
+		}
+		cell, _, _ := strings.Cut(row[col], "regarding")
+		names := observerReason.FindAllStringSubmatch(cell, -1)
+		if len(names) == 0 {
+			return nil, fmt.Errorf("the Observers table, row %d: %q names no reason (a backticked CamelCase word)", n+1, row[col])
+		}
+		for _, m := range names {
+			seen[m[1]] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for r := range seen {
+		out = append(out, r)
 	}
 	sort.Strings(out)
 	return out, nil

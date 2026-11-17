@@ -91,8 +91,11 @@ func newGateExecWorld(t *testing.T, knob *gateKnob) (w *execWorld, r, x string) 
 // target reports Done, since it is gone, and its outcome names the failure that released it. When the write lands the
 // Operation is Done, R untouched.
 //
-// JobEnded's `related` (the Provider controller's event for an Allocation released by an Operation) is not on main, so the
-// row asserts the release cause the event reads, and not the event.
+// JobEnded is raised by the Provider's controller (internal/providerctl), which reads the release cause with
+// ParseReleaseCauseOperation to put an Operation in `related` (HBEP-8, Allocation events). The rig's Provider is
+// pkg/provider/fake, which raises no such event, so the row asserts what the event reads: the gate's cause does not parse as an
+// Operation's, so JobEnded's related would be empty and its note would carry the failure's own cause. providerctl/e2e
+// (events_delete_test.go) shows the event for a cause that is not the Operation's form, with no related object.
 func TestAGateMissReleasesACommittedTargetsAllocationWithTheGatesCauseAndTheTargetIsDoneNamingIt(t *testing.T) {
 	ms := time.Millisecond
 	knob := &gateKnob{tpot: 41 * ms, ttft: 300 * ms}

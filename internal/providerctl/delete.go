@@ -70,6 +70,7 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	// say which job (HBEP-4, Risks, and Test plan, the alpha conformance step).
 	// This and the absentSince anchor are the only status a deleting pass writes;
 	// the phase and the rest stay as the last live pass left them.
+	e.endedWhileDeleting(a, rec, jobs)
 	blocker, blocked := completingBlocker(jobs, rec.jobID)
 	e.mirrorBlocker(a, rec.jobID, blocker, blocked)
 	e.toCancel = nil
@@ -112,6 +113,7 @@ func (e *external) observeDeleting(ctx context.Context, a *v1alpha1.Allocation, 
 	e.p.SetBusy(name, false)
 	e.s.finals.Delete(rec.jobID)
 	e.s.limitEvents.Delete(a.UID)
+	e.s.gates.forget(a.UID)
 	return missing, nil
 }
 

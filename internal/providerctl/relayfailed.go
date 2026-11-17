@@ -42,9 +42,13 @@ type relayFailure struct {
 }
 
 // relayFailedMessage is the RelayFailed event's message, which the condition
-// repeats.
-func relayFailedMessage(ch agentapi.RelayChannel, cause string) string {
-	return fmt.Sprintf("the %s relay ended for good: %s", ch, cause)
+// repeats. It names no job ID: the lifecycle controller copies the condition's
+// message into the RelayEndedForGood event on the Instance, which goes to the
+// durable log (HBEP-8, Allocation events, No job ID in a note; R2 of #625). A
+// relay's cause can name the job (its own refusals say "job <ID> is not
+// running"), so the recorded job's ID is taken out of the cause as a token.
+func relayFailedMessage(ch agentapi.RelayChannel, cause, jobID string) string {
+	return fmt.Sprintf("the %s relay ended for good: %s", ch, redactToken(cause, jobID, "the job"))
 }
 
 // onRelayFailed is the relay owner's OnFailed for one Allocation: the owner
@@ -71,7 +75,7 @@ func (e *external) onRelayFailed(ref *v1alpha1.Allocation, tag string) func(agen
 		if lead.Err() != nil {
 			return
 		}
-		msg := relayFailedMessage(ch, cause)
+		msg := relayFailedMessage(ch, cause, job)
 		f := s.relays.recordFailure(tag, relayFailure{uid: uid, jobID: job, msg: msg, at: e.now()})
 		if err := s.persistRelayFailed(lead, key, f); err != nil {
 			s.o.Log.Info("the RelayEndedForGood mark waits for the next observation", "tag", tag, "error", err)

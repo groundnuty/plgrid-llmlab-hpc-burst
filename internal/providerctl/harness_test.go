@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -179,6 +180,63 @@ func (r *recorder) has(reason string) bool {
 	return false
 }
 
+// typedEvent is one typed Allocation event as the controller handed it to its
+// typed recorder: the id the marking carries (empty for an event raised with
+// Eventf, which marks no transition), the type in action, and the formatted note.
+type typedEvent struct {
+	id                              string
+	regarding, related              runtime.Object
+	eventtype, reason, action, note string
+}
+
+// typedRecorder is the in-memory double of Options.TypedRecorder. It stands in
+// for client-go's recorder in the unit tests of the decisions; the API-level
+// rows are in e2e, which lists the Events the API server holds.
+type typedRecorder struct {
+	mu     sync.Mutex
+	events []typedEvent
+}
+
+func (r *typedRecorder) add(id string, regarding, related runtime.Object, eventtype, reason, action, note string, args []interface{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, typedEvent{id: id, regarding: regarding, related: related, eventtype: eventtype,
+		reason: reason, action: action, note: fmt.Sprintf(note, args...)})
+}
+
+func (r *typedRecorder) Eventf(regarding, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+	r.add("", regarding, related, eventtype, reason, action, note, args)
+}
+
+func (r *typedRecorder) EventfID(id string, regarding, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+	r.add(id, regarding, related, eventtype, reason, action, note, args)
+}
+
+// of returns the events of the reason, in order.
+func (r *typedRecorder) of(reason string) []typedEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []typedEvent
+	for _, e := range r.events {
+		if e.reason == reason {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (r *typedRecorder) has(reason string) bool { return len(r.of(reason)) > 0 }
+
+func (r *typedRecorder) reasons() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, e := range r.events {
+		out = append(out, e.reason)
+	}
+	return out
+}
+
 // env is one test's world.
 type env struct {
 	t        *testing.T
@@ -190,6 +248,7 @@ type env struct {
 	c        client.Client
 	ctl      *Controller
 	rec      *recorder
+	typed    *typedRecorder
 	credDir  string
 	buildDir string
 	digest   string
@@ -233,7 +292,7 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 	batch := fake.NewBatch(clock, fake.Config{Partitions: []fake.Partition{
 		{Name: gpuPart, GPUModel: "A100", GPUsPerNode: gpus, MaxTime: 48 * time.Hour},
 	}})
-	e := &env{t: t, ctx: context.Background(), clock: clock, batch: batch, rec: &recorder{}}
+	e := &env{t: t, ctx: context.Background(), clock: clock, batch: batch, rec: &recorder{}, typed: &typedRecorder{}}
 	e.platform = &fakePlatform{Batch: batch, clock: clock, busy: map[string]bool{},
 		paths: slurm.Paths{Home: "/home/example-user", Staging: "/scratch/example-user/stage"}, keysPresent: true}
 	e.profiles = &staticProfiles{v: slurm.Validated{
@@ -265,7 +324,7 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 		NewPlatform: func(slurm.Validated) (Platform, io.Closer, error) { return e.platform, io.NopCloser(nil), nil },
 		Clock:       clock, CredentialsDir: e.credDir, AgentBuildsDir: e.buildDir,
 		Front:    exampleFront(t, e.buildDir),
-		Recorder: e.rec, CreationGracePeriod: -1, Identity: "test-controller",
+		Recorder: e.rec, TypedRecorder: e.typed, CreationGracePeriod: -1, Identity: "test-controller",
 	}
 	for _, m := range mods {
 		m(e)

@@ -31,6 +31,12 @@ type ProbeResult struct {
 	Passed   bool
 	Status   int    // the /health status; 0 when none arrived
 	Error    string // why it failed; empty when it passed
+	// Cause classifies the failure into one of probeCauseTimeout,
+	// probeCauseRefused, probeCauseNoProxy and probeCauseOther; empty when it
+	// passed. Error is the text of the dial or the reply, which can name an
+	// address or a status line from outside the front, and stays in the front's
+	// log. Cause is what an event's note may say of it (probeFailureText).
+	Cause string
 	// Failures is the run of failed probes, this one included; 0 after a pass.
 	Failures int
 	// Registered is whether the transport counts as registered after it.
@@ -414,7 +420,7 @@ func (p *Prober) probeOne(ctx context.Context, in *v1alpha1.Instance, st *probeS
 		st.fails = 0
 	} else {
 		st.fails++
-		res.Error = err.Error()
+		res.Error, res.Cause = err.Error(), probeCauseOf(err)
 	}
 	res.Failures = st.fails
 	st.has, st.passed, st.at = true, err == nil, p.clk.Now()

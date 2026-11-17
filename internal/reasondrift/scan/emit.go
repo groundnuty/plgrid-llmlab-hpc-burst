@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
 	"strings"
 
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift"
@@ -37,6 +39,14 @@ type scanner struct {
 	// implementers are the types with a builder in their method set
 	// (indexImplementers).
 	implementers []implementer
+
+	// byDir are the packages loaded with their syntax, by directory; actionMaps
+	// the maps from reason to type of the sinks that take their type from one,
+	// by the sink's actionMap, read on the first call of such a sink
+	// (actionMap), with the error of any that could not be read in mapErr.
+	byDir      map[string]*packages.Package
+	actionMaps map[string]map[string]string
+	mapErr     error
 }
 
 // functions lists the functions that can hold a call or a use of a function:
@@ -211,7 +221,7 @@ func (s *scanner) collect(code *reasondrift.Code) {
 					continue
 				}
 				if isSink {
-					code.Emits = append(code.Emits, s.emit(fn, ci, cc, sk))
+					code.Emits = append(code.Emits, s.emit(fn, ci, cc, sk)...)
 					continue
 				}
 				if isRecorder {
@@ -383,7 +393,7 @@ func (s *scanner) receiver(cc *ssa.CallCommon, v ssa.Value) (ssa.Value, string) 
 			if f.Event && off+f.Param == pos {
 				carries = true
 			}
-			if f.Arg == 0 && !f.Event && f.Of == "" && f.Field == "" {
+			if f.Arg == 0 && !f.Event && f.Of == "" && f.Field == "" && f.Map == "" {
 				regarding = off + f.Param
 			}
 		}
@@ -444,6 +454,10 @@ func (s *scanner) verifyForwards(w reasondrift.Wrapper, root *ssa.Function, cc *
 			if !isField || typeName != f.Of || field != f.Field {
 				return fmt.Sprintf("argument %d is not the %s of a %s", f.Arg, f.Field, f.Of)
 			}
+		case f.Map != "":
+			if !s.isMapLookup(arg, f.Map, param) {
+				return fmt.Sprintf("argument %d is not the value of %s under parameter %d", f.Arg, f.Map, f.Param)
+			}
 		case f.Field != "":
 			if !isField || field != f.Field || !isParam(base, param) {
 				return fmt.Sprintf("argument %d is not the %s of parameter %d", f.Arg, f.Field, f.Param)
@@ -455,6 +469,37 @@ func (s *scanner) verifyForwards(w reasondrift.Wrapper, root *ssa.Function, cc *
 		}
 	}
 	return ""
+}
+
+// isMapLookup reports whether v is the value the package-level map named full
+// (the package directory, a dot, the variable) holds under the key key, which
+// is the parameter itself: the lookup a, ok := m[key] (the first of its two
+// results) or the plain m[key]. A lookup in another map, under another key, a
+// constant, or the key itself is not.
+func (s *scanner) isMapLookup(v ssa.Value, full string, key *ssa.Parameter) bool {
+	switch x := unwrap(v).(type) {
+	case *ssa.Extract:
+		l, ok := x.Tuple.(*ssa.Lookup)
+		return ok && l.CommaOk && x.Index == 0 && s.isLookupOf(l, full, key)
+	case *ssa.Lookup:
+		return !x.CommaOk && s.isLookupOf(x, full, key)
+	}
+	return false
+}
+
+// isLookupOf reports whether the lookup reads the package-level variable named
+// full, under the key key.
+func (s *scanner) isLookupOf(l *ssa.Lookup, full string, key *ssa.Parameter) bool {
+	load, ok := l.X.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return false
+	}
+	g, ok := load.X.(*ssa.Global)
+	if !ok || g.Pkg == nil {
+		return false
+	}
+	dir := strings.TrimPrefix(strings.TrimPrefix(g.Pkg.Pkg.Path(), s.mod), "/")
+	return dir+"."+g.Name() == full && isParam(l.Index, key)
 }
 
 // isParam reports whether v is the parameter p, unchanged: p itself, or p read
@@ -584,29 +629,62 @@ func (s *scanner) sink(full string) (sink, bool) {
 	return sk, ok
 }
 
-// emit resolves one call of a sink to an Emit.
-func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCommon, sk sink) reasondrift.Emit {
+// emit resolves one call of a sink to its Emits: one, or, for a sink that takes
+// its type from a map (sink.actionMap), one for each reason that can reach the
+// call, so that a reason is never paired with the type of another.
+func (s *scanner) emit(fn *ssa.Function, ci ssa.CallInstruction, cc *ssa.CallCommon, sk sink) []reasondrift.Emit {
 	e := reasondrift.Emit{Package: s.pkgDir(fn), Func: funcName(fn), Pos: s.pos(ci.Pos())}
 	off := receiverOffset(cc)
 	if why := s.reasonsOf(&e, cc, off, sk.reason); why != "" {
 		e.Unresolved = "the reason: " + why
-		return e
+		return []reasondrift.Emit{e}
 	}
-	if why := s.actionsOf(&e, cc, off, sk.action); why != "" {
-		e.Unresolved = "the type: " + why
-		return e
+	if sk.actionMap == "" {
+		if why := s.actionsOf(&e, cc, off, sk.action); why != "" {
+			e.Unresolved = "the type: " + why
+			return []reasondrift.Emit{e}
+		}
 	}
 	if off+sk.regarding >= len(cc.Args) {
 		e.Unresolved = "the regarding object: the call has too few arguments"
-		return e
+		return []reasondrift.Emit{e}
 	}
 	kinds, why := s.resolve(cc.Args[off+sk.regarding], kindLeaf)
 	if why != "" {
 		e.Unresolved = "the regarding object: " + why
-		return e
+		return []reasondrift.Emit{e}
+	}
+	if sk.actionMap != "" {
+		return s.mapEmits(e, kinds, sk)
 	}
 	e.Kinds = kinds
-	return e
+	return []reasondrift.Emit{e}
+}
+
+// mapEmits splits e, whose Reasons are known, into one Emit for each reason,
+// with the type the sink's map gives it and the kinds the call regards. A
+// reason the map does not hold makes its Emit unresolved, and no other.
+func (s *scanner) mapEmits(e reasondrift.Emit, kinds []string, sk sink) []reasondrift.Emit {
+	types, readable := s.actionMap(sk.actionMap)
+	var out []reasondrift.Emit
+	for _, r := range e.Reasons {
+		x := e
+		x.Reasons, x.LiteralReasons = []string{r}, nil
+		if slices.Contains(e.LiteralReasons, r) {
+			x.LiteralReasons = []string{r}
+		}
+		a, ok := types[r]
+		switch {
+		case !readable:
+			x.Unresolved = fmt.Sprintf("the type: %s cannot be read", sk.actionMap)
+		case !ok:
+			x.Unresolved = fmt.Sprintf("the type: reason %s is not in %s", r, sk.actionMap)
+		default:
+			x.Actions, x.Kinds = []string{a}, kinds
+		}
+		out = append(out, x)
+	}
+	return out
 }
 
 // reasonsOf resolves argument i (after the receiver offset) of the call to the

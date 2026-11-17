@@ -219,8 +219,16 @@ func TestARelayEndedForGoodReleasesTheAllocationThroughTheLifecycle(t *testing.T
 	if in.Status.Phase != v1alpha1.InstanceEnded || in.Status.EndReason != wantRelayCondition {
 		t.Errorf("the Instance is %s with end reason %q; want ended with %s", in.Status.Phase, in.Status.EndReason, wantRelayCondition)
 	}
-	if ev := lcRec.Find("failing", wantRelayCondition); len(ev) != 1 || ev[0].Name != served.Name || !strings.Contains(ev[0].Message, "step limit") {
-		t.Errorf("failing/%s events %+v: want one, for %s, naming srun's refusal", wantRelayCondition, ev, served.Name)
+	// The Instance's event goes to the durable log in beta, so it gives the reason
+	// code and a fixed description, not the relay's cause, which can quote a path
+	// (HBEP-8, Allocation events, No job ID, path or name in a note). The cause, srun's
+	// refusal, stays in the Allocation's condition, which the next lines read.
+	if ev := lcRec.Find("failing", wantRelayCondition); len(ev) != 1 || ev[0].Name != served.Name ||
+		ev[0].Message != "a relay of Allocation "+old.Name+" ended for good; the Allocation's RelayEndedForGood condition has the cause" {
+		t.Errorf("failing/%s events %+v: want one, for %s, with the fixed description", wantRelayCondition, ev, served.Name)
+	}
+	if _, _, msg := relayCondition(e.get(old.Name)); !strings.Contains(msg, "step limit") {
+		t.Errorf("the Allocation's condition message %q does not keep srun's refusal", msg)
 	}
 
 	// The finalizer cancels the job by its tag, and the Allocation goes, with

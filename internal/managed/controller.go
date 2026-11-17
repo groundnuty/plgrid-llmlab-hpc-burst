@@ -20,6 +20,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/managedrecord"
 )
@@ -195,15 +196,21 @@ func Setup(events *eventcount.Counter) func(mgr manager.Manager, provider string
 	}
 	return func(mgr manager.Manager, provider string) error {
 		controller := eventcount.ControllerProvider(provider)
+		rec := eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller)
 		c, err := New(Options{
 			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
-			Recorder: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller),
+			Recorder: rec,
 			Log:      mgr.GetLogger().WithName("managed-catalog"),
 		})
 		if err != nil {
 			return err
 		}
 		if err := c.SetupWithManager(mgr); err != nil {
+			return err
+		}
+		// Each Provider manager raises one ObservationGap regarding its own Lease
+		// when it takes it (HBEP-8, Gaps after a restart), through this recorder.
+		if err := providerctl.AddGapEmitter(mgr, provider, rec); err != nil {
 			return err
 		}
 		events.Zero(controller, RaisedEvents())

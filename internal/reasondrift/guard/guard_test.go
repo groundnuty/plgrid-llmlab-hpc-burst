@@ -469,6 +469,23 @@ func mutantOwnInterfaceCounted(src mutantRecorderSource, c *eventcount.Counter) 
 func mutantFakeRecorder() record.EventRecorder { return record.NewFakeRecorder(1) }
 `
 
+// mutantEventfID is a file added to internal/lifecycle: a call of the counting
+// wrapper's EventfID, the beta's recorder for an event with an id, outside a
+// listed wrapper. EventfID is an emit method, so the call is one UnknownRecorder
+// problem, in the function that makes it.
+const mutantEventfID = `package lifecycle
+
+import (
+	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+)
+
+func mutantEventfID(r eventcount.IDRecorder, o runtime.Object) {
+	r.EventfID("id", o, nil, "Normal", "MutantEventfIDReason", "started", "n")
+}
+`
+
 // mutantFrontRecorders is a file added to internal/front: the recorders of
 // client-go's two event broadcasters built and not wrapped, and the method
 // that builds one taken as a value (#256). Each is one RecorderNotCounted
@@ -496,6 +513,38 @@ func mutantBroadcasterAsValue(b events.EventBroadcaster) func(*runtime.Scheme, s
 	return b.NewRecorder
 }
 `
+
+// mustRead returns the file at rel, under the root.
+func mustRead(t *testing.T, rel string) []byte {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return src
+}
+
+// replaceInFunc returns src with the one occurrence of from, within the
+// function that begins with funcPrefix (up to the closing brace at the start of
+// a line), replaced by to. A file whose two functions hold the same line, as the
+// counting wrapper's Eventf and EventfID do, takes a change in one.
+func replaceInFunc(t *testing.T, src []byte, rel, funcPrefix, from, to string) []byte {
+	t.Helper()
+	text := string(src)
+	if n := strings.Count(text, funcPrefix); n != 1 {
+		t.Fatalf("%s has %d functions that begin %q, want 1", rel, n, funcPrefix)
+	}
+	start := strings.Index(text, funcPrefix)
+	end := strings.Index(text[start:], "\n}\n")
+	if end < 0 {
+		t.Fatalf("%s: the function that begins %q has no closing brace", rel, funcPrefix)
+	}
+	body := text[start : start+end]
+	if n := strings.Count(body, from); n != 1 {
+		t.Fatalf("%s: %q has %d occurrences of %q, want 1", rel, funcPrefix, n, from)
+	}
+	return []byte(text[:start] + strings.Replace(body, from, to, 1) + text[start+end:])
+}
 
 // replaceOnce returns the file at rel (under the root) with the one occurrence
 // of from replaced by to.
@@ -550,13 +599,21 @@ func mutantOverlay(t *testing.T) map[string][]byte {
 		filepath.Join(root, "internal/lifecycle/zz_mutant_recorders.go"): []byte(mutantLifecycleRecorders),
 		filepath.Join(root, "internal/front/zz_mutant_recorders.go"):     []byte(mutantFrontRecorders),
 		// #256: the counting wrappers' calls of the recorders they wrap stop
-		// passing on the type (events.k8s.io) and the reason (core/v1).
-		filepath.Join(root, "internal/eventcount/counter.go"): replaceIn(t,
-			replaceOnce(t, "internal/eventcount/counter.go",
-				"r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)",
-				`r.inner.Eventf(regarding, related, "Warning", reason, action, note, args...)`),
+		// passing on the type (events.k8s.io, Eventf), the reason (core/v1) and, for
+		// the beta's EventfID, whose id is parameter 0 and so shifts every other
+		// by one, the reason and the type, swapped.
+		filepath.Join(root, "internal/eventcount/counter.go"): replaceInFunc(t,
+			replaceInFunc(t,
+				replaceInFunc(t, mustRead(t, "internal/eventcount/counter.go"), "internal/eventcount/counter.go",
+					"func (r eventsRecorder) Eventf(", "r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)",
+					`r.inner.Eventf(regarding, related, "Warning", reason, action, note, args...)`),
+				"internal/eventcount/counter.go",
+				"func (r eventsRecorder) EventfID(", "r.inner.Eventf(regarding, related, eventtype, reason, action, note, args...)",
+				"r.inner.Eventf(regarding, related, eventtype, action, reason, note, args...)"),
 			"internal/eventcount/counter.go",
-			"r.inner.Event(object, eventtype, reason, message)", "r.inner.Event(object, eventtype, message, reason)"),
+			"func (r legacyRecorder) Event(", "r.inner.Event(object, eventtype, reason, message)", "r.inner.Event(object, eventtype, message, reason)"),
+		// The recorder of the beta's events with an id, called outside a listed wrapper.
+		filepath.Join(root, "internal/lifecycle/zz_mutant_eventfid.go"): []byte(mutantEventfID),
 	}
 }
 
@@ -606,7 +663,11 @@ func TestMutantsAreCaught(t *testing.T) {
 		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantLegacyBroadcasterRecorder"),
 		keyF(reasondrift.RecorderNotCounted, "", "internal/front", "mutantBroadcasterAsValue"),
 		keyF(reasondrift.WrapperDoesNotForward, "", "internal/eventcount", "eventsRecorder.Eventf"),
+		keyF(reasondrift.WrapperDoesNotForward, "", "internal/eventcount", "eventsRecorder.EventfID"),
 		keyF(reasondrift.WrapperDoesNotForward, "", "internal/eventcount", "legacyRecorder.Event"),
+		// EventfID called outside a listed wrapper is a call through a recorder the
+		// scan does not know: it is an emit method.
+		keyF(reasondrift.UnknownRecorder, "", lc, "mutantEventfID"),
 		// The managed controller: a built reason is unresolved, and a constant the
 		// bullet does not list is one more it can raise.
 		keyF(reasondrift.ManagedUnresolved, "", "internal/managed", "mutantBuiltReason"),

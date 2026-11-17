@@ -70,6 +70,12 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		e.absent(a, rec.jobID, now)
 		return exists, nil
 	}
+	drained, err := e.drainedAtEnd(ctx, a, prior, job)
+	if err != nil {
+		*o = *prior
+		o.JobID, o.Submission = rec.jobID, rec.sub
+		return exists, err
+	}
 	var errs []error
 	renamed := job.Name != name
 	if renamed {
@@ -77,7 +83,7 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 			errs = append(errs, err)
 		}
 		refused = true
-	} else if rec.readBack != job.ID && e.readBack(a, job) {
+	} else if rec.readBack != job.ID && e.readBack(a, *rec, job) {
 		if err := e.markReadBack(ctx, a, rec, job.ID); err != nil {
 			errs = append(errs, err)
 		}
@@ -120,6 +126,11 @@ func (e *external) observeRecorded(ctx context.Context, a *v1alpha1.Allocation, 
 		}
 		setAvailability(a)
 	}
+	// The typed events of what this pass changed, against the stored status
+	// (prior), before the status write that records it, so a failed write makes
+	// the next pass raise them again under the same ids (HBEP-8, Allocation
+	// events).
+	e.transitions(a, prior, *rec, job, drained)
 	if job.StartTime != nil && !prior.QueueWaitRecorded {
 		if a.Annotations[v1alpha1.AnnotationQueuedSuccessor] != "" {
 			// A queued-path successor pended behind its own predecessor's per-user cap, not in the
@@ -241,14 +252,11 @@ func addQueueWait(waits []v1alpha1.QueueWait, w v1alpha1.QueueWait) []v1alpha1.Q
 // mirror writes what the read of the recorded job showed into the status.
 func (e *external) mirror(a *v1alpha1.Allocation, prior *v1alpha1.AllocationObservation, id string, job provider.Job) {
 	o := &a.Status.AtProvider
-	if prior.Phase == v1alpha1.AllocationLost {
-		e.event(a, event.Normal("JobReappeared", fmt.Sprintf("job %s shows again in the %s after being reported Lost", id, job.Source)))
-	}
 	o.AbsentSince = nil
 	o.Phase = job.Phase
 	o.Held = job.Held()
 	o.Requeued = o.Requeued || job.Requeued // kept once seen
-	o.Reason = job.Reason
+	o.Reason = redactToken(job.Reason, id, "the job")
 	if o.Requeued {
 		o.Phase, o.Reason = v1alpha1.AllocationFailed, v1alpha1.ReasonRequeued
 	}
@@ -287,6 +295,25 @@ func (e *external) mirrorCompleting(a *v1alpha1.Allocation, id string, job provi
 		return
 	}
 	e.setCompleting(a, completingMessage(id, job))
+	e.completingEvent(a, job)
+}
+
+// completingEvent raises JobCompleting, a degraded event and a repeating
+// condition, once the recorded job has carried COMPLETING for
+// completingEventAfter, counted from the listing's own end time (never from the
+// clock, which would date the flag from when it was first read), and then at
+// most once an hour while the flag lasts (HBEP-8, Allocation events, Repeating
+// conditions). Its note is built from the job's facts, not copied from the
+// condition's message, which names the job ID.
+func (e *external) completingEvent(a *v1alpha1.Allocation, job provider.Job) {
+	if job.CompletingSince == nil || e.now().Sub(*job.CompletingSince) < completingEventAfter {
+		return
+	}
+	if !e.s.gates.hourlyDue(gateCompleting, a.UID, e.now()) {
+		return
+	}
+	e.typedUnmarked(a, evJobCompleting,
+		fmt.Sprintf("the job has carried COMPLETING since %s, in base state %s", factTime(job.CompletingSince), baseState(job)), nil)
 }
 
 // setCompleting records that a job is completing: the flag, and the
@@ -301,6 +328,7 @@ func (e *external) setCompleting(a *v1alpha1.Allocation, message string) {
 // and a JobCompleting condition that was True turns False. A job never seen
 // completing gets no condition.
 func (e *external) clearCompleting(a *v1alpha1.Allocation) {
+	e.s.gates.clearHourly(gateCompleting, a.UID)
 	a.Status.AtProvider.JobCompleting = false
 	if a.GetCondition(v1alpha1.ConditionJobCompleting).Status == corev1.ConditionTrue {
 		a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionJobCompleting, Status: corev1.ConditionFalse, Reason: v1alpha1.ReasonJobNotCompleting,
@@ -349,7 +377,8 @@ func (e *external) absent(a *v1alpha1.Allocation, id string, now time.Time) {
 		return
 	}
 	if o.Phase != v1alpha1.AllocationLost {
-		e.event(a, event.Warning("JobLost", fmt.Errorf("job %s has been absent from the queue listing and accounting since %s", id, o.AbsentSince.UTC().Format(time.RFC3339))))
+		e.typed(a, evJobLost, factTime(&o.AbsentSince.Time),
+			fmt.Sprintf("the job has been absent from the queue listing and accounting since %s; it is Lost after %s", factTime(&o.AbsentSince.Time), e.lostGrace()), nil)
 	}
 	o.Phase = v1alpha1.AllocationLost
 	o.Reason = "absent from the queue listing and accounting"
@@ -366,7 +395,7 @@ func (e *external) absent(a *v1alpha1.Allocation, id string, now time.Time) {
 // the lifecycle controller replaces the Allocation. It reports whether the job
 // matched, so the caller writes the marker; a raised condition is not a match
 // and is not compared again.
-func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) bool {
+func (e *external) readBack(a *v1alpha1.Allocation, rec record, job provider.Job) bool {
 	if a.GetCondition(v1alpha1.ConditionSubmittedAsOther).Status == corev1.ConditionTrue {
 		return false
 	}
@@ -374,10 +403,14 @@ func (e *external) readBack(a *v1alpha1.Allocation, job provider.Job) bool {
 	if len(diffs) == 0 {
 		return true
 	}
-	msg := "job " + job.ID + " was established with other settings than requested: " + strings.Join(diffs, "; ")
+	// The message names no job ID: the lifecycle controller copies it into its
+	// SubmittedAsOther event on the Instance, which goes to the durable log
+	// (HBEP-8, Allocation events, No job ID in a note; R2 of #625). The status
+	// holds the job's ID on its own.
+	msg := "the job was established with other settings than requested: " + strings.Join(diffs, "; ")
 	a.SetConditions(xpv2.Condition{Type: v1alpha1.ConditionSubmittedAsOther, Status: corev1.ConditionTrue,
 		Reason: v1alpha1.ReasonReadBackMismatch, Message: msg, LastTransitionTime: *mt(e.now())})
-	e.event(a, event.Warning("SubmittedAsOther", errors.New(msg)))
+	e.typed(a, evSubmittedAsOther, attemptFact(rec), msg, nil)
 	return false
 }
 
@@ -534,7 +567,8 @@ func (e *external) liftRecorded(ctx context.Context, a *v1alpha1.Allocation, rec
 	if err := e.markLifted(ctx, a, rec, recorded.ID); err != nil {
 		return true, err
 	}
-	e.event(a, event.Normal("HoldLifted", fmt.Sprintf("the hold of job %s was lifted", recorded.ID)))
+	e.typed(a, evHoldLifted, fmt.Sprintf("%d", recorded.RestartCount),
+		fmt.Sprintf("the hold was lifted, so the job pends; it was submitted at %s", factTime(&recorded.SubmitTime)), nil)
 	return true, nil
 }
 

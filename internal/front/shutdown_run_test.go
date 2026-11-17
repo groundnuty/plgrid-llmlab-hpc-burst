@@ -219,8 +219,15 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	}
 	errWaitFor(t, "a UsageWriteFailed event", func() bool { return len(rec.Find(eventFailing, reasonUsageWriteFailed)) > 0 })
 	ev := rec.Find(eventFailing, reasonUsageWriteFailed)[0]
-	if !ev.Warning || ev.Object != leaseDesc || !strings.Contains(ev.Message, "no space left") {
-		t.Errorf("event %+v: want a warning regarding %s naming the cause", ev, leaseDesc)
+	// The note says the cause by its kind (the disk is full) and names no text of the sink's error,
+	// which holds the usage file's path; /healthz below still shows that error (HBEP-8, No job ID,
+	// path or name in a note).
+	const noteTail = "): the disk is full; the error is in the front's log and in the usage member of its health report"
+	if !ev.Warning || ev.Object != leaseDesc || !strings.HasPrefix(ev.Message, "usage records are not being written (request ") || !strings.HasSuffix(ev.Message, noteTail) {
+		t.Errorf("event %+v: want a warning regarding %s, with the note of a full disk", ev, leaseDesc)
+	}
+	if leaks := noteLeaks(ev.Message); len(leaks) > 0 || strings.Contains(ev.Message, "no space left") || strings.Contains(ev.Message, dir) {
+		t.Errorf("the note %q holds %q, the error's text or the usage directory %s", ev.Message, leaks, dir)
 	}
 	resp, err := http.Get("http://" + f.Health.String() + "/healthz")
 	if err != nil {
@@ -243,6 +250,10 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	}
 	if !strings.Contains(body.UsageError, "no space left") {
 		t.Errorf("/healthz usageError = %q, want the cause", body.UsageError)
+	}
+	// The error the note leaves out names the usage directory: the detail stays here, in the status.
+	if !strings.Contains(body.Usage.Error, dir) {
+		t.Errorf("/healthz usage.error = %q, want it to name the usage directory %s, the text the note no longer carries", body.Usage.Error, dir)
 	}
 
 	// The counter, over the health listener: the records lost, and the

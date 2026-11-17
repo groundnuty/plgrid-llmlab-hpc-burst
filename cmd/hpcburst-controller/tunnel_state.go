@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sync/atomic"
 	"time"
 
@@ -253,13 +254,30 @@ func (s *pathState) reportOrphans(ctx context.Context, rep frpsplugin.Report, li
 	s.admitted.retain(keep)
 }
 
+// proxyUIDForm is the alphabet of an Instance UID, the name the agent gives frpc as its proxy's
+// (internal/agent/frpcconf.go, uidForm; the front's frps plugin refuses any other form at
+// NewProxy, internal/front/tunnel.go).
+var proxyUIDForm = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// proxyRef is how a TunnelOrphaned note names a proxy. The name is frps's text, read from its list,
+// and the event goes to a durable log that is kept and may be exported, so a note names no path,
+// user, account or grant (HBEP-8, Allocation events, No job ID, path or name in a note). A name in
+// the form of an Instance UID is the framework's own fact and is named; any other name is not shown,
+// and the controller's log line for the orphan has it.
+func proxyRef(proxy string) string {
+	if proxyUIDForm.MatchString(proxy) {
+		return proxy
+	}
+	return "(name not shown: it is not in the form of an Instance UID)"
+}
+
 // orphanEvent emits one TunnelOrphaned, a degraded event, regarding the Allocation whose
 // credential admitted the tunnel when the plugin's admissions name it and the cache has it, and
 // else the lifecycle Lease (HBEP-8, Reasons in alpha).
 func (s *pathState) orphanEvent(ctx context.Context, proxy string) {
 	subject, how := s.orphanSubject(ctx, proxy)
 	s.rec.Event(subject, nil, lifecycle.EventDegraded, v1alpha1.EventReasonTunnelOrphaned,
-		fmt.Sprintf("frps lists the proxy %s online, and no current Instance has that UID (an orphan, HBEP-6); %s", proxy, how))
+		fmt.Sprintf("frps lists the proxy %s online, and no current Instance has that UID (an orphan, HBEP-6); %s", proxyRef(proxy), how))
 }
 
 // orphanSubject picks the object a proxy's TunnelOrphaned regards, and says why in a clause for

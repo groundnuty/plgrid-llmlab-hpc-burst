@@ -1,7 +1,6 @@
 package managed
 
 import (
-	"fmt"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -69,6 +69,8 @@ func RaisedEvents() []eventcount.Series {
 		v1alpha1.ReasonExpired, v1alpha1.ReasonReadsFailing, v1alpha1.ReasonExpiresWithinADay} {
 		add(badAction[reason], reason)
 	}
+	// ObservationGap, which the manager raises at its start through providerctl.AddGapEmitter.
+	add(provider.EventActionDegraded, providerctl.ReasonObservationGap)
 	add(provider.EventActionDegraded, provider.EventCatalogEntrySkipped)
 	add(provider.EventActionDegraded, provider.EventCatalogTruncated)
 	for _, reason := range readyReasons {
@@ -88,10 +90,38 @@ var watched = []struct {
 	{v1alpha1.ConditionProviderReady, metav1.ConditionFalse},
 }
 
+// credentialNotes are the fixed descriptions the notes of the three bad states
+// of the credentials give instead of their condition's message. The messages
+// are built from an error: a refused file's names the file's path, which the
+// error of the file system and the file's checks put in, and a rejected key's
+// copies the gateway's answer. The events go to a durable log that is kept and
+// may be exported, so no note of it names a path, a user, an account or a
+// grant, or copies another component's error text (HBEP-8, Allocation events,
+// No job ID, path or name in a note; the science agent's ruling on #640). The
+// detail stays in the condition's message, which only status shows.
+var credentialNotes = map[string]string{
+	v1alpha1.ReasonFileRefused:       "the credentials file could not be read or was refused; the reason is in the Provider's CredentialsInvalid condition",
+	v1alpha1.ReasonNoCredentialsFile: "the Provider names no credentials file; a managed Provider reads one (spec.credentialsRef.file)",
+	v1alpha1.ReasonKeyRejected:       "the gateway rejected the key; its answer's status is in the Provider's CredentialsRejected condition",
+}
+
+// badNote is the note of the event for a condition of type typ that turned bad
+// with reason and message. The reasons of credentialNotes get their fixed
+// description; the others (Expired, ExpiresWithinADay and ReadsFailing) copy
+// the message, which provider.ExpiringCondition and provider.SetManagedReadiness
+// write from a time in UTC and fixed words alone.
+func badNote(typ, reason, message string) string {
+	if fixed, ok := credentialNotes[reason]; ok {
+		return typ + ": " + fixed
+	}
+	return typ + ": " + message
+}
+
 // emitTransitions records an event for each watched condition that turned bad
 // in this write (or changed its bad reason), and a ready event for each that
-// left its bad state. The notes are the condition messages, which hold no key
-// and no byte the gateway sent.
+// left its bad state. The note of a bad state is badNote's. A ready note is the
+// condition's recovery and its message, which is empty or the framework's own
+// words with a time in UTC (provider.ExpiringCondition).
 func (c *Controller) emitTransitions(old, prov *v1alpha1.Provider) {
 	if c.recorder == nil {
 		return
@@ -112,7 +142,7 @@ func (c *Controller) emitTransitions(old, prov *v1alpha1.Provider) {
 				c.log.Info("no HBEP-8 type for a bad condition reason; no event", "condition", w.typ, "reason", now.Reason)
 				continue
 			}
-			c.record(prov, provider.NewManagedEvent(action, now.Reason, fmt.Sprintf("%s: %s", w.typ, now.Message)))
+			c.record(prov, provider.NewManagedEvent(action, now.Reason, badNote(w.typ, now.Reason, now.Message)))
 		case was != nil && was.Status == w.bad:
 			note := w.typ + " recovered"
 			if now.Message != "" {

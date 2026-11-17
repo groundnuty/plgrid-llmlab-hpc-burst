@@ -10,6 +10,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/managed"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -59,7 +60,7 @@ func emitPairs(code *reasondrift.Code, pkgs ...string) (pairs map[pair]bool, bad
 // of bad states gives) or the ready event of a cleared condition, and the typed
 // events it builds that are not shown to reach a recorder, in internal/managed
 // and in pkg/provider, which builds the catalog's. pkg/provider/fake is a test
-// double and internal/providerctl the batch Provider, which has no zero list.
+// double and internal/providerctl the batch Provider, whose list is providerPairs'.
 // Its events from emitTransitions are unresolved by design; every other emit
 // site of those packages that is unresolved is returned in bad.
 func managedPairs(code *reasondrift.Code) (pairs map[pair]bool, bad []string) {
@@ -92,7 +93,43 @@ func managedPairs(code *reasondrift.Code) (pairs map[pair]bool, bad []string) {
 			}
 		}
 	}
+	for p := range gapPairs(code) {
+		pairs[p] = true
+	}
 	return pairs, bad
+}
+
+// providerPairs returns what a batch Provider's controller can raise typed: the
+// (action, reason) pairs of the emit sites of internal/providerctl whose events
+// have a type, which is every one but HBEP-4's untyped diagnostics (action
+// none), and the ObservationGap its manager raises at its start. A site the
+// scan could not resolve is returned in bad.
+func providerPairs(code *reasondrift.Code) (pairs map[pair]bool, bad []string) {
+	pairs, bad = emitPairs(code, "internal/providerctl")
+	for p := range pairs {
+		if p.action == reasondrift.NoAction {
+			delete(pairs, p)
+		}
+	}
+	return pairs, bad
+}
+
+// gapPairs returns the pair the managers' ObservationGap emit site raises
+// (internal/providerctl, gapEmitter.Start), which a managed Provider's manager
+// raises too, through the same runnable.
+func gapPairs(code *reasondrift.Code) map[pair]bool {
+	out := map[pair]bool{}
+	for _, e := range code.Emits {
+		if e.Package != "internal/providerctl" || e.Func != "gapEmitter.Start" || e.Unresolved != "" {
+			continue
+		}
+		for _, r := range e.Reasons {
+			for _, a := range e.Actions {
+				out[pair{a, r}] = true
+			}
+		}
+	}
+	return out
 }
 
 // zeroDiff compares a controller's list of series created at 0 with the pairs
@@ -127,7 +164,7 @@ func zeroDiff(list []eventcount.Series, want map[pair]bool) []string {
 // packages whose emit sites it must equal: the lifecycle controller's with
 // cmd/hpcburst-controller's (the tunnel-state reader raises TunnelOrphaned
 // through the lifecycle controller's recorder), the front's, and a managed
-// Provider's.
+// Provider's, and a batch Provider's.
 type zeroList struct {
 	name  string
 	list  func() []eventcount.Series
@@ -142,6 +179,7 @@ var zeroLists = []zeroList{
 		return emitPairs(c, "internal/front")
 	}},
 	{"managed", managed.RaisedEvents, managedPairs},
+	{"provider", providerctl.RaisedEvents, providerPairs},
 }
 
 // TestZeroListsMatchTheEmitSites: each controller's series created at 0 equal,
@@ -178,6 +216,7 @@ func TestAZeroListThatDiffersFails(t *testing.T) {
 		{"lifecycle", pair{"started", "AgentRegistered"}},
 		{"front", pair{"degraded", "CountsDrift"}},
 		{"managed", pair{"failing", "Expired"}},
+		{"provider", pair{"started", "JobSubmitted"}},
 	} {
 		z := zeroLists[slices.IndexFunc(zeroLists, func(x zeroList) bool { return x.name == c.name })]
 		want, _ := z.pairs(code)

@@ -152,9 +152,18 @@ var guideNames = map[string]string{
 // unexportedNames are names the guide gives whose constant is unexported in its package, so this
 // package cannot refer to it: each is checked by its identifier in that package's source.
 var unexportedNames = map[string]struct{ dir, ident string }{
-	"JobHeldAdmin":     {"internal/providerctl", "reasonAdminHold"},
-	"NotHeldByAdmin":   {"internal/providerctl", "reasonNoAdminHold"},
-	"HeartbeatMissed":  {"internal/lifecycle", "reasonHeartbeatMissed"},
+	"JobHeldAdmin":    {"internal/providerctl", "reasonAdminHold"},
+	"NotHeldByAdmin":  {"internal/providerctl", "reasonNoAdminHold"},
+	"HeartbeatMissed": {"internal/lifecycle", "reasonHeartbeatMissed"},
+	// The Provider's controller's typed Allocation events (HBEP-8, Allocation events (beta)).
+	"JobSubmitted":     {"internal/providerctl", "evJobSubmitted"},
+	"JobAdopted":       {"internal/providerctl", "evJobAdopted"},
+	"HoldLifted":       {"internal/providerctl", "evHoldLifted"},
+	"JobStarted":       {"internal/providerctl", "evJobStarted"},
+	"JobReappeared":    {"internal/providerctl", "evJobReappeared"},
+	"HardEndNear":      {"internal/providerctl", "evHardEndNear"},
+	"JobEnded":         {"internal/providerctl", "evJobEnded"},
+	"JobLost":          {"internal/providerctl", "evJobLost"},
 	"ObservationGap":   {"internal/lifecycle", "reasonObservationGap"},
 	"PathProbeFailing": {"internal/front", "reasonPathProbeFailing"},
 	// HBEP-10, The report, as amended by #665 and #666: the final failures of a committed target.
