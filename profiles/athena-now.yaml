@@ -72,6 +72,7 @@ spec:
   inflightWindow: 5m # framework default (HBEP-4, Platform profile schema, inflightWindow): 5 min until the sbatch latency over ssh is measured (HBEP-4, Graduation criteria)
   unknownBound: 10m # framework default (HBEP-4, Platform profile schema, unknownBound): S4's default
   timeZone: Europe/Warsaw # facts.time.slurm_time_zone.value, "Europe/Warsaw, CET +0100 on 2026-10-30"
+  startEstimateTime: epoch-seconds # #661's probe of 16 Nov 2026 (Slurm 23.11.7)
   requeueDefault: true # facts.slurm.job_requeue, "1"
   minJobAge: 10s # facts.slurm.min_job_age, "10 sec"
   # facts.slurm.squeue_json.note: meta.plugin names data_parser/v0.0.40 (HBEP-4, The Slurm dialect), without the
