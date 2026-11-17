@@ -208,8 +208,9 @@ type slotAsk struct {
 	alsoLeave int
 	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
 	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
-	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each other deployment with a missing
-	// primary that the Provider allows, and at least one. It reads through the uncached Reader and adds to alsoLeave.
+	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
+	// deployments that the Provider allows, and 0 when there are none. It reads through the uncached Reader and adds to
+	// alsoLeave.
 	headroom func(ctx context.Context) (int, error)
 }
 

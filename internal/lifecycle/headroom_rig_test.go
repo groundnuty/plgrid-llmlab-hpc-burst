@@ -2,8 +2,8 @@ package lifecycle
 
 // The extra's admission headroom (HBEP-7, Over-allocation and qualification (beta), Its checks; the science agent's ruling on
 // #708's delta reviews, amendment #711; #616 PR 4): an extra is submitted only while, after it, at least H slots stay free on
-// its Provider, H being the other deployments with a missing primary that the Provider allows, and at least 1. Nothing is
-// cancelled to make room. Every count is worked by hand in the row.
+// its Provider, H being the missing primaries, counted as primaries, of the other deployments that the Provider allows, at the
+// time of the check, and 0 when there are none. Nothing is cancelled to make room. Every count is worked by hand in the row.
 
 import (
 	"context"
@@ -26,7 +26,7 @@ func limitOpts(limit int32) []rigOption {
 	return append(qosOpts([]v1alpha1.QOSProfile{{Name: "example-lim", MaxSubmitPerUser: i32(limit)}}, "", "example-lim"), withMaxTime(12*time.Hour))
 }
 
-// TestHeadroomLeavesOneSlotPerOtherDeploymentWithAMissingPrimary: the rule at the reservation. The extras' deployment is
+// TestHeadroomLeavesASlotPerMissingPrimaryOfTheOtherDeployments: the rule at the reservation. The extras' deployment is
 // md-e (k = 1, end time 14:00, so its handover reserves no slot); the others are k = 0 with one primary each. Pass order is by
 // name: md-a, md-b, md-c place their primaries before md-e; md-y and md-z sort after it, so they still have none when md-e's
 // extra is checked: each is a missing primary the Provider allows.
@@ -34,11 +34,11 @@ func limitOpts(limit int32) []rigOption {
 //     is admitted (it leaves 2 slots, one needed), md-e has 2 Allocations and md-z then submits its primary;
 //   - limit 6, md-a, md-b and md-c placed, md-y and md-z missing: 4 listed, H = 2, 4 + 0 + 1 + 2 = 7 > 6: refused, silently
 //     (md-e is not Degraded and names no limit); md-e has 1 Allocation, and md-y and md-z submit theirs: 6 = the limit;
-//   - limit 3, md-a placed, nobody missing: 2 listed, H = max(0, 1) = 1, 2 + 0 + 1 + 1 = 4 > 3: refused. Without the floor of 1
-//     it would be 3 <= 3 and the extra would take the last slot.
+//   - limit 3, md-a placed, nobody missing: 2 listed, H = 0, 2 + 0 + 1 + 0 = 3 <= 3: admitted, a lone deployment takes the last
+//     slot (there is no floor), 3 Allocations; at limit 2 it is 2 + 0 + 1 + 0 = 3 > 2, refused.
 //
 // Nothing is cancelled in any of them.
-func TestHeadroomLeavesOneSlotPerOtherDeploymentWithAMissingPrimary(t *testing.T) {
+func TestHeadroomLeavesASlotPerMissingPrimaryOfTheOtherDeployments(t *testing.T) {
 	for _, c := range []struct {
 		name       string
 		limit      int32
@@ -50,7 +50,8 @@ func TestHeadroomLeavesOneSlotPerOtherDeploymentWithAMissingPrimary(t *testing.T
 	}{
 		{"one other missing: H = 1, the extra is admitted", 6, []string{"md-a", "md-b"}, []string{"md-z"}, 2, 5, false},
 		{"two others missing: H = 2, the extra is refused, silently", 6, []string{"md-a", "md-b", "md-c"}, []string{"md-y", "md-z"}, 1, 6, false},
-		{"nobody missing: H is at least 1, the extra is refused", 3, []string{"md-a"}, nil, 1, 2, false},
+		{"nobody missing: H = 0, the extra takes the last slot", 3, []string{"md-a"}, nil, 2, 3, false},
+		{"nobody missing, limit 2: 2 + 0 + 1 + 0 = 3 > 2, no extra", 2, []string{"md-a"}, nil, 1, 2, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			log := newCauseLog()
@@ -138,13 +139,13 @@ func (f *headroomFixture) h(t *testing.T) int {
 // TestHeadroomCountsOnlyTheOtherDeploymentsThatAllowTheProvider: H, read from a hand-built store through headroomOf, for the
 // Provider prov-x asked by ns/this (which itself misses a primary: that never counts). Each row lists the others and the
 // H it gives, counted by hand:
-//   - none: H = max(0, 1) = 1;
+//   - none: H = 0;
 //   - o1 allows prov-x and has no Instance: 1;  o1 and o7 (an Instance whose Allocation was never made, so a primary still
 //     missing by Allocation presence): 2;  and o8, which allows prov-x by a selector on the Provider's labels: 3;
-//   - o9 wants 2 Instances and has none: its 2 missing primaries count, 2 (headroomUnit: 1 were it a deployment that counts);
+//   - o9 wants 2 Instances and has none: its 2 missing primaries count, 2 (as primaries, not as one deployment);
 //   - o2 allows another Provider only, o3 has its Allocation, o4 is being deleted, o5 wants no Instance, o6 is past its end
-//     time, and this deployment is missing a primary itself: none of them counts, H = max(0, 1) = 1, a count that took any of
-//     them would be 2 or more; with o1 and o7 beside them, which do count, 2.
+//     time, and this deployment is missing a primary itself: none of them counts, H = 0, a count that took any of
+//     them would be 1 or more; with o1 and o7 beside them, which do count, 2.
 func TestHeadroomCountsOnlyTheOtherDeploymentsThatAllowTheProvider(t *testing.T) {
 	past := metav1.NewTime(hoT(7, 0, 0))
 	now := metav1.NewTime(hoT(8, 0, 0))
@@ -188,13 +189,13 @@ func TestHeadroomCountsOnlyTheOtherDeploymentsThatAllowTheProvider(t *testing.T)
 		others []string
 		want   int
 	}{
-		{"no other deployment: the floor of 1", nil, 1},
+		{"no other deployment: H = 0", nil, 0},
 		{"o1 (allows prov-x, no Instance)", []string{"o1"}, 1},
 		{"o1 and o7 (an Instance with no Allocation)", []string{"o1", "o7"}, 2},
 		{"o1, o7 and o8 (allowed by a selector)", []string{"o1", "o7", "o8"}, 3},
-		{"o2 (another Provider), o3 (has its Allocation), o4 (deleting), o5 (wants none), o6 (past its end time) and this one: none counts", []string{"o2", "o3", "o4", "o5", "o6"}, 1},
+		{"o2 (another Provider), o3 (has its Allocation), o4 (deleting), o5 (wants none), o6 (past its end time) and this one: none counts", []string{"o2", "o3", "o4", "o5", "o6"}, 0},
 		{"those five with o1 and o7: only o1 and o7 count", []string{"o2", "o3", "o4", "o5", "o6", "o1", "o7"}, 2},
-		{"o9 wants 2 Instances and has none: it counts for its 2 missing primaries (headroomUnit; 1 if it counts deployments)", []string{"o9"}, 2},
+		{"o9 wants 2 Instances and has none: it counts for its 2 missing primaries, as primaries", []string{"o9"}, 2},
 		{"o1 and o9: 1 + 2 missing primaries", []string{"o1", "o9"}, 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -205,10 +206,10 @@ func TestHeadroomCountsOnlyTheOtherDeploymentsThatAllowTheProvider(t *testing.T)
 	}
 }
 
-// TestADeploymentMissingSeveralPrimariesLeavesASlotForEach: H counts missing primaries (headroomUnit). Limit 3. md-e (k = 1,
+// TestADeploymentMissingSeveralPrimariesLeavesASlotForEach: H counts missing primaries, as primaries (#711). Limit 3. md-e (k = 1,
 // end time 14:00) and md-z (k = 0, instances 2) are created together; md-e's pass comes first, md-z has no Instance: 2 missing
 // primaries, H = 2. md-e's primary makes 1 listed; its extra needs 1 + 0 + 1 + 2 = 4 > 3: refused. md-z then submits both of its
-// primaries: 3 listed, the limit. Were H the number of deployments (1), the extra would be admitted (1 + 0 + 1 + 1 = 3), md-z
+// primaries: 3 listed, the limit. Counting md-z as one deployment (H = 1), the extra would be admitted (1 + 0 + 1 + 1 = 3), md-z
 // would submit one primary and its second would wait behind the extra for a slot it was missing when the extra was checked.
 // Expected: md-e 1 Allocation, md-z 2.
 func TestADeploymentMissingSeveralPrimariesLeavesASlotForEach(t *testing.T) {
@@ -232,11 +233,12 @@ func TestADeploymentMissingSeveralPrimariesLeavesASlotForEach(t *testing.T) {
 }
 
 // TestAnArrivingPrimaryNeverCostsAnExtraItsSlotAndNothingIsCancelled: the ruling's case, worked by hand. Limit 4 first: md-a
-// (k = 1, end time 14:00) makes its primary and its extra at 08:00:10 (1 listed: 1 + 0 + 1 + H(1) = 3 <= 4: admitted; 2 listed).
+// (k = 1, end time 14:00) makes its primary and its extra at 08:00:10 (1 listed: 1 + 0 + 1 + H(0) = 2 <= 4: admitted; 2 listed).
 // md-b (k = 1) and md-c (k = 0) are created together at 08:00:20: md-b's pass comes first, md-c has no Allocation, so H = 1
 // for the other that is missing; md-b's primary makes 3 listed, and its extra needs 3 + 0 + 1 + 1 = 5 > 4: refused. md-c's
 // primary then submits: 4 listed, the limit. Nothing is cancelled, and every deployment has its primary. Second: limit 5, md-a
-// and md-b each with primary and extra (4 listed: md-b's extra, 3 + 0 + 1 + H(1) = 5 <= 5, is admitted, md-c not yet created);
+// and md-b each with primary and extra (4 listed: md-a's extra, 1 + 0 + 1 + H(1: md-b is missing) = 3 <= 5, and md-b's,
+// 3 + 0 + 1 + H(0) = 4 <= 5, are admitted, md-c not yet created);
 // then md-c and md-d arrive TOGETHER: md-c's primary takes the 5th slot, md-d's is refused (5 listed): the stated limit, md-d
 // waits, SubmitLimitReached, with no cancel; when md-a is scaled to zero at 08:01:10 its primary's pending Allocation is released,
 // and md-d's primary submits once that completes.
@@ -269,7 +271,7 @@ func TestAnArrivingPrimaryNeverCostsAnExtraItsSlotAndNothingIsCancelled(t *testi
 		rg.batch.Enqueue(pending10h(10)...)
 		rg.create(extraMD("md-a"))
 		rg.create(extraMD("md-b"))
-		tick10(rg) // 08:00:10: md-a: primary, extra; md-b: primary (3 listed), extra 3 + 0 + 1 + 1 = 5 <= 5
+		tick10(rg) // 08:00:10: md-a: primary, extra (1 + 0 + 1 + 1 = 3); md-b: primary (3 listed), extra 3 + 0 + 1 + 0 = 4 <= 5
 		if a, b := len(rg.allocations("md-a")), len(rg.allocations("md-b")); a != 2 || b != 2 {
 			t.Fatalf("md-a has %d Allocations and md-b %d at 08:00:10, want 2 each", a, b)
 		}
@@ -626,11 +628,13 @@ func TestTheCountAndTheHeadroomShareOneDeadline(t *testing.T) {
 
 // TestACutShortExtrasRetryKeepsTheHeadroom: the retry of an extra whose Allocation's create was cut short takes the headroom
 // like its creation did (E's shared extraChecks). Limit 4. md-e (k = 1, end time 14:00) makes its primary and its extra X at
-// 08:00:10: 1 + 0 + 1 + H(1) = 3 <= 4, admitted, and X's Allocation create is cut short; the controller restarts (its
-// reservation is lost). md-b and md-c (k = 0), created then, take two slots at 08:00:20: 3 listed (md-e's primary and theirs).
-// X's retry: 3 + 0 + 1 + H(1) = 5 > 4: refused, and X is ended through the trim path. Without the headroom at the retry it would
-// be 3 + 0 + 1 = 4 <= 4 and X would take the last slot.
-// Expected at 08:01:10: X ended with no Allocation; md-e, md-b and md-c one Allocation each; md-e not SubmitLimitReached.
+// 08:00:10: 1 + 0 + 1 + H(0: nobody else exists) = 2 <= 4, admitted, and X's Allocation create is cut short; the controller
+// restarts (its reservation is lost). md-b and md-c (k = 0) and md-f (k = 0), created then, are reconciled in name order:
+// md-b and md-c take two slots at 08:00:20 (3 listed with md-e's primary), and md-f, which sorts after md-e, is still missing
+// when X's retry is checked in md-e's pass: H = 1. X's retry: 3 + 0 + 1 + 1 = 5 > 4: refused, and X is ended through the trim
+// path; md-f then submits its primary in the slot (4 listed). Without the headroom at the retry it would be 3 + 0 + 1 = 4 <= 4,
+// X would take the last slot and md-f's primary would wait.
+// Expected at 08:01:10: X ended with no Allocation; md-e, md-b, md-c and md-f one Allocation each; md-e not SubmitLimitReached.
 func TestACutShortExtrasRetryKeepsTheHeadroom(t *testing.T) {
 	log := newCauseLog()
 	cut := &allocCutter{}
@@ -653,14 +657,17 @@ func TestACutShortExtrasRetryKeepsTheHeadroom(t *testing.T) {
 	rg.restartController()
 	rg.create(mdSpec("md-b"))
 	rg.create(mdSpec("md-c"))
+	rg.create(mdSpec("md-f"))
 	for range 6 { // 08:00:20 to 08:01:10
 		tick10(rg)
 	}
 	if got := instOrNil(rg, xName); got != nil && !ended(got) {
-		t.Fatalf("X is %s at 08:01:10, want it ended: its retry leaves no headroom (3 listed + 1 + 1 > 4)", got.Status.Phase)
+		t.Fatalf("X is %s at 08:01:10, want it ended: its retry leaves no headroom for md-f's missing primary (3 listed + 1 + 1 > 4)", got.Status.Phase)
 	}
-	if e, b, c := len(rg.allocations("md-e")), len(rg.allocations("md-b")), len(rg.allocations("md-c")); e != 1 || b != 1 || c != 1 {
-		t.Fatalf("md-e has %d Allocations, md-b %d and md-c %d, want 1 each", e, b, c)
+	for _, n := range []string{"md-e", "md-b", "md-c", "md-f"} {
+		if got := len(rg.allocations(n)); got != 1 {
+			t.Fatalf("%s has %d Allocations, want 1: md-f's primary takes the slot the headroom kept", n, got)
+		}
 	}
 	if d := rg.condition("md-e", v1alpha1.ConditionDegraded); d.Reason == v1alpha1.ReasonSubmitLimitReached {
 		t.Fatalf("md-e Degraded = %s/%s %q, want no SubmitLimitReached", d.Status, d.Reason, d.Message)

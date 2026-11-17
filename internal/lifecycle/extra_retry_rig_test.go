@@ -6,11 +6,12 @@ package lifecycle
 // when one refuses, the Instance is ended, so it never takes a slot its primary's handover needs and never sets
 // SubmitLimitReached on a deployment that is fully served (D7: a refused extra is silent).
 //
-// The state is built through the real path. The Provider's submit limit is 3. The deployment has k = 1 and an end time of
-// 14:00, before the primary's drain start 08:00:10 + 12 h - 2 h 10 min = 17:50:10, so its handover reserves no slot and the
-// extra is admitted at 08:00:10 (1 listed + alsoLeave 0 + 1 + headroom 1 = 3 within 3); the extra's Allocation create is cut
-// short. The end time is then lifted (the deployment now serves past the drain start: the primary's handover will need a
-// slot, which is what makes the retry a violation). With the end time kept, the same checks pass.
+// The state is built through the real path. Host-dialed mode gives a submit limit of 2 per Provider. The deployment has k = 1
+// and an end time of 14:00, before the primary's drain start 08:00:10 + 12 h - 2 h 10 min = 17:50:10, so its handover
+// reserves no slot, no other deployment misses a primary (H = 0), and the extra is admitted at 08:00:10 (1 listed + alsoLeave 0
+// + 1 + 0 = 2 within 2); the extra's Allocation create is cut short. The end time is then lifted (the deployment now serves
+// past the drain start: the primary's handover will need a slot, which is what makes the retry a violation). With the end
+// time kept, the same checks pass.
 
 import (
 	"context"
@@ -30,11 +31,11 @@ import (
 
 // TestACutShortExtrasRetryTakesTheExtrasChecks: the two ways the retry goes wrong, one subtest each.
 //   - the primary is still pending (its job queued 10 h): it holds no reserved slot yet, so a retry with no checks sees 1
-//     listed + 0 reserved = 1 < 3 and submits the extra, 2 Allocations, and the primary's handover finds a slot short. The
-//     extra's own checks leave 1 slot beside it for the primary (alsoLeave 1) and the headroom 1: 1 + 1 + 1 + 1 = 4 > 3, and
-//     refuse it. Expected: one Allocation (the primary's) at 08:01:10.
+//     listed + 0 reserved = 1 < 2 and submits the extra, 2 Allocations, and the primary's handover finds no slot. The
+//     extra's own checks leave 1 slot beside it for the primary (alsoLeave 1): 1 + 1 + 1 + 0 = 3 > 2, and refuse it.
+//     Expected: one Allocation (the primary's) at 08:01:10.
 //   - the primary serves (job started at 08:00:20, ready at 08:01:10): it holds the reserved slot, 1 listed + 1 reserved
-//   - 1 + 1 = 4 > 3, so the retry is refused, and a retry that reported it would set SubmitLimitReached on a deployment
+//   - 1 + 0 = 3 > 2, so the retry is refused, and a retry that reported it would set SubmitLimitReached on a deployment
 //     that is fully served. Expected: ready 1 and Degraded False/AsDesired at 08:02:00, one Allocation.
 func TestACutShortExtrasRetryTakesTheExtrasChecks(t *testing.T) {
 	for _, c := range []struct {
@@ -47,7 +48,7 @@ func TestACutShortExtrasRetryTakesTheExtrasChecks(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			log := newCauseLog()
 			cut := &allocCutter{}
-			rg := newRig(t, append(limitOpts(3), withInterceptors(cut.funcs(log.funcs())))...)
+			rg := newRig(t, withHostDialed(), withMaxTime(12*time.Hour), withInterceptors(cut.funcs(log.funcs())))
 			if c.pPending {
 				rg.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
 			}
@@ -96,13 +97,13 @@ func TestACutShortExtrasRetryTakesTheExtrasChecks(t *testing.T) {
 
 // TestACutShortExtrasRetryThatPassesItsChecksMakesItsAllocation is the positive control of the rows above: with the end time
 // kept at 14:00, before the primary's drain start, the extra's checks pass at the retry exactly as they did at its creation
-// (1 listed + alsoLeave 0 + 1 + headroom 1 = 3 within the limit of 3), so the retry must make the extra's Allocation:
+// (1 listed + alsoLeave 0 + 1 + 0 = 2 within the host-dialed limit of 2), so the retry must make the extra's Allocation:
 // 2 Allocations at 08:01:10, and a deployment that is not Degraded. A fix that ended every cut-short extra would pass the
 // rows above and fail this one.
 func TestACutShortExtrasRetryThatPassesItsChecksMakesItsAllocation(t *testing.T) {
 	log := newCauseLog()
 	cut := &allocCutter{}
-	rg := newRig(t, append(limitOpts(3), withInterceptors(cut.funcs(log.funcs())))...)
+	rg := newRig(t, withHostDialed(), withMaxTime(12*time.Hour), withInterceptors(cut.funcs(log.funcs())))
 	cut.arm(hoMD, 1)
 	rg.create(extraMD(hoMD))
 	rg.clock.Advance(10 * time.Second)
@@ -151,21 +152,22 @@ func (u *uidSetter) funcs(base interceptor.Funcs) interceptor.Funcs {
 	return base
 }
 
-// TestACutShortExtraWithTheLowerUIDTakesTheExtrasChecks (Y1 and E: the selection's tie never decides). Limit
-// 5. md-a (k = 1, end time 14:00) holds its primary and pending extra: 2 listed. md-c (the same) makes its primary P, with UID
-// bbbbbbbb, and its Allocation at 08:00:30 (3 listed), then its extra X, with the LOWER UID aaaaaaaa (3 + 0 + 1 + headroom 1 =
-// 5 <= 5: admitted), whose Allocation's create is cut short; the controller restarts (the slot table is lost) and md-b (k = 0),
-// created at 08:00:30, takes a slot at 08:00:40: P1, X1, P and P2, 4 listed. Both of md-c's Instances are pending with no job started, made in one
-// second, so the selection's tie chooses the lower UID, X, with no Allocation, as md-c's primary. The deployment's units
-// that HAVE an Allocation number its desired count (1: P's), so X is the extra, not a missing primary: shortage 0.
-// X's retry is refused by the extra's own checks (4 listed + 1 + headroom 1 = 6 > the limit of 5), silently, and X is ended.
+// TestACutShortExtraWithTheLowerUIDTakesTheExtrasChecks (Y1 and E: the selection's tie never decides). Limit 4. md-a (k = 1,
+// end time 14:00) holds its primary and pending extra: 2 listed. md-c (the same) makes its primary P, with UID bbbbbbbb, and
+// its Allocation at 08:00:30 (3 listed), then its extra X, with the LOWER UID aaaaaaaa (3 + 0 + 1 + 0 = 4 <= 4: admitted;
+// no other deployment misses a primary), whose Allocation's create is cut short; the controller restarts (the slot table is
+// lost) and md-b (k = 0), created at 08:00:30, takes the fourth slot at 08:00:40: P1, X1, P and P2, 4 listed. Both of md-c's
+// Instances are pending with no job started, made in one second, so the selection's tie chooses the lower UID, X, with no
+// Allocation, as md-c's primary. The deployment's units that HAVE an Allocation number its desired count (1: P's), so X is
+// the extra, not a missing primary: shortage 0. X's retry is refused by the extra's own checks (4 listed + 0 + 1 + 0 = 5 > the
+// limit of 4), silently, and X is ended.
 // Expected by 08:02:00: X ended with no Allocation, P alive with its Allocation, nothing deleted, md-c with no
 // SubmitLimitReached.
 func TestACutShortExtraWithTheLowerUIDTakesTheExtrasChecks(t *testing.T) {
 	log := newCauseLog()
 	cut := &allocCutter{}
 	uids := &uidSetter{md: "md-c", uids: []types.UID{"bbbbbbbb-0000-0000-0000-000000000000", "aaaaaaaa-0000-0000-0000-000000000000"}}
-	rg := newRig(t, append(limitOpts(5), withInterceptors(uids.funcs(cut.funcs(log.funcs()))))...)
+	rg := newRig(t, append(limitOpts(4), withInterceptors(uids.funcs(cut.funcs(log.funcs()))))...)
 	rg.batch.Enqueue(pending10h(8)...)
 	rg.create(extraMD("md-a"))
 	tick10(rg)         // 08:00:10
@@ -198,7 +200,7 @@ func TestACutShortExtraWithTheLowerUIDTakesTheExtrasChecks(t *testing.T) {
 		tick10(rg)
 	}
 	if got := instOrNil(rg, x.Name); got != nil && !ended(got) {
-		t.Fatalf("X is %s at 08:02:00, want it ended (or gone): the extra's checks refuse its retry (4 listed + 1 + 1 > 5)", got.Status.Phase)
+		t.Fatalf("X is %s at 08:02:00, want it ended (or gone): the extra's checks refuse its retry (4 listed + 1 > 4)", got.Status.Phase)
 	}
 	if _, ok := rg.allocation(x.Spec.AllocationRef.Name); ok {
 		t.Fatalf("X's Allocation %s was made, want none", x.Spec.AllocationRef.Name)

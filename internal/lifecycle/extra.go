@@ -97,9 +97,9 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLe
 }
 
 // headroomOf is the admission headroom H of an extra on the Provider (HBEP-7, Over-allocation and qualification (beta), Its
-// checks, admission headroom; the science agent's ruling on #708's delta reviews, amendment #711): the number of OTHER
-// deployments with a missing primary that the Provider allows, and at least 1, so an extra never takes a slot a primary needs
-// at the time, and nothing is cancelled to make room. It is the callback a reservation calls under the Provider's lock
+// checks, admission headroom; the science agent's ruling on #708's delta reviews, amendment #711): the number of missing
+// PRIMARIES, counted as primaries, of the OTHER deployments that the Provider allows, at the time of the check, and 0 when
+// there are none, so an extra never takes a slot a primary needs at the time, and nothing is cancelled to make room. It is the callback a reservation calls under the Provider's lock
 // (slotAsk.headroom), reading through the uncached Reader: one List of the Providers and one of the ModelDeployments of
 // every namespace, and, for each deployment that allows the Provider, its Instances and Allocations by its model-deployment
 // label. A deployment with a missing primary may have NO Instance on this Provider, so no view of the Provider's own
@@ -137,17 +137,11 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			h += headroomUnit(short)
+			h += short
 		}
-		return max(h, 1), nil
+		return h, nil
 	}
 }
-
-// headroomUnit is what a deployment missing short primaries adds to H: its missing PRIMARIES, short, so that one
-// deployment missing several leaves a slot for each, or, were the rule's "other deployments with a missing primary" read
-// as deployments, 1 for any short above 0. The one line the science agent's ruling on the unit flips (#711, Fable's
-// review of the headroom); 0 for a deployment missing none, either way.
-func headroomUnit(short int) int { return short }
 
 // shortageOf is how many primaries a deployment lacks, counted by ALLOCATION PRESENCE and never by the selection's
 // choice: its desired count less the units, one per hedge, that countable Instances make and that HAVE an Allocation. A
