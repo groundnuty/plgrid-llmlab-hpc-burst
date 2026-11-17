@@ -56,6 +56,8 @@ type ownerLog struct {
 	mdPatches    []ownerPatch
 	mdUpdates    int
 	childPatches []string
+	// failMDPatch, when set, is what every Patch of a ModelDeployment returns, before anything is written.
+	failMDPatch error
 }
 
 func (l *ownerLog) funcs() interceptor.Funcs {
@@ -80,6 +82,12 @@ func (l *ownerLog) funcs() interceptor.Funcs {
 			return nil
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			l.mu.Lock()
+			fail := l.failMDPatch
+			l.mu.Unlock()
+			if _, ok := obj.(*v1alpha1.ModelDeployment); ok && fail != nil {
+				return fail
+			}
 			body, err := patch.Data(obj) // before the call: the call overwrites obj with the stored object
 			if err != nil {
 				return err
@@ -108,6 +116,13 @@ func (l *ownerLog) funcs() interceptor.Funcs {
 			return c.Update(ctx, obj, opts...)
 		},
 	}
+}
+
+// failPatches makes every Patch of a ModelDeployment fail with err from now on; nil lets them through.
+func (l *ownerLog) failPatches(err error) {
+	l.mu.Lock()
+	l.failMDPatch = err
+	l.mu.Unlock()
 }
 
 // createdOf returns the records of one kind created for a deployment, in creation order.

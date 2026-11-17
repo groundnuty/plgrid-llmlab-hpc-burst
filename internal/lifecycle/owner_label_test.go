@@ -6,10 +6,13 @@ package lifecycle
 // body written out by hand; a fake client that never records writes would prove nothing about "no write".
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // wantOnePatch checks the deployment's one label patch: the merge patch's body, written out by hand, and the field
@@ -158,5 +161,33 @@ func TestADeploymentBeingDeletedIsNotLabelled(t *testing.T) {
 	rg.Step()
 	if n := len(log.patchesOf("md-live")); n != 1 {
 		t.Errorf("%d patches of the live deployment, want one", n)
+	}
+}
+
+// TestAFailedLabelWriteDoesNotHoldBackTheRestOfThePass: when the label's patch fails (a controller with no right to
+// patch ModelDeployments, say), the pass still provisions, so an Instance exists after it, and still returns the error,
+// so the key is retried with backoff and the label is written once the patch works.
+func TestAFailedLabelWriteDoesNotHoldBackTheRestOfThePass(t *testing.T) {
+	boom := errors.New("example refusal of the patch")
+	log := &ownerLog{}
+	rg := newRig(t, withInterceptors(log.funcs()))
+	rg.Step() // the Providers' first status, before the deployment exists
+	log.failPatches(boom)
+	rg.create(ownedMD("md-a", ownerA, "example purpose of a"))
+	rg.clock.Advance(10 * time.Second)
+	_, err := rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: rigNS, Name: "md-a"}})
+	if !errors.Is(err, boom) {
+		t.Fatalf("the pass returned %v, want the failed patch's error", err)
+	}
+	if n := len(rg.instances("md-a")); n == 0 {
+		t.Error("no Instance exists after the pass: a failed label write held back provisioning")
+	}
+	if lb, _ := rg.mdMeta("md-a"); lb[keyOwnerHash] != "" {
+		t.Errorf("the label is %q although every patch failed", lb[keyOwnerHash])
+	}
+	log.failPatches(nil)
+	rg.Step()
+	if lb, _ := rg.mdMeta("md-a"); lb[keyOwnerHash] != hashA {
+		t.Errorf("the label is %q after the patch worked, want %s", lb[keyOwnerHash], hashA)
 	}
 }
