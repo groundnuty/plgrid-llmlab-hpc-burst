@@ -56,6 +56,8 @@ type ownerLog struct {
 	mdPatches    []ownerPatch
 	mdUpdates    int
 	childPatches []string
+	// before, when set, runs once, before the next Patch of a ModelDeployment reaches the store: another writer's write.
+	before func(ctx context.Context, c client.WithWatch)
 	// failMDPatch, when set, is what every Patch of a ModelDeployment returns, before anything is written.
 	failMDPatch error
 }
@@ -83,10 +85,18 @@ func (l *ownerLog) funcs() interceptor.Funcs {
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			l.mu.Lock()
-			fail := l.failMDPatch
+			fail, before := l.failMDPatch, l.before
+			if _, ok := obj.(*v1alpha1.ModelDeployment); ok && before != nil {
+				l.before = nil
+			}
 			l.mu.Unlock()
-			if _, ok := obj.(*v1alpha1.ModelDeployment); ok && fail != nil {
-				return fail
+			if _, ok := obj.(*v1alpha1.ModelDeployment); ok {
+				if before != nil {
+					before(ctx, c)
+				}
+				if fail != nil {
+					return fail
+				}
 			}
 			body, err := patch.Data(obj) // before the call: the call overwrites obj with the stored object
 			if err != nil {
@@ -122,6 +132,13 @@ func (l *ownerLog) funcs() interceptor.Funcs {
 func (l *ownerLog) failPatches(err error) {
 	l.mu.Lock()
 	l.failMDPatch = err
+	l.mu.Unlock()
+}
+
+// beforeMDPatch arms f to run once, just before the next Patch of a ModelDeployment is made.
+func (l *ownerLog) beforeMDPatch(f func(ctx context.Context, c client.WithWatch)) {
+	l.mu.Lock()
+	l.before = f
 	l.mu.Unlock()
 }
 

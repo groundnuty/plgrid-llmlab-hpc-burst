@@ -35,9 +35,7 @@ const (
 // ModelDeployment with an owner annotation, and on the ModelDeployment itself
 // (correcting a wrong value and removing it when the annotation is absent); it
 // sets it on nothing when there is no owner annotation
-// (`@hpc-burst-science-agent`, 17 Nov 2026, #662). An agent cannot edit a label
-// after create (HBEP-10, The capacity guard), so a person's change of owner is
-// the only thing that moves it.
+// (`@hpc-burst-science-agent`, 17 Nov 2026, #662).
 const LabelOwnerHash = Group + "/owner-hash"
 
 // OwnerHash returns the value of LabelOwnerHash for a user name: "u-" and the

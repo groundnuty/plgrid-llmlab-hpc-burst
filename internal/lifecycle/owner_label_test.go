@@ -6,6 +6,7 @@ package lifecycle
 // body written out by hand; a fake client that never records writes would prove nothing about "no write".
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -13,6 +14,9 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
 // wantOnePatch checks the deployment's one label patch: the merge patch's body, written out by hand, and the field
@@ -44,18 +48,26 @@ func TestTheDeploymentsLabelIsSetCorrectedAndRemoved(t *testing.T) {
 		name       string
 		owner      string
 		label      string // the label the deployment is created with; "" for none
+		noTeam     bool   // the deployment has no label but the owner-hash
 		wantLabels map[string]string
 		wantBody   string
 	}{
-		{"set when absent", ownerA, "", map[string]string{teamLabel: "a", keyOwnerHash: hashA}, setBody},
-		{"corrected when an agent set another value at create", ownerA, wrongHash, map[string]string{teamLabel: "a", keyOwnerHash: hashA}, setBody},
-		{"removed when there is no owner annotation", "", hashA, map[string]string{teamLabel: "a"}, removeBody},
+		{"set when absent", ownerA, "", false, map[string]string{teamLabel: "a", keyOwnerHash: hashA}, setBody},
+		{"corrected when an agent set another value at create", ownerA, wrongHash, false, map[string]string{teamLabel: "a", keyOwnerHash: hashA}, setBody},
+		{"removed when there is no owner annotation", "", hashA, false, map[string]string{teamLabel: "a"}, removeBody},
+		// With the owner-hash as the deployment's only label, a patch built by diffing two copies reads {"labels":null}, which
+		// the API server takes as "drop the whole map": the patch names the one key instead.
+		{"removed when it is the only label", "", hashA, true, nil, removeBody},
+		{"set when it would be the only label", ownerA, "", true, map[string]string{keyOwnerHash: hashA}, setBody},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log := &ownerLog{}
 			rg := newRig(t, withInterceptors(log.funcs()))
 			md := ownedMD("md-a", tc.owner, "example purpose of a")
 			md.Labels = map[string]string{teamLabel: "a"}
+			if tc.noTeam {
+				md.Labels = map[string]string{}
+			}
 			if tc.label != "" {
 				md.Labels[keyOwnerHash] = tc.label
 			}
@@ -189,5 +201,51 @@ func TestAFailedLabelWriteDoesNotHoldBackTheRestOfThePass(t *testing.T) {
 	rg.Step()
 	if lb, _ := rg.mdMeta("md-a"); lb[keyOwnerHash] != hashA {
 		t.Errorf("the label is %q after the patch worked, want %s", lb[keyOwnerHash], hashA)
+	}
+}
+
+// TestALabelAddedByAnotherWriterSurvivesTheLabelPatch: a label that another writer adds between the pass's read and its
+// patch is still there afterwards, for a removal and for a set. The patch names the one owner-hash key, so it cannot
+// drop what it never read; a patch that sent the whole label map, or null for it, would.
+func TestALabelAddedByAnotherWriterSurvivesTheLabelPatch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owner string
+		label string
+		want  map[string]string
+	}{
+		{"removal", "", hashA, map[string]string{"example.org/late": "x"}},
+		{"set", ownerA, "", map[string]string{"example.org/late": "x", keyOwnerHash: hashA}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &ownerLog{}
+			rg := newRig(t, withInterceptors(log.funcs()))
+			md := ownedMD("md-a", tc.owner, "example purpose of a")
+			if tc.label != "" {
+				md.Labels = map[string]string{keyOwnerHash: tc.label}
+			}
+			rg.create(md)
+			// The other writer lands after the pass read the deployment and before its patch.
+			log.beforeMDPatch(func(ctx context.Context, c client.WithWatch) {
+				var cur v1alpha1.ModelDeployment
+				if err := c.Get(ctx, client.ObjectKey{Namespace: rigNS, Name: "md-a"}, &cur); err != nil {
+					t.Error(err)
+					return
+				}
+				if cur.Labels == nil {
+					cur.Labels = map[string]string{}
+				}
+				cur.Labels["example.org/late"] = "x"
+				if err := c.Update(ctx, &cur); err != nil {
+					t.Error(err)
+				}
+			})
+			rg.Step()
+			if n := len(log.patchesOf("md-a")); n != 1 {
+				t.Fatalf("%d patches of the deployment, want one", n)
+			}
+			lb, _ := rg.mdMeta("md-a")
+			wantMap(t, "the deployment's labels", lb, tc.want)
+		})
 	}
 }

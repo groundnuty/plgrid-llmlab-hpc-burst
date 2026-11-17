@@ -1,11 +1,13 @@
 package lifecycle
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -66,10 +68,12 @@ func withKeys(dst, add map[string]string) map[string]string {
 // syncOwnerLabel keeps the ModelDeployment's own owner-hash label true to its owner annotation, once per pass, right
 // after the deployment is read (`@hpc-burst-science-agent`, 17 Nov 2026, #662, Q4): it sets the label when it is
 // absent, corrects a wrong one (an agent can set any label at create, and the capacity guard only stops a later edit),
-// and removes it when there is no owner annotation. The write is a merge patch of the labels alone, under the
-// lifecycle controller's field manager, so it touches no spec, annotation or other label and carries no
-// resourceVersion to conflict on. It writes nothing when the label is right, and nothing for a deployment being
-// deleted. On success p.md is the stored object, so the pass's status write carries the new resourceVersion.
+// and removes it when there is no owner annotation. The write is a JSON merge patch of that one label key, under the
+// lifecycle controller's field manager, so it touches no spec, annotation or other label, carries no resourceVersion
+// to conflict on, and leaves alone a label another writer added since the read. (A patch built by diffing two copies
+// would send "labels": null when owner-hash is the only label, and the API server would drop the whole map.) It writes
+// nothing when the label is right, and nothing for a deployment being deleted. On success p.md is the stored object,
+// so the pass's status write carries the new resourceVersion.
 func (p *pass) syncOwnerLabel() error {
 	md := p.md
 	if md == nil || !md.DeletionTimestamp.IsZero() {
@@ -81,13 +85,12 @@ func (p *pass) syncOwnerLabel() error {
 	if wanted == has && wantHash == gotHash {
 		return nil // right already; with neither wanted nor present both hashes are empty
 	}
-	next := md.DeepCopy()
-	if wanted {
-		next.Labels = withKeys(next.Labels, want)
-	} else {
-		delete(next.Labels, v1alpha1.LabelOwnerHash)
+	body, err := ownerLabelPatch(wantHash, wanted)
+	if err != nil {
+		return fmt.Errorf("build the owner-hash label patch of ModelDeployment %s: %w", p.key, err)
 	}
-	if err := p.r.Client.Patch(p.ctx, next, client.MergeFrom(md), owner); err != nil {
+	next := md.DeepCopy()
+	if err := p.r.Client.Patch(p.ctx, next, client.RawPatch(types.MergePatchType, body), owner); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil // deleted since the read: the next pass finds it gone
 		}
@@ -95,4 +98,14 @@ func (p *pass) syncOwnerLabel() error {
 	}
 	*p.md = *next
 	return nil
+}
+
+// ownerLabelPatch returns the JSON merge patch that sets the owner-hash label to hash, or, when set is false, removes
+// it (a merge patch deletes a key whose value is null). It names that one label key and nothing else.
+func ownerLabelPatch(hash string, set bool) ([]byte, error) {
+	var value any
+	if set {
+		value = hash
+	}
+	return json.Marshal(map[string]any{"metadata": map[string]any{"labels": map[string]any{v1alpha1.LabelOwnerHash: value}}})
 }
