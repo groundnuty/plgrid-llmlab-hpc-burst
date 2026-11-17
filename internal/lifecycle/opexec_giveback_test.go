@@ -77,28 +77,44 @@ func TestAScaleGivesBackTheCountOfAnUntakenUnitAndFinishesOnlyAfterTheRecord(t *
 	}
 }
 
-// A person's count stands: a person sets spec.instances to 5 after the failures are recorded and before the give-back pass; nothing
-// is given back, the record holds its units with no count written, and the Operation finishes.
-func TestAPersonsCountStandsWhenTheGiveBackFindsAnotherValue(t *testing.T) {
-	w, _, _, stop := lastReadyScale(t)
-	stop()
-	w.clock.Advance(10 * time.Second)
-	if err := w.stepKeepingErrors(); err != nil {
-		t.Fatalf("the pass in which the spec write lands: %v", err)
-	}
-	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 5 })
-	w.stepsUntil(2*time.Minute, 10*time.Second, "the record", func() bool { return w.getOp("scale").Status.CountGivenBack != nil })
-	op := w.getOp("scale")
-	if rec := op.Status.CountGivenBack; rec.Units != 1 || rec.Instances != nil {
-		t.Errorf("the record is %+v, want 1 unit and no count written", rec)
-	}
-	if got := w.md(hoMD).Spec.Instances; got != 5 {
-		t.Errorf("spec.instances is %d, want the person's 5 to stand", got)
-	}
-	if op.Status.FinishedAt == nil {
-		t.Error("the Operation did not finish after the record")
+// A person's count meets the give-back by the max rule (HBEP-10, The report, Kept warm): raised above N, which needs no approval, the
+// larger of V and N + U is written, so a raise never takes back the untaken unit; lowered below N, theirs stands and nothing is given
+// back, the record holding its units with no count written. Here N is 1 and U is 1.
+func TestAPersonsRaisedOrLoweredCountMeetsTheGiveBackByTheMaxRule(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		set       int32
+		wantCount *int32 // the count the record holds; nil: none written
+		wantSpec  int32
+	}{
+		{"raised to 5, above N + U: the larger stands and is recorded", 5, ptr32(5), 5},
+		{"lowered to 0, below N: theirs stands and nothing is given back", 0, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _, _, stop := lastReadyScale(t)
+			stop()
+			w.clock.Advance(10 * time.Second)
+			if err := w.stepKeepingErrors(); err != nil {
+				t.Fatalf("the pass in which the spec write lands: %v", err)
+			}
+			w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = tc.set })
+			w.stepsUntil(2*time.Minute, 10*time.Second, "the record", func() bool { return w.getOp("scale").Status.CountGivenBack != nil })
+			op := w.getOp("scale")
+			rec := op.Status.CountGivenBack
+			if rec.Units != 1 || (tc.wantCount == nil) != (rec.Instances == nil) || (tc.wantCount != nil && *rec.Instances != *tc.wantCount) {
+				t.Errorf("the record is %+v, want 1 unit and count %v", rec, tc.wantCount)
+			}
+			if got := w.md(hoMD).Spec.Instances; got != tc.wantSpec {
+				t.Errorf("spec.instances is %d, want %d", got, tc.wantSpec)
+			}
+			if op.Status.FinishedAt == nil {
+				t.Error("the Operation did not finish after the record")
+			}
+		})
 	}
 }
+
+func ptr32(v int32) *int32 { return &v }
 
 // A record that does not land is written again, and the count is never given back twice: the first record's status write fails
 // after the spec write landed; the next pass finds N + U written and no record, and writes the record alone.

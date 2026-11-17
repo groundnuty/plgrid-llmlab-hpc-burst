@@ -23,25 +23,30 @@ func TestTheMarkIsClearedByPlacementAndByAServingPairAndByNothingElse(t *testing
 		phase       v1alpha1.OperationPhase
 		finished    bool
 		committed   bool                   // the live Instance is a committed target of the marking Operation
+		shutdown    bool                   // the deployment is in shutdown (HBEP-7, Reconcile loop, step 4)
 		instPhase   v1alpha1.InstancePhase // "" for no live Instance
 		wantCleared bool
 	}{
-		{"no live Instance: nothing placed, nothing serving", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, true, "", false},
-		{"its own Instance, ending, under an End that is unfinished", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, true, v1alpha1.InstanceDraining, false},
-		{"its own Instance, ending, under an End that is finished", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhasePartlyFailed, true, true, v1alpha1.InstanceDraining, false},
-		{"its own Instance still serving under an Operation that is unfinished", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhaseExecuting, false, true, v1alpha1.InstanceReady, false},
-		{"its own Instance still serving under a PartlyFailed Operation that is not finished", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, false, true, v1alpha1.InstanceReady, false},
-		{"its own Instance serving on once the Scale above zero has finished: cleared", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, v1alpha1.InstanceReady, true},
-		{"its own Instance still starting once the Scale above zero has finished: cleared", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, v1alpha1.InstanceStarting, true},
-		{"an Instance placed on it that the Operation did not commit to, though the Operation is unfinished: cleared", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, false, v1alpha1.InstanceStarting, true},
-		{"an Instance placed on it, draining already: cleared, it was placed", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhasePartlyFailed, true, false, v1alpha1.InstanceDraining, true},
-		{"the marking Operation is gone and a live Instance is on it: cleared", nil, "", false, true, v1alpha1.InstanceReady, true},
+		{"no live Instance: nothing placed, nothing serving", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, true, false, "", false},
+		{"its own Instance, ending, under an End that is unfinished", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, true, false, v1alpha1.InstanceDraining, false},
+		{"its own Instance, ending, under an End that is finished", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhasePartlyFailed, true, true, false, v1alpha1.InstanceDraining, false},
+		{"its own Instance still serving under an Operation that is unfinished", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhaseExecuting, false, true, false, v1alpha1.InstanceReady, false},
+		{"its own Instance still serving under a PartlyFailed Operation that is not finished", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, false, true, false, v1alpha1.InstanceReady, false},
+		{"its own Instance serving on once the Scale above zero has finished: cleared", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, false, v1alpha1.InstanceReady, true},
+		{"its own Instance still starting once the Scale above zero has finished: cleared", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, false, v1alpha1.InstanceStarting, true},
+		{"the same, but the deployment is in shutdown: the spec keeps nothing, the mark stays", func() *v1alpha1.Operation { return scaleOp(1) }, v1alpha1.OperationPhasePartlyFailed, true, true, true, v1alpha1.InstanceReady, false},
+		{"an Instance placed on it that the Operation did not commit to, though the Operation is unfinished: cleared", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhaseExecuting, false, false, false, v1alpha1.InstanceStarting, true},
+		{"an Instance placed on it, draining already: cleared, it was placed", func() *v1alpha1.Operation { return endOp(false) }, v1alpha1.OperationPhasePartlyFailed, true, false, false, v1alpha1.InstanceDraining, true},
+		{"the marking Operation is gone and a live Instance is on it: cleared", nil, "", false, true, false, v1alpha1.InstanceReady, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &v1alpha1.Allocation{}
 			a.Name, a.UID = "alloc-p", types.UID("uid-alloc-p")
 			a.Status.AtProvider.StartTime = opTime(opT0)
-			p := &pass{}
+			md := &v1alpha1.ModelDeployment{}
+			md.Name, md.UID = opMD, "uid-md"
+			md.Spec.Instances = 1
+			p := &pass{md: md, allocs: map[string]*v1alpha1.Allocation{"alloc-p": a}, shutdown: tc.shutdown}
 			const opUID = types.UID("9c4f9840-fe6c-3951-a310-dd5d74680a7b") // the release-cause form takes a UUID
 			mark := v1alpha1.ReleaseCauseOperation(opNS, "op", opUID)
 			a.Annotations = map[string]string{v1alpha1.AnnotationKeptWarm: mark}
@@ -131,6 +136,47 @@ func TestTheKeptWarmFinalizerIsALevelRuleThatReadsNoOperationThatIsGone(t *testi
 			}
 			if got := p.keptWarmFinalizerWanted(); got != tc.want {
 				t.Errorf("keptWarmFinalizerWanted = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// From an Operation's commit until its spec write lands the controller creates no Allocation and no Instance (HBEP-7, Reconcile loop,
+// steps 7 and 8): the guard reads the committed, unfinished Operations' SpecWritten condition, and an unknown commit holds too.
+func TestCreationIsHeldFromTheCommitUntilTheSpecWriteLands(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		phase       v1alpha1.OperationPhase
+		finished    bool
+		specWritten bool
+		unknown     bool
+		none        bool
+		want        bool
+	}{
+		{"no Operation", "", false, false, false, true, false},
+		{"committed, the spec not written", v1alpha1.OperationPhaseExecuting, false, false, false, false, true},
+		{"committed, the spec written", v1alpha1.OperationPhaseExecuting, false, true, false, false, false},
+		{"PartlyFailed and not finished, the spec not written", v1alpha1.OperationPhasePartlyFailed, false, false, false, false, true},
+		{"finished, the spec not written", v1alpha1.OperationPhasePartlyFailed, true, false, false, false, false},
+		{"only planned", v1alpha1.OperationPhasePlanned, false, false, false, false, false},
+		{"a commit of this pass that may or may not have landed", "", false, false, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &pass{commitUnknown: tc.unknown}
+			if !tc.none {
+				op := executingOp("op", scaleOp(1), nil)
+				op.Status.Phase = tc.phase
+				if tc.finished {
+					now := metav1.Now()
+					op.Status.FinishedAt = &now
+				}
+				if tc.specWritten {
+					op.Status.Conditions = append(op.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionSpecWritten, Status: metav1.ConditionTrue, Reason: "Written"})
+				}
+				p.ops = []*v1alpha1.Operation{op}
+			}
+			if got := p.creationHeld(); got != tc.want {
+				t.Errorf("creationHeld = %v, want %v", got, tc.want)
 			}
 		})
 	}

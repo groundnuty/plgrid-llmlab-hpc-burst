@@ -10,7 +10,6 @@ package lifecycle
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -189,25 +188,14 @@ func TestAnEndWithDeleteThatFinishesWithoutDeletingRemovesItsFinalizerAndAPerson
 		t.Errorf("the finished End left the kept-warm finalizer on a LIVE deployment: %v", md.Finalizers)
 	}
 
+	// The second End's plan approved releasing P's marked Allocation (a release now priced and approved), so its mark was cleared at the
+	// commit and the End's own release took it. Nothing marked remains, and a person's delete of the deployment, now that no finalizer
+	// holds, completes at once: it is not held by the orphan the aborted End would have left.
 	if err := w.c.Delete(w.ctx, md); err != nil { // a person's delete
 		t.Fatal(err)
 	}
-	w.passes(60, func(int) bool { _, ok := w.allocation(pAlloc); return !ok })
-	a, ok := w.allocation(pAlloc)
-	if ok && a.DeletionTimestamp.IsZero() {
-		t.Errorf("a person's direct delete of the deployment is HELD by the orphaned finalizer: P's Allocation is kept warm after ten minutes of passes (finalizers %v)", func() []string {
-			if m, ok := w.deployment(); ok {
-				return m.Finalizers
-			}
-			return nil
-		}())
-		return
-	}
-	cause, _ := w.log.deletedWith(pAlloc)
-	if ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(cause); ok {
-		t.Errorf("the cause is the Operation's, %q (%s/%s %s): a person's delete releases it with retention's cause", cause, ns, name, uid)
-	}
-	if !strings.Contains(cause, "deleted") {
-		t.Errorf("the cause is %q, want retention's: its deployment was deleted", cause)
+	w.passes(20, func(int) bool { _, ok := w.deployment(); return !ok })
+	if m, ok := w.deployment(); ok {
+		t.Errorf("a person's delete of the deployment is HELD: it is %+v with finalizers %v", m.DeletionTimestamp, m.Finalizers)
 	}
 }
