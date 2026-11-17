@@ -106,6 +106,8 @@ type Publisher struct {
 	emitHook func()
 	// leaseTimeoutFor, when set (tests only), replaces the bound on a Lease read.
 	leaseTimeoutFor time.Duration
+	// jobsDone counts the raise jobs the notifier has finished, handed over or not (tests read it).
+	jobsDone atomic.Uint64
 }
 
 // item is one event waiting for the log.

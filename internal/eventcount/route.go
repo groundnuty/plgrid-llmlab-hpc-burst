@@ -71,6 +71,10 @@ type route struct {
 	// counter's Forget): a late loss of its queued events is one log line, uncounted, raising nothing
 	// (the science agent's ruling on #697, 17 Nov 2026).
 	dead bool
+	// epoch counts the retirements and revivals of the route (under mu). A raise job carries the epoch it
+	// was queued in and is dropped by emit if the route has been retired or revived since: it holds the
+	// retired manager's recorder and a span that manager owed.
+	epoch uint64
 	// retire orders the final recorder call of a raise against retirement: raiseJob's emit holds it for
 	// reading across its checks and the recorder call, and markDead and revive take it for writing. Lock
 	// order, with the Counter's lifecycle mutex: Counter.lc, then retire, then mu (see Counter.lc). Nothing

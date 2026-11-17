@@ -118,7 +118,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 		j.handles++
 		rode = true
 	} else if (r.lastRaise.IsZero() || now.Sub(r.lastRaise) >= repeatEvery) && !(r.loss != nil && r.loss.gen == r.gen) {
-		job = &raiseJob{r: r, kind: jobLoss, gen: r.gen, count: r.runCount, since: r.runStart, at: now, handles: 1}
+		job = &raiseJob{r: r, kind: jobLoss, epoch: r.epoch, gen: r.gen, count: r.runCount, since: r.runStart, at: now, handles: 1}
 		r.loss = job
 	}
 	r.mu.Unlock()
@@ -177,7 +177,7 @@ func (r *route) closingJobLocked(now time.Time) *raiseJob {
 		}
 		return nil
 	}
-	j := &raiseJob{r: r, kind: jobRecovery, at: now}
+	j := &raiseJob{r: r, kind: jobRecovery, epoch: r.epoch, at: now}
 	j.hold(r.owed)
 	r.owed = span{}
 	r.closing = j
@@ -278,6 +278,7 @@ func (r *route) revive() {
 		return
 	}
 	r.dead = false
+	r.epoch++
 	r.gate = gate{gen: r.gen}
 	r.warnedAt = time.Time{}
 	r.counter.unlogged.WithLabelValues(r.controller)
@@ -289,6 +290,9 @@ func (r *route) markDead() {
 	r.retire.Lock()
 	defer r.retire.Unlock()
 	r.mu.Lock()
-	r.dead = true
+	if !r.dead {
+		r.dead = true
+		r.epoch++
+	}
 	r.mu.Unlock()
 }

@@ -292,6 +292,34 @@ func TestARegistrationInTheMiddleOfAForgetKeepsTheSeriesItCreated(t *testing.T) 
 	within(t, 20*time.Second, "the new manager's EventsNotLogged", func() bool { return len(inner2.byReason(ReasonEventsNotLogged)) == 1 })
 }
 
+// A raise job queued before its label was retired is dropped when the label is revived: it holds the retired
+// manager's recorder and a span that manager owed, and the revived route's gate is not the one it belonged to.
+func TestARaiseJobOfARetiredEpochIsDroppedWhenTheLabelIsRevived(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	setA, setB := seriesSetA(), seriesSetB()
+	l := newBlockedLease("provider-p1", 2) // the second read, the closing's, waits
+	r := newRig(t, ctl, false, bigCaps, nil, l.read)
+	r.pub.leaseTimeoutFor = time.Hour
+	r.counter.Zero(ctl, setA)
+	rt := r.route(ctl)
+	rt.lost(lostBudget, "JobStarted", "epoch-0", nil, nil) // run 1: its loss job's read goes through
+	within(t, 20*time.Second, "run 1's EventsNotLogged", func() bool { return len(r.inner.byReason(ReasonEventsNotLogged)) == 1 })
+	rt.logged(&item{r: rt, id: "ok"}) // run 1 ends: its closing job's Lease read waits
+	within(t, 20*time.Second, "the closing's Lease read", func() bool { return l.calls.Load() >= 2 })
+	r.counter.Forget(ctl, setA) // the manager is dropped: the route is retired
+	inner2 := &recInner{}
+	_ = Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
+	r.counter.Zero(ctl, setB) // a manager of the label again: the route is revived
+	close(l.release)          // the old closing's read returns
+	within(t, 20*time.Second, "the old closing job to finish", func() bool { return r.pub.jobsDone.Load() >= 2 })
+	if got := len(r.inner.byReason(ReasonEventsNotLogged)); got != 1 {
+		t.Errorf("the retired manager's recorder was called again: %d EventsNotLogged, want its one from before", got)
+	}
+	if got := len(inner2.byReason(ReasonEventsNotLogged)); got != 0 {
+		t.Errorf("the new manager's recorder received %d EventsNotLogged for a span it never owed", got)
+	}
+}
+
 func seriesSetA() []Series {
 	return []Series{{Reason: "JobStarted", Action: "start", Type: provider.EventKindOrdinary}, {Reason: ReasonEventsNotLogged, Action: ActionDegraded, Type: provider.EventKindWarning}}
 }

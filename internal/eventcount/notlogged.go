@@ -69,6 +69,7 @@ const (
 // Its fields are the route's to change, under the route's lock, until the notifier starts it.
 type raiseJob struct {
 	r       *route
+	epoch   uint64 // the route's epoch when the job was queued
 	kind    jobKind
 	gen     uint64    // a loss job: the run it raises for
 	upTo    uint64    // a closing: the last run it reports
@@ -107,6 +108,7 @@ func (d jobData) note() string {
 // run raises the event, and records whether it was handed over.
 func (j *raiseJob) run(stopped func() bool) {
 	r := j.r
+	defer r.p.jobsDone.Add(1)
 	data, live := r.start(j)
 	spec := r.snapshot()
 	if !live || spec.lease == nil || spec.rec == nil || stopped() {
@@ -136,7 +138,10 @@ func (j *raiseJob) run(stopped func() bool) {
 func (r *route) emit(spec routeSpec, lease *coordinationv1.Lease, j *raiseJob, data jobData) bool {
 	r.retire.RLock()
 	defer r.retire.RUnlock()
-	if r.isDead() {
+	r.mu.Lock()
+	stale := r.dead || j.epoch != r.epoch // the route was retired, or retired and revived, since the job was queued
+	r.mu.Unlock()
+	if stale {
 		return false
 	}
 	if h := r.p.emitHook; h != nil {
