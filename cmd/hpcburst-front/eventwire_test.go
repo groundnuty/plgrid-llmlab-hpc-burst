@@ -7,8 +7,11 @@ package main
 // kernel, and what it holds is read through a fresh client.
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -22,6 +25,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -102,3 +106,67 @@ func TestTheFrontsRecorderWithoutATokenFileHasNoLog(t *testing.T) {
 		t.Error("a front with no token file has an unlogged series")
 	}
 }
+
+// run itself: with the token file on its command line, the recorder it hands front.Run is the one with the
+// durable log's publisher. front.Run is replaced by a stub that reads that recorder, so a call in run that drops
+// the token file, or the publisher it builds, is caught here and not only in newRecorder's own test.
+func TestRunHandsTheServerARecorderWithTheDurableLog(t *testing.T) {
+	port := kernelPair(t)
+	d := nodetest.NewDir(t, nodetest.Ports{Client: port, Monitor: port + 1}, eventlog.Caps{Events: 1 << 20, Usage: 1 << 20})
+	d.Start(t).Ready()
+	state := t.TempDir()
+	kubeconfig := filepath.Join(state, "kubeconfig")
+	cfg := filepath.Join(state, "front.json")
+	for path, body := range map[string]string{
+		kubeconfig: "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: \"http://127.0.0.1:1\"}\ncontexts:\n- name: x\n  context: {cluster: c, user: u}\ncurrent-context: x\nusers:\n- name: u\n  user: {}\n",
+		cfg:        `{"clientKeysFile": "` + filepath.Join(state, "keys") + `", "usageDir": "` + filepath.Join(state, "usage") + `"}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saved := frontRun
+	t.Cleanup(func() { frontRun = saved })
+	var gotErr error
+	called := false
+	frontRun = func(_ context.Context, o front.Options) error {
+		called = true
+		rec, ok := o.Recorder.(front.KubeRecorder)
+		if !ok {
+			gotErr = errString("run handed the server a " + typeName(o.Recorder) + ", want the front's KubeRecorder")
+			return nil
+		}
+		if v, exists := rec.Counter.Unlogged(eventcount.ControllerFront); !exists || v != 0 {
+			gotErr = errString("hpcburst_events_unlogged_total{controller=front} is not 0 and existing in the recorder run built: its call dropped the log")
+			return nil
+		}
+		md := &v1alpha1.ModelDeployment{}
+		md.Namespace, md.Name, md.UID = "ns-a", "md-run", types.UID("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb")
+		rec.Event(md, true, "degraded", "RunWiringProbe", "the recorder run built reaches the log")
+		for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+			for _, m := range d.ReadAll(t, eventlog.StreamEvents) {
+				if _, data, err := eventcount.Decode(m.Payload); err == nil && data.Reason == "RunWiringProbe" {
+					return nil
+				}
+			}
+		}
+		gotErr = errString("the typed event of the recorder run built did not reach the log within 30 s")
+		return nil
+	}
+	err := run([]string{"--config", cfg, "--state-dir", state, "--port-base", strconv.Itoa(port - agentapi.EventLogPortOffset), "--kubeconfig", kubeconfig, "--event-log-token-file", d.TokenFile()})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !called {
+		t.Fatal("run did not reach front.Run")
+	}
+	if gotErr != nil {
+		t.Error(gotErr)
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func typeName(v any) string { return fmt.Sprintf("%T", v) }
