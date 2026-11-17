@@ -134,14 +134,20 @@ func (r *rig) keeperStart() (primary, repl *v1alpha1.Instance) {
 }
 
 // tunnelBack waits until the Instance's frpc is logged in over its serving
-// relay: frps lists its proxy online, TunnelConnected is True and the front
-// registers its transport.
+// relay: frps lists its proxy online, TunnelConnected is True, the front
+// registers its transport and its own view routes the model (#676; the
+// callers send right after). The last is the model-level gate: with a
+// replacement standing it holds without the Instance, so a caller that needs
+// this one Instance settles that in the request's own usage record or the key
+// search, not here.
 func (r *rig) tunnelBack(what string, in *v1alpha1.Instance) {
 	r.t.Helper()
-	stack.WaitFor(r.t, stack.WaitDeadline, what+": frpc logged in, the proxy online, TunnelConnected True and the front's registration back", func() bool {
+	stack.WaitState(r.t, stack.WaitDeadline, what+": frpc logged in, the proxy online, TunnelConnected True, the front's registration back and the front routing the model", func() (bool, string) {
 		now, ok := r.instance(in.Name)
-		reg, known := stack.Registered(r.ports, in)
-		return r.frpsProxies()[string(in.UID)] && ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
+		if !r.frpsProxies()[string(in.UID)] || !ok || !conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+			return false, "frps does not list the proxy online, or TunnelConnected is not True"
+		}
+		return r.routedNow(in)
 	})
 }
 
