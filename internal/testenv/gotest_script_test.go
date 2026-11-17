@@ -16,7 +16,11 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
+
+// outlivedWait is how long a script run may hold the output pipe open after the script exits.
+const outlivedWait = 30 * time.Second
 
 // The groups as this test expects them: the lease test (#291), internal/lifecycle's other control-plane
 // tests in three groups and cmd/hpcburst-controller's failover tests (#295), and hack/livechecks' dry
@@ -89,12 +93,13 @@ func (g group) passed() string {
 // and exits 0, as a -run that matched nothing does.
 type goDouble struct {
 	packagesCode string
+	warmUpCode   string            // the warm-up build's exit code ("own" runs it first, "-exec true")
 	outputs      map[string]string // group name -> output
 	codes        map[string]string // group name -> exit code
 }
 
 func allPassed() goDouble {
-	d := goDouble{packagesCode: "0", outputs: map[string]string{}, codes: map[string]string{}}
+	d := goDouble{packagesCode: "0", warmUpCode: "0", outputs: map[string]string{}, codes: map[string]string{}}
 	for _, g := range groups {
 		d.outputs[g.name], d.codes[g.name] = g.passed(), "0"
 	}
@@ -113,8 +118,18 @@ func groupNamed(t *testing.T, name string) group {
 }
 
 // runGoTestScript runs the script in root (the repository's, or a stand-in tree) with the double as go,
-// and returns its output, its exit code and the double's calls, one line each.
+// and returns its output, its exit code and the double's calls, one line each. "own" with no group runs
+// the groups in lanes, so the double's calls from different packages arrive in no fixed order, and it
+// appends each as one line.
 func runGoTestScript(t *testing.T, root string, d goDouble, args ...string) (string, int, []string) {
+	t.Helper()
+	return runGoTestScriptEnv(t, root, d, nil, args...)
+}
+
+// runGoTestScriptEnv is runGoTestScript with more environment for the script. GITHUB_ACTIONS is cleared
+// first, since CI sets it and the script then folds each lane's output; a test that wants the folding
+// sets it back.
+func runGoTestScriptEnv(t *testing.T, root string, d goDouble, env []string, args ...string) (string, int, []string) {
 	t.Helper()
 	dir := t.TempDir()
 	calls := filepath.Join(dir, "calls")
@@ -135,6 +150,7 @@ func runGoTestScript(t *testing.T, root string, d goDouble, args ...string) (str
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$GO_DOUBLE_CALLS"
 case "$*" in
+  *-exec*) exit "$GO_DOUBLE_WARM_UP_CODE" ;;
   *-skip*) exit "$GO_DOUBLE_PACKAGES_CODE" ;;
 esac
 for f in "$GO_DOUBLE_ANSWERS"/out-*; do
@@ -150,16 +166,25 @@ exit 0
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", append([]string{filepath.Join(root, "hack", "go-test.sh")}, args...)...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(append(os.Environ(),
+		"GITHUB_ACTIONS=",
 		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GO_DOUBLE_CALLS="+calls, "GO_DOUBLE_ANSWERS="+answers, "GO_DOUBLE_PACKAGES_CODE="+d.packagesCode)
+		"GO_DOUBLE_CALLS="+calls, "GO_DOUBLE_ANSWERS="+answers,
+		"GO_DOUBLE_PACKAGES_CODE="+d.packagesCode, "GO_DOUBLE_WARM_UP_CODE="+d.warmUpCode), env...)
+	// A process the script leaves running (a lane's) keeps the output pipe open, and CombinedOutput would
+	// wait for it for ever: bound the wait, and call it a failure.
+	cmd.WaitDelay = outlivedWait
+	began := time.Now()
 	out, err := cmd.CombinedOutput()
 	code := 0
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		code = exit.ExitCode()
-	} else if err != nil {
+	} else if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		t.Fatal(err)
+	}
+	if time.Since(began) >= outlivedWait {
+		t.Errorf("a process the script started outlived it and held its output open for %s", outlivedWait)
 	}
 	raw, err := os.ReadFile(calls)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -241,14 +266,12 @@ func TestGoTestScriptOwnNeedsEveryTestsPassLineAndNoSkip(t *testing.T) {
 	}
 }
 
-// "own" with no group, and "all", run every group in turn, each even when an earlier one failed, and fail
-// if any does; "all" runs the packages first.
+// "own" with no group, and "all", run every group, each even when an earlier one failed, and fail if any
+// does; "all" runs the packages first. The groups of one package run in table order and the lanes of
+// different packages in no fixed order (lanes_test.go runs them at the same time), so the calls are
+// compared lane by lane, and as a set.
 func TestGoTestScriptAllRunsEveryPart(t *testing.T) {
 	root := realRoot(t)
-	var wantOwn []string
-	for _, g := range groups {
-		wantOwn = append(wantOwn, g.wantCall())
-	}
 	failed := func(group string) goDouble {
 		d := allPassed()
 		g := groupNamed(t, group)
@@ -272,12 +295,20 @@ func TestGoTestScriptAllRunsEveryPart(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			out, code, calls := runGoTestScript(t, root, c.d, c.mode)
-			want := wantOwn
-			if c.mode == "all" {
-				want = append([]string{wantPackages}, wantOwn...)
+			if code != c.wantCode {
+				t.Errorf("exit %d, want %d; go called\n%s\noutput:\n%s", code, c.wantCode, strings.Join(calls, "\n"), out)
 			}
-			if code != c.wantCode || strings.Join(calls, "\n") != strings.Join(want, "\n") {
-				t.Errorf("exit %d, want %d; go called\n%s\nwant\n%s\noutput:\n%s", code, c.wantCode, strings.Join(calls, "\n"), strings.Join(want, "\n"), out)
+			groupCalls := calls
+			if c.mode == "all" {
+				// The package run is first and alone: the groups' lanes start after it, with no warm-up of their
+				// own, since the package run has compiled every test variant.
+				if len(calls) == 0 || calls[0] != wantPackages {
+					t.Fatalf("all: go's first call was not the packages' run %q; calls:\n%s", wantPackages, strings.Join(calls, "\n"))
+				}
+				groupCalls = calls[1:]
+			}
+			for _, p := range ownCallProblems(groupCalls, c.mode == "own") {
+				t.Errorf("%s; go called\n%s\noutput:\n%s", p, strings.Join(calls, "\n"), out)
 			}
 		})
 	}
@@ -399,10 +430,9 @@ func TestGoTestScriptRefusesANameDeclaredTwiceOrNowhere(t *testing.T) {
 func TestGoTestScriptIsWhatCIAndCheckRun(t *testing.T) {
 	root := realRoot(t)
 	const byHand = "go test -count=1 -v ./..."
-	ci := []string{"bash hack/go-test.sh packages"}
-	for _, g := range groups {
-		ci = append(ci, "run: bash hack/go-test.sh own "+g.name+"\n")
-	}
+	// The go-own job runs every group in one step, "own"; the line must end there (a step for one group,
+	// "own lease", would run that group twice beside the lanes: ciProblems reads CI's steps for that).
+	ci := []string{"bash hack/go-test.sh packages", "run: bash hack/go-test.sh own\n"}
 	for _, c := range []struct {
 		file string
 		want []string

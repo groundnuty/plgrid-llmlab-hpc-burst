@@ -3,7 +3,8 @@
 # It runs the repository's own checks on every pull request and on every push to main:
 #   go              gofmt, go vet, go test (through hack/go-test.sh: the packages)
 #   go own-timeout  hack/go-test.sh's groups, the tests that run on their own -timeout (issue #295), in a
-#                   job of their own so that neither job comes near its 30 minutes
+#                   job of their own so that neither job comes near its 30 minutes; the groups of
+#                   different packages run at the same time, in lanes
 #   tidy         go mod tidy -diff, in a job of its own that restores no module cache (its Go tarball
 #                is the only thing it restores)
 #   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
@@ -298,10 +299,10 @@ jobs:
     name: go own-timeout
     runs-on: ubuntu-24.04
     # hack/go-test.sh's groups, the tests that run on their own -timeout, apart from the go job (issue
-    # #295): the two together ran 1,174-1,331 s of the go job's 30 minutes, 1.35x at worst, and with the
-    # groups here the go job keeps about 840 s of its 30 minutes and this job about 640 s of its own. The
-    # envoy-timeouts group (issue #429) adds about 370 s to this job, which leaves about 1,010 s of its 30
-    # minutes (a local estimate; the first run on CI will say).
+    # #295): the two together ran 1,174-1,331 s of the go job's 30 minutes, 1.35x at worst. The groups run in
+    # LANES, one per package (the groups of different packages at the same time, those of one package one
+    # after another), so the job costs its longest lane and not the sum of its groups, which was about
+    # 950-990 s of test time on 17 Nov 2026 (the envoy-timeouts group of issue #429 alone is about 360 s).
     # The same setup as the go job, step for step, since the groups need the same Go, the pinned frp and
     # Kubernetes binaries and sshd; no build cache is restored, so the Kubernetes libraries compile
     # from scratch here too. This job's name is a required check of main: a rename would stop every merge.
@@ -442,54 +443,25 @@ jobs:
       # was not verified: without steps.gocheck.outcome a failed install or check would leave PATH
       # without the pinned Go, and hack/go-test.sh would run the runner image's own, unchecked one.
       #
-      # One test of internal/lifecycle runs on its own, under its own timeout, so that the package
-      # stays clear of go test's 10-minute one, which keeps catching a real hang (issue #282). The step
-      # fails unless the test really ran and passed. It runs even if the packages failed. hack/check.sh
-      # runs the same parts, so the crd job runs this test too.
-      - name: go test, one test on its own timeout
+      # Every group runs in this one step, in lanes (see the top of hack/go-test.sh): one lane per
+      # package, the lanes at the same time, a package's groups one after another. The groups are the
+      # tests that run on their own -timeout so that their packages stay clear of go test's 10-minute
+      # one, which keeps catching a real hang (issues #282, #295, #306 and #429):
+      #   - internal/lifecycle: the lease test and three groups of control-plane tests;
+      #   - cmd/hpcburst-controller: the two failover tests, which wait out two 15 s Leases each;
+      #   - internal/agent: the two real-Envoy tests that wait out Envoy's own defaults (a worker silent
+      #     for 310 s, an upstream connection idle for 50 s). The step fails unless both ran and passed,
+      #     with nothing skipped, so a runner without Envoy fails it (the job sets HPCBURST_REQUIRE_ENVOY=1
+      #     and fetches the pinned binary above);
+      #   - hack/livechecks: the dry runs through hack/live-checks.sh, which build and run the real test
+      #     binaries and agent, in two groups.
+      # The step fails unless every group's tests all ran and passed, with nothing skipped, and a failing
+      # group fails it, named in its output and its table, without stopping the other lanes. hack/check.sh
+      # runs the same groups, so the crd job runs these tests too. The step is gated as the groups' steps
+      # were: a CI guard (internal/testenv) refuses a second step for a group, as it would run twice.
+      - name: go test, the groups that run on their own timeout, in lanes
         if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lease
-
-      # internal/lifecycle's other tests that start a control plane, in three groups, and
-      # cmd/hpcburst-controller's two failover tests run on their own for the same reason (issue #295):
-      # with them, each package was within 1.5x of the 10 minutes on main's slow runs. Each step fails
-      # unless every one of its tests ran and passed, with nothing skipped, and hack/check.sh runs the
-      # same groups, so the crd job runs these tests too.
-      - name: go test, internal/lifecycle's caches tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lifecycle-caches
-
-      - name: go test, internal/lifecycle's two-copy tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lifecycle-copies
-
-      - name: go test, internal/lifecycle's other control-plane tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lifecycle-control-plane
-
-      - name: go test, cmd/hpcburst-controller's failover tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own controller-failover
-
-      # internal/agent's two real-Envoy tests that wait out Envoy's own defaults (a worker silent for
-      # 310 s, an upstream connection idle for 50 s) run on their own timeout for the same reason (issue
-      # #429): about 6 minutes between them, which the package's run would carry. The step fails unless
-      # both ran and passed, with nothing skipped, so a runner without Envoy fails it (the job sets
-      # HPCBURST_REQUIRE_ENVOY=1 and fetches the pinned binary above).
-      - name: go test, internal/agent's real-Envoy timeout tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own envoy-timeouts
-
-      # hack/livechecks' dry runs through hack/live-checks.sh, which build and run the real test
-      # binaries and agent, run in two groups of their own for the same reason (PR #306): each step
-      # fails unless every one of its tests ran and passed, with nothing skipped.
-      - name: go test, hack/livechecks' host-dialed dry runs on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own livechecks-hostdialed
-
-      - name: go test, hack/livechecks' other dry runs on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own livechecks-dry
+        run: bash hack/go-test.sh own
 
   tidy:
     name: tidy
