@@ -62,7 +62,8 @@ type Reconciler struct {
 	slotsOnce sync.Once
 	slotTab   *slotTable
 	// hedgeFrozen, when set, says whether an executing Operation holds a hedge, so growHedges adds no member to it
-	// (HBEP-7, Hedging (beta), Operations). Nil reads false: #589's execution sets it from the committed targets.
+	// (HBEP-7, Hedging (beta), Operations). Nil reads the pass's own Operations (frozenByOperation, ophedge.go): this field
+	// is the seam tests set to pin growth on or off.
 	hedgeFrozen func(hedgeGroup) bool
 }
 
