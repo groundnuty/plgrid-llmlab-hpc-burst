@@ -11,6 +11,15 @@
 #     start a control plane (envtest), about 170 s of the package's 435-447 s on main's slow runs, which
 #     took it below a 1.5x margin (issue #295). Their time is real work and waits on observable state (a
 #     manager's start and stop, Lease expiry, informer syncs), not a fixed sleep;
+#   - lifecycle-apiserver and lifecycle-slow: internal/lifecycle's slowest remaining tests (issue #295, part
+#     B), peeled out because the package's run reached 506 s of go test's 600 s on main's newest run of 17
+#     Nov 2026. lifecycle-apiserver is three more tests that start a control plane (envtest, the package's
+#     block). lifecycle-slow is eleven tests that start none: read through the package's helpers, they reach
+#     no control plane, listener or port constant. They run reconcile passes over a fake provider and a fake
+#     clock, with no sleep, so their time is CPU and moves with the runner's load (4.8 s to 33.9 s for one).
+#     Each of the fourteen is a test whose worst across the five newest go-job logs was at least 9 s. Taking
+#     them from those logs, the package's slowest logged run would have been 335 s, a margin of 1.79x (a
+#     projection: CI's runs of this change are the measurement);
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
@@ -19,7 +28,10 @@
 #     observable state (a response, the worker's connection events), never a fixed sleep;
 #   - livechecks-hostdialed and livechecks-dry: hack/livechecks' dry runs through hack/live-checks.sh, the
 #     tests that build and run the real conformance and alpha test binaries and a real agent, which took
-#     that package to the 10 minutes in the crd and envtest job (the science agent's ruling on PR #306).
+#     that package to the 10 minutes in the crd and envtest job (the science agent's ruling on PR #306);
+#   - livechecks-tree: the five tests of that package whose worst across the five newest go-job logs was at
+#     least 15 s (issue #295, part B): its package run reached 459 s, and without these five the slowest
+#     logged run would have been 345 s, 1.74x (a projection, as above).
 #
 #   hack/go-test.sh packages        every package without the groups' tests, at go test's default timeout
 #   hack/go-test.sh own [group]     one group alone, or every group in lanes; each test must really run and pass
@@ -60,16 +72,23 @@ cd "$root" || exit 1
 # controller-failover 150.5 s. envoy-timeouts' 1200 s is about 3x its local run, not yet a CI one:
 # TestEnvoyStreamIdleOutlivesTheDefault took 310.7 s (its two halves run at once, bound by the worker's
 # silence of 310 s) and TestEnvoyClosesIdleUpstreamConnectionsFirst 50.7 s (bound by Envoy's 50 s upstream
-# idle), 362 s in all. The first green CI run should replace it with 3x its own.
+# idle), 362 s in all. The first green CI run should replace it with 3x its own. Part B's groups of issue
+# #295 take 3x the sum of each test's worst in the go job of main's five newest runs of 17 Nov 2026 (03:01Z
+# to 08:55Z), a bound on the group's worst: lifecycle-apiserver 43.0 s (130 s), lifecycle-slow 172.8 s
+# (520 s) and livechecks-tree 126.9 s (390 s). The selection rule is in the bullets above, and the tests'
+# worst times are in the issue's record.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
   "lifecycle-copies|./internal/lifecycle|TestMetricsStandbyOnTwoManagers TestMetricsLostLeaseStopsBeforeANewCopyLeads TestMetricsCopiesStartAgainOnALostPort TestRaisedEventsOnTwoManagers|190s"
   "lifecycle-control-plane|./internal/lifecycle|TestManagerOnControlPlane TestVerificationRecordRoundTripsThroughTheAPIServer TestLifecycleLeaseReleaseUnderLatency TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead|170s"
+  "lifecycle-apiserver|./internal/lifecycle|TestOperationsOnAControlPlaneWithTwoAgents TestMetricsKeeperModeThroughNewManager TestRecordedOutcomesPassTheAPIServersRules|130s"
+  "lifecycle-slow|./internal/lifecycle|TestScaleDownWithASurplus TestARankedOutAllocationIsKeptUnderItsPolicy TestHandoverLateReplacementDegradesThenTakesOver TestHandoverReplacementCreatedAtItsPlannedTime TestAWaitingCandidateIsNotFailedByStartTimeout TestACandidateWithNoTunnelFailsAtItsDeadline TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear TestAWarmAllocationDoesNotCancelAPendingSurplus TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations TestAMarkedPeerThatRestartsNeverOutranks TestAReplacementHedgesByItsWaits|520s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
   "livechecks-dry|./hack/livechecks|TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt TestADryBinaryRefusesLiveSettings TestAJobPendingPastTheBoundIsNotRunOnEveryRow TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt TestACatchUpThatCannotTellIsAFailureOnATwoJobRow TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows TestEveryReachRowReportsEachOutcomeThroughTheScript TestADryReachBinaryRefusesLiveSettingsAndARealGateway TestAReachRowWhoseSlotIsHeldIsNotRun|270s"
+  "livechecks-tree|./hack/livechecks|TestRegistryFailsOnTheRealTreeWhenAPartIsRemoved TestPlanMapsChangedFilesToTheLiveTestsThatRunThem TestTheBulkRowsFourVerdictsThroughTheScript TestTheFindingMarkerIsTheBulkRowsAlone TestMutateAlphaEndsAHangAtItsBoundAndRestoresTheFile|390s"
 )
 
 # field <row> <n>: the row's n-th field (1-based).

@@ -447,14 +447,16 @@ jobs:
       # package, the lanes at the same time, a package's groups one after another. The groups are the
       # tests that run on their own -timeout so that their packages stay clear of go test's 10-minute
       # one, which keeps catching a real hang (issues #282, #295, #306 and #429):
-      #   - internal/lifecycle: the lease test and three groups of control-plane tests;
+      #   - internal/lifecycle: the lease test, four groups of tests that start a control plane, and the
+      #     fake-clock group of its slowest tests that start none (lifecycle-slow, issue #295 part B);
       #   - cmd/hpcburst-controller: the two failover tests, which wait out two 15 s Leases each;
       #   - internal/agent: the two real-Envoy tests that wait out Envoy's own defaults (a worker silent
       #     for 310 s, an upstream connection idle for 50 s). The step fails unless both ran and passed,
       #     with nothing skipped, so a runner without Envoy fails it (the job sets HPCBURST_REQUIRE_ENVOY=1
       #     and fetches the pinned binary above);
       #   - hack/livechecks: the dry runs through hack/live-checks.sh, which build and run the real test
-      #     binaries and agent, in two groups.
+      #     binaries and agent, in two groups, and its five slowest other tests (livechecks-tree, issue #295
+      #     part B).
       # The step fails unless every group's tests all ran and passed, with nothing skipped, and a failing
       # group fails it, named in its output and its table, without stopping the other lanes. hack/check.sh
       # runs the same groups, so the crd job runs these tests too. The step is gated as the groups' steps

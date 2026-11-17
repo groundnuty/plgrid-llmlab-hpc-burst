@@ -25,7 +25,9 @@ const outlivedWait = 30 * time.Second
 // The groups as this test expects them: the lease test (#291), internal/lifecycle's other control-plane
 // tests in three groups and cmd/hpcburst-controller's failover tests (#295), and hack/livechecks' dry
 // runs through the script (PR #306), host-dialed and the rest, and internal/agent's two real-Envoy tests
-// that wait out Envoy's own defaults (issue #429).
+// that wait out Envoy's own defaults (issue #429). Part B of issue #295 adds the slowest tests of
+// internal/lifecycle and hack/livechecks in three more groups: lifecycle-apiserver (envtest),
+// lifecycle-slow (fake-clock, no control plane and no port) and livechecks-tree.
 const ownTestName = "TestLifecycleManagerReleasesItsLeaseOnEveryStop"
 
 var (
@@ -35,6 +37,14 @@ var (
 		"TestMetricsCopiesStartAgainOnALostPort", "TestRaisedEventsOnTwoManagers"}
 	lifecycleControlPlane = []string{"TestManagerOnControlPlane", "TestVerificationRecordRoundTripsThroughTheAPIServer",
 		"TestLifecycleLeaseReleaseUnderLatency", "TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead"}
+	lifecycleAPIServer = []string{"TestOperationsOnAControlPlaneWithTwoAgents", "TestMetricsKeeperModeThroughNewManager",
+		"TestRecordedOutcomesPassTheAPIServersRules"}
+	lifecycleSlow = []string{"TestScaleDownWithASurplus", "TestARankedOutAllocationIsKeptUnderItsPolicy",
+		"TestHandoverLateReplacementDegradesThenTakesOver", "TestHandoverReplacementCreatedAtItsPlannedTime",
+		"TestAWaitingCandidateIsNotFailedByStartTimeout", "TestACandidateWithNoTunnelFailsAtItsDeadline",
+		"TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear", "TestAWarmAllocationDoesNotCancelAPendingSurplus",
+		"TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations", "TestAMarkedPeerThatRestartsNeverOutranks",
+		"TestAReplacementHedgesByItsWaits"}
 	controllerFailover = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
 	envoyTimeouts      = []string{"TestEnvoyStreamIdleOutlivesTheDefault", "TestEnvoyClosesIdleUpstreamConnectionsFirst"}
 	hostDialedDry      = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
@@ -44,6 +54,9 @@ var (
 		"TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt", "TestACatchUpThatCannotTellIsAFailureOnATwoJobRow",
 		"TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows", "TestEveryReachRowReportsEachOutcomeThroughTheScript",
 		"TestADryReachBinaryRefusesLiveSettingsAndARealGateway", "TestAReachRowWhoseSlotIsHeldIsNotRun"}
+	livechecksTree = []string{"TestRegistryFailsOnTheRealTreeWhenAPartIsRemoved", "TestPlanMapsChangedFilesToTheLiveTestsThatRunThem",
+		"TestTheBulkRowsFourVerdictsThroughTheScript", "TestTheFindingMarkerIsTheBulkRowsAlone",
+		"TestMutateAlphaEndsAHangAtItsBoundAndRestoresTheFile"}
 )
 
 type group struct {
@@ -56,10 +69,13 @@ var groups = []group{
 	{"lifecycle-caches", "./internal/lifecycle", "180s", lifecycleCaches},
 	{"lifecycle-copies", "./internal/lifecycle", "190s", lifecycleCopies},
 	{"lifecycle-control-plane", "./internal/lifecycle", "170s", lifecycleControlPlane},
+	{"lifecycle-apiserver", "./internal/lifecycle", "130s", lifecycleAPIServer},
+	{"lifecycle-slow", "./internal/lifecycle", "520s", lifecycleSlow},
 	{"controller-failover", "./cmd/hpcburst-controller", "460s", controllerFailover},
 	{"envoy-timeouts", "./internal/agent", "1200s", envoyTimeouts},
 	{"livechecks-hostdialed", "./hack/livechecks", "150s", hostDialedDry},
 	{"livechecks-dry", "./hack/livechecks", "270s", otherDry},
+	{"livechecks-tree", "./hack/livechecks", "390s", livechecksTree},
 }
 
 func anchored(names []string) string { return "^(" + strings.Join(names, "|") + ")$" }
@@ -287,7 +303,7 @@ func TestGoTestScriptAllRunsEveryPart(t *testing.T) {
 		{"all: every part passes", "all", allPassed(), 0},
 		{"all: the packages fail", "all", func() goDouble { d := allPassed(); d.packagesCode = "1"; return d }(), 1},
 		{"all: the first group fails", "all", failed("lease"), 1},
-		{"all: the last group fails", "all", failed("livechecks-dry"), 1},
+		{"all: the last group fails", "all", failed("livechecks-tree"), 1},
 		{"all: the envoy-timeouts group fails", "all", failed("envoy-timeouts"), 1},
 		{"own: every group passes", "own", allPassed(), 0},
 		{"own: the first group fails, the rest still run", "own", failed("lease"), 1},
