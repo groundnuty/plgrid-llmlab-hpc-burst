@@ -368,13 +368,16 @@ func (r *rig) writeCredentials(s rigSetup, creds string) error {
 
 // startServing starts the served deployment and waits for its Instance to be ready and routed: the
 // front has registered its token transport and, with the bulk path, its bulk transport too
-// (hpcburst_front_bulk_registered).
+// (hpcburst_front_bulk_registered), and its own router would place a request for the model now
+// (frontRoutes: GET /v1/models lists it routable). The last is a state apart from the
+// registrations, so a caller that sends at once, as the key search does, can't meet
+// 503 no_ready_target (issue #671).
 func (r *rig) startServing(bulkPath bool) *v1alpha1.Instance {
 	r.t.Helper()
 	r.providerReady()
 	stack.Create(r.t, r.c, stack.ServedDeployment(rehearsalTiming, r.engineEnv...))
 	var ready *v1alpha1.Instance
-	stack.WaitState(r.t, stack.WaitDeadline, "a ready Instance whose transports the front registered", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "a ready Instance whose transports the front registered and whose model the front routes", func() (bool, string) {
 		for _, in := range r.instances() {
 			if in.Status.Phase != v1alpha1.InstanceReady {
 				continue
@@ -385,6 +388,11 @@ func (r *rig) startServing(bulkPath bool) *v1alpha1.Instance {
 			}
 			if bulkPath && frontMetric(r.t, r.ports, "hpcburst_front_bulk_registered") < 1 {
 				return false, "the bulk transport is not registered"
+			}
+			// Last, so that its GETs (each a usage record and a request count at the front) start only
+			// once the registrations stand, and are a handful.
+			if routes, why := frontRoutes(r.fc.H.Ports.ClientAddr, r.fc.H.ClientKey, r.fc.Model); !routes {
+				return false, "the front does not route the model yet: " + why
 			}
 			ready = &in
 			return true, ""
