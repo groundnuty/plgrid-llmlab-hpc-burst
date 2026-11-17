@@ -64,6 +64,16 @@ func TestDeletingARunningAllocationRaisesJobEndedWithTheCause(t *testing.T) {
 		t.Errorf("JobEnded notes %q, want one carrying the release cause %q", notes, cause)
 	}
 	r.checkNotes(evs, id)
+	// The log's id: the end time, which the fake Slurm recorded when the deletion cancelled the job, written out
+	// from its own record (HBEP-8, The event's id).
+	j, ok := r.sl.Job(id)
+	if !ok || j.End.IsZero() {
+		t.Fatalf("the fake Slurm's job %+v has no end time after the deletion cancelled it", j)
+	}
+	r.idle()
+	msgs := r.wantLog(a, eid(a, "JobEnded", rfc(j.End)))
+	r.checkLogNotes(msgs, id)
+	r.matchAPI(msgs, evs, "JobEnded")
 	if n := r.count(r.key("ended", "JobEnded", "Normal")); n != 1 {
 		t.Errorf("JobEnded handed over %v times for one deletion, want 1 (once per process)", n)
 	}
@@ -154,6 +164,11 @@ func TestDeletingAnAllocationThatCarriesSubmittedAsOtherRaisesNoEndEvent(t *test
 	if notes := notesOf(evs, "SubmittedAsOther"); len(notes) == 0 || !strings.Contains(notes[0], "timeLimit: requested 3h0m0s, got 2h0m0s") {
 		t.Errorf("SubmittedAsOther notes %q, want the differing field with both values", notes)
 	}
+	// The log's id: the submission attempt's number, as for JobSubmitted (HBEP-8, The event's id; the erratum for
+	// #625): the one attempt this Allocation made. No JobEnded is in the log either, which the stream shows in full
+	// after the deletion below.
+	r.idle()
+	r.checkLogNotes(r.wantLog(a, eid(a, "SubmittedAsOther", "1")), id)
 	// The deletion: the first pass cancels the job; a later one reads it ended
 	// and would raise JobEnded if the stored phase had not announced a failure.
 	// The barrier is a deleting pass of this Allocation that began after the job
@@ -194,5 +209,11 @@ func TestDeletingAnAllocationThatCarriesSubmittedAsOtherRaisesNoEndEvent(t *test
 	}
 	if got := r.apiEvents(a); len(notesOf(got, "JobEnded")) != 0 {
 		t.Errorf("the API holds a JobEnded event for an Allocation that carried SubmittedAsOther: %q", notesOf(got, "JobEnded"))
+	}
+	// The log holds no JobEnded either: the counter's absence proof above covers the events handed to the recorder, and
+	// the publisher gets exactly those, so the stream read now, after the passes, shows none.
+	r.idle()
+	if got := loggedOf(r.logAbout(a.UID), "JobEnded"); len(got) != 0 {
+		t.Errorf("the log holds JobEnded %s for an Allocation that carried SubmittedAsOther", joinIDs(got))
 	}
 }

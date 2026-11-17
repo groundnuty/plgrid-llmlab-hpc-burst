@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/common/expfmt"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -46,6 +47,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/providerctl/ctltest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -109,6 +111,14 @@ type evRig struct {
 	counter *eventcount.Counter
 	reg     *prometheus.Registry
 	typed   eventcount.IDRecorder
+	// The durable log (HBEP-8, Test plan, Beta), a REAL child process (nodetest): the typed recorder
+	// publishes through pub, and the rows read what the log holds through a fresh client. logProc is
+	// nil while the log is not running. lease is the Provider's own Lease, for EventsNotLogged, when
+	// the rig made one.
+	logDir  *nodetest.Dir
+	logProc *nodetest.Proc
+	pub     *eventcount.Publisher
+	lease   *coordinationv1.Lease
 	// the front's settings, which every Options of the rig carries
 	certPEM       []byte
 	certPin, frpc string
@@ -129,6 +139,16 @@ type rigOpts struct {
 	// keyword is a path under the synthetic home (the reader echoes a keyword it
 	// refuses), and an account with a space in it.
 	badProfile bool
+	// noLog runs the rig without the durable log: the recorder is built as the controller binary
+	// builds it without --event-log-token-file.
+	noLog bool
+	// logDown makes the log's directory and leaves the log not running: it is not up yet, or it was
+	// refused for space.
+	logDown bool
+	// budget shortens the publisher's retry budget; 0 keeps HBEP-8's 100 s.
+	budget time.Duration
+	// withLease creates the Provider's own Lease, provider-<name>, which EventsNotLogged regards.
+	withLease bool
 }
 
 // extraCredsLines is what the credentials file holds beyond the valid lines.
@@ -201,6 +221,7 @@ func newEvRig(t *testing.T, o rigOpts) *evRig {
 	r.sl = fakeslurm.New(r.clock, fakeslurm.Config{FirstJobID: firstJobID, Partitions: []fakeslurm.Partition{{Name: rowPart, GPUOnly: true}}})
 	r.session = r.sl.Login(fakeslurm.Login{User: rowUser, Env: map[string]string{"HOME": rowHome, "SCRATCH": "/scratch/" + rowUser}})
 	r.faults = &lineFaults{inner: r.session}
+	r.startLog(o)
 	r.typed = r.newTypedRecorder()
 	r.reg = newRegistry(r.counter)
 	// providerctl.Setup creates the typed series at 0 (Options.Counter), which the
@@ -268,7 +289,11 @@ func (r *evRig) newTypedRecorder() eventcount.IDRecorder {
 	stop := make(chan struct{})
 	b.StartRecordingToSink(stop)
 	r.t.Cleanup(func() { close(stop); b.Shutdown() })
-	return eventcount.Events(b.NewRecorder(scheme(), v1alpha1.FieldManagerProvider), r.counter, eventcount.ControllerProvider(r.prov))
+	// With the log, as the controller binary builds it with --event-log-token-file (cmd/hpcburst-controller,
+	// wiring.setupBatch): the option publishes each typed event and reads the Provider's own Lease for
+	// EventsNotLogged. r.pub is nil without the log, and then the option does nothing.
+	logOpt := r.pub.Option(scheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(c, v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(r.prov)))
+	return eventcount.Events(b.NewRecorder(scheme(), v1alpha1.FieldManagerProvider), r.counter, eventcount.ControllerProvider(r.prov), logOpt)
 }
 
 // newAlloc creates an Allocation with the time limit and the credential the

@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -30,6 +31,7 @@ func TestAllocationEventsOnTheFakeSlurm(t *testing.T) {
 	r.newAlloc("a", "3h")
 	a := r.until("a", "Pending", 12, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.AllocationPending })
 	id := r.jobID(a)
+	jobStart := r.clock.Now() // the fake Slurm stamps the job's start with this
 	if err := r.sl.Start(id); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +74,25 @@ func TestAllocationEventsOnTheFakeSlurm(t *testing.T) {
 		t.Errorf("JobSubmitted notes %q, want the attempt and the partition", got)
 	}
 	r.checkNotes(evs, id)
+
+	// The log's half (HBEP-8, Test plan, Beta: Allocation events on the fake Slurm), read through a fresh client: at
+	// least one of each, on hb.ev.allocation.<uid>, with the ids written out here from the fixture's own times and
+	// counts, each fact being the one HBEP-8's list in The event's id names: the attempt's number for JobSubmitted, the
+	// restart count for HoldLifted and JobStarted, the hard end for HardEndNear and the end time for JobEnded. The job
+	// started at jobStart, with a 3 h limit, and the test ended it at its hard end.
+	wantEnd := rfc(jobStart.Add(3 * time.Hour))
+	if got := rfc(hardEnd); got != wantEnd {
+		t.Fatalf("the Allocation's hard end is %s, the fixture's (start %s + 3 h) is %s", got, rfc(jobStart), wantEnd)
+	}
+	r.idle()
+	msgs := r.wantLog(a,
+		eid(a, "JobSubmitted", "1"), eid(a, "HoldLifted", "0"), eid(a, "JobStarted", "0"),
+		eid(a, "HardEndNear", wantEnd), eid(a, "JobEnded", wantEnd))
+	r.checkLogNotes(msgs, id)
+	r.matchAPI(msgs, evs, "JobSubmitted", "HoldLifted", "JobStarted", "HardEndNear", "JobEnded")
+	if got, _ := r.counter.Unlogged(eventcount.ControllerProvider(r.prov)); got != 0 {
+		t.Errorf("hpcburst_events_unlogged_total reads %v with the log running throughout", got)
+	}
 	// It ended at its planned end, never by a failure.
 	for _, reason := range []string{"AllocationEndedEarly", "AllocationFailed", "JobLost"} {
 		if n := r.count(r.key("failing", reason, "Warning")); n != 0 {
@@ -109,12 +130,18 @@ func running(t *testing.T) (*evRig, *v1alpha1.Allocation, int) {
 func TestAllocationFailures(t *testing.T) {
 	t.Run("a job that fails gives AllocationFailed", func(t *testing.T) {
 		r, a, id := running(t)
+		endT := r.clock.Now() // the fake Slurm stamps the job's end with this
 		if err := r.sl.End(id, "FAILED"); err != nil {
 			t.Fatal(err)
 		}
 		r.until("a", "Failed", 5, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.AllocationFailed })
 		evs := r.waitEvents(a, want{"failing", "AllocationFailed"})
 		r.checkNotes(evs, id)
+		// The log's id: the end time (HBEP-8, The event's id).
+		r.idle()
+		msgs := r.wantLog(a, eid(a, "AllocationFailed", rfc(endT)))
+		r.checkLogNotes(msgs, id)
+		r.matchAPI(msgs, evs, "AllocationFailed")
 		if n := r.count(r.key("failing", "Requeued", "Warning")); n != 0 {
 			t.Errorf("Requeued raised %v times for a failed job", n)
 		}
@@ -127,6 +154,9 @@ func TestAllocationFailures(t *testing.T) {
 		a = r.until("a", "requeued", 5, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Requeued })
 		evs := r.waitEvents(a, want{"failing", "Requeued"})
 		r.checkNotes(evs, id)
+		// The log's id: the restart count, which the fake Slurm's one Requeue made 1.
+		r.idle()
+		r.checkLogNotes(r.wantLog(a, eid(a, "Requeued", "1")), id)
 		if n := r.count(r.key("failing", "AllocationFailed", "Warning")); n != 0 {
 			t.Errorf("AllocationFailed raised %v times for a requeue", n)
 		}
@@ -146,6 +176,7 @@ func TestAllocationFailures(t *testing.T) {
 		}
 		r.clock.Advance(time.Hour) // past the queue's minimum age for an ended job
 		_ = r.pass("a")
+		absentSince := r.clock.Now() // the first pass that found the job absent: the id's fact
 		if n := r.count(r.key("failing", "JobLost", "Warning")); n != 0 {
 			t.Fatalf("JobLost raised %v times on the first absence, before lostGrace", n)
 		}
@@ -158,16 +189,22 @@ func TestAllocationFailures(t *testing.T) {
 		r.until("a", "not Lost", 3, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase != v1alpha1.AllocationLost })
 		evs := r.waitEvents(a, want{"ready", "JobReappeared"})
 		r.checkNotes(evs, id)
+		// The log's ids: JobLost and JobReappeared share absentSince, and so are two events of their own.
+		r.idle()
+		r.checkLogNotes(r.wantLog(a, eid(a, "JobLost", rfc(absentSince)), eid(a, "JobReappeared", rfc(absentSince))), id)
 	})
 	t.Run("cancelled from outside before the hard end gives AllocationEndedEarly", func(t *testing.T) {
 		r, a, id := running(t)
 		r.clock.Advance(2*time.Hour + 30*time.Minute) // hardEnd - 30 min
+		endT := r.clock.Now()
 		if err := r.sl.End(id, "CANCELLED"); err != nil {
 			t.Fatal(err)
 		}
 		r.until("a", "Ended", 5, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded })
 		evs := r.waitEvents(a, want{"failing", "AllocationEndedEarly"})
 		r.checkNotes(evs, id)
+		r.idle()
+		r.checkLogNotes(r.wantLog(a, eid(a, "AllocationEndedEarly", rfc(endT))), id)
 		if n := r.count(r.key("ended", "JobEnded", "Normal")); n != 0 {
 			t.Errorf("JobEnded raised %v times for an end from outside before the hard end, with no Instance draining", n)
 		}
@@ -193,12 +230,15 @@ func TestAllocationFailures(t *testing.T) {
 			t.Fatalf("the Instance in the API is %q, not Draining", got.Status.Phase)
 		}
 		r.clock.Advance(2*time.Hour + 50*time.Minute) // hardEnd - 10 min
+		endT := r.clock.Now()
 		if err := r.sl.End(id, "COMPLETED"); err != nil {
 			t.Fatal(err)
 		}
 		r.until("a", "Ended", 5, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded })
 		evs := r.waitEvents(a, want{"ended", "JobEnded"})
 		r.checkNotes(evs, id)
+		r.idle()
+		r.checkLogNotes(r.wantLog(a, eid(a, "JobEnded", rfc(endT))), id)
 		if n := r.count(r.key("failing", "AllocationEndedEarly", "Warning")); n != 0 {
 			t.Errorf("AllocationEndedEarly raised %v times for an end while the Instance drains", n)
 		}
@@ -213,6 +253,8 @@ func TestAllocationFailures(t *testing.T) {
 		r.until("a", "Ended", 5, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.AllocationEnded })
 		evs := r.waitEvents(a, want{"ended", "JobEnded"})
 		r.checkNotes(evs, id)
+		r.idle()
+		r.checkLogNotes(r.wantLog(a, eid(a, "JobEnded", rfc(hardEnd))), id)
 		if n := r.count(r.key("failing", "AllocationEndedEarly", "Warning")); n != 0 {
 			t.Errorf("AllocationEndedEarly raised %v times for a job cancelled at its hard end", n)
 		}
@@ -288,6 +330,19 @@ func TestAFailedStatusWriteRaisesJobStartedAgainUnderTheSameID(t *testing.T) {
 	}
 	evs := r.waitEvents(after, want{"ready", "JobStarted"})
 	r.checkNotes(evs, id)
+
+	// The log's half (HBEP-8, Test plan, Beta: A failed status write): the event was raised twice, and the log holds
+	// exactly one copy of its id, <uid>/JobStarted/0, since the second publish, within the duplicate window, was
+	// answered as a duplicate of the first: neither was lost (nothing is counted unlogged), and the stream, read through a
+	// fresh client, holds one. The API holds at least one (above).
+	r.idle()
+	msgs := r.wantLog(after, eid(after, "JobStarted", "0"))
+	if got := loggedOf(msgs, "JobStarted"); len(got) != 1 {
+		t.Errorf("the log holds %d JobStarted for the Allocation (%s), want exactly one under the id %s", len(got), joinIDs(got), eid(after, "JobStarted", "0"))
+	}
+	if got, _ := r.counter.Unlogged(eventcount.ControllerProvider(r.prov)); got != 0 {
+		t.Errorf("hpcburst_events_unlogged_total reads %v: a publish was lost, so the one copy proves nothing about the duplicate", got)
+	}
 }
 
 // Repeating conditions, read every minute on the fake clock: an admin hold kept
@@ -314,6 +369,20 @@ func TestRepeatingAllocationConditions(t *testing.T) {
 		}
 		evs := r.waitEvents(a, want{"degraded", "AdminHold"})
 		r.checkNotes(evs, id)
+		// The log: each emission of a repeating condition is an event of its own, so each has a fresh UUID
+		// for its id, and no two are the same (HBEP-8, The event's id).
+		r.idle()
+		holds := loggedOf(r.logAbout(a.UID), "AdminHold")
+		if float64(len(holds)) != n {
+			t.Fatalf("the log holds %d AdminHold events (%s), want the %v handed over", len(holds), joinIDs(holds), n)
+		}
+		seen := map[string]bool{}
+		for _, h := range holds {
+			if !uuidRE.MatchString(h.ID) || seen[h.ID] {
+				t.Errorf("AdminHold's id %q is not a fresh UUID of its own", h.ID)
+			}
+			seen[h.ID] = true
+		}
 	})
 	for _, c := range []struct {
 		name string
@@ -396,5 +465,25 @@ func TestAMovedHardEndRaisesHardEndNearAgain(t *testing.T) {
 		if want := end.UTC().Truncate(time.Second).Format(time.RFC3339); !strings.Contains(notes, want) {
 			t.Errorf("the API's HardEndNear notes %q do not name the hard end %s", notes, want)
 		}
+	}
+	// The log: two events of the same reason with different facts, the moved hard end's two, have two ids
+	// (HBEP-8, The event's id: the hard end for HardEndNear). The first hard end is the fixture's start of the
+	// job plus 3 h, the second 2 h later.
+	r.idle()
+	j, ok := r.sl.Job(id)
+	if !ok {
+		t.Fatal("the fake Slurm has no such job")
+	}
+	wantFirst := j.Start.Add(3 * time.Hour) // the fake's own record of the start, and the limit the Allocation asked for
+	wantMoved := wantFirst.Add(2 * time.Hour)
+	if rfc(hardEnd) != rfc(wantFirst) || rfc(moved) != rfc(wantMoved) {
+		t.Fatalf("the hard ends are %s and %s, the fixture's are %s and %s", rfc(hardEnd), rfc(moved), rfc(wantFirst), rfc(wantMoved))
+	}
+	first, second := eid(a, "HardEndNear", rfc(wantFirst)), eid(a, "HardEndNear", rfc(wantMoved))
+	if first == second {
+		t.Fatal("the two hard ends have one id")
+	}
+	if got := loggedOf(r.wantLog(a, first, second), "HardEndNear"); len(got) != 2 {
+		t.Errorf("the log holds %d HardEndNear (%s), want the two", len(got), joinIDs(got))
 	}
 }
