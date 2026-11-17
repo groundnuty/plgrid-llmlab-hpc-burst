@@ -87,32 +87,57 @@ func (rt *cli) cmdApprove(ctx context.Context, args []string, stdout, stderr io.
 	if err != nil {
 		return failf(stderr, exitFail, "%v", err)
 	}
+	ap := approvalFor(op, cl, ns, planID)
+	// The caller's own Approval comes first, whatever the phase: a Create that landed whose reply was lost has moved the
+	// Operation on, and its retry is a success, not a refusal of a phase.
+	if have, err := ownApproval(ctx, cl.c, ap); err != nil {
+		return failf(stderr, exitFail, "%v", err)
+	} else if have != nil {
+		return rt.reportApproval(stdout, stderr, have, "alreadyApproved", o.asJSON)
+	}
 	if code := checkApprovable(op, planID, cl, stderr); code != exitOK {
 		return code
 	}
-	ap := &v1alpha1.Approval{
+	switch err := cl.c.Create(ctx, ap); {
+	case err == nil:
+		return rt.reportApproval(stdout, stderr, ap, "approved", o.asJSON)
+	case apierrors.IsAlreadyExists(err):
+		// Made between the read and the create, by a retry of this command that overtook it.
+		have, err := ownApproval(ctx, cl.c, ap)
+		if err != nil || have == nil {
+			return failf(stderr, exitFail, "read Approval %s: %v", ap.Name, err)
+		}
+		return rt.reportApproval(stdout, stderr, have, "alreadyApproved", o.asJSON)
+	default:
+		return failf(stderr, exitFail, "approve Operation %s: %v", name, err)
+	}
+}
+
+// ownApproval reads the Approval of that name. It is nil when there is none, and an error when there is one that is not the
+// Approval asked for: another Operation by UID, or other groups.
+func ownApproval(ctx context.Context, c client.Client, want *v1alpha1.Approval) (*v1alpha1.Approval, error) {
+	have := &v1alpha1.Approval{}
+	switch err := c.Get(ctx, client.ObjectKeyFromObject(want), have); {
+	case apierrors.IsNotFound(err):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("read Approval %s: %w", want.Name, err)
+	case !sameApproval(&have.Spec, &want.Spec):
+		return nil, fmt.Errorf("Approval %s exists with a different request: it is for another Operation or other groups", want.Name)
+	}
+	return have, nil
+}
+
+// approvalFor is the Approval of the caller for the plan: named by the Operation and a digest of the user and the plan, so that
+// the same approver of the same plan always has the same one, and spec.approver the caller's user and groups exactly.
+func approvalFor(op *v1alpha1.Operation, cl *caller, ns, planID string) *v1alpha1.Approval {
+	return &v1alpha1.Approval{
 		ObjectMeta: metav1.ObjectMeta{Name: approvalName(op.Name, cl.user, planID), Namespace: ns},
 		Spec: v1alpha1.ApprovalSpec{
 			Operation: v1alpha1.OperationReference{Name: op.Name, UID: op.UID}, PlanID: planID,
 			Approver: v1alpha1.ApproverIdentity{Username: cl.user, Groups: slices.Clone(cl.groups)},
 		},
 	}
-	result := "approved"
-	switch err := cl.c.Create(ctx, ap); {
-	case err == nil:
-	case apierrors.IsAlreadyExists(err):
-		have := &v1alpha1.Approval{}
-		if err := cl.c.Get(ctx, client.ObjectKeyFromObject(ap), have); err != nil {
-			return failf(stderr, exitFail, "read Approval %s: %v", ap.Name, err)
-		}
-		if !sameApproval(&have.Spec, &ap.Spec) {
-			return failf(stderr, exitFail, "Approval %s exists with a different request: it is for another Operation or other groups", ap.Name)
-		}
-		result = "alreadyApproved"
-	default:
-		return failf(stderr, exitFail, "approve Operation %s: %v", name, err)
-	}
-	return rt.reportApproval(stdout, stderr, ap, result, o.asJSON)
 }
 
 // checkApprovable refuses an approval that cannot count: another plan, a phase that takes none, or a
