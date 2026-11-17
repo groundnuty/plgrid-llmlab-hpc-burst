@@ -208,7 +208,7 @@ func TestAKeptLosersMarkIsReadAfterARestart(t *testing.T) {
 			h, p := klPrimary(t)
 			w := klWin(t, h, p, c.tpot, ptrTo(int32(1)), false)
 			w.keptAtTheWin()
-			hoStepTo(h.rig, hoT(9, 25, 0), 10*time.Second, nil)
+			hoStepTo(h.rig, hoT(9, 25, 0), 30*time.Second, nil)
 			h.restartController()
 			if got := h.mustInstance(w.r1).Annotations[annotationCandidateOf]; got != w.r2 {
 				t.Fatalf("R1's candidate-of %q after the restart, want %q read from the object", got, w.r2)

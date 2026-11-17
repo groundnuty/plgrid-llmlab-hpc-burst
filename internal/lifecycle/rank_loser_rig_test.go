@@ -335,11 +335,15 @@ func (w *klHedge) endsAtTheWin() {
 func (w *klHedge) waitsToItsPoint() {
 	h := w.h
 	h.t.Helper()
-	hoStepTo(h.rig, hoT(9, 30, 10), 10*time.Second, func() {
+	// 30 s steps while the worker has not started (09:29:40), 10 s from 09:28:40, where the checks are answered a round
+	// at a time: coarse steps there would let the Instance reach its point a round early.
+	check := func() {
 		if in := h.mustInstance(w.r1); ended(in) || in.Status.Phase == v1alpha1.InstanceReady {
 			h.t.Fatalf("R1 is %s (end %q) at %s, want it waiting for its checks until 09:30:20", in.Status.Phase, in.Status.EndReason, h.clock.Now().Format(time.TimeOnly))
 		}
-	})
+	}
+	hoStepTo(h.rig, hoT(9, 28, 40), 30*time.Second, check)
+	hoStepTo(h.rig, hoT(9, 30, 10), 10*time.Second, check)
 	// R1's warm-up is judged in the pass of 09:30:10 and the agent reports it done one round later, so the Instance reaches
 	// its ranking point at 09:30:20, where the loop above found it neither ended nor ready.
 }
@@ -371,6 +375,13 @@ func TestAStartedLoserIsRankedAgainstItsWinnerAlone(t *testing.T) {
 	}
 }
 
+// toPDrain steps to 09:50:30, ten seconds after P's drain start: a minute at a time to 09:49:30, then every 10 s.
+func (w *klHedge) toPDrain() {
+	w.h.t.Helper()
+	hoStepTo(w.h.rig, hoT(9, 49, 30), time.Minute, nil)
+	hoStepTo(w.h.rig, hoT(9, 50, 30), 10*time.Second, nil)
+}
+
 // resolved asserts the loser's ranking at 09:30:20 and what follows, to P's drain start.
 func (w *klHedge) resolved(outranks bool) {
 	t, h := w.h.t, w.h
@@ -398,7 +409,7 @@ func (w *klHedge) resolved(outranks bool) {
 		if win.Status.Phase != v1alpha1.InstanceReady || win.Annotations[annotationRankedOut] != "" {
 			t.Fatalf("R2 is %s with ranked-out %q, want it ready and unmarked: it serves on", win.Status.Phase, win.Annotations[annotationRankedOut])
 		}
-		hoStepTo(h.rig, hoT(9, 50, 30), 10*time.Second, nil)
+		w.toPDrain()
 		if ph := hoPhase(h.rig, w.p); ph != v1alpha1.InstanceDraining && ph != v1alpha1.InstanceEnded {
 			t.Fatalf("P is %s at 09:50:30, want draining or ended", ph)
 		}
@@ -443,7 +454,7 @@ func (w *klHedge) resolved(outranks bool) {
 	if o, ok := h.outcomeOf(w.r1UID); !ok || o.Result != v1alpha1.StartOutcomeReady || !o.Time.Time.Equal(hoT(9, 30, 20)) {
 		t.Fatalf("R1's outcome %+v (%v), want a success at its ready time, 09:30:20", o, ok)
 	}
-	hoStepTo(h.rig, hoT(9, 50, 30), 10*time.Second, nil)
+	w.toPDrain()
 	if ph := hoPhase(h.rig, w.p); ph != v1alpha1.InstanceDraining && ph != v1alpha1.InstanceEnded {
 		t.Fatalf("P is %s at 09:50:30, want draining or ended: its handover goes on", ph)
 	}
@@ -481,7 +492,7 @@ func TestAStartedLoserEndsAtTheWinWhenAnyOfItsConditionsFails(t *testing.T) {
 			if win := h.mustInstance(w.r2); win.Status.Phase != v1alpha1.InstanceReady || win.Annotations[annotationRankedOut] != "" {
 				t.Fatalf("R2 is %s with ranked-out %q: nothing outranks it, R1 having ended", win.Status.Phase, win.Annotations[annotationRankedOut])
 			}
-			h.run(15*time.Minute, 10*time.Second)
+			h.run(15*time.Minute, time.Minute)
 			if win := h.mustInstance(w.r2); win.Status.Phase != v1alpha1.InstanceReady {
 				t.Fatalf("R2 is %s ten minutes on, want ready", win.Status.Phase)
 			}
