@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -147,6 +148,57 @@ func TestProcIdentityRefusesAReusedPIDAndAnotherBoot(t *testing.T) {
 			t.Errorf("%s: the identity opened", name)
 		}
 	}
+}
+
+// A process that is reaped after OpenProc took its pidfd makes the read of /proc/<pid>/stat fail with
+// ESRCH, not ENOENT (#709), and the identity then matches no process: ErrProcGone, as for any other
+// way of being gone. The race cannot be timed, so the start-time read is replaced by one that fails
+// the way the kernel's does, for a process that is alive and has the identity it is opened with. The
+// controls show that the replacement is called with this PID and that no other failure is read as an
+// exit: a read that is refused is an error that OpenProc cannot decide on.
+func TestOpenProcReadsAReapedProcessesStatAsGone(t *testing.T) {
+	_, id := startSleeper(t)
+	stat := "/proc/" + strconv.Itoa(id.PID) + "/stat"
+	for _, c := range []struct {
+		name    string
+		readErr error
+		gone    bool
+	}{
+		{"reaped_after_the_open_ESRCH", &os.PathError{Op: "read", Path: stat, Err: syscall.ESRCH}, true},
+		{"gone_before_the_read_ENOENT", &os.PathError{Op: "open", Path: stat, Err: syscall.ENOENT}, true},
+		{"refused_EACCES", &os.PathError{Op: "read", Path: stat, Err: syscall.EACCES}, false},
+		{"interrupted_EINTR", &os.PathError{Op: "read", Path: stat, Err: syscall.EINTR}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var asked []int
+			old := readStartTicks
+			t.Cleanup(func() { readStartTicks = old })
+			readStartTicks = func(pid int) (uint64, error) {
+				asked = append(asked, pid)
+				return 0, c.readErr
+			}
+			p, err := OpenProc(id)
+			if err == nil {
+				p.Close()
+				t.Fatal("the identity opened")
+			}
+			if len(asked) != 1 || asked[0] != id.PID {
+				t.Errorf("the start time was read for %v, want only pid %d", asked, id.PID)
+			}
+			if got := errors.Is(err, ErrProcGone); got != c.gone {
+				t.Errorf("OpenProc returned %v; ErrProcGone is %t, want %t", err, got, c.gone)
+			}
+			if !c.gone && !errors.Is(err, c.readErr) {
+				t.Errorf("OpenProc returned %v, which does not carry the read's error %v", err, c.readErr)
+			}
+		})
+	}
+	// The replacement was undone: the same identity opens through the real read.
+	p, err := OpenProc(id)
+	if err != nil {
+		t.Fatalf("the identity does not open after the start-time read was restored: %v", err)
+	}
+	p.Close()
 }
 
 // statLine builds a /proc/<pid>/stat line from its command name and its start time, with the 17
