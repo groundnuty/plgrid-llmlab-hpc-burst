@@ -72,8 +72,9 @@
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
 # skipped for lack of its script would turn a rename into a check that quietly stopped running.
-# One skip remains, and it is explicit: launcher-k3s leaves out the store-full tests on a runner
-# without FUSE, and says so in the job summary and in a check annotation.
+# One skip remains, and it is explicit: launcher-k3s leaves out the tests that mount a FUSE volume on a
+# runner without FUSE, and says so in the job summary and in a check annotation. Which tests those are
+# is read from the test sources by hack/fusetests (#657), never kept by hand.
 
 name: ci
 
@@ -783,8 +784,9 @@ jobs:
       # volume of the store-full tests is a FUSE file system that go-fuse mounts through the
       # setuid helper fusermount3, or fusermount when there is no fusermount3. Rather than guess
       # from file modes, the probe does what go-fuse does: it runs that helper to mount a tiny
-      # file system as this user, checks the mount, and unmounts it. The three tests are
-      # excluded only when that fails. The job cannot install anything, because it never uses sudo.
+      # file system as this user, checks the mount, and unmounts it. The tests that mount a volume
+      # are excluded only when that fails (the next step names them). The job cannot install
+      # anything, because it never uses sudo.
       - name: Probe what this runner offers
         id: probe
         run: |
@@ -881,13 +883,20 @@ jobs:
           # test-launcher.sh turns a failed FUSE mount into a failure, so a runner where the
           # probe's mount failed would fail the whole job. The tests that need the volume are left
           # out instead, and the summary says so. go test -skip leaves no "--- SKIP" line, so the
-          # warning and the "excluded" line below are the only record.
+          # warning and the "excluded" line below are the only record. The tests are the ones
+          # that reach a mount, read from the test sources of the packages the script runs
+          # (hack/fusetests, #657): a list kept by hand went stale, and the tests it lacked would
+          # have failed here instead of being left out. A runner with FUSE excludes nothing.
           excluded=()
           if [ "$FUSE" != "yes" ]; then
-            excluded=(TestCapVolume TestStoreFull TestStoreFullWholeDataDir)
+            if ! derived=$(go run ./hack/fusetests ./internal/launcher ./cmd/hpcburst 2> "$RUNNER_TEMP/fusetests.err"); then
+              echo "::error title=hack/fusetests failed::could not tell which tests need FUSE: $(tr '\n' ' ' < "$RUNNER_TEMP/fusetests.err")"
+              exit 1
+            fi
+            mapfile -t excluded <<< "$derived"
             args+=(-skip "^($(IFS='|'; echo "${excluded[*]}"))\$")
-            msg="NOT RUN: ${excluded[*]} need a size-limited FUSE volume, and the mount probe failed on this runner ($FUSE_REASON)"
-            echo "::warning title=store-full tests not run::$msg"
+            msg="NOT RUN: ${#excluded[@]} tests that mount a size-limited FUSE volume (${excluded[*]}), and the mount probe failed on this runner ($FUSE_REASON)"
+            echo "::warning title=tests that need FUSE not run::$msg"
             {
               echo "### launcher-k3s"
               echo "$msg"

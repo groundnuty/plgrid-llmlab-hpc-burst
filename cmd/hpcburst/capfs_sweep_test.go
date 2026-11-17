@@ -1,8 +1,8 @@
 package main
 
-// The sweep of dead capfs mounts (issue #648). The size-limited file system of the store-full tests (capfs_test.go) is served by the
-// test's own process. When that process is killed, its clean-up never runs, and since nothing else holds the connection
-// (capfs_mount_test.go), the kernel ends it: the mount stays with no one to serve it. Its endpoint is dead, a stat of it fails with
+// The sweep of dead capfs mounts (issue #648). The size-limited file system of the store-full tests (capfs_test.go) is served by a child
+// process of the test (capfs_volume_test.go, issue #658). When the test is killed, its clean-up never runs, the kernel kills the server
+// with it, and since nothing else holds the connection (capfs_mount_test.go), the kernel ends it: the mount stays with no one to serve it. Its endpoint is dead, a stat of it fails with
 // ENOTCONN ("transport endpoint is not connected"), an ordinary rm cannot remove it, and a later run or a removal of the scratch
 // directory trips on it. fusermount3's auto_unmount removes such a mount only from version 3.16 on.
 //

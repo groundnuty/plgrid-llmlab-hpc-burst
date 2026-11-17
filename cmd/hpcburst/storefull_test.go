@@ -17,7 +17,9 @@ import (
 
 // TestCapVolume checks the test file system itself, so that the store-full test below stands on
 // something that was shown to behave like a full disk: writes up to the limit succeed, the next
-// ones fail with ENOSPC, statfs reports the limit, and freeing space makes writes work again.
+// ones fail with ENOSPC, statfs reports the limit, and freeing space makes writes work again. The
+// volume is served by a child process (#658), and the test reads its refusal count from the files
+// the server keeps it in.
 func TestCapVolume(t *testing.T) {
 	const limit = 2 << 20
 	v := newCapVolume(t, limit)
@@ -50,7 +52,7 @@ func TestCapVolume(t *testing.T) {
 	if int64(st.Bavail)*int64(st.Bsize) > limit/4 {
 		t.Errorf("statfs reports %d bytes free on a full volume", int64(st.Bavail)*int64(st.Bsize))
 	}
-	if v.enospc.Load() == 0 {
+	if v.refused() == 0 {
 		t.Error("the volume did not count a refusal")
 	}
 	f.Close()
@@ -76,12 +78,12 @@ func TestCapVolumeFrozen(t *testing.T) {
 	}
 	defer f.Close()
 	block := make([]byte, 64<<10)
-	for i := 0; i < 64 && v.enospc.Load() == 0; i++ { // fill the volume with this one file
+	for i := 0; i < 64 && v.refused() == 0; i++ { // fill the volume with this one file
 		if _, err := f.Write(block); err != nil {
 			break
 		}
 	}
-	if v.enospc.Load() == 0 {
+	if v.refused() == 0 {
 		t.Fatal("the volume never reached its limit")
 	}
 	inPlace := func() error { _, err := f.WriteAt([]byte("rewritten"), 0); return err }
@@ -89,7 +91,7 @@ func TestCapVolumeFrozen(t *testing.T) {
 		t.Fatalf("a rewrite inside the file was refused on a volume that is only full: %v", err)
 	}
 	v.freeze()
-	refusedBefore := v.frozenRefusals.Load()
+	refusedBefore := v.frozenRefused()
 	for name, op := range map[string]func() error{
 		"a rewrite inside the file":  inPlace,
 		"a write that grows it":      func() error { _, err := f.WriteAt(block, 1<<30); return err },
@@ -99,7 +101,7 @@ func TestCapVolumeFrozen(t *testing.T) {
 			t.Errorf("%s on a frozen volume: %v, want ENOSPC", name, err)
 		}
 	}
-	if got := v.frozenRefusals.Load() - refusedBefore; got < 3 {
+	if got := v.frozenRefused() - refusedBefore; got < 3 {
 		t.Errorf("the freeze refused %d requests, want at least the 3 above", got)
 	}
 	if b, err := os.ReadFile(path); err != nil || len(b) == 0 {
@@ -206,7 +208,7 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	if got := vol.used(); got == 0 {
 		t.Fatal("the store is not on the size-limited volume: it holds no data")
 	}
-	t.Logf("the volume holds %d KiB of a %d KiB limit before the fill; refusals so far: %d", vol.used()>>10, vol.limit.Load()>>10, vol.enospc.Load())
+	t.Logf("the volume holds %d KiB of a %d KiB limit before the fill; refusals so far: %d", vol.used()>>10, vol.limitBytes()>>10, vol.refused())
 
 	// Fill it with large objects, then smaller and smaller ones, until even tiny writes fail. Every refusal
 	// must be the full store's (requireDiskFull); a request of its own context each.
@@ -242,9 +244,9 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 			created++
 		}
 	}
-	t.Logf("created %d objects; the volume refused %d requests; volume used %d of %d KiB", created, vol.enospc.Load(), vol.used()>>10, vol.limit.Load()>>10)
-	if firstErr == nil || vol.enospc.Load() == 0 {
-		t.Fatalf("the fill never hit the limit (first error %v, refusals %d)", firstErr, vol.enospc.Load())
+	t.Logf("created %d objects; the volume refused %d requests; volume used %d of %d KiB", created, vol.refused(), vol.used()>>10, vol.limitBytes()>>10)
+	if firstErr == nil || vol.refused() == 0 {
+		t.Fatalf("the fill never hit the limit (first error %v, refusals %d)", firstErr, vol.refused())
 	}
 
 	// The store is full, but a volume that is merely at its limit still accepts a write that fits in space
@@ -254,7 +256,7 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	// accept such rewrites now and then; status must report failing writes whenever its own probe is
 	// refused, and the assertions below are about the state in which every write is.
 	vol.freeze()
-	t.Logf("the volume is frozen at %d of %d KiB", vol.used()>>10, vol.limit.Load()>>10)
+	t.Logf("the volume is frozen at %d of %d KiB", vol.used()>>10, vol.limitBytes()>>10)
 	// The store's own directory, as status shows it: in both variants the store lives in the volume
 	// through a link, and statfs follows it (#192). The available space is logged as the evidence that the
 	// frozen volume has no block available, which is what launcher.StoreFullHint requires.
@@ -269,7 +271,7 @@ func storeFull(t *testing.T, wholeDataDir bool) {
 	for i := 0; i < followingRefused; i++ {
 		requireDiskFull(t, fmt.Sprintf("tiny write %d on the frozen volume", i+1), create(fmt.Sprintf("one-more-%d", i), "x"))
 	}
-	if vol.frozenRefusals.Load() == 0 {
+	if vol.frozenRefused() == 0 {
 		t.Fatal("the frozen volume refused no request: the freeze did not take effect, and the refusals above came from elsewhere")
 	}
 	lctx, lcancel := ctx()
