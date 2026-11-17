@@ -102,6 +102,12 @@ type Publisher struct {
 	// library returned it, and its result is what the publisher then sees: a test injects the loss of
 	// an acknowledgement after the broker has stored the message (spike S8's lostAckJS).
 	afterPublish func(id string, ack *jetstream.PubAck, err error) error
+	// emitHook, when set (tests only), is called by a raise between its dead check and its recorder call.
+	emitHook func()
+	// leaseTimeoutFor, when set (tests only), replaces the bound on a Lease read.
+	leaseTimeoutFor time.Duration
+	// jobsDone counts the raise jobs the notifier has finished, handed over or not (tests read it).
+	jobsDone atomic.Uint64
 }
 
 // item is one event waiting for the log.
@@ -365,16 +371,23 @@ func (p *Publisher) Shutdown(ctx context.Context) {
 // wrapper of one controller shares one loss gate: the lifecycle controller's recorders, the
 // manager's and the tunnel-state reader's, raise one EventsNotLogged between them.
 func (p *Publisher) routeFor(controller string, counter *Counter) *route {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	k := routeKey{controller: controller, counter: counter}
-	if r, ok := p.routes[k]; ok {
-		return r
+	p.mu.Lock()
+	r, ok := p.routes[k]
+	if !ok {
+		r = &route{p: p, controller: controller, counter: counter}
+		p.routes[k] = r
 	}
-	r := &route{p: p, controller: controller, counter: counter}
-	p.routes[k] = r
-	// The controller's manager stopped for good (its series are forgotten): its gate goes with it.
-	counter.forgetHook(controller, func() { p.Unregister(controller, counter) })
+	p.mu.Unlock()
+	if !ok {
+		// The last manager of the label stopped for good (its series are forgotten): the route is retired
+		// with it. A new registration of the label, a Zero or a recorder built for it, revives it.
+		counter.forgetHook(controller, func() { p.Unregister(controller, counter) })
+		counter.zeroHook(controller, func() {
+			r.revive()
+			counter.unlogged.WithLabelValues(controller) // a manager of the label is registered: the series stands at 0, if no loss has counted into it
+		})
+	}
 	return r
 }
 
@@ -399,16 +412,15 @@ func (p *Publisher) Wrapped(controller string) int {
 	return n
 }
 
-// Unregister drops a controller's route and its loss gate: its manager has stopped for good. The
-// next wrapper of the controller starts a new one.
+// Unregister retires a controller's route: the last manager of its label has stopped for good
+// (Counter.Forget decides that). Events of the controller still queued keep their route, which is dead now:
+// they publish, and their late losses are one log line each, uncounted (route.lost). The route stays with
+// the publisher, so that the next manager of the label, a recorder built or a Zero, revives it.
 func (p *Publisher) Unregister(controller string, counter *Counter) {
 	k := routeKey{controller: controller, counter: counter}
 	p.mu.Lock()
 	r := p.routes[k]
-	delete(p.routes, k)
 	p.mu.Unlock()
-	// Events of the controller still queued keep their route, which is dead now: they publish, and their
-	// late losses are one log line each, uncounted (route.lost).
 	if r != nil {
 		r.markDead()
 	}

@@ -207,26 +207,50 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			if float64(ackedEvents)+lostEvents != crashEvents {
 				t.Fatalf("%d acknowledged + %v counted lost (less the lost EventsNotLogged) = %v, want exactly %d (kill at %d)", ackedEvents, lostEvents, float64(ackedEvents)+lostEvents, crashEvents, kill)
 			}
+			lostAtRestart := r.unlogged(ctl)
 			r.restart()
-			// The log is back: the next publish that it takes closes the run of losses with one
-			// EventsNotLogged, published like any event.
-			r.raise(crashUIDs()[0], "after-return", "JobEnded")
+			// The log is back, and a token client connects to it, as the publisher's will: only then is the
+			// next publish that it takes expected to close the run of losses with one EventsNotLogged,
+			// published like any event.
 			_, js := r.d.Connect(t)
-			eventually(t, "the run's closing event to be stored", func() bool {
+			triggers := map[string]bool{}
+			trigger := func() {
+				id := fmt.Sprintf("after-return-%d", len(triggers))
+				triggers[id] = true
+				r.raise(crashUIDs()[0], id, "JobEnded")
+			}
+			trigger()
+			// A trigger has the shortened budget of its own, and if it runs out nothing succeeds and no closing is
+			// owed or raised: a fresh trigger is raised whenever the queue is empty and no closing is in the log.
+			for end := time.Now().Add(waitFor); ; time.Sleep(2 * time.Millisecond) {
 				st, err := js.Stream(t.Context(), eventlog.StreamEvents)
-				if err != nil {
-					return false
+				if err == nil {
+					_, err = st.GetLastMsgForSubject(t.Context(), "hb.ev.lease.uid-of-provider-p1")
+					if err == nil && r.pub.Pending() == 0 {
+						break
+					}
 				}
-				_, err = st.GetLastMsgForSubject(t.Context(), "hb.ev.lease.uid-of-provider-p1")
-				return err == nil && r.pub.Pending() == 0
-			})
+				if time.Now().After(end) {
+					rt := r.route(ctl)
+					rt.mu.Lock()
+					g := fmt.Sprintf("losing=%v runCount=%d owed=%d closing=%v loss=%v", rt.losing, rt.runCount, rt.owed.count, rt.closing != nil, rt.loss != nil)
+					rt.mu.Unlock()
+					t.Fatalf("timed out after %s waiting for the run's closing event to be stored: %d triggers raised, %v events lost at the restart and %v now, pending %d, gate %s", waitFor, len(triggers), lostAtRestart, r.unlogged(ctl), r.pub.Pending(), g)
+				}
+				if r.pub.Pending() == 0 && err != nil {
+					trigger()
+				}
+			}
 			ms := r.read()
-			raised := map[string]bool{"after-return": true}
+			raised := map[string]bool{}
 			for _, id := range idList {
 				raised[id] = true
 			}
 			var notLogged, kept int
 			for _, m := range ms {
+				if triggers[m.ID] {
+					continue
+				}
 				if raised[m.ID] {
 					kept++
 					continue
@@ -243,7 +267,7 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 					t.Errorf("EventsNotLogged is %s/%s, want degraded/Warning", d.Action, d.Type)
 				}
 			}
-			stored := kept - 1 // the after-return event
+			stored := kept
 			if float64(stored)+lostEvents < crashEvents {
 				t.Fatalf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least %d: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents, crashEvents)
 			}

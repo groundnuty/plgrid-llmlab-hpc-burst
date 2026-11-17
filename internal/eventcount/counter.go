@@ -20,6 +20,8 @@
 package eventcount
 
 import (
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -86,8 +88,40 @@ type Counter struct {
 
 	// onForget are run when a controller's series are forgotten: the publisher drops the controller's
 	// route and its loss gate then, since its manager has stopped for good.
+	// lc is the lifecycle mutex. Zero, Forget and a recorder's attach (route.attach) each hold it for the whole
+	// of one transition: the registration, the retirement or revival of the label's route, and the explicit
+	// creation and deletion of its series. A registration and a retirement are therefore never interleaved.
+	//
+	// LOCK ORDER: lc, then a route's retirement lock (route.retire), then its r.mu. Forget and Zero take the
+	// retirement lock for writing while they hold lc: that is how retirement waits for a raise that is handing
+	// EventsNotLogged to the recorder. So nothing that runs under the retirement lock's read side, the
+	// recorder call and everything it reaches (the wrapper's count, route.publish, route.lost), may take lc; the
+	// hot paths count through prometheus's own locks only. mu below is a leaf: it guards the maps, and no hook
+	// is run under it.
+	lc sync.Mutex
+
 	mu       sync.Mutex
 	onForget map[string][]func()
+	// onZero are run when a controller's series are zeroed, a new registration of the label: the publisher
+	// revives the label's route then, if a Forget retired it.
+	onZero map[string][]func()
+	// regs are the managers of each controller label that have set their series up and not yet had them
+	// forgotten: a registration per series set, the one a manager's Setup passes to Zero and its Dropped hook
+	// to Forget. Two managers of one label can run at once, as when a Provider changes kind, and the label's
+	// route and unlogged series live as long as either does. A registration is a member of a set, not a
+	// count, on two facts about the supervisors (internal/providerctl/supervisor.go): a manager that fails is
+	// set up again, and so zeroed again, with no Forget between, so a count would never return to 0; and one
+	// Supervisor never has two managers of one name, its pass stopping a dropped manager and calling Dropped
+	// before it starts any (TestSupervisorNeverRunsTwoManagersOfOneNameAtOnce pins that order).
+	regs map[string]map[string][]Series
+
+	// forgetMid, when set (tests only), is called by Forget between retiring the controller's route and
+	// deleting its series, the window in which an event of the controller can still be lost.
+	forgetMid func()
+	// forgetDecided, when set (tests only), is called by Forget after it has decided whether the label has
+	// another registration, and before it retires the route: the window in which a Zero could register, if
+	// nothing ordered it behind the Forget.
+	forgetDecided func()
 }
 
 // forgetHook registers f to run when the controller's series are forgotten.
@@ -98,6 +132,16 @@ func (c *Counter) forgetHook(controller string, f func()) {
 		c.onForget = map[string][]func(){}
 	}
 	c.onForget[controller] = append(c.onForget[controller], f)
+}
+
+// zeroHook registers f to run when the controller's series are zeroed.
+func (c *Counter) zeroHook(controller string, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.onZero == nil {
+		c.onZero = map[string][]func(){}
+	}
+	c.onZero[controller] = append(c.onZero[controller], f)
 }
 
 // New returns a Counter with no series.
@@ -145,10 +189,46 @@ func (c *Counter) Unlogged(controller string) (value float64, exists bool) {
 // are created at 0 for every reason, action and type that the lifecycle
 // controller, the front and a managed Provider can raise). A series that
 // exists already keeps its count.
+//
+// The series set is also the registration of the manager that asks for it: see Forget.
 func (c *Counter) Zero(controller string, series []Series) {
+	c.lc.Lock()
+	defer c.lc.Unlock()
 	for _, s := range series {
 		c.vec.WithLabelValues(controller, s.Reason, s.Action, s.Type)
 	}
+	c.mu.Lock()
+	if c.regs == nil {
+		c.regs = map[string]map[string][]Series{}
+	}
+	if c.regs[controller] == nil {
+		c.regs[controller] = map[string][]Series{}
+	}
+	c.regs[controller][seriesKey(series)] = append([]Series(nil), series...)
+	hooks := append([]func(){}, c.onZero[controller]...)
+	c.mu.Unlock()
+	// A new registration means the label is live again: a route that a Forget retired is revived, and its
+	// unlogged series comes back at 0.
+	for _, f := range hooks {
+		f()
+	}
+}
+
+// lifecycle runs f as one lifecycle transition (see lc).
+func (c *Counter) lifecycle(f func()) {
+	c.lc.Lock()
+	defer c.lc.Unlock()
+	f()
+}
+
+// seriesKey names a series set: its entries sorted, so the set a manager zeroes is the set it forgets.
+func seriesKey(series []Series) string {
+	keys := make([]string, 0, len(series))
+	for _, s := range series {
+		keys = append(keys, s.Reason+"|"+s.Action+"|"+s.Type)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 // Forget deletes the controller's series named in series, whatever their
@@ -156,17 +236,49 @@ func (c *Counter) Zero(controller string, series []Series) {
 // now of another kind) raises nothing more, so series created at 0 for it would
 // read as a Provider that raised nothing. A series that does not exist is
 // skipped.
+//
+// The series set is the registration of the manager that Zero was given it for, and the manager that is
+// forgotten is the one whose set this is. Two managers of one label can run at once, when a Provider changes
+// kind: while another registration of the label is live, the label's route, its unlogged series and the
+// series the other manager also raises are left alone, and only the series of this manager's own are deleted.
+// When it was the last, the controller is retired first and its series deleted after: the hooks mark its
+// publisher route dead, and a dead route counts no loss and raises nothing, so no event of the controller
+// that is still queued, or whose EventsNotLogged is being raised, can bring a series back once it is deleted
+// (the delta reviews of #697, 17 Nov 2026).
 func (c *Counter) Forget(controller string, series []Series) {
-	for _, s := range series {
-		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
-	}
-	c.unlogged.DeleteLabelValues(controller)
+	c.lc.Lock()
+	defer c.lc.Unlock()
 	c.mu.Lock()
-	hooks := c.onForget[controller]
-	delete(c.onForget, controller)
+	delete(c.regs[controller], seriesKey(series))
+	live := len(c.regs[controller]) > 0
+	kept := map[Series]bool{} // series another live registration of the label raises too
+	for _, ss := range c.regs[controller] {
+		for _, s := range ss {
+			kept[s] = true
+		}
+	}
+	var hooks []func()
+	if !live {
+		delete(c.regs, controller)
+		hooks = append([]func(){}, c.onForget[controller]...)
+	}
 	c.mu.Unlock()
+	if c.forgetDecided != nil {
+		c.forgetDecided()
+	}
 	for _, f := range hooks {
-		f()
+		f() // retire the route: this waits for a raise that is handing its event to the recorder
+	}
+	if c.forgetMid != nil {
+		c.forgetMid()
+	}
+	for _, s := range series {
+		if !kept[s] {
+			c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
+		}
+	}
+	if !live {
+		c.unlogged.DeleteLabelValues(controller)
 	}
 }
 
@@ -286,7 +398,6 @@ func Events(inner events.EventRecorder, c *Counter, controller string, opts ...O
 			panic("eventcount: a recorder wrapped with a log needs the scheme and the reporting controller")
 		}
 		r.rt = o.log.Publisher.routeFor(controller, c)
-		c.unlogged.WithLabelValues(controller) // the series starts at 0
 		r.rt.attach(routeSpec{scheme: o.log.Scheme, reporting: o.log.ReportingController, lease: o.log.Lease, rec: r})
 	}
 	return r

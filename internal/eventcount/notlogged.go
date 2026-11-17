@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -48,6 +50,14 @@ const repeatEvery = provider.EventRepeatInterval
 // leaseReadTimeout bounds the read of the Lease for its UID.
 const leaseReadTimeout = 5 * time.Second
 
+// leaseTimeout is the bound on one Lease read: leaseReadTimeout, unless a test has set its own.
+func (p *Publisher) leaseTimeout() time.Duration {
+	if p.leaseTimeoutFor > 0 {
+		return p.leaseTimeoutFor
+	}
+	return leaseReadTimeout
+}
+
 type jobKind int
 
 const (
@@ -59,6 +69,7 @@ const (
 // Its fields are the route's to change, under the route's lock, until the notifier starts it.
 type raiseJob struct {
 	r       *route
+	epoch   uint64 // the route's epoch when the job was queued
 	kind    jobKind
 	gen     uint64    // a loss job: the run it raises for
 	upTo    uint64    // a closing: the last run it reports
@@ -67,6 +78,14 @@ type raiseJob struct {
 	at      time.Time // when it was decided
 	handles int       // a loss job: the losses whose barrier it carries (route.handled)
 	started bool      // the notifier has taken it: it is no longer updated in place
+}
+
+// hold makes the closing job report sp as well as what it holds already: the earliest loss, the counts
+// summed, the latest generation.
+func (j *raiseJob) hold(sp span) {
+	h := span{gen: j.upTo, since: j.since, count: j.count}
+	h.add(sp)
+	j.upTo, j.since, j.count = h.gen, h.since, h.count
 }
 
 // jobData is what a started job says.
@@ -89,6 +108,7 @@ func (d jobData) note() string {
 // run raises the event, and records whether it was handed over.
 func (j *raiseJob) run(stopped func() bool) {
 	r := j.r
+	defer r.p.jobsDone.Add(1)
 	data, live := r.start(j)
 	spec := r.snapshot()
 	if !live || spec.lease == nil || spec.rec == nil || stopped() {
@@ -98,7 +118,7 @@ func (j *raiseJob) run(stopped func() bool) {
 		r.finish(j, false)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.p.ctx, leaseReadTimeout)
+	ctx, cancel := context.WithTimeout(r.p.ctx, r.p.leaseTimeout())
 	lease, err := spec.lease(ctx)
 	cancel()
 	if err != nil || lease == nil || lease.UID == "" {
@@ -106,9 +126,26 @@ func (j *raiseJob) run(stopped func() bool) {
 		r.finish(j, false)
 		return
 	}
-	if r.isDead() {
-		r.finish(j, false)
-		return
+	r.finish(j, r.emit(spec, lease, j, data))
+}
+
+// emit hands the EventsNotLogged to the controller's recorder, unless the controller has stopped for good,
+// and says whether it did. It holds the route's retirement lock for reading across the dead check and the
+// recorder call, so that retirement (markDead) waits for an emit in flight, and an emit that starts after it
+// finds the route dead: a stopped manager's recorder is never called, and its series never come back. The
+// lock is not r.mu, which the recorder call takes again (route.publish); and nothing the call reaches takes
+// the retirement lock for writing.
+func (r *route) emit(spec routeSpec, lease *coordinationv1.Lease, j *raiseJob, data jobData) bool {
+	r.retire.RLock()
+	defer r.retire.RUnlock()
+	r.mu.Lock()
+	stale := r.dead || j.epoch != r.epoch // the route was retired, or retired and revived, since the job was queued
+	r.mu.Unlock()
+	if stale {
+		return false
+	}
+	if h := r.p.emitHook; h != nil {
+		h()
 	}
 	// The wrapper counts the event and hands it to the Kubernetes recorder and the publisher, as it does
 	// any event. The call is through the recorder's interface, so the drift guard reads it as the emit
@@ -117,7 +154,7 @@ func (j *raiseJob) run(stopped func() bool) {
 	r.setEmitting(j)
 	spec.rec.Eventf(lease, nil, provider.EventKindWarning, ReasonEventsNotLogged, ActionDegraded, "%s", provider.CutNote(data.note()))
 	r.setEmitting(nil)
-	r.finish(j, true)
+	return true
 }
 
 // notifier raises the owed EventsNotLogged events in a goroutine of its own, so that neither the emit

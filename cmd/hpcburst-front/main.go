@@ -115,8 +115,11 @@ func run(args []string) error {
 	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, records, rec, log, *health)
 	o.BulkPath = *bulkPath
 	o.EventLogTokenFile = *eventLogTokenFile
-	return front.Run(ctx, o)
+	return frontRun(ctx, o)
 }
+
+// frontRun is front.Run; a test of run replaces it to read what run hands the server (eventwire_test.go).
+var frontRun = front.Run
 
 // options are Run's inputs in production. They set no Transports, so Run
 // builds HBEP-6's Tunnel and its probe, and no PathEvents, so the probe's
