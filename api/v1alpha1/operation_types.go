@@ -235,7 +235,11 @@ type OperationStatus struct {
 	// untaken units (HBEP-10, The report, as amended by #698). It is set ONLY
 	// when some unit is untaken: a Scale with no untaken unit never sets it, and
 	// does not wait for it. When set, the Operation finishes only after it is
-	// written. Written once by the lifecycle controller.
+	// written. Written once by the lifecycle controller: a rule on status
+	// refuses dropping it while status stays, its own rule refuses changing it,
+	// and a rule at the Operation's root refuses removing the status that holds
+	// it, which the others could not see (a merge patch of status null leaves
+	// them nothing to run on).
 	//
 	// +optional
 	CountGivenBack *CountGivenBack `json:"countGivenBack,omitempty"`
@@ -638,6 +642,7 @@ type QueueWaitsFigure struct {
 // +kubebuilder:printcolumn:name="Deployment",type=string,JSONPath=`.spec.modelDeploymentRef.name`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.countGivenBack) || has(self.status)",message="status.countGivenBack is set once: removing the status that holds it is refused (HBEP-10, The report)"
 type Operation struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
