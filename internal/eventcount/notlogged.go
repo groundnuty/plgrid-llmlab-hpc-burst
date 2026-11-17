@@ -78,6 +78,7 @@ type raiseJob struct {
 	at      time.Time // when it was decided
 	handles int       // a loss job: the losses whose barrier it carries (route.handled)
 	started bool      // the notifier has taken it: it is no longer updated in place
+	covered bool      // a loss job whose run a waiting closing now covers: it is dropped when the notifier takes it
 }
 
 // hold makes the closing job report sp as well as what it holds already: the earliest loss, the counts

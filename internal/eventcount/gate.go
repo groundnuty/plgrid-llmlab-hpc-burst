@@ -112,6 +112,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 		// A loss job is waiting for the notifier: it raises for the run as it stands now. It is the run's own
 		// job, or an older run's that has not started, which this run takes over.
 		j.gen, j.count, j.since = r.gen, r.runCount, r.runStart
+		j.covered = false // it raises for this run now, which no closing covers
 		if j.at.IsZero() || now.After(j.at) {
 			j.at = now
 		}
@@ -174,6 +175,12 @@ func (r *route) closingJobLocked(now time.Time) *raiseJob {
 			j.hold(r.owed)
 			j.at = now
 			r.owed = span{}
+			// The waiting closing now covers runs whose loss job may wait behind it, and would be emitted after it:
+			// a log that says it takes events again and then that it is losing them, for a run it has just
+			// reported. That loss job is dropped.
+			if l := r.loss; l != nil && !l.started && l.gen <= j.upTo {
+				l.covered = true
+			}
 		}
 		return nil
 	}
@@ -202,12 +209,13 @@ func (r *route) closingLostLocked(j *raiseJob) {
 }
 
 // start marks a job as taken by the notifier, which ends its update in place, and returns what it says. It
-// returns false when the route's controller has stopped for good: nothing is raised for it.
+// returns false when the route's controller has stopped for good, or when it is a loss job whose run a closing
+// has come to cover: nothing is raised for it.
 func (r *route) start(j *raiseJob) (jobData, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	j.started = true
-	return jobData{kind: j.kind, count: j.count, since: j.since, at: j.at}, !r.dead
+	return jobData{kind: j.kind, count: j.count, since: j.since, at: j.at}, !r.dead && !j.covered
 }
 
 // setEmitting records the job whose recorder call is about to be made, so that the event it raises carries it.
