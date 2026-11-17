@@ -216,7 +216,7 @@ func TestTheMarkReadsTheProviderFromTheReferenceNotTheLabel(t *testing.T) {
 
 // TestAReplacementPlacedOnAWarmAllocationCreatesAndMarksNothing: a replacement that goes onto a retained
 // warm Allocation creates no Allocation, so there is nothing to mark, and the existing ones are never
-// marked later (README line 466). The setup is TestNoOverlapWarmAllocationTakesTheReplacement's: with
+// marked later (README line 466). The setup is TestNoOverlapWarmAllocationTakesTheReplacement's (a 12 h partition, scaled up at 11:50, replacement at 17:19:30, for the lead of amendment #711): with
 // maxSubmitPerUser 2 the primary's and a retained warm Allocation take both slots, so a new job is
 // impossible, and the replacement goes onto the warm one at its planned time.
 func TestAReplacementPlacedOnAWarmAllocationCreatesAndMarksNothing(t *testing.T) {
@@ -227,9 +227,9 @@ func TestAReplacementPlacedOnAWarmAllocationCreatesAndMarksNothing(t *testing.T)
 	// made, and 2 from then on, as an operator's edit would, so the primary's and the warm Allocation take both
 	// slots, the state this test is about.
 	qos := []v1alpha1.QOSProfile{{Name: "example-s2", MaxSubmitPerUser: i32(3)}}
-	rg := newRig(t, append(qosOpts(qos, "", "example-s2"), withMaxTime(4*time.Hour), withInterceptors(log.funcs()), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 2 }))...)
-	p := *hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 0, 0), 5*time.Minute, nil)
+	rg := newRig(t, append(qosOpts(qos, "", "example-s2"), withMaxTime(12*time.Hour), withInterceptors(log.funcs()), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 2 }))...)
+	p := *hoStartLease(rg, nil, hoT(20, 0, 20))
+	hoStepTo(rg, hoT(11, 50, 0), 5*time.Minute, nil)
 	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
 	var warm string
 	rg.until(5*time.Minute, 10*time.Second, "the second Allocation started", func() bool {
@@ -248,8 +248,8 @@ func TestAReplacementPlacedOnAWarmAllocationCreatesAndMarksNothing(t *testing.T)
 	if before != 2 {
 		t.Fatalf("%d Allocations created before the replacement, want the primary's and the warm one", before)
 	}
-	hoStepTo(rg, hoT(9, 19, 20), 5*time.Minute, nil)
-	hoStepTo(rg, hoT(9, 19, 40), 10*time.Second, nil)
+	hoStepTo(rg, hoT(17, 19, 20), 5*time.Minute, nil)
+	hoStepTo(rg, hoT(17, 19, 40), 10*time.Second, nil)
 	reps := hoRepl(rg, p.Name)
 	if len(reps) != 1 || reps[0].Spec.AllocationRef.Name != warm {
 		t.Fatalf("replacements %+v, want one, on the warm Allocation %s", reps, warm)

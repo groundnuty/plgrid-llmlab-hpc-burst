@@ -221,12 +221,15 @@ func (p *pass) warmOf(pv *providerView) []*v1alpha1.Allocation {
 // next would fail that Instance, which counts toward RestartLoop (issue #332). One whose agent has not registered
 // again yet, during the grace after the controller's own restart, is waited for rather than passed over.
 //
-// For a replacement (pred != nil) the warm Allocation's drain start must be STRICTLY later than pred's: HBEP-7,
-// Hedging (beta), Started losers are kept, and Over-allocation and qualification (beta), The lowest-ranked is
-// kept: "A replacement goes there only when the warm Allocation's drain start is later than its predecessor's".
-// One that drains with the predecessor, as the ranked-out extra's does, would end the replacement at the very
-// moment it is meant to take over. At exactly pred's it is not used (#604 PR 3's plan, Q4). The pick is the first
-// of warmOf's, the latest hard end first, so it is the same on every pass.
+// For a replacement (pred != nil) the warm Allocation's drain start must be later than its predecessor's BY AT LEAST the
+// lead an Instance needs (leadOf: the drain window, handoverMargin and health.startTimeout; HBEP-7, Hedging (beta), Started
+// losers are kept, and Over-allocation and qualification (beta), The lowest-ranked is kept; the science agent's ruling on
+// #708's Fable review, amendment #711): "a replacement goes there only when the warm Allocation's drain start is later than
+// its predecessor's by at least the lead an Instance needs, or it would drain with or soon after it, before its own
+// replacement could start". One that drains with the predecessor, as the ranked-out extra's does, would end the replacement at
+// the very moment it is meant to take over, and one that drains moments after it would leave the deployment without a ready
+// Instance until the replacement's own replacement, planned only then, starts and is ready. At exactly the lead it is used.
+// The pick is the first of warmOf's, the latest hard end first, so it is the same on every pass.
 func (p *pass) warmFor(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) (warm *v1alpha1.Allocation, deferUntil time.Time) {
 	need := 2*startToReady(p.md, pv.class) + drainWindowOf(pv, p.md)
 	for _, a := range p.warmOf(pv) {
@@ -245,9 +248,10 @@ func (p *pass) warmFor(pv *providerView, params v1alpha1.BatchParameters, pred *
 }
 
 // drainsAfter reports whether the warm Allocation's drain start (its hard end minus the Provider's drain window,
-// as v1alpha1.DrainStart reads it) is strictly later than the predecessor's (drainStart: its lease end, the
-// Provider's profile and the deployment's routing). It is true with no predecessor, and when the predecessor has no
-// drain start to compare with (it never started, so nothing serves that the replacement must outlive).
+// as v1alpha1.DrainStart reads it) is later than the predecessor's (drainStart: its lease end, the Provider's profile and
+// the deployment's routing) by at least the lead an Instance needs on the warm Allocation's Provider (leadOf). It is true
+// with no predecessor, and when the predecessor has no drain start to compare with (it never started, so nothing serves
+// that the replacement must outlive).
 func (p *pass) drainsAfter(pv *providerView, warm *v1alpha1.Allocation, pred *v1alpha1.Instance) bool {
 	if pred == nil {
 		return true
@@ -264,7 +268,11 @@ func (p *pass) drainsAfter(pv *providerView, warm *v1alpha1.Allocation, pred *v1
 		return false
 	}
 	ws, err := v1alpha1.DrainStart(warm.Status.AtProvider.HardEnd.Time, pv.profile.Spec, routing)
-	return err == nil && ws.After(ps)
+	if err != nil {
+		return false
+	}
+	lead, _ := leadOf(pv, p.md)
+	return !ws.Before(ps.Add(lead))
 }
 
 // releasePending reports whether an Instance on the Allocation failed, so the
