@@ -51,6 +51,8 @@ type auditEvent struct {
 
 	// size is the line's length in bytes, and file the log file it came from.
 	size int
+	// line is the event's JSON line as logged, without its newline: a slice of the file's text.
+	line []byte
 	file string
 }
 
@@ -225,7 +227,7 @@ func parseEvents(f logFile) ([]auditEvent, error) {
 		if err := json.Unmarshal(line, &e); err != nil {
 			return nil, fmt.Errorf("%s line %d is not a JSON event: %w", f.name, n+1, err)
 		}
-		e.size, e.file = len(line)+1, f.name
+		e.size, e.file, e.line = len(line)+1, f.name, line
 		out = append(out, e)
 	}
 	return out, nil

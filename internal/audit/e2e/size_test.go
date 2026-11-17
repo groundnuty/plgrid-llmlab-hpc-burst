@@ -3,6 +3,8 @@ package e2e
 // The size of the log (issue #660, S3): per Operation and per minute of an idle controller, measured in the stand-in's run.
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"testing"
 	"time"
@@ -73,6 +75,7 @@ func (w *world) reportSize(t *testing.T, rd *reader, from, to time.Time, operati
 	perUser := map[string]*tally{}
 	lifecycleBy := map[string]*tally{}
 	var lifecycleBodies tally
+	var windowLog, lifecycleLog []byte // the window's lines as logged, to gzip as a rotated file is
 	for _, e := range set.events {
 		if e.RequestReceivedTimestamp.Before(start) || e.RequestReceivedTimestamp.After(end) {
 			continue
@@ -83,6 +86,7 @@ func (w *world) reportSize(t *testing.T, rd *reader, from, to time.Time, operati
 		}
 		perUser[u].n++
 		perUser[u].bytes += e.size
+		windowLog = append(append(windowLog, e.line...), '\n')
 		if u != "lifecycle" {
 			continue
 		}
@@ -96,6 +100,7 @@ func (w *world) reportSize(t *testing.T, rd *reader, from, to time.Time, operati
 		}
 		lifecycleBy[key].n++
 		lifecycleBy[key].bytes += e.size
+		lifecycleLog = append(append(lifecycleLog, e.line...), '\n')
 		lifecycleBodies.bytes += len(e.RequestObject) + len(e.ResponseObject)
 		lifecycleBodies.mf += managedFieldsBytes(e.RequestObject) + managedFieldsBytes(e.ResponseObject)
 	}
@@ -112,6 +117,27 @@ func (w *world) reportSize(t *testing.T, rd *reader, from, to time.Time, operati
 	} else {
 		t.Logf("size: an idle lifecycle controller wrote no event in %.0f s", quiet.Seconds())
 	}
+	// What a rotated file costs on disk: the API server gzips it with Go's default level (6), as gzipBytes does. The sample is the
+	// window's own lines, so its ratio is a lower bound for a file of up to 100 MB, in which the same structures recur.
+	for _, g := range []struct {
+		what string
+		log  []byte
+	}{{"the lifecycle controller's lines", lifecycleLog}, {"every user's lines", windowLog}} {
+		if len(g.log) == 0 {
+			continue
+		}
+		z := gzipBytes(g.log)
+		t.Logf("size: gzip -6 of %s in the idle window: %d bytes plain, %d gzipped, 1 : %.1f, %d gzipped bytes per minute", g.what, len(g.log), z, float64(len(g.log))/float64(z), z*perMinute)
+	}
+}
+
+// gzipBytes is the size of b gzipped at Go's default level, which is what the API server's log writer uses for a rotated file.
+func gzipBytes(b []byte) int {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	_ = zw.Close()
+	return buf.Len()
 }
 
 // managedFieldsBytes is the size of every managedFields array in a logged body, found at any depth.
