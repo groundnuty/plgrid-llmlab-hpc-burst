@@ -322,6 +322,49 @@ func TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan(t *testing.T) {
 		}
 	}
 
+	// By NAME, in hpcburst-system: the lifecycle's and the front's Leases have fixed names, and their roles name them,
+	// so the front's token cannot take the lifecycle Lease, nor the lifecycle's the front's, which it only reads. The
+	// controls: each identity does what its role says to its own Lease. (The Provider managers' Leases are one per
+	// Provider, made at run time, so that role is not narrowed by name: nothing is asserted of it here.)
+	for _, n := range []string{v1alpha1.LeaseLifecycle, v1alpha1.LeaseFront} {
+		if err := api.client.Create(ctx, &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: v1alpha1.ControllerNamespace}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leaseKey := func(n string) client.ObjectKey {
+		return client.ObjectKey{Namespace: v1alpha1.ControllerNamespace, Name: n}
+	}
+	var lifecycleLease, frontLease coordinationv1.Lease
+	if err := api.client.Get(ctx, leaseKey(v1alpha1.LeaseLifecycle), &lifecycleLease); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.client.Get(ctx, leaseKey(v1alpha1.LeaseFront), &frontLease); err != nil {
+		t.Fatal(err)
+	}
+	if err := frontC.Update(ctx, lifecycleLease.DeepCopy()); !apierrors.IsForbidden(err) {
+		t.Errorf("hpcburst-front updating the lifecycle Lease: %v, want Forbidden", err)
+	}
+	if err := frontC.Get(ctx, leaseKey(v1alpha1.LeaseLifecycle), &coordinationv1.Lease{}); !apierrors.IsForbidden(err) {
+		t.Errorf("hpcburst-front reading the lifecycle Lease: %v, want Forbidden", err)
+	}
+	if err := lifecycleC.Update(ctx, frontLease.DeepCopy()); !apierrors.IsForbidden(err) {
+		t.Errorf("hpcburst-lifecycle updating the front's Lease: %v, want Forbidden", err)
+	}
+	var got coordinationv1.Lease
+	if err := frontC.Get(ctx, leaseKey(v1alpha1.LeaseFront), &got); err != nil {
+		t.Errorf("hpcburst-front reading its own Lease, the control: %v", err)
+	} else if err := frontC.Update(ctx, got.DeepCopy()); err != nil {
+		t.Errorf("hpcburst-front updating its own Lease, the control: %v", err)
+	}
+	if err := lifecycleC.Get(ctx, leaseKey(v1alpha1.LeaseFront), &coordinationv1.Lease{}); err != nil {
+		t.Errorf("hpcburst-lifecycle reading the front's Lease, which its observer does: %v", err)
+	}
+	if err := lifecycleC.Get(ctx, leaseKey(v1alpha1.LeaseLifecycle), &got); err != nil {
+		t.Errorf("hpcburst-lifecycle reading its own Lease, the control: %v", err)
+	} else if err := lifecycleC.Update(ctx, got.DeepCopy()); err != nil {
+		t.Errorf("hpcburst-lifecycle updating its own Lease, the control: %v", err)
+	}
+
 	// The control: the lifecycle identity, whose role grants delete, deletes it. A refusal above that came from a
 	// missing object or an admission rule, and not from RBAC, would have shown here as a different answer.
 	if err := lifecycleC.Delete(ctx, alloc); err != nil {

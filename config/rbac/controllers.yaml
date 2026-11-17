@@ -19,8 +19,18 @@
 # (config/rbac/embed.go), so what up installs is this file.
 #
 # EACH ROLE GRANTS EXACTLY WHAT ITS COMPONENT CALLS (the science agent, 17 Nov 2026, #660: S2). It was
-# enumerated from the code, call site by call site, never from a test's list, and is proved by running the
-# real controllers' suites under these identities (cmd/hpcburst-controller's harness, CI's launcher-k3s).
+# enumerated from the code, call site by call site, never from a test's list. What PROVES a rule, and what does
+# not (the measured table is in the PR body):
+#   - cmd/hpcburst-controller's harness runs the real controller binary on envtest under the identities and
+#     fails any test on a 403 in the API server's audit log. It proves the rules it exercises: the leader Leases,
+#     the watches of the cached kinds, the Provider controller's Allocation, Provider and record writes, the
+#     tunnel state's Instance status write, events create. It does NOT exercise the lifecycle's ModelDeployment,
+#     Operation, Instance and Allocation reads and writes, the events patch, or the front.
+#   - Those are proved by the rehearsals and the alpha stand-in (internal/alpha), which run the whole stack through
+#     `up` and so under the identities. They are not required checks.
+#   - CI's launcher-k3s starts a FAKE controller and the real front: it proves the identities are issued and usable
+#     (a SelfSubjectReview through each file, the audit log's user names) and that the real front's startup
+#     paths run under its role, and nothing of the real controller.
 # A controller change that adds an API call extends its role in the same change. The rules of one resource
 # carry the reason in the comment above them. Three things that follow from how the clients are built:
 #   - A read through a manager's cached client (mgr.GetClient()) is a LIST and a WATCH of the kind: the
@@ -34,8 +44,9 @@
 #   - A leader-election Lease lock is GET, CREATE and UPDATE (client-go resourcelock leaselock.go). Every
 #     controller's Lease lives in hpcburst-system only, so the Lease verbs are a Role and a RoleBinding in that
 #     namespace for each identity (below the ClusterRoles), never a ClusterRole's: a controller's Lease write in
-#     any other namespace is Forbidden. Events stay in the ClusterRoles, since a deployment, and so the events
-#     about it, can be in any namespace.
+#     any other namespace is Forbidden. The fixed-name Leases (the lifecycle's and the front's) are narrowed further
+#     by resourceNames; the Provider managers' are one per Provider, made at run time, and stay namespace-wide.
+#     Events stay in the ClusterRoles, since a deployment, and so the events about it, can be in any namespace.
 # Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
 # would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it, and were it set,
 # the Forbidden would surface as a reconcile error, not silently); deletes of
@@ -200,8 +211,14 @@ subjects:
     name: hpcburst-front
     namespace: hpcburst-system
 ---
-# The Lease verbs, in hpcburst-system alone. hpcburst-lifecycle: the lifecycle Lease (leader election) and its
-# reads of it and of the front's, by the observer, the gap emitter and the tunnel state's events.
+# The Lease verbs, in hpcburst-system alone, narrowed to the Lease NAMES each identity touches where the names are
+# fixed. `create` cannot be narrowed by name: the name of a Lease that does not exist yet is not known to the
+# authorizer, so a rule with resourceNames never matches a create, and each identity's create is a rule of its own
+# with no names (a controller can create a Lease in hpcburst-system, and nothing else there).
+#
+# hpcburst-lifecycle: the lifecycle Lease (leader election: get, create, update; v1alpha1.LeaseLifecycle) and its
+# READ of the front's (v1alpha1.LeaseFront), by the observer (observers.go), the gap emitter (gap.go) and the
+# tunnel state's events (tunnel_state.go, tunnel_bulk.go). It never writes the front's.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -210,9 +227,21 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["lifecycle"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["front"]
+    verbs: ["get"]
 ---
-# hpcburst-provider: its Provider's Lease, provider-<name> (leader election), and the gap emitter's read of it.
+# hpcburst-provider: its Provider's Lease, provider-<name> (leader election), and the gap emitter's read of it. The
+# names are NOT fixed: there is one Lease per Provider, Providers are made at run time, and a Role cannot name a
+# Lease that does not exist yet, so this one stays namespace-wide in hpcburst-system: get, create and update of any
+# Lease there, the other identities' included. That is the limit of what a role can say here (a Role cannot
+# match a name by prefix).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -223,7 +252,8 @@ rules:
     resources: ["leases"]
     verbs: ["get", "create", "update"]
 ---
-# hpcburst-front: its own Lease, its heartbeat.
+# hpcburst-front: its own Lease, its heartbeat (v1alpha1.LeaseFront; internal/front/lease.go): get and update, and
+# the create of the first take.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -232,7 +262,11 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["front"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

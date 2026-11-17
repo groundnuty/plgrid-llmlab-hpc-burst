@@ -34,6 +34,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/rbac"
 )
 
@@ -103,11 +104,32 @@ var wantControllerRules = map[string][]string{
 	},
 }
 
-// wantLeaseVerbs is each identity's Role in hpcburst-system, by hand: every controller's leader Lease (or, for the
-// front, its heartbeat Lease) lives in hpcburst-system alone, and a Lock is GET, CREATE and UPDATE.
-var wantLeaseVerbs = []string{"coordination.k8s.io leases create", "coordination.k8s.io leases get", "coordination.k8s.io leases update"}
+// wantLeaseRules is each identity's Role in hpcburst-system, by hand, as "group resource verb" with " name=<n>" where
+// the rule is narrowed to one Lease. Every controller's leader Lease (or, for the front, its heartbeat Lease) lives
+// in hpcburst-system alone, and a lock is GET, CREATE and UPDATE. A create carries no name (the authorizer does not
+// know the name of a Lease that does not exist yet). The lifecycle READS the front's Lease and never writes it. The
+// Provider managers' Leases are provider-<name>, one per Provider and made at run time, so that role has no names.
+var wantLeaseRules = map[string][]string{
+	"hpcburst-lifecycle": {
+		"coordination.k8s.io leases create",
+		"coordination.k8s.io leases get name=front",
+		"coordination.k8s.io leases get name=lifecycle",
+		"coordination.k8s.io leases update name=lifecycle",
+	},
+	"hpcburst-provider": {
+		"coordination.k8s.io leases create",
+		"coordination.k8s.io leases get",
+		"coordination.k8s.io leases update",
+	},
+	"hpcburst-front": {
+		"coordination.k8s.io leases create",
+		"coordination.k8s.io leases get name=front",
+		"coordination.k8s.io leases update name=front",
+	},
+}
 
-// triples expands a role's rules into "group resource verb" strings.
+// rulesOf expands a role's rules into "group resource verb" strings, each with " name=<n>" for every name the rule is
+// narrowed to.
 func rulesOf(t testing.TB, role *unstructured.Unstructured) []string {
 	t.Helper()
 	rules, _, err := unstructured.NestedSlice(role.Object, "rules")
@@ -124,10 +146,19 @@ func rulesOf(t testing.TB, role *unstructured.Unstructured) []string {
 			}
 			return s
 		}
+		var names []string
+		if _, ok := rm["resourceNames"]; ok {
+			names = strs("resourceNames")
+		}
 		for _, g := range strs("apiGroups") {
 			for _, res := range strs("resources") {
 				for _, v := range strs("verbs") {
-					out = append(out, g+" "+res+" "+v)
+					if len(names) == 0 {
+						out = append(out, g+" "+res+" "+v)
+					}
+					for _, n := range names {
+						out = append(out, g+" "+res+" "+v+" name="+n)
+					}
 				}
 			}
 		}
@@ -165,8 +196,10 @@ func TestControllerRolesGrantExactlyTheEnumeration(t *testing.T) {
 	}
 	for _, role := range m.roles {
 		// The Lease verbs are a Role of hpcburst-system, never a ClusterRole's: a Lease write anywhere else is Forbidden.
-		if got := rulesOf(t, role); !slices.Equal(got, wantLeaseVerbs) || role.GetNamespace() != "hpcburst-system" {
-			t.Errorf("the Role %s of %s grants %q, want %q in hpcburst-system", role.GetName(), role.GetNamespace(), got, wantLeaseVerbs)
+		want := slices.Clone(wantLeaseRules[role.GetName()])
+		slices.Sort(want)
+		if got := rulesOf(t, role); !slices.Equal(got, want) || role.GetNamespace() != "hpcburst-system" {
+			t.Errorf("the Role %s of %s grants %q, want %q in hpcburst-system", role.GetName(), role.GetNamespace(), got, want)
 		}
 	}
 	for _, role := range m.clusterRoles {
@@ -196,6 +229,23 @@ func TestControllerRolesGrantExactlyTheEnumeration(t *testing.T) {
 				t.Errorf("the ClusterRole %s grants the verb of %q", name, tr)
 			case f[2] == "delete" && !(name == "hpcburst-lifecycle" && (f[1] == "instances" || f[1] == "allocations")):
 				t.Errorf("the ClusterRole %s grants %q: only the lifecycle controller deletes, and only an Instance or an Allocation", name, tr)
+			}
+		}
+	}
+}
+
+// TestTheLeaseNamesOfTheRolesAreTheNamesTheCodeUses: the two names the roles narrow to are the API's own constants,
+// which the lifecycle controller, its observer and the front use for their Leases (v1alpha1.LeaseLifecycle,
+// v1alpha1.LeaseFront), so a rename in the code fails here and not in a refused request on a real host. The names in
+// the roles are typed in wantLeaseRules and in controllers.yaml; these are the third place.
+func TestTheLeaseNamesOfTheRolesAreTheNamesTheCodeUses(t *testing.T) {
+	if v1alpha1.LeaseLifecycle != "lifecycle" || v1alpha1.LeaseFront != "front" {
+		t.Fatalf("the Lease names are %q and %q: update the roles' resourceNames, and wantLeaseRules", v1alpha1.LeaseLifecycle, v1alpha1.LeaseFront)
+	}
+	for id, lines := range wantLeaseRules {
+		for _, l := range lines {
+			if _, n, ok := strings.Cut(l, " name="); ok && n != v1alpha1.LeaseLifecycle && n != v1alpha1.LeaseFront {
+				t.Errorf("%s's Lease rule %q names %q, which the code does not use", id, l, n)
 			}
 		}
 	}
@@ -280,6 +330,13 @@ func TestControllerManifestIsRefusedWhenItsShapeIsWrong(t *testing.T) {
 		}, "Lease verbs"},
 		{"a Role with a wildcard verb", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
 			setRule(find(o, "Role", "hpcburst-lifecycle"), "verbs", []any{"*"})
+			return o
+		}, "wildcard"},
+		{"a Role rule with a wildcard resource name", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			r := find(o, "Role", "hpcburst-front")
+			rules, _, _ := unstructured.NestedSlice(r.Object, "rules")
+			rules[1].(map[string]any)["resourceNames"] = []any{"*"}
+			_ = unstructured.SetNestedSlice(r.Object, rules, "rules")
 			return o
 		}, "wildcard"},
 		{"a Role in another namespace", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
@@ -639,53 +696,147 @@ func stepErr(fail, step string) error {
 	return nil
 }
 
-// TestOnlyStartControllerSupervisorStartsTheSupervisor reads the package's sources: startSupervisor is
-// called by no function of its own but through supervisorStartSteps, and startControllerSupervisor is
-// called by exactly up (startControllers) and upgrade (Upgrade). So no path can start the supervisor and
-// leave out the identities, and a third path would have to be added here by name.
+// TestOnlyStartControllerSupervisorStartsTheSupervisor reads the package's sources: ANY mention of startSupervisor
+// outside its own declaration and the one place supervisorStartSteps holds it is a violation, a call or a reference
+// (a function value passed on would start the supervisor without the identities); and startControllerSupervisor is
+// mentioned only as a call, by exactly up (startControllers) and upgrade (Upgrade). So no path can start the
+// supervisor and leave out the identities, and a third path would have to be added here by name. The limit: it
+// reads this package's non-test files by name; a method value or a reflection call of another name is outside it.
 func TestOnlyStartControllerSupervisorStartsTheSupervisor(t *testing.T) {
 	fset := gotoken.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	direct := map[string]bool{}
-	callers := map[string]bool{}
+	var files []*ast.File
 	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					switch f := call.Fun.(type) {
-					case *ast.Ident:
-						switch f.Name {
-						case "startSupervisor":
-							direct[fn.Name.Name] = true
-						case "startControllerSupervisor":
-							callers[fn.Name.Name] = true
-						}
-					}
-					return true
-				})
-			}
+		for _, f := range pkg.Files {
+			files = append(files, f)
 		}
 	}
-	if len(direct) != 0 {
-		t.Errorf("startSupervisor is called directly by %v: it must be reached through startControllerSupervisor", direct)
+	violations, callers, sawSteps, sawWrapper := starterViolations(fset, files)
+	if !sawSteps || !sawWrapper {
+		t.Fatalf("the guard read no supervisorStartSteps (%v) or no startControllerSupervisor (%v): it reads nothing", sawSteps, sawWrapper)
+	}
+	if len(violations) != 0 {
+		t.Errorf("startSupervisor must be reached only through startControllerSupervisor: %v", violations)
 	}
 	if want := map[string]bool{"startControllers": true, "Upgrade": true}; len(callers) != len(want) || !callers["startControllers"] || !callers["Upgrade"] {
 		t.Errorf("startControllerSupervisor is called by %v, want up's startControllers and Upgrade only", callers)
 	}
-	// The guard reads something: the wrapper itself calls the step variable, not the function.
-	if _, err := os.Stat("controller_identities.go"); err != nil {
-		t.Fatal(err)
+}
+
+// starterViolations is the guard's reading of the files: every mention of startSupervisor except its declaration and
+// the supervisorStartSteps variable that holds it, and every mention of startControllerSupervisor that is not a call;
+// and which functions call startControllerSupervisor.
+func starterViolations(fset *gotoken.FileSet, files []*ast.File) (violations []string, callers map[string]bool, sawSteps, sawWrapper bool) {
+	callers = map[string]bool{}
+	for _, file := range files {
+		allowed := map[*ast.Ident]bool{}  // the declarations, and the one holder of startSupervisor
+		callIn := map[*ast.Ident]string{} // an identifier that is the function of a call, and the function it is in
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Name.Name == "startSupervisor" || d.Name.Name == "startControllerSupervisor" {
+					allowed[d.Name] = true
+				}
+				if d.Name.Name == "startControllerSupervisor" {
+					sawWrapper = true
+				}
+				if d.Body == nil {
+					continue
+				}
+				ast.Inspect(d.Body, func(n ast.Node) bool {
+					if call, ok := n.(*ast.CallExpr); ok {
+						if id, ok := call.Fun.(*ast.Ident); ok {
+							callIn[id] = d.Name.Name
+						}
+					}
+					return true
+				})
+			case *ast.GenDecl:
+				for _, sp := range d.Specs {
+					vs, ok := sp.(*ast.ValueSpec)
+					if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "supervisorStartSteps" {
+						continue
+					}
+					sawSteps = true
+					for _, v := range vs.Values {
+						ast.Inspect(v, func(n ast.Node) bool {
+							if id, ok := n.(*ast.Ident); ok && id.Name == "startSupervisor" {
+								allowed[id] = true
+							}
+							return true
+						})
+					}
+				}
+			}
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok || allowed[id] {
+				return true
+			}
+			at := fset.Position(id.Pos()).String()
+			switch id.Name {
+			case "startSupervisor":
+				violations = append(violations, "startSupervisor at "+at)
+			case "startControllerSupervisor":
+				if fn, isCall := callIn[id]; isCall {
+					callers[fn] = true
+				} else {
+					violations = append(violations, "startControllerSupervisor, not as a call, at "+at)
+				}
+			}
+			return true
+		})
+	}
+	return violations, callers, sawSteps, sawWrapper
+}
+
+// The guard is not vacuous: a direct call, a function value kept in a variable, one passed as an argument and a
+// reference to the wrapper that is not a call are each flagged, and the shape the real package has is not.
+func TestTheStarterGuardFlagsEveryWayAroundTheWrapper(t *testing.T) {
+	src := func(body string) string { return "package launcher\n" + body }
+	for _, c := range []struct {
+		name string
+		src  string
+		want int // violations
+	}{
+		{"the real shape", `
+func startSupervisor() {}
+func startControllerSupervisor() {}
+var supervisorStartSteps = struct{ start func() }{startSupervisor}
+func up() { startControllerSupervisor() }
+`, 0},
+		{"a direct call", `
+func startSupervisor() {}
+func other() { startSupervisor() }
+`, 1},
+		{"a function value in a variable", `
+func startSupervisor() {}
+var f = startSupervisor
+`, 1},
+		{"a function value passed on", `
+func startSupervisor() {}
+func g(func()) {}
+func other() { g(startSupervisor) }
+`, 1},
+		{"the wrapper kept as a value", `
+func startControllerSupervisor() {}
+var f = startControllerSupervisor
+`, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fset := gotoken.NewFileSet()
+			f, err := parser.ParseFile(fset, "x.go", src(c.src), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _, _, _ := starterViolations(fset, []*ast.File{f}); len(got) != c.want {
+				t.Errorf("flagged %v, want %d", got, c.want)
+			}
+		})
 	}
 }
 
