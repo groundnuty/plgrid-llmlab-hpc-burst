@@ -385,8 +385,8 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	// worker takes requests only once verified again.
 	// The stream's key is the primary's (KeyFor). Which worker Envoy gives it is read from the stream
 	// itself, never from an earlier probe in the key (#634: a probe's worker was not always the stream's, and
-	// the step then killed the worker its stream ran on): once the stream's first chunk has arrived, its
-	// worker is the one worker Envoy shows a request active on. The victim is the other. The probes go in
+	// the wait for the stream to show on the probe's worker timed out): once the stream's first chunk has
+	// arrived, its worker is the one worker Envoy shows a request active on. The victim is the other. The probes go in
 	// a key pinned to the primary and, on its Envoy, to the victim (keyOn), so each probe is one the dead
 	// or restarted victim would get without the fix: the front's ring would otherwise send a share to the
 	// handover replacement, and Envoy a share to the sibling (#510's review). The victim is known only
@@ -407,8 +407,8 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 		st := hostStats(t, admin)
 		select {
 		case s := <-done:
-			t.Fatalf("step (c): the stream ended before Envoy showed it on one worker: status %d, err %v, ending %.200q; rq_active worker-0 %d, worker-1 %d",
-				s.Status, s.Err, s.Body[max(0, len(s.Body)-200):], st["worker-0"]["rq_active"], st["worker-1"]["rq_active"])
+			t.Fatalf("step (c): the stream ended before Envoy showed it on one worker: status %d, answered by Instance %q (want %s), err %v, ending %.200q; rq_active worker-0 %d, worker-1 %d",
+				s.Status, s.Header.Get(headerInstanceUID), in.UID, s.Err, s.Body[max(0, len(s.Body)-200):], st["worker-0"]["rq_active"], st["worker-1"]["rq_active"])
 		default:
 		}
 		var active []string
