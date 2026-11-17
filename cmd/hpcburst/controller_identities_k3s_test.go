@@ -12,9 +12,10 @@ package main
 //   - the API server's audit log FILE holds a write made with the lifecycle
 //     identity under user.username = the lifecycle ServiceAccount, and the real front's Lease writes under the
 //     front's, so the real front process runs on its identity; the administrator's name is on neither;
-//   - up writes the embedded audit policy and starts k3s with the flags that keep every rotated file, gzipped (read from
-//     k3s's argument list), and an agent's Operation create is in the audit log FILE at RequestResponse, under the
+//   - up writes the embedded audit policy, owner only, and the running k3s logs by it: an agent's Operation create is in the audit log FILE at RequestResponse, under the
 //     agent's user name (issue #660, PR B);
+//   - the real front's Lease renewTime moves, so its heartbeat is written under its own role (rule 1 of the audit policy leaves
+//     no line for a Lease renewal, so no log scan can show it);
 //   - down leaves the files, and the next up issues new tokens, with new expiries, to the same paths;
 //   - status lists each identity, valid, with its expiry and no warning.
 
@@ -174,6 +175,12 @@ func TestControllerIdentitiesOnARealK3s(t *testing.T) {
 			(findAuditBy(evs, "update", "leases", "front", frontUser) != nil || findAuditBy(evs, "create", "leases", "front", frontUser) != nil)
 	})
 	_, evs := readAudit(t, auditPath, true)
+	// Rule 3 of the policy, in the log FILE: the lifecycle identity's UPDATE of an Allocation is at Request level, with its
+	// request body (the release cause is logged before the delete that follows). The levels of every rule are judged by the
+	// API server's own evaluator in config/audit; this is what the real API server wrote.
+	if e := findAuditBy(evs, "update", "allocations", "lifecycle-write", lifecycle); e == nil || e.Level != "Request" || !e.hasRequest {
+		t.Errorf("the lifecycle identity's update of an Allocation is logged as %+v, want level Request with its request body", e)
+	}
 	for _, e := range evs {
 		if e.ObjectRef.Name == "lifecycle-write" && e.ObjectRef.Resource == "allocations" && e.User.Username != lifecycle {
 			t.Errorf("the Allocation the lifecycle identity wrote is logged under %q (%s), never the admin's or another's", e.User.Username, e.Verb)
@@ -191,9 +198,31 @@ func TestControllerIdentitiesOnARealK3s(t *testing.T) {
 		}
 	}
 
+	// ---- the front's heartbeat moves, on state (rule 1 of the audit policy leaves no line for a Lease read or renewal in
+	// hpcburst-system, refused or not, so the log's 403 scan cannot see a Lease verb the front's role lacks: drop its update and
+	// the heartbeat is refused every 10 s while the front runs on, and the Lease's create alone met the wait above) ----
+	leases, _ := kubeClients(t, adminKubeconfig)
+	frontLease := func() (time.Time, bool) {
+		l, err := leases.CoordinationV1().Leases("hpcburst-system").Get(ctx, "front", metav1.GetOptions{})
+		if err != nil || l.Spec.RenewTime == nil {
+			return time.Time{}, false
+		}
+		return l.Spec.RenewTime.Time, true
+	}
+	var firstRenew time.Time
+	waitFor(t, 60*time.Second, "the front's Lease has a renewTime", func() bool {
+		rt, ok := frontLease()
+		firstRenew = rt
+		return ok
+	})
+	waitFor(t, 90*time.Second, "the front's Lease renewTime moves: its heartbeat is written, under its own role", func() bool {
+		rt, ok := frontLease()
+		return ok && rt.After(firstRenew)
+	})
+
 	// ---- the audit policy and its rotation (HBEP-10, Audit; issue #660, PR B) ----
-	// up wrote the embedded policy, owner only; k3s runs with the flags that keep every rotated file, gzipped
-	// (read from the process's own argument list); and an agent's Operation create is in the log FILE at
+	// up wrote the embedded policy, owner only; the launcher passed k3s the flags that keep every rotated file, gzipped
+	// (as it recorded them); and an agent's Operation create is in the log FILE at
 	// RequestResponse, with its body, under the agent's user name.
 	policyPath := filepath.Join(h.dir, "audit-policy.yaml")
 	if got, err := os.ReadFile(policyPath); err != nil || !bytes.Equal(got, audit.Policy) {
@@ -202,29 +231,10 @@ func TestControllerIdentitiesOnARealK3s(t *testing.T) {
 	if fi, err := os.Stat(policyPath); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("the audit policy file: %v, %v, want mode 600", fi, err)
 	}
-	k3sArgv := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", readState(t, h.dir).Processes[0].PID)), "\x00"), "\x00")
-	argIs := func(prefix, suffix string) bool {
-		for _, a := range k3sArgv {
-			if strings.HasPrefix(a, prefix) && strings.HasSuffix(a, suffix) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, f := range []struct{ prefix, suffix string }{
-		{"--kube-apiserver-arg=audit-policy-file=", "/audit-policy.yaml"}, {"--kube-apiserver-arg=audit-log-path=", "/logs/audit.log"},
-		{"--kube-apiserver-arg=audit-log-maxsize=100", ""}, {"--kube-apiserver-arg=audit-log-maxbackup=0", ""},
-		{"--kube-apiserver-arg=audit-log-maxage=0", ""}, {"--kube-apiserver-arg=audit-log-compress=true", ""},
-	} {
-		if !argIs(f.prefix, f.suffix) {
-			t.Errorf("k3s's argument list has no %s...%s: the audit flags are not what the launcher installs", f.prefix, f.suffix)
-		}
-	}
-	for _, a := range k3sArgv {
-		if strings.HasPrefix(a, "--kube-apiserver-arg=audit-log-maxbackup=") && a != "--kube-apiserver-arg=audit-log-maxbackup=0" {
-			t.Errorf("k3s runs with %s: a rotated audit file would be removed", a)
-		}
-	}
+	// The flags k3s is started with are pinned where they are built (internal/launcher's TestK3sArgs, with literals). They are
+	// not read from the running process: k3s rewrites its own command line after it starts. What the RUNNING k3s shows is its
+	// behaviour: the policy it reads is the one up wrote, because only that policy logs an Operation's create at RequestResponse,
+	// with its body (below), and the log is where the flags put it.
 	for _, p := range []string{filepath.Join(h.dir, "logs"), auditPath} {
 		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm()&0o077 != 0 {
 			t.Errorf("%s: %v, %v, want owner only", p, fi, err)
