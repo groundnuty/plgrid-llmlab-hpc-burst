@@ -156,7 +156,16 @@ Problems this addresses, in general terms:
     Measured on Athena's A100 nodes, and on Helios's CPU nodes for the relay alone (#145). Not yet measured on Helios GH200, whose partition was down on 9 Nov.
 
     **Not needed for alpha:** Sano, inbound reachability, node-local disk sizes and GPU drivers.
-17. **A connection budget per platform.** **Not needed for alpha:** one multiplexed connection per login node and credential, and at most four commands at once on it, are code defaults. **Open (blocks beta):** a per-platform budget in the profile, sized from the login nodes' measured ssh limits, which S5 could not read. Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026, for the defaults.
+17. **A connection budget per platform.** **Not needed for alpha:** one multiplexed connection per login node and credential, and at most four commands at once on it, are code defaults. **Open (blocks beta):** a per-platform budget in the profile, sized from the login nodes' measured ssh limits, which S5 could not read: Helios's and Athena's sshd configuration isn't readable by a user, and Sano's readable files set none (`facts.ssh_connection_limits` in the profiles). Source: spike S5 (PR #19); science-agent decision, 30 Oct 2026, for the defaults. **What decides it** (the science agent, 17 Nov 2026; proposal):
+    - **The measurement,** on each platform's login node, from the control-plane host through a Provider's own `-F` file. It needs no GPU job; a person or the code agent runs it with the owner's go:
+      - read `/etc/security/limits.conf` and `/etc/security/limits.d/` for `maxlogins` and `maxsyslogins`, read-only;
+      - open plain ssh connections with `ControlPath=none`, each running `sleep 600`, one at a time, each logged in before the next, up to 12, a bound on the probe. Record how many were held when the first was refused, or 12. One at a time, because sshd's `MaxStartups` counts "concurrent unauthenticated connections" for every user of the node (sshd_config(5), [man.openbsd.org](https://man.openbsd.org/sshd_config.5), accessed 2026-11-17), and about twenty parallel logins once tripped it (L-7.3);
+      - run four commands at once on one master, as the plugin does, and record any refusal. `MaxSessions` bounds the sessions "per network connection", 10 by default (the same page).
+    - **The rule:**
+      - **relays per login host** are the profile's `transport.maxRelaysPerLoginHost` (proposed; default 4, the count the probe of 9 Nov 2026 held without refusal, HBEP-6). The value is the count held, less one for the Provider's master and one for a person's own login, and never above `maxlogins` less those two when that is set;
+      - **host-dialed Allocations per Provider** are half of it, rounded down: 2 at the default. A third, such as HBEP-7's extra beside a handover pair (HBEP-7, open question 12), needs 6;
+      - **commands per master** stay 4 when the four ran at once; otherwise they're the most that did.
+    - **What can be built now:** the relay count and the host-dialed submit limit read `maxRelaysPerLoginHost`, with its default, so each platform's measurement lands as a profile PR.
 
 ## Design details
 
@@ -413,6 +422,8 @@ A partition enters the typed list only when `holdRelease` has been verified on i
 | `maxIdle` | duration, optional | an Allocation with no Instance is released after this long, counted from its `idle-since` annotation, even when its retention policy says keep (HBEP-7, Retention) | `facts.login_node_policy.gpu_only` (Athena) motivates it. Athena: 30 min (HBEP-7); unset elsewhere |
 | `health.probeInterval`, `.failureThreshold`, `.noProgressTimeout`, `.errorOnlyWindow`, `.kvSkewTimeout`, `.agentTimeout`, `.registrationTimeout`, `.startTimeout` | 10 s, 3, 30 min, 1 min, 2 min, 2 min, 15 min, 1 h | HBEP-7's malfunction signals; the longest time from the job's start to its agent's registration; the longest time from an Instance's own start instruction to `ready`. In alpha `noProgressTimeout` equals HBEP-5's `idleTimeout` (30 min), so a healthy prefill that the front allows is never restarted (HBEP-7, open question 6) | none; defaults, tuned in beta |
 | `restart.stopGrace`, `.attemptsPerRung`, `.window`, `.backoff` | 10 s, 2, 30 min, 30 s | HBEP-7's restart ladder | none; defaults, tuned in beta |
+
+**`health.stallTimeout`** (proposed, beta; HBEP-7, open question 6). A duration, optional; unset turns its rule off. It's how long a worker with requests running may show neither a new token nor a change of KV usage before it counts as stalled, a faster rule beside `noProgressTimeout`, which stays. Its value is set per platform from beta's fault-injection run, since a step's length depends on the GPU (HBEP-7, Graduation criteria).
 
 **Draft fields that alpha reads.** Only through the typed fields above, whose values are copied from the draft paths named in their last column. Alpha code reads nothing in the untyped `profile` block.
 
@@ -765,6 +776,7 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 - 2026-11-16: the science agent's decisions on the billing count, memory per GPU, records and the comparison: no share above the scheduler's per GPU, GH200's `memPerGpu` checked by its first job, and LLMLab's overload status read passively.
 - 2026-11-16: revised by its Fable review (PR #621): `dialHomeModes` without `direct`, and no Helios list until GH200's relay checks; no engine entry fails CI by version; the documented GH200 share settled by the comparison's GH200 window.
 - 2026-11-16: `Estimate` reads its time with `SLURM_TIME_FORMAT=%s` as epoch seconds, decided on Athena by #661's probe; unknown on a platform not yet probed.
+- 2026-11-17: the connection budget's measurement and rule, with the proposed `transport.maxRelaysPerLoginHost` (open question 17, still open); the proposed `health.stallTimeout` (HBEP-7's amendment of the same day).
 
 ## Amendments
 
@@ -871,3 +883,6 @@ The Slurm provider plugin grows from www-2027's per-cluster ssh over one shared 
 
   Before, these groups' schema, the register's format and the probes were open and blocked beta; a profile was to pin versions, and a workaround to switch off when the profile's pin passed its fixed-in version; and open question 15 read every beta platform as running Apptainer.
 - **2026-11-16: the estimate's time** (Core operations, `Estimate`; Test plan). An amendment by the science agent's decision from #661's probe. `Estimate` runs `sbatch --test-only` with `SLURM_TIME_FORMAT=%s` and reads the start as epoch seconds, with no zone. On Athena (Slurm 23.11.7), the epoch and the default text read in Europe/Warsaw gave the same instant to the second. A platform not yet probed, Helios among them, returns unknown until its own probe is recorded. Before, the reading was open, and `Estimate` returned unknown everywhere.
+- **2026-11-17: the connection budget's rule, and the stall time-out** (Open question 17; Platform profile schema). An amendment, the science agent's proposals for beta, with HBEP-7's of the same day. Both names are proposed.
+  - **Open question 17** stays open, now with its measurement and rule: a one-at-a-time login-node probe of held connections and of four commands on one master, plus a read of `limits.conf`; relays per login host are the count held less two, typed as `transport.maxRelaysPerLoginHost` with a default of 4; host-dialed Allocations per Provider are half of it, so a third needs 6. The relay count (`hostdial.Slots`, which the relay keeper's runner keeps: `internal/relaykeeper/runner.go`) and the Provider's controller's host-dialed submit limit read the field in place of their constants, so a measurement lands as a profile PR. Before, the budget waited for "the login nodes' measured ssh limits", with no measurement named and no rule from its result.
+  - **`health.stallTimeout`** joins the profile's `health` group: optional, off when unset, the time a worker with requests running may show neither a new token nor a change of KV usage. Before, `noProgressTimeout` was the group's only stall bound.
