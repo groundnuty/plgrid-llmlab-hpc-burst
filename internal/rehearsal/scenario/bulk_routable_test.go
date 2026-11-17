@@ -35,9 +35,12 @@ import (
 // that does not parse, the model not listed, listed as not routable) returns false with a reason that
 // says which, for a wait's timeout message.
 //
-// routable is a property of the model: true for any eligible Instance, or any managed entry that is
-// not paused. startServing's deployment has one Instance and no managed entry, so true there means
-// this Instance.
+// routable is a property of the model, not of one Instance: true for any eligible Instance, or any
+// managed entry that is not paused. startServing's deployment has no managed entry, but a replacement
+// can stand beside the primary (the controller creates it at the primary's start; TestRehearsalDirect's
+// comment). So a true answer rules out no_ready_target, which is what the key search's first request
+// met; it does not say which Instance the ring places a key on. KeyFor settles that, by the Instance
+// each reply's usage record names.
 func frontRoutes(addr, key, model string) (routes bool, why string) {
 	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/models", nil)
 	if err != nil {
