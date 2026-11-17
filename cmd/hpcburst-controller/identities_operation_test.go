@@ -14,6 +14,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -106,6 +109,7 @@ func TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity(t *te
 		t.Fatal(err)
 	}
 	key := client.ObjectKeyFromObject(op)
+	fin := watchFinalizer(t, api.cfg, op.Namespace, op.Name, operationUnfinished)
 	b.eventually(t, "the controller to plan the Operation", 60*time.Second, func() bool {
 		return c.Get(ctx, key, op) == nil && op.Status.Phase == v1alpha1.OperationPhasePlanned && op.Status.Plan != nil
 	})
@@ -136,6 +140,48 @@ func TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity(t *te
 		return false
 	}
 	waitUntil(t, 30*time.Second, "the audit log to hold the Operation's reads and writes", func() bool {
-		return has("get", "operations", op.Name) && has("update", "modeldeployments", md.Name) && has("delete", "modeldeployments", md.Name)
+		return has("get", "operations", op.Name) && has("update", "modeldeployments", md.Name) && has("delete", "modeldeployments", md.Name) &&
+			has("update", "operations", op.Name)
 	})
+	// The operation-unfinished finalizer (#707): added at the commit and removed at the finish, each a metadata update of the
+	// Operation object (a PUT on operations, not on operations/status), which a missing `update` on operations refuses. The
+	// watch saw it on the object, and the object ends without it.
+	waitUntil(t, 30*time.Second, "the Operation's finalizer to have been added and then removed", func() bool {
+		seen, now := fin()
+		return seen && !now
+	})
+}
+
+// operationUnfinished is the finalizer the lifecycle controller keeps on a committed Operation until it has finished, spelled
+// out here and not read from the API package.
+const operationUnfinished = "hpcburst.groundnuty.github.io/operation-unfinished"
+
+// watchFinalizer watches the Operation ns/name through a dynamic client of the administrator and reports, from what the
+// API server sent, whether the finalizer was ever on the object (seen) and whether the latest state has it (now).
+func watchFinalizer(t *testing.T, cfg *rest.Config, ns, name, finalizer string) (state func() (seen, now bool)) {
+	t.Helper()
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := dyn.Resource(v1alpha1.GroupVersion.WithResource("operations")).Namespace(ns).Watch(t.Context(), metav1.ListOptions{FieldSelector: "metadata.name=" + name})
+	if err != nil {
+		t.Fatalf("watch the Operation: %v", err)
+	}
+	t.Cleanup(w.Stop)
+	var seen, now atomic.Bool
+	go func() {
+		for ev := range w.ResultChan() {
+			u, ok := ev.Object.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+			has := slices.Contains(u.GetFinalizers(), finalizer)
+			now.Store(has)
+			if has {
+				seen.Store(true)
+			}
+		}
+	}()
+	return func() (bool, bool) { return seen.Load(), now.Load() }
 }

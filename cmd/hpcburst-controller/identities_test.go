@@ -367,22 +367,21 @@ func TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan(t *testing.T) {
 	}
 
 	// What the lifecycle's Operation execution calls (#664: opexec.go), asked of the API server's own authorizer under the
-	// lifecycle identity (a SelfSubjectAccessReview made with its token), since no suite here runs an Operation: update and
-	// delete of a ModelDeployment (an End, a Scale's spec write, the kept-warm finalizer), and the get of an Operation through
-	// the API reader that recovers a commit whose status write returned an error (afterCommitError: refused, the commit is
-	// left unknown on every such pass). The Operation's get and delete of the 7-day removal are the audit PR's, not granted.
+	// lifecycle identity (a SelfSubjectAccessReview made with its token): update and delete of a ModelDeployment (an End, a
+	// Scale's spec write, the kept-warm finalizer), patch of one (#715's owner-hash label), the get of an Operation through the
+	// API reader that recovers a commit whose status write returned an error (afterCommitError), and the update of an Operation
+	// (the operation-unfinished finalizer). The Operation's delete and what no controller does stay refused: the 7-day removal's
+	// delete is the audit PR's, and is not granted here.
 	for _, c := range []struct {
 		verb, resource string
 		want           bool
 	}{
-		{"update", "modeldeployments", true}, {"delete", "modeldeployments", true}, {"get", "operations", true},
-		{"create", "modeldeployments", false}, {"patch", "modeldeployments", false}, {"update", "operations", false},
-		{"delete", "operations", false}, {"create", "operations", false}, {"update", "modeldeployments/status", true},
+		{"update", "modeldeployments", true}, {"delete", "modeldeployments", true}, {"patch", "modeldeployments", true},
+		{"get", "operations", true}, {"update", "operations", true}, {"update", "modeldeployments/status", true},
+		{"create", "modeldeployments", false}, {"delete", "operations", false}, {"create", "operations", false},
+		{"patch", "operations", false}, {"deletecollection", "modeldeployments", false},
 	} {
 		resource, sub, _ := strings.Cut(c.resource, "/")
-		if sub == "status" && c.verb == "update" && resource == "modeldeployments" {
-			c.want = true
-		}
 		if got := canI(t, lifecycleKC, c.verb, v1alpha1.GroupVersion.Group, resource, sub); got != c.want {
 			t.Errorf("hpcburst-lifecycle may %s %s: the API server says %v, want %v", c.verb, c.resource, got, c.want)
 		}

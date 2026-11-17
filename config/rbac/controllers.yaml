@@ -90,9 +90,12 @@ rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["modeldeployments"]
     verbs: ["get", "list", "watch", "patch", "update", "delete"]
+  # An Operation carries the operation-unfinished finalizer from its commit to its finish (#707; opexec.go
+  # keepOperationUntilFinished and releaseOperationFinalizer): added and removed by a metadata UPDATE of the
+  # Operation object, which is a PUT on operations, not on operations/status.
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["operations"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "update"]
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["providers", "platformprofiles", "approvals", "approvalpolicies"]
     verbs: ["list", "watch"]

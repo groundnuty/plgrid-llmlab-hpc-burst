@@ -78,7 +78,7 @@ func randomToken(t testing.TB) string {
 var wantControllerRules = map[string][]string{
 	"hpcburst-lifecycle": {
 		"hpcburst.groundnuty.github.io modeldeployments: get list watch patch update delete",
-		"hpcburst.groundnuty.github.io operations: get list watch",
+		"hpcburst.groundnuty.github.io operations: get list watch update",
 		"hpcburst.groundnuty.github.io providers platformprofiles approvals approvalpolicies: list watch",
 		"hpcburst.groundnuty.github.io instances: get list watch create update delete",
 		"hpcburst.groundnuty.github.io instances/status: update",
