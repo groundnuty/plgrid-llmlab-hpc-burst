@@ -32,6 +32,13 @@ func (p *pass) retention() error {
 		if !a.DeletionTimestamp.IsZero() {
 			continue
 		}
+		// The mark is cleared by two conditions, evaluated every pass from the cluster's state (markCleared), whatever the order of
+		// the writes that led here (HBEP-10, The report, Kept warm).
+		if keptWarm(a) && p.markCleared(a) {
+			if err := p.clearKeptWarm(a); err != nil {
+				return err
+			}
+		}
 		if len(p.liveOn(a.Name)) > 0 {
 			if _, idle, _ := v1alpha1.IdleSince(a); idle {
 				if err := p.writeIdleSince(a, nil); err != nil {
@@ -51,6 +58,17 @@ func (p *pass) retention() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// clearKeptWarm removes the kept-warm mark, an update with the resourceVersion read.
+func (p *pass) clearKeptWarm(a *v1alpha1.Allocation) error {
+	next := a.DeepCopy()
+	delete(next.Annotations, v1alpha1.AnnotationKeptWarm)
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+		return fmt.Errorf("remove the kept-warm mark of Allocation %s: %w", a.Name, err)
+	}
+	*a = *next
 	return nil
 }
 
@@ -105,16 +123,104 @@ func (p *pass) retentionView(a *v1alpha1.Allocation) fateView {
 	return v
 }
 
-// keptWarm reports whether the Allocation carries the kept-warm mark: its job started after an Operation committed to cancel it
-// as queued, and no rule but the profile's maxIdle, its hard end, HBEP-7's unconditional releases and a person's direct delete of
-// its deployment releases it (HBEP-10, The report, as amended by #698).
+// keptWarm reports whether the Allocation carries the kept-warm mark: an Operation committed to cancel it as queued and marked it
+// before it acted (markBeforeActing). While its job is pending it follows the usual rules, since its queued cancel was approved;
+// once the job has started (keptWarmStarted), no rule but the profile's maxIdle, its hard end, HBEP-7's failure releases, a person's
+// direct delete of its deployment while no finalizer holds, and an approved Release releases it (HBEP-10, The report, Kept warm).
 func keptWarm(a *v1alpha1.Allocation) bool { return a.Annotations[v1alpha1.AnnotationKeptWarm] != "" }
 
-// keptWarmSkipsDeletion is the ONE function that tells an Operation's delete of a deployment from a person's (HBEP-10, The
-// report, as amended by #698): a deployment that is being deleted AND holds FinalizerKeptWarm is an Operation's End with
-// delete, so its marked Allocations skip retention's deletion rule; a deployment that is gone, or is being deleted WITHOUT the
-// finalizer, was deleted by a person, a person's act outside the guard by design, and the deletion rule releases its marked
-// Allocations with retention's cause.
+// keptWarmStarted reports whether the Allocation carries the mark and its job has started: the one state retention's policy rules, the
+// shutdown and, while the finalizer holds, the deployment-deletion rule skip.
+func keptWarmStarted(a *v1alpha1.Allocation) bool {
+	return keptWarm(a) && a.Status.AtProvider.StartTime != nil
+}
+
+// markCleared reports whether a marked Allocation's mark goes now. Two conditions, each read from the cluster's state:
+//   - an Instance is placed on it (a replacement, an added Instance, a repurpose): a live Instance that the marking Operation did not
+//     commit to, or any live Instance when that Operation is gone;
+//   - it hosts a live Instance that the spec keeps, with its deployment not in shutdown (HBEP-7, Reconcile loop, step 4) and no
+//     committed, unfinished Operation targeting it, which is the serving pair of a Scale above zero once the Operation has finished.
+//     Under an End or a Scale to zero the spec ends that Instance, so the mark stays.
+//
+// An Operation whose approved plan releases a marked Allocation clears its mark at its commit (markBeforeActing). Once the mark is
+// gone, the Allocation follows its retention policy as any other does (HBEP-10, The report, Kept warm).
+//
+// Two stated limits, which no design here closes: a mark is cleared when an Instance is placed on its Allocation, so a later shutdown
+// of that Instance follows retention as for any serving Allocation, and an agent that extends a deployment's end time, which needs no
+// approval, can have the controller reuse a kept-warm Allocation and release it at the new end time; and where the profile sets no
+// maxIdle a marked, started Allocation idles until its hard end, which the report names.
+func (p *pass) markCleared(a *v1alpha1.Allocation) bool {
+	live := p.liveOn(a.Name)
+	if len(live) == 0 {
+		return false
+	}
+	var marking *v1alpha1.Operation
+	if ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(a.Annotations[v1alpha1.AnnotationKeptWarm]); ok {
+		for _, op := range p.ops {
+			if op.Namespace == ns && op.Name == name && op.UID == uid {
+				marking = op
+			}
+		}
+	}
+	for _, in := range live {
+		if marking == nil || !committedInstanceOf(marking, in) {
+			return true // placed after the mark
+		}
+	}
+	if p.targetedByUnfinishedOperation(a) || p.md == nil || p.shutdown {
+		return false
+	}
+	for _, in := range live {
+		if in.Status.Phase != v1alpha1.InstanceDraining && in.DeletionTimestamp.IsZero() && p.keptBySpec(in) {
+			if _, began := drainBegan(in); !began {
+				return true // it serves on, the spec keeps it, and no Operation ends it
+			}
+		}
+	}
+	return false
+}
+
+// keptBySpec reports whether the spec keeps the Instance: it is one of the primaries the desired count chooses, or a member or
+// replacement of one's hedge. A surplus Instance is one the controller's own scale-down will take.
+func (p *pass) keptBySpec(in *v1alpha1.Instance) bool {
+	for _, c := range p.primaries() {
+		if c.Name == in.Name || hedgeKey(c) == hedgeKey(in) {
+			return true
+		}
+	}
+	return false
+}
+
+// committedInstanceOf reports whether the Operation committed to the Instance as a target.
+func committedInstanceOf(op *v1alpha1.Operation, in *v1alpha1.Instance) bool {
+	for _, t := range op.Status.Committed {
+		if t.Kind == v1alpha1.TargetKindInstance && t.UID == in.UID {
+			return true
+		}
+	}
+	return false
+}
+
+// targetedByUnfinishedOperation reports whether an Operation that is committed and not finished has the Allocation as a committed
+// target.
+func (p *pass) targetedByUnfinishedOperation(a *v1alpha1.Allocation) bool {
+	for _, op := range p.ops {
+		if !isExecuting(op) {
+			continue
+		}
+		for _, t := range op.Status.Committed {
+			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// keptWarmSkipsDeletion is the ONE function that says when the deployment-deletion rule skips a marked Allocation: while its
+// deployment is being deleted AND holds FinalizerKeptWarm. A delete made while the finalizer holds, a person's included, waits for
+// the marked, started Allocations; a deployment that is gone, or is being deleted WITHOUT the finalizer, was deleted when nothing
+// held it, and the deletion rule releases its marked Allocations with retention's cause (HBEP-10, The report, Kept warm).
 func keptWarmSkipsDeletion(a *v1alpha1.Allocation, v fateView) bool {
 	return keptWarm(a) && v.heldByKeptWarm
 }
@@ -175,9 +281,9 @@ func retentionFate(a *v1alpha1.Allocation, v fateView, now time.Time, emptiedAt 
 		}
 	}
 	if keptWarm(a) {
-		// Kept warm: the profile's maxIdle, its hard end and the unconditional releases above are all that release it, and
-		// every other rule, the idle limit, a keep date and the deployment's end time, skips it (HBEP-10, The report, as
-		// amended by #698).
+		// Kept warm and started (a marked, pending one was released above, since its queued cancel was approved): the profile's
+		// maxIdle, its hard end and the unconditional releases above are all that release it, and every other rule, the idle limit,
+		// a keep date and the deployment's end time, skips it (HBEP-10, The report, Kept warm: protect first).
 		return false, at, "", false
 	}
 	switch pol.EffectiveMode() {

@@ -77,28 +77,44 @@ func TestAScaleGivesBackTheCountOfAnUntakenUnitAndFinishesOnlyAfterTheRecord(t *
 	}
 }
 
-// A person's count stands: a person sets spec.instances to 5 after the failures are recorded and before the give-back pass; nothing
-// is given back, the record holds its units with no count written, and the Operation finishes.
-func TestAPersonsCountStandsWhenTheGiveBackFindsAnotherValue(t *testing.T) {
-	w, _, _, stop := lastReadyScale(t)
-	stop()
-	w.clock.Advance(10 * time.Second)
-	if err := w.stepKeepingErrors(); err != nil {
-		t.Fatalf("the pass in which the spec write lands: %v", err)
-	}
-	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 5 })
-	w.stepsUntil(2*time.Minute, 10*time.Second, "the record", func() bool { return w.getOp("scale").Status.CountGivenBack != nil })
-	op := w.getOp("scale")
-	if rec := op.Status.CountGivenBack; rec.Units != 1 || rec.Instances != nil {
-		t.Errorf("the record is %+v, want 1 unit and no count written", rec)
-	}
-	if got := w.md(hoMD).Spec.Instances; got != 5 {
-		t.Errorf("spec.instances is %d, want the person's 5 to stand", got)
-	}
-	if op.Status.FinishedAt == nil {
-		t.Error("the Operation did not finish after the record")
+// A person's count meets the give-back by the max rule (HBEP-10, The report, Kept warm): raised above N, which needs no approval, the
+// larger of V and N + U is written, so a raise never takes back the untaken unit; lowered below N, theirs stands and nothing is given
+// back, the record holding its units with no count written. Here N is 1 and U is 1.
+func TestAPersonsRaisedOrLoweredCountMeetsTheGiveBackByTheMaxRule(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		set       int32
+		wantCount *int32 // the count the record holds; nil: none written
+		wantSpec  int32
+	}{
+		{"raised to 5, above N + U: the larger stands and is recorded", 5, ptr32(5), 5},
+		{"lowered to 0, below N: theirs stands and nothing is given back", 0, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _, _, stop := lastReadyScale(t)
+			stop()
+			w.clock.Advance(10 * time.Second)
+			if err := w.stepKeepingErrors(); err != nil {
+				t.Fatalf("the pass in which the spec write lands: %v", err)
+			}
+			w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = tc.set })
+			w.stepsUntil(2*time.Minute, 10*time.Second, "the record", func() bool { return w.getOp("scale").Status.CountGivenBack != nil })
+			op := w.getOp("scale")
+			rec := op.Status.CountGivenBack
+			if rec.Units != 1 || (tc.wantCount == nil) != (rec.Instances == nil) || (tc.wantCount != nil && *rec.Instances != *tc.wantCount) {
+				t.Errorf("the record is %+v, want 1 unit and count %v", rec, tc.wantCount)
+			}
+			if got := w.md(hoMD).Spec.Instances; got != tc.wantSpec {
+				t.Errorf("spec.instances is %d, want %d", got, tc.wantSpec)
+			}
+			if op.Status.FinishedAt == nil {
+				t.Error("the Operation did not finish after the record")
+			}
+		})
 	}
 }
+
+func ptr32(v int32) *int32 { return &v }
 
 // A record that does not land is written again, and the count is never given back twice: the first record's status write fails
 // after the spec write landed; the next pass finds N + U written and no record, and writes the record alone.
@@ -142,25 +158,37 @@ func TestAGiveBackWhoseRecordDidNotLandIsRecordedAloneNotWrittenTwice(t *testing
 }
 
 // Under a Scale above zero a started-since-commit pair is not taken: P's Instance, committed CancelPending, and its Allocation both
-// fail JobStartedSinceCommit; the Instance keeps starting and serving, the Allocation is kept warm, and the count is given back.
+// fail JobStartedSinceCommit; the Instance keeps starting and serving, and the count is given back. P's Allocation is MARKED during the
+// Operation (before any act, so before the job started), and its mark is CLEARED once the Operation has finished and the pair serves on:
+// a serving pair is no kept-warm capacity, and when its Instance later ends it follows its retention policy as any other does.
 func TestAScaleDoesNotTakeAStartedSinceCommitPairAndGivesItsCountBack(t *testing.T) {
 	w := newExecWorld(t, time.Hour)
 	stop := w.failSpecWrites()
 	w.approveScale("scale", 1, 2)
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !keptWarm(a) {
+		t.Errorf("P's Allocation is %+v (found %v) after the commit, want it MARKED before any act", a, ok)
+	}
 	w.stepsUntil(90*time.Minute, 2*time.Minute, "P ready", func() bool { return w.instance(w.pending).Status.Phase == v1alpha1.InstanceReady })
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !keptWarm(a) {
+		t.Errorf("P's Allocation is %+v (found %v) while the Operation is unfinished, want it still marked: it is a target of an unfinished Operation", a, ok)
+	}
 	stop()
 	w.stepsUntil(5*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
+	w.passes(3, nil)
 	op := w.getOp("scale")
 	for _, name := range []string{w.pending, w.pendingAlloc} {
 		if o, ok := outcomeOf(op, name); !ok || o.State != v1alpha1.TargetStateFailed || o.Reason != reasonJobStartedSinceCommit {
 			t.Errorf("%s's outcome is %+v (%v), want Failed with %s", name, o, ok, reasonJobStartedSinceCommit)
 		}
 	}
+	if o, ok := outcomeOf(op, w.pendingAlloc); !ok || !strings.Contains(o.Message, "kept warm") {
+		t.Errorf("P's Allocation outcome is %+v (%v), want the words kept warm: the report is historical", o, ok)
+	}
 	if in := w.instance(w.pending); isDraining(in) || ended(in) || in.Status.Phase != v1alpha1.InstanceReady {
 		t.Errorf("P is %q: under a Scale above zero it is not taken, and serves", in.Status.Phase)
 	}
-	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationKeptWarm] == "" {
-		t.Errorf("P's Allocation is %+v (found %v), want it kept warm", a, ok)
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() || keptWarm(a) {
+		t.Errorf("P's Allocation is %+v (found %v), want it present with its mark CLEARED: the Operation has finished and the pair serves on", a, ok)
 	}
 	if rec := op.Status.CountGivenBack; rec == nil || rec.Units != 1 || rec.Instances == nil || *rec.Instances != 2 {
 		t.Errorf("the record is %+v, want 1 unit and 2 written", rec)

@@ -108,6 +108,7 @@ modeldeployments:$.status.startOutcomes[].outcomes[].referenceDate#0|^TestDatesA
 modeldeployments:$.status.suspendedReferences[].capacityFlags#0|^TestCapacityFlagsAlwaysHoldMaxNumSeqs$
 modeldeployments:$.status.suspendedReferences[].capacityFlags#1|^TestCapacityFlagNamesAreOneTo64Characters$
 modeldeployments:$.status.suspendedReferences[].date#0|^TestDatesAreRealCalendarDates$
+operations:$#0|^TestOperationStatusRemovalDoesNotBypassTheCountGivenBackRules$
 operations:$.spec#0|^TestOperationConfirmIsSetOnce$
 operations:$.spec#1|^TestOperationSpecIsImmutable$
 operations:$.spec#2|^TestOperationSpecIsImmutable$

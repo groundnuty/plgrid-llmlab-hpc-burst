@@ -58,14 +58,15 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsNotTakenAndItsJobIsNo
 	stop()
 	w.stepsUntil(5*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
 
-	// P is not taken, and its started Allocation is kept warm.
+	// P is not taken, and its started Allocation stays: marked before any act, and its mark cleared once the Operation has finished and
+	// the pair serves on (a serving pair is no kept-warm capacity).
 	in := w.instance(w.pending)
 	if in.UID != pendingUID || isDraining(in) || ended(in) || in.Status.Phase != v1alpha1.InstanceReady {
 		t.Errorf("P's Instance is %q (draining %v): under a Scale above zero a started-since-commit Instance is not taken", in.Status.Phase, isDraining(in))
 	}
 	a, ok := w.allocation(w.pendingAlloc)
-	if !ok || a.UID != pendingAllocUID || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" || a.Annotations[v1alpha1.AnnotationKeptWarm] == "" {
-		t.Errorf("P's started Allocation is %+v (found %v): kept warm, and not released under the cancel approval", a, ok)
+	if !ok || a.UID != pendingAllocUID || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" || a.Annotations[v1alpha1.AnnotationKeptWarm] != "" {
+		t.Errorf("P's started Allocation is %+v (found %v): not released under the cancel approval, and its mark cleared: its Instance serves on it", a, ok)
 	}
 	if _, deleted := w.log.deletedWith(w.pendingAlloc); deleted {
 		t.Error("P's Allocation was deleted under the cancel approval")
@@ -186,8 +187,15 @@ func TestTheSpecRecordIsWrittenBeforeAnyAct(t *testing.T) {
 	w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
 	dead := false
 	w.fc.set(func(method string, obj client.Object) error {
-		switch obj.(type) {
-		case *v1alpha1.Instance, *v1alpha1.Allocation:
+		switch o := obj.(type) {
+		case *v1alpha1.Allocation:
+			// The kept-warm mark is written before the spec write and is no act (markBeforeActing): only a write that carries a
+			// release cause, or any other Allocation write, is the Operation's first act.
+			if method == "Update" && o.Annotations[v1alpha1.AnnotationKeptWarm] != "" && o.Annotations[v1alpha1.AnnotationReleaseCause] == "" {
+				break
+			}
+			dead = true // the first act of the Operation: the process dies with it
+		case *v1alpha1.Instance:
 			dead = true // the first act of the Operation: the process dies with it
 		}
 		if dead {
