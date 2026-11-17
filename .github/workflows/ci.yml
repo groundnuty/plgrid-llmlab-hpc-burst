@@ -882,6 +882,9 @@ jobs:
           else
             fuse=no
           fi
+          # DO NOT MERGE (#657's throwaway): force the no-FUSE branch, which hosted runners never take.
+          fuse=no
+          out="forced off for #657's throwaway (the real probe said: $out)"
           reason=$(echo "$out" | tr '\n' ' ')
           echo "fuse=$fuse" >> "$GITHUB_OUTPUT"
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
