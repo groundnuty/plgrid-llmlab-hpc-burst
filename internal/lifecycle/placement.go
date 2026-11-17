@@ -269,7 +269,7 @@ func (p *pass) submitOn(pv *providerView, t *placeTarget, pred *v1alpha1.Instanc
 	if pred == nil && !o.extra && o.hedgeGroup == "" {
 		onLimit = p.yieldOnLimit(pv)
 	}
-	ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
+	ok, holds, err := p.reserveYielding(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
 	if err != nil {
 		return stepStopped, err
 	}

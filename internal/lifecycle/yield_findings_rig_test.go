@@ -520,49 +520,94 @@ func TestTheOwnerWaitsForTheNamedDeploymentsGeneration(t *testing.T) {
 	}
 }
 
-// TestAMarkIsClearedWhenAnotherDeploymentsReservedSlotMakesTheCancelUseless (Y3 and Y4, the count rises after the mark).
-// Limit 4 on one Provider. md-a (k = 1, no end time) makes P1 and X1 at 08:00:10, jobs submitted 08:00:20, one starting after
-// 40 s (08:01:00: P1, the earlier start) and one pending 10 h (X1). md-b (k = 1, end time 14:00, so its handover reserves no
-// slot) makes P2 and X2 at 08:00:30, both pending 10 h: 4 listed. md-c (k = 0, instances 2), created 08:00:40, is refused at
-// 08:00:50: 4 listed + 0 reserved = 4 <= 4, so it marks md-b's extra (the newest pending), for a shortage of 2. At 08:01:00
-// P1 is Running and reserves one slot for its replacement (md-a has no end time): 4 listed + 1 reserved = 5 > 4. Cancelling
-// the marked extra would leave 4, still the limit, so md-c's cancel can admit nothing now: md-c marks NO second extra, and
-// its outstanding mark is CLEARED (it keeps at most 1 mark less the excess of 1 over the limit = 0).
-// Expected: one mark at 08:00:50; none at 08:01:00 and after; nothing deleted through 08:02:30; md-c without an Allocation.
-func TestAMarkIsClearedWhenAnotherDeploymentsReservedSlotMakesTheCancelUseless(t *testing.T) {
-	log := newCauseLog()
-	rg := yieldRig(t, log)
-	rg.batch.Enqueue(append([]pfake.Script{{QueueWait: 40 * time.Second}, {QueueWait: 10 * time.Hour}}, pending10h(2)...)...)
-	a := mdSpec("md-a")
-	a.Spec.OverAllocation = ptrTo(int32(1))
-	rg.create(a)
-	tick10(rg) // 08:00:10
-	tick10(rg) // 08:00:20
-	rg.create(yieldMD("md-b"))
-	tick10(rg) // 08:00:30
-	tick10(rg) // 08:00:40
-	c := mdSpec("md-c")
-	c.Spec.Instances = 2
-	rg.create(c)
-	tick10(rg) // 08:00:50
-	if n := len(rg.allAllocations()); n != 4 {
-		t.Fatalf("%d Allocations at 08:00:50, want 4: the limit is full", n)
-	}
-	ms := marks(rg)
-	if len(ms) != 1 || deploymentOfInstance(ms[0]) != "md-b" {
-		t.Fatalf("the marks at 08:00:50 are %v, want one, md-b's extra: 4 listed + 0 reserved = 4, a cancel admits md-c", markNames(ms))
-	}
-	for range 10 { // 08:01:00 to 08:02:30
-		tick10(rg)
-		if ms := marks(rg); len(ms) != 0 {
-			t.Fatalf("at %s %v is marked, want nothing: P1 is Running, 4 listed + 1 reserved = 5, a cancel leaves 4 and admits nothing", rg.clock.Now().Format(time.TimeOnly), markNames(ms))
-		}
-	}
-	if n := cancelsOf(log); n != 0 {
-		t.Fatalf("%d Allocations were deleted, want none", n)
-	}
-	if n := len(rg.allocations("md-c")); n != 0 {
-		t.Fatalf("md-c has %d Allocations, want none: its two primaries wait", n)
+// TestAMarkIsKeptButNeverCommittedWhenAnotherDeploymentsReservedSlotMakesTheCancelUseless (Y3, and C4's admission; Opus's M1 and
+// Astra's finding 1: the count rises after the mark). Limit 4 on one Provider. md-a (k = 1, no end time) makes P1 and X1 at
+// 08:00:10, jobs submitted 08:00:20, one starting after 40 s (08:01:00: P1, the earlier start) and one pending 10 h (X1). md-b
+// (k = 1, end time 14:00, so its handover reserves no slot) makes P2 and X2 at 08:00:30, both pending 10 h: 4 listed. md-c (k = 0,
+// instances 2), created 08:00:40, is refused at 08:00:50 (4 listed + 0 reserved = 4 <= 4, so a cancel admits it), marks md-b's X2
+// (the newest pending), for a shortage of 2. At 08:01:00 P1 is Running and reserves one slot for its replacement (md-a has no end
+// time): 4 listed + 1 reserved = 5 > 4. md-c's pass is refused again, and it marks NO second extra (5 > 4: cancelling one leaves 4,
+// the limit). Its mark on X2 is KEPT: it was refused on that Provider, and one mark is within its shortage of 2 less 0 yields in
+// flight. This is what changed from the version of this row that fixed head c0928964 pinned, which asserted that the mark was
+// CLEARED at 08:01:00: that came from Y4's excess formula, 2 marks less an excess of 1, which the fix round removed because it kept
+// a mark that could not admit its primary when two were out (Opus M1). Safety is now the owner's commit: at 08:01:10 md-b's owner
+// finds md-c's last pass (08:01:00) later than the mark (08:00:50) and the generation current, but freeing X2's slot would leave 4,
+// not below the limit: it WAITS. Expected from 08:01:00 through 08:02:30: exactly ONE mark stands, md-b's X2, naming md-c; nothing
+// is deleted; md-c has no Allocation.
+func TestAMarkIsKeptButNeverCommittedWhenAnotherDeploymentsReservedSlotMakesTheCancelUseless(t *testing.T) {
+	for _, v := range []struct {
+		name string
+		// then runs after 08:02:30, when the mark stands and the owner waits.
+		then func(t *testing.T, rg *rig, log *causeLog, x2 string)
+	}{
+		{"the count never falls: the mark stands and the owner waits", nil},
+		{"the need goes: md-c's instances is lowered to zero, the mark is cleared and nothing is cancelled", func(t *testing.T, rg *rig, log *causeLog, x2 string) {
+			rg.mutateMD("md-c", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 0 })
+		}},
+		{"the need goes: a slot elsewhere takes both of md-c's primaries, the mark is cleared and nothing is cancelled", func(t *testing.T, rg *rig, log *causeLog, x2 string) {
+			rg.mutateMD("md-c", func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{rigProvider, yieldC} })
+		}},
+	} {
+		t.Run(v.name, func(t *testing.T) {
+			log := newCauseLog()
+			rg, _ := yieldRigTwo(t, log, 4, 2)
+			rg.batch.Enqueue(append([]pfake.Script{{QueueWait: 40 * time.Second}, {QueueWait: 10 * time.Hour}}, pending10h(2)...)...)
+			a := mdSpec("md-a")
+			a.Spec.OverAllocation = ptrTo(int32(1))
+			rg.create(a)
+			tick10(rg) // 08:00:10
+			tick10(rg) // 08:00:20
+			rg.create(yieldMD("md-b"))
+			tick10(rg) // 08:00:30
+			tick10(rg) // 08:00:40
+			c := mdSpec("md-c")
+			c.Spec.Instances = 2
+			rg.create(c)
+			tick10(rg) // 08:00:50
+			if n := len(rg.allAllocations()); n != 4 {
+				t.Fatalf("%d Allocations at 08:00:50, want 4: the limit is full", n)
+			}
+			ms := marks(rg)
+			if len(ms) != 1 || deploymentOfInstance(ms[0]) != "md-b" {
+				t.Fatalf("the marks at 08:00:50 are %v, want one, md-b's extra: 4 listed + 0 reserved = 4, a cancel admits md-c", markNames(ms))
+			}
+			x2 := ms[0].Name
+			for range 9 { // 08:01:00 to 08:02:30
+				tick10(rg)
+				ms := marks(rg)
+				if len(ms) != 1 || ms[0].Name != x2 || ms[0].Annotations[annotationYieldTo] != yieldDeployment+" 2026-11-02T08:00:50Z" {
+					t.Fatalf("at %s the marks are %v, want exactly md-b's X2 %s naming md-c: P1 is Running (4 listed + 1 reserved = 5), so no second mark, and the first is kept", rg.clock.Now().Format(time.TimeOnly), markNames(ms), x2)
+				}
+			}
+			if n := cancelsOf(log); n != 0 {
+				t.Fatalf("%d Allocations were deleted, want none: cancelling X2 leaves 3 listed + 1 reserved = 4, the limit, so the owner waits", n)
+			}
+			if n := len(rg.allocations("md-c")); n != 0 {
+				t.Fatalf("md-c has %d Allocations, want none: its two primaries wait", n)
+			}
+			if v.then == nil {
+				return
+			}
+			// md-c's shortage goes to zero: a mark that stands while the commit waits must not outlive its need. Its next pass
+			// clears it (its shortage, 0, is below its marks, and it is refused nowhere); the owner never cancels, since at its
+			// pass before md-c's the count is still 5 > 4, and after it the mark is gone.
+			v.then(t, rg, log, x2)
+			for range 3 { // 08:02:40 to 08:03:00
+				tick10(rg)
+			}
+			if ms := marks(rg); len(ms) != 0 {
+				t.Fatalf("%v are marked at 08:03:00, want none: md-c's shortage is 0, so its own clearing removed the mark", markNames(ms))
+			}
+			if n := cancelsOf(log); n != 0 {
+				t.Fatalf("%d Allocations were deleted, want none: the extra yielded nothing", n)
+			}
+			if in := instOrNil(rg, x2); in == nil || ended(in) {
+				t.Fatalf("X2 %v at 08:03:00, want it pending and alive, md-b's", in)
+			}
+			if b := len(rg.liveInstances("md-b")); b != 2 {
+				t.Fatalf("md-b has %d live Instances, want its primary and its extra", b)
+			}
+		})
 	}
 }
 
@@ -599,5 +644,71 @@ func TestShortageIsCountedByAllocationPresence(t *testing.T) {
 				t.Fatalf("shortage = %d, want %d", got, c.want)
 			}
 		})
+	}
+}
+
+// TestAYieldedExtrasDeletingAllocationStillCountsAsASlotComing (Gemini's review of #708, finding 2). Provider A has a limit
+// of 4 and is full: md-a's and md-b's primaries and pending extras, X1 and X2. Provider C has a limit of 1 and is held by
+// md-0's pending primary. md-c (created at 08:00:40, k = 0, instances 2, A then C) is refused on both at 08:00:50 and marks
+// the newest pending extra, md-b's X2; at 08:01:00 it marks X1 (two marks for a shortage of 2). md-0 is scaled to zero
+// after 08:00:50, so its pending Allocation is deleted at 08:01:00 and C is free at 08:01:10. At 08:01:10 md-b cancels X2,
+// whose Allocation is DELETING and still holds its slot on A; md-c, in the same step, is refused on A (4 listed), places its
+// first primary on C and has a shortage of 1. X2's Allocation is the slot that is coming for the remaining primary, so X1
+// must not be cancelled: X2's yield stays counted while its Allocation is deleting. At c0928964 that was marksOfMine (a mark on
+// an extra that is no longer live but whose Allocation is deleting still counts, and clearYieldMarks never clears it); under the
+// owner's commit it is inFlightFor (an Allocation being deleted whose release cause names md-c). So md-c has 1 yield in
+// flight against a shortage of 1 and clears X1's mark, and X1's owner finds the shortage met. Expected: only X2 is cancelled (of the extras); X1 and its owner's two
+// Instances live; md-c has its two primaries, one on C and one on A, in the slot X2 frees; no mark is left.
+func TestAYieldedExtrasDeletingAllocationStillCountsAsASlotComing(t *testing.T) {
+	log := newCauseLog()
+	rg, c := yieldRigTwo(t, log, 4, 1)
+	rg.batch.Enqueue(pending10h(8)...)
+	c.batch.Enqueue(pending10h(1)...)
+	f := mdSpec("md-0")
+	f.Spec.Providers.Names = []string{yieldC}
+	rg.create(f)
+	rg.create(yieldMD("md-a"))
+	tick10(rg) // 08:00:10: md-0's primary on C, md-a's P1 and X1 on A
+	tick10(rg) // 08:00:20
+	rg.create(yieldMD("md-b"))
+	tick10(rg) // 08:00:30
+	tick10(rg) // 08:00:40
+	b := mdSpec("md-c")
+	b.Spec.Instances = 2
+	b.Spec.Providers.Names = []string{rigProvider, yieldC}
+	rg.create(b)
+	tick10(rg) // 08:00:50: md-c marks X2
+	if n := len(rg.allocations("md-0")); n != 1 {
+		t.Fatalf("md-0 has %d Allocations, want its primary's, which fills C's limit of 1", n)
+	}
+	rg.mutateMD("md-0", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 0 })
+	tick10(rg) // 08:01:00: md-c marks X1, md-0's Allocation is deleted
+	var x1Alloc string
+	if ms := marks(rg); len(ms) != 2 {
+		t.Fatalf("the marks at 08:01:00 are %v, want two: X2 (md-b's) and X1 (md-a's)", markNames(ms))
+	} else {
+		for _, m := range ms {
+			if deploymentOfInstance(m) == "md-a" {
+				x1Alloc = m.Spec.AllocationRef.Name
+			}
+		}
+	}
+	if x1Alloc == "" {
+		t.Fatal("md-a's extra is not marked at 08:01:00: the row proves nothing")
+	}
+	for range 11 { // 08:01:10 to 08:03:00
+		tick10(rg)
+	}
+	if _, deleted := log.deletedWith(x1Alloc); deleted {
+		t.Fatal("md-a's extra X1 was cancelled: md-c's remaining primary is met by the slot X2's deleting Allocation frees, so two extras went for one primary")
+	}
+	if a, bb := len(rg.liveInstances("md-a")), len(rg.liveInstances("md-b")); a != 2 || bb != 1 {
+		t.Fatalf("md-a has %d live Instances and md-b %d, want 2 (untouched) and 1 (its extra yielded)", a, bb)
+	}
+	if n := len(rg.liveInstances("md-c")); n != 2 || len(rg.onProvider("md-c", yieldC)) != 1 {
+		t.Fatalf("md-c has %d live Instances, %d on C, want 2 and 1: one on C and one in the slot X2 freed on A", n, len(rg.onProvider("md-c", yieldC)))
+	}
+	if ms := marks(rg); len(ms) != 0 {
+		t.Fatalf("%v are marked at 08:03:00, want none", markNames(ms))
 	}
 }

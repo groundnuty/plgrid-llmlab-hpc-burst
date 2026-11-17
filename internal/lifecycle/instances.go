@@ -190,8 +190,22 @@ func (p *pass) failNoted(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reas
 // desired state of an ended Instance), removes its drain finalizer and, when
 // release is set and the Allocation exists, releases the Allocation.
 func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, msg string, release bool) error {
+	if err := p.endStatus(in, reason, msg); err != nil {
+		return err
+	}
+	// An ended Instance has no engine series (not applicable: the collector
+	// lists only Instances that have not ended) and no heartbeat to judge.
+	p.mem.clear(instanceHeartbeatKey(in))
+	if err := p.endRelease(in, alloc, reason, msg, release); err != nil {
+		return err
+	}
+	return p.removeDrainFinalizer(in)
+}
+
+// endStatus writes the Instance's end: its phase, reason, end time and, for a failed end, its Healthy condition.
+func (p *pass) endStatus(in *v1alpha1.Instance, reason, msg string) error {
 	now := metav1.NewTime(p.now)
-	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
+	return p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		s.Phase, s.EndReason = v1alpha1.InstanceEnded, reason
 		if s.EndTime == nil {
 			s.EndTime = &now
@@ -199,24 +213,17 @@ func (p *pass) end(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, ms
 		if !cleanEnd(reason) {
 			cond(&s.Conditions, v1alpha1.ConditionHealthy, metav1.ConditionFalse, reason, msg, in.Generation, now)
 		}
-	}); err != nil {
-		return err
-	}
-	// An ended Instance has no engine series (not applicable: the collector
-	// lists only Instances that have not ended) and no heartbeat to judge.
-	p.mem.clear(instanceHeartbeatKey(in))
-	// The release, or the idle anchor, is made durable before the finalizer
-	// goes: once it goes, the Instance may vanish (a garbage-collected one at
-	// once), and with it what says the Allocation must go or since when it is
-	// idle (HBEP-7, Release; Retention, the idle anchor).
+	})
+}
+
+// endRelease is the release, or the idle anchor, made durable before the finalizer goes: once it goes, the Instance may
+// vanish (a garbage-collected one at once), and with it what says the Allocation must go or since when it is idle
+// (HBEP-7, Release; Retention, the idle anchor).
+func (p *pass) endRelease(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, reason, msg string, release bool) error {
 	if release && alloc != nil {
-		if err := p.deleteAllocation(alloc, endCause(in, reason, msg)); err != nil {
-			return err
-		}
-	} else if err := p.anchorIfLast(alloc); err != nil {
-		return err
+		return p.deleteAllocation(alloc, endCause(in, reason, msg))
 	}
-	return p.removeDrainFinalizer(in)
+	return p.anchorIfLast(alloc)
 }
 
 // releaseRequired reports whether an ended Instance's Allocation must be
