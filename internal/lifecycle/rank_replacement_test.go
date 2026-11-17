@@ -86,11 +86,18 @@ func TestAnExtraThatPassesFirstWaitsForTheRanking(t *testing.T) {
 				t.Fatalf("X is %s at %s, want it waiting in verifying until P is ready", xi.Status.Phase, h.clock.Now().Format(time.TimeOnly))
 			}
 		})
-		h.tick(10 * time.Second) // 00:40:00: P is ready, and X is ranked in the same pass
+		h.tick(10 * time.Second) // 00:40:00: P is ready
 		if got := h.readyAt(p); !got.Equal(rkAt(0, 40, 0)) {
 			t.Fatalf("P ready at %v, want 00:40", got)
 		}
-		rkAssertRankedOut(t, h, x, "", rkAt(0, 40, 0))
+		// P and X are made in the same second, so a pass handles them in the order of their random names: X is ranked in the
+		// pass that makes P ready, 00:40:00, when P is handled first, and in the next, 00:40:10, when X is.
+		h.tick(10 * time.Second)
+		at := rkAt(0, 40, 0)
+		if end := h.mustInstance(x).Status.EndTime; end != nil && end.Time.Equal(rkAt(0, 40, 10)) {
+			at = rkAt(0, 40, 10)
+		}
+		rkAssertRankedOut(t, h, x, "", at)
 	})
 }
 
