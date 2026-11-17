@@ -13,12 +13,15 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -151,6 +154,19 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 		t.Run(fmt.Sprintf("kill-%02d-at-%d", i, kill), func(t *testing.T) {
 			ctl := ControllerProvider("p1")
 			r := newRig(t, ctl, false, bigCaps, func(o *PublisherOptions) { o.Budget = 2 * time.Second }, leaseFor("provider-p1"))
+			// The publisher's own record of what the log acknowledged, id by id: an event the log stored whose
+			// acknowledgement the kill swallowed is counted lost though it is in the stream, so the stream
+			// cannot say which events are accounted twice; the acknowledgements can.
+			var ackMu sync.Mutex
+			acked := map[string]bool{}
+			r.pub.afterPublish = func(id string, _ *jetstream.PubAck, err error) error {
+				if err == nil {
+					ackMu.Lock()
+					acked[id] = true
+					ackMu.Unlock()
+				}
+				return err
+			}
 			idList, uidOf := r.raiseAll(i)
 			r.killAt(kill)
 			// Down past the retries: every event still queued is lost within the budget, and so is the
@@ -165,7 +181,22 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			// The counter also counts the EventsNotLogged that ran out against the dead log, each raised
 			// while the log was down and so lost: they are not among the 500, and subtracting them takes
 			// away the unit of slack they would give an event that was neither stored nor counted.
-			lostEvents := lost - float64(len(r.inner.byReason(ReasonEventsNotLogged)))
+			ackMu.Lock()
+			ackedEvents, ackedNotLogged := 0, 0
+			for id := range acked {
+				if strings.HasPrefix(id, "crash-") {
+					ackedEvents++
+				} else {
+					ackedNotLogged++ // an EventsNotLogged the log took: it was not lost
+				}
+			}
+			ackMu.Unlock()
+			lostEvents := lost - float64(len(r.inner.byReason(ReasonEventsNotLogged))-ackedNotLogged)
+			// Every one of the 500 is exactly one of two things: acknowledged by the log, or counted lost. A
+			// count that is higher or lower is an event that is neither, or both.
+			if float64(ackedEvents)+lostEvents != crashEvents {
+				t.Fatalf("%d acknowledged + %v counted lost (less the lost EventsNotLogged) = %v, want exactly %d (kill at %d)", ackedEvents, lostEvents, float64(ackedEvents)+lostEvents, crashEvents, kill)
+			}
 			r.restart()
 			// The log is back: the next publish that it takes closes the run of losses with one
 			// EventsNotLogged, published like any event.
