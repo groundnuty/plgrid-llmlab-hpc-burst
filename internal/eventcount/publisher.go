@@ -273,15 +273,13 @@ func (p *Publisher) deliver(it *item) {
 	}
 }
 
-// sweepFullRuns ends the queue-full run of every route but stored's that holds one, when the queue the routes
-// share is below half its size: stored's own route has just taken its own path (route.logged). The routes are
+// sweepFullRuns offers every route but stored's, which has just taken its own path (route.logged), the
+// chance to end its queue-full run: each ends it only if the queue the routes share is below half its size
+// (route.queueDrained). The routes are
 // copied under the publisher's lock and visited after it is released, each under its own lock, so the order
 // of the two locks is never inverted.
 func (p *Publisher) sweepFullRuns(stored *route) {
 	pending := p.Pending() // counts the event just stored, which is still in flight
-	if (pending-1)*2 >= p.o.QueueSize {
-		return
-	}
 	p.mu.Lock()
 	routes := make([]*route, 0, len(p.routes))
 	for _, r := range p.routes {

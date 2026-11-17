@@ -77,3 +77,48 @@ func gateAll(t *testing.T, r *rig) (struct{}, func()) {
 	t.Cleanup(drain)
 	return struct{}{}, drain
 }
+
+// Another route's publish that leaves the shared queue at or above half its size does not end a route's queue-full
+// run: the queue has not drained. The run ends only once it has.
+func TestAnotherRoutesPublishWithTheQueueStillFullDoesNotEndARun(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	r := newRig(t, ctl, false, bigCaps, func(o *PublisherOptions) { o.QueueSize = 4 }, leaseFor("provider-p1"))
+	life := Events(&recInner{}, r.counter, ControllerLifecycle, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("lifecycle")}))
+	rt := r.route(ctl)
+	gate, done := make(chan struct{}, 64), make(chan struct{})
+	r.pub.afterPublish = func(id string, ack *jetstream.PubAck, err error) error {
+		select {
+		case <-gate:
+		case <-done:
+		}
+		return err
+	}
+	var once sync.Once
+	drain := func() { once.Do(func() { close(done) }) }
+	t.Cleanup(drain)
+	for i := 0; i < 8; i++ { // the lifecycle controller fills the queue; the rest are its own drops
+		life.EventfID(fmtID("life", i), alloc(crashUID), nil, provider.EventKindOrdinary, "JobStarted", "started", "%s", "a note")
+	}
+	r.raise(crashUID, "p1-dropped", "JobStarted")
+	within(t, 20*time.Second, "provider-p1's run to hold a queue-full loss", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return rt.losing && rt.runFull
+	})
+	gate <- struct{}{} // one publish of the lifecycle controller goes through: the queue is still full behind it
+	within(t, 20*time.Second, "the publisher to take the token", func() bool { return len(gate) == 0 })
+	time.Sleep(200 * time.Millisecond) // the publish's gate decisions are made by now
+	rt.mu.Lock()
+	open := rt.losing
+	rt.mu.Unlock()
+	if !open {
+		t.Fatal("provider-p1's queue-full run ended on a publish that left the shared queue full")
+	}
+	drain()
+	r.settled()
+	within(t, 20*time.Second, "provider-p1's run to end once the queue drained", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return !rt.losing
+	})
+}
