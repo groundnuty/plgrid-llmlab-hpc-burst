@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -264,6 +265,94 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 		}
 		if got := estimatesOf(t, retried); got != wantList {
 			t.Fatalf("the retry changed status.estimates\n before %s\n after  %s", wantList, got)
+		}
+	})
+
+	// S4-5 on the writers of the execution (#664: opexec.go and opreport.go): the commit to Executing, the report's Done, the
+	// finish of an Operation whose spec effect no longer holds (PartlyFailed, with finishedAt) and Stale. Each row takes an
+	// Operation through its approvals on the same control plane and finishes it, so none holds the one-at-a-time slot of the
+	// rows after it. This test's ModelDeployment is a hand-made state the control plane does not hold, so the commit's own pass
+	// fails at the spec write (committedTo's note); the rows move the fixture's deployment to reach each later write.
+	approved := func(t *testing.T, name string) (f *opFixture, list string) {
+		t.Helper()
+		f, id, list := e.plannedWithEstimates(t, name)
+		op := e.get(t, name)
+		e.confirmAs(t, e.a, name, id)
+		e.step(t, f, opAt.Add(time.Minute))
+		if err := e.approval(t, e.admin, "ap-"+name, op, id, e.admin); err != nil {
+			t.Fatalf("the person's Approval: %v", err)
+		}
+		return f, list
+	}
+	committed := func(t *testing.T, f *opFixture, name, list string) {
+		t.Helper()
+		if err := e.stepErr(t, f, opAt.Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "set spec.instances to 1") {
+			t.Fatalf("the commit's pass failed with %v, want the spec write of a deployment this control plane does not hold", err)
+		}
+		got := e.get(t, name)
+		if got.Status.Phase != v1alpha1.OperationPhaseExecuting || len(got.Status.Committed) == 0 {
+			t.Fatalf("phase %q with %d committed targets, want Executing", got.Status.Phase, len(got.Status.Committed))
+		}
+		if now := estimatesOf(t, got); now != list {
+			t.Fatalf("the commit to Executing changed status.estimates\n before %s\n after  %s", list, now)
+		}
+	}
+	t.Run("S4-5 (Executing, Done): the commit and the report's Done keep the list", func(t *testing.T) {
+		e.setPolicies(t, globalFor(e.person))
+		f, list := approved(t, "est-7")
+		committed(t, f, "est-7", list)
+		// The commit also keeps the Operation until it finishes: a metadata update of the object (#707's finalizer), which carries the
+		// status as read and which the API server takes no status from. It is in this pass's writes, and the list is still as it was.
+		if got := e.get(t, "est-7"); !controllerutil.ContainsFinalizer(got, v1alpha1.FinalizerOperationUnfinished) {
+			t.Fatalf("the committed Operation lacks %s: the finalizer's write was not part of the commit", v1alpha1.FinalizerOperationUnfinished)
+		}
+		// The committed targets are gone, as a delete leaves them, and the spec effect already holds: the next pass records the
+		// spec as written, finds every target done, and reports Done. (A target still held in the fixture would be acted on by
+		// a status write for an object this control plane does not hold.)
+		f.md.Spec.Instances = 1
+		f.insts = f.insts[:1]
+		delete(f.allocs, "alloc-p")
+		delete(f.allocs, "alloc-p2")
+		e.step(t, f, opAt.Add(3*time.Minute))
+		done := e.get(t, "est-7")
+		if done.Status.Phase != v1alpha1.OperationPhaseDone || done.Status.FinishedAt == nil {
+			t.Fatalf("phase %q, finishedAt %v, want Done and finished", done.Status.Phase, done.Status.FinishedAt)
+		}
+		if got := estimatesOf(t, done); got != list {
+			t.Fatalf("the write to Done changed status.estimates\n before %s\n after  %s", list, got)
+		}
+		// The finish releases the finalizer in the same pass, by another metadata update, and the list is as it was after that too.
+		if controllerutil.ContainsFinalizer(done, v1alpha1.FinalizerOperationUnfinished) {
+			t.Fatalf("the finished Operation still carries %s", v1alpha1.FinalizerOperationUnfinished)
+		}
+	})
+
+	t.Run("S4-5 (PartlyFailed with finishedAt): the finish of an Operation whose effect no longer holds keeps the list", func(t *testing.T) {
+		e.setPolicies(t, globalFor(e.person))
+		f, list := approved(t, "est-8")
+		committed(t, f, "est-8", list)
+		f.md.Generation++ // a person's edit since the plan, and spec.instances still above the Scale's count: the effect does not hold
+		e.stepRec(t, f, opAt.Add(3*time.Minute))
+		failed := e.get(t, "est-8")
+		if failed.Status.Phase != v1alpha1.OperationPhasePartlyFailed || failed.Status.FinishedAt == nil {
+			t.Fatalf("phase %q, finishedAt %v, want PartlyFailed and finished", failed.Status.Phase, failed.Status.FinishedAt)
+		}
+		if got := estimatesOf(t, failed); got != list {
+			t.Fatalf("the write to PartlyFailed changed status.estimates\n before %s\n after  %s", list, got)
+		}
+	})
+
+	t.Run("S4-5 (Stale): the write to Stale keeps the list", func(t *testing.T) {
+		e.setPolicies(t, globalFor(e.person))
+		f, list := approved(t, "est-9")
+		f.md.Generation++ // the deployment changed since the plan was approved: the plan's ID covers its generation
+		e.step(t, f, opAt.Add(2*time.Minute))
+		stale := e.get(t, "est-9")
+		if stale.Status.Phase != v1alpha1.OperationPhaseStale || stale.Status.FinishedAt == nil {
+			t.Fatalf("phase %q, finishedAt %v, want Stale and finished", stale.Status.Phase, stale.Status.FinishedAt)
+		}
+		if got := estimatesOf(t, stale); got != list {
+			t.Fatalf("the write to Stale changed status.estimates\n before %s\n after  %s", list, got)
 		}
 	})
 }
