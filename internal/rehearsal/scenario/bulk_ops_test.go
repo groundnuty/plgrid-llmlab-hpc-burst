@@ -75,7 +75,7 @@ func (r *rig) sendSmall(key string) int {
 // the first frps keeps its process, a non-streamed request meanwhile gets its answer, and once the
 // bulk frpc has logged in again and a probe passed, the next one takes the bulk transport again.
 //
-//livecheck:none a hosted throwaway runs it (IMPL-COMMON: rehearsals on hosted runners)
+//livecheck:none CI's rehearsal-bulk job runs it, in a step of its own (hack/rehearsal.sh)
 func TestFrpsBulkRestartCutsOnlyBulk(t *testing.T) {
 	requireRehearsal(t)
 	for _, c := range []struct {
@@ -171,7 +171,7 @@ func TestFrpsBulkRestartCutsOnlyBulk(t *testing.T) {
 // lists the proxy, so the read can see one. Then down leaves nothing listening on the whole block,
 // base..base+15, the bulk path's three ports included.
 //
-//livecheck:none a hosted throwaway runs it (IMPL-COMMON: rehearsals on hosted runners)
+//livecheck:none CI's rehearsal-bulk job runs it, in a step of its own (hack/rehearsal.sh)
 func TestTeardownLeavesNoBulkProxy(t *testing.T) {
 	requireRehearsal(t)
 	for _, c := range []struct {
@@ -217,7 +217,7 @@ func TestTeardownLeavesNoBulkProxy(t *testing.T) {
 // bulk transport for it, and serves its non-streamed requests through the token tunnel, with neither
 // bulk counter moving.
 //
-//livecheck:none a hosted throwaway runs it (IMPL-COMMON: rehearsals on hosted runners)
+//livecheck:none CI's rehearsal-bulk job runs it, in a step of its own (hack/rehearsal.sh)
 func TestPreBulkAllocationKeepsItsTokenTunnel(t *testing.T) {
 	requireRehearsal(t)
 	for _, c := range []struct {
@@ -259,9 +259,10 @@ func TestPreBulkAllocationKeepsItsTokenTunnel(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(r.h.State, "agent-endpoint", "tls-bulk.crt")); err != nil {
 				t.Fatalf("up --bulk-path issued no second certificate: %v", err)
 			}
-			stack.WaitState(t, stack.WaitDeadline, "the Instance's token transport to register again", func() (bool, string) {
-				reg, _ := stack.Registered(r.ports, in)
-				return reg, "not registered"
+			// The key's request below follows after one more wait: the front's own view must route the model
+			// as well as hold the registration (#676).
+			stack.WaitState(t, stack.WaitDeadline, "the Instance's token transport to register again and the front to route the model", func() (bool, string) {
+				return r.routedNow(in)
 			})
 			r.waitFrpcs(in, 1, 0)
 			if code := r.sendSmall(key); code != http.StatusOK {
