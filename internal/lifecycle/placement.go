@@ -8,9 +8,10 @@ import (
 )
 
 // The placement order (HBEP-7, Provisioning, Where; #604 PR 3). provisionWith walks the steps placementOrder gives
-// it, in order, and the first step that places an Instance, or that defers the placement, ends the walk. A step is a
-// Provider and a kind: a warm step places on one of the deployment's warm Allocations there (warmFor), a submit step
-// makes a new Allocation there.
+// it, in order, and the first step that places an Instance ends the walk. A step is a Provider and a kind: a warm step
+// places on one of the deployment's warm Allocations there (warmFor), a submit step makes a new Allocation there. A warm
+// step that finds an Allocation not registered again after a restart holds the submit steps after it, not the warm
+// steps (amendment #719).
 
 type stepKind int
 

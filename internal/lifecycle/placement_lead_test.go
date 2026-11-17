@@ -168,8 +168,9 @@ func TestTheNoOverlapDecisionTakesAWarmAllocationOnlyByTheLead(t *testing.T) {
 // revises it, on its own timeline (P starts at 00:00, here 08:00:20, with a 12 h limit: hard end 20:00:20, drain start
 // 17:50:20). P's replacement hedge has R1 on A, whose job starts 30 min after P's, 08:30:20, and R2 on B, whose job
 // starts at 08:20:30 and which is ready at about 08:55, when R1, started and not ready, ends HedgeLost and its Allocation
-// is kept (hard end 20:30:20, drain start 18:20:20, 30 min after P's). B's member fails at 11:00: P's new replacement
-// is NOT placed on A's kept Allocation, its drain start being only 30 min after P's, less than the lead, 3 h 40 min. It is
+// is kept (hard end 20:30:20, drain start 18:20:20, 30 min after P's). B's member fails at 09:30 (the HBEP row has it at
+// 03:00 of its timeline; the rig's B has a 4 h partition, whose drain would end R2 at 10:10:30, so it fails before that):
+// P's new replacement is NOT placed on A's kept Allocation, its drain start being only 30 min after P's, less than the lead, 3 h 40 min. It is
 // submitted anew, on A, P's own Provider, and the kept Allocation stays, with no Instance (HBEP-7, Test plan). The
 // row of TestAStartedLosersAllocationTakesTheWinnersReplacement is the other side, on a timeline 12 h later.
 func TestAStartedLoserThirtyMinutesAfterItsPredecessorIsNotPlacedOn(t *testing.T) {
@@ -210,7 +211,7 @@ func TestAStartedLoserThirtyMinutesAfterItsPredecessorIsNotPlacedOn(t *testing.T
 		t.Fatalf("R1 is %s, ended for %q, its Allocation released %v: want HedgeLost with the Allocation kept", lost.Status.Phase, lost.Status.EndReason, h.released(r1Alloc))
 	}
 	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.HedgeWidth = ptrTo(int32(1)) }) // the row is about placement, not growth
-	hoStepTo(h.rig, hoT(11, 0, 0), 5*time.Minute, nil)
+	hoStepTo(h.rig, hoT(9, 30, 0), 5*time.Minute, nil)
 	subsA := h.batch.Count("sbatch")
 	r2Alloc := h.mustAllocation(h.mustInstance(r2).Spec.AllocationRef.Name)
 	h.b.batch.CancelExternally(r2Alloc.Annotations[v1alpha1.AnnotationJobID])
