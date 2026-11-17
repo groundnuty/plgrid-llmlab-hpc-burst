@@ -2,8 +2,9 @@ package main
 
 // How a capfs volume is mounted, so that a killed test leaves a DEAD mount, never a wedged one (issue #648).
 //
-// The FUSE server of a volume runs in the test's own process, so a killed test never runs the clean-up that unmounts it. What matters is
-// what it leaves. If no process holds the connection's /dev/fuse descriptor any more, the kernel ends the connection when the server
+// The FUSE server of a volume runs in a child process of the test (issue #658; capfs_volume_test.go), so a killed test never runs the
+// clean-up that unmounts it, and its server never runs it either, since the kernel kills the server with the test (Pdeathsig). What matters
+// is what is left. If no process holds the connection's /dev/fuse descriptor any more, the kernel ends the connection when the server
 // dies: the mount is dead, a stat of it fails at once with ENOTCONN, and the sweep of dead mounts (capfs_sweep_test.go) unmounts it at
 // the next newCapVolume. If some other process still holds the descriptor, or the socket it travels in, the connection stays open and
 // nobody serves it: the mount is wedged, and every stat of it blocks for good. That wedged two sessions on 16 Nov 2026.
@@ -25,10 +26,11 @@ package main
 // ENOTCONN counts, and it exits leaving the mount (libfuse added recheck_ENOTCONN_as_owner later; allow_other needs user_allow_other in
 // /etc/fuse.conf, which a user cannot set). Either way it leaves no process behind, and the sweep removes a mount it left.
 //
-// What none of this covers: a process that cannot finish dying. A thread of it waiting on its own mount for a request its server had
-// already read (a test hung on its volume, then killed) waits on uninterruptibly, so the process's descriptors stay open, and the mount
-// stays wedged until its connection is aborted (/sys/fs/fuse/connections/N/abort); every other run's sweep reports it, and none touches
-// it. That happened once, in a loaded run on 16 Nov 2026, from the deadlock that capPollHack now prevents.
+// What the mount alone does not cover is a process that cannot finish dying: a thread of it waiting on its own mount for a request its
+// own server had already read waits on uninterruptibly, so the process's descriptors stay open, and the mount stays wedged until its
+// connection is aborted (/sys/fs/fuse/connections/N/abort). That happened once, in a loaded run on 16 Nov 2026, from the deadlock that
+// capPollHack now prevents. It needs a server in the same process as the waiting thread, which no test has any more (issue #658): the
+// server is a child, and ends with its test process, and the connection with it (capfs_victim_test.go kills a test process mid-write).
 
 import (
 	"bytes"

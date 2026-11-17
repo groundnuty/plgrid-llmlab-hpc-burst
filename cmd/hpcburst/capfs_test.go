@@ -2,58 +2,59 @@ package main
 
 // A size-limited file system for the store-full test, built without root or any system change.
 // An ordinary user cannot mount a loop device or a tmpfs here (user namespaces are restricted),
-// but /dev/fuse is writable and fusermount3 is setuid, so a FUSE file system in this process can
-// serve a small volume. It passes everything through to a directory (go-fuse's loopback file
-// system, BSD-3-Clause) and answers ENOSPC to any write, allocation or truncation that would take
-// the directory above its limit, as a full disk does. It also reports the limit in statfs.
+// but /dev/fuse is writable and fusermount3 is setuid, so a FUSE file system can serve a small
+// volume. It passes everything through to a directory (go-fuse's loopback file system,
+// BSD-3-Clause) and answers ENOSPC to any write, allocation or truncation that would take the
+// directory above its limit, as a full disk does. It also reports the limit in statfs.
+//
+// The server of a volume runs in a CHILD process (capfs_volume_test.go), never in the process of
+// the test that uses the volume (issue #658). A test process whose own thread waits on its own
+// mount for a request that its own server has read cannot finish dying when it is killed, and then
+// holds /dev/fuse for good: the mount is wedged. With the server in another process, a killed test
+// leaves the server to die with it (Pdeathsig) and the connection ends: the mount is dead, and the
+// next newCapVolume sweeps it. This file is the server side. A test changes a running volume's
+// settings, and reads its counts, through files in a control directory beside the mount
+// (capfs_volume_test.go), so that nothing a test asks of a volume goes through the mount.
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"sync"
 	"syscall"
-	"testing"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-const capBlock = 4096
+const (
+	capBlock = 4096
+	// capStallMax bounds how long the server holds a write that a test asked it to hold (capCtlStall). It is longer than any wait of the
+	// tests, so that only the end of the server, or of the hold's request, releases a held write inside a test's bounds.
+	capStallMax = 2 * time.Minute
+)
 
+// capVolume is the server side of a volume: it runs where mountCapVolume was called, which is the child process of newCapVolume.
 type capVolume struct {
 	backing string
-	limit   atomic.Int64 // bytes; grow raises it, as freeing space on a full disk would
-	enospc  atomic.Int64 // how many requests were refused, so a test can show the volume really was full
+	ctl     capCtl // the limit, the freeze and the counts, in files (capfs_volume_test.go)
 	server  *fuse.Server
 	conn    *capConn // the mount's connection, and fusermount3 with auto_unmount, which stays until its socket closes
 	mount   string
 
-	// frozen is the steady state of a full store (#180): once set, every write, allocation and
-	// truncation is refused with ENOSPC, including one that fits in space the files already hold, which
-	// a volume that is merely at its limit accepts (SQLite reusing pages, or its WAL restarting after a
-	// checkpoint, writes inside the files). A real full disk can accept such rewrites now and then; the
-	// frozen volume models the state in which none is, so that "the store is full" holds until the test
-	// unfreezes it, and a test can make assertions about that state without racing the store's own
-	// housekeeping. frozenRefusals counts the requests that only the freeze refused.
-	frozen         atomic.Bool
-	frozenRefusals atomic.Int64
+	stop     chan struct{} // closed by end: a write held for a test (capCtlStall) is released by it
+	stopOnce sync.Once
 }
 
-// grow adds bytes to the volume's limit, as freeing space on a full disk does.
-func (v *capVolume) grow(bytes int64) { v.limit.Add(bytes) }
+// end releases every write the volume is holding, and is called before an unmount, so that a held request does not keep the mount busy.
+func (v *capVolume) end() { v.stopOnce.Do(func() { close(v.stop) }) }
 
-// freeze makes the volume refuse every write from now on; unfreeze lifts it.
-func (v *capVolume) freeze()   { v.frozen.Store(true) }
-func (v *capVolume) unfreeze() { v.frozen.Store(false) }
-
-// used is the space the files in the backing directory take, in bytes of allocated blocks.
-func (v *capVolume) used() int64 {
+// capUsed is the space the files in a backing directory take, in bytes of allocated blocks.
+func capUsed(backing string) int64 {
 	var n int64
-	_ = filepath.Walk(v.backing, func(_ string, fi os.FileInfo, err error) error {
+	_ = filepath.Walk(backing, func(_ string, fi os.FileInfo, err error) error {
 		if err == nil && fi.Mode().IsRegular() {
 			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 				n += st.Blocks * 512
@@ -66,13 +67,71 @@ func (v *capVolume) used() int64 {
 	return n
 }
 
+// fault is the answer to a control directory that cannot be read or written: the server says so on its stderr and fails the request with
+// EIO, so that a test sees a failure of the volume, and never a number or a state that the server made up.
+func (v *capVolume) fault(err error) syscall.Errno {
+	fmt.Fprintf(os.Stderr, "capfs: the control directory %s: %v\n", v.ctl.dir, err)
+	return syscall.EIO
+}
+
+// refuse counts a refused request in the control directory, and then answers ENOSPC. The count is made before the answer, so that a test
+// that has seen the error reads it. A request that cannot be counted fails with EIO instead (fault). frozen says the freeze alone refused it.
+func (v *capVolume) refuse(frozen bool) syscall.Errno {
+	names := []string{capCtlRefused}
+	if frozen {
+		names = append(names, capCtlFrozenRefused)
+	}
+	for _, name := range names {
+		if err := v.ctl.bump(name); err != nil {
+			return v.fault(err)
+		}
+	}
+	return syscall.ENOSPC
+}
+
+// holdIfAsked holds a write while the control directory says so (capCtlStall): it records that it holds one (capCtlStalled), outside the
+// mount, and waits until the hold is lifted, the volume ends, or capStallMax has passed. A test shows with it a request that the server has
+// already read, and has not answered.
+func (v *capVolume) holdIfAsked() {
+	on, err := v.ctl.flag(capCtlStall)
+	if err != nil {
+		v.fault(err)
+		return
+	}
+	if !on {
+		return
+	}
+	if err := v.ctl.setFlag(capCtlStalled, true); err != nil {
+		v.fault(err)
+		return
+	}
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	limit := time.NewTimer(capStallMax)
+	defer limit.Stop()
+	for {
+		select {
+		case <-v.stop:
+			return
+		case <-limit.C:
+			return
+		case <-tick.C:
+		}
+		if still, err := v.ctl.flag(capCtlStall); err != nil || !still {
+			return
+		}
+	}
+}
+
 // admit decides whether growing the file at path to newSize fits. A frozen volume refuses every
 // request, whatever it would take.
 func (v *capVolume) admit(path string, newSize int64) syscall.Errno {
-	if v.frozen.Load() {
-		v.frozenRefusals.Add(1)
-		v.enospc.Add(1)
-		return syscall.ENOSPC
+	frozen, err := v.ctl.flag(capCtlFrozen)
+	if err != nil {
+		return v.fault(err)
+	}
+	if frozen {
+		return v.refuse(true)
 	}
 	var cur int64
 	if fi, err := os.Stat(path); err == nil {
@@ -82,9 +141,12 @@ func (v *capVolume) admit(path string, newSize int64) syscall.Errno {
 	if growth <= 0 {
 		return 0
 	}
-	if v.used()+growth > v.limit.Load() {
-		v.enospc.Add(1)
-		return syscall.ENOSPC
+	limit, err := v.ctl.limit()
+	if err != nil {
+		return v.fault(err)
+	}
+	if capUsed(v.backing)+growth > limit {
+		return v.refuse(false)
 	}
 	return 0
 }
@@ -107,6 +169,7 @@ var (
 )
 
 func (n *capNode) Write(ctx context.Context, f fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
+	n.vol.holdIfAsked()
 	if e := n.vol.admit(n.backingPath(), off+int64(len(data))); e != 0 {
 		return 0, e
 	}
@@ -146,13 +209,16 @@ func (n *capNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttr
 }
 
 func (n *capNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
-	used := n.vol.used()
-	free := n.vol.limit.Load() - used
+	limit, err := n.vol.ctl.limit()
+	if err != nil {
+		return n.vol.fault(err)
+	}
+	free := limit - capUsed(n.vol.backing)
 	if free < 0 {
 		free = 0
 	}
 	out.Bsize, out.Frsize, out.NameLen = capBlock, capBlock, 255
-	out.Blocks = uint64(n.vol.limit.Load() / capBlock)
+	out.Blocks = uint64(limit / capBlock)
 	out.Bfree, out.Bavail = uint64(free/capBlock), uint64(free/capBlock)
 	out.Files, out.Ffree = 1<<16, 1<<16
 	return 0
@@ -174,20 +240,22 @@ type capMountError struct{ err error }
 func (e capMountError) Error() string { return e.err.Error() }
 func (e capMountError) Unwrap() error { return e.err }
 
-// mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory and a mount point, and returns it
-// with its server running in this process. The mount carries source as its name. newCapVolume mounts through it, and so does the child
-// process of the sweep's tests, so that both mount alike. autoUnmount passes fusermount3's auto_unmount (capfs_mount_test.go says what
-// it does, and does not do, on each version). opts change go-fuse's mount options (a test turns on its debug log).
+// mountCapVolume mounts a volume of the given size under dir, which it fills with a backing directory, a mount point and a control
+// directory, and returns it with its server running in this process. The mount carries source as its name. Only the child process of
+// capfs_volume_test.go calls it, for every volume of the tests, so that all mount alike. autoUnmount passes fusermount3's auto_unmount
+// (capfs_mount_test.go says what it does, and does not do, on each version). opts change go-fuse's mount options (the child's debug log).
 func mountCapVolume(dir string, limit int64, source string, autoUnmount bool, opts ...func(*fuse.MountOptions)) (*capVolume, error) {
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = real // mountinfo and fusermount3 name a mount point by its real path
 	}
-	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt")}
-	v.limit.Store(limit)
-	for _, d := range []string{v.backing, v.mount} {
+	v := &capVolume{backing: filepath.Join(dir, "backing"), mount: filepath.Join(dir, "mnt"), ctl: capCtl{filepath.Join(dir, "ctl")}, stop: make(chan struct{})}
+	for _, d := range []string{v.backing, v.mount, v.ctl.dir} {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			return nil, err
 		}
+	}
+	if err := v.ctl.setLimit(limit); err != nil {
+		return nil, err
 	}
 	rootData := &fs.LoopbackRoot{Path: v.backing}
 	rootData.NewNode = func(r *fs.LoopbackRoot, parent *fs.Inode, name string, st *syscall.Stat_t) fs.InodeEmbedder {
@@ -230,6 +298,7 @@ func mountCapVolume(dir string, limit int64, source string, autoUnmount bool, op
 // end of the server, then the close of the socket, on which an auto_unmount fusermount3 finds the mount gone and exits. A mount that
 // will not unmount keeps its socket open.
 func (v *capVolume) unmount(d time.Duration) error {
+	v.end()
 	deadline := time.Now().Add(d)
 	var err error
 	for {
@@ -253,52 +322,6 @@ func (v *capVolume) unmount(d time.Duration) error {
 		return fmt.Errorf("the server of %s did not stop within %s of its unmount", v.mount, d)
 	}
 	return v.conn.closeComm(d)
-}
-
-// newCapVolume mounts a volume of the given size and registers its unmount with the test.
-// Register it before the host's clean-up, so that the unmount runs after the host is stopped
-// (clean-ups run last-in first-out). If FUSE cannot be mounted it skips with the exact reason,
-// unless HPCBURST_REQUIRE_INTEGRATION=1, which turns that skip into a failure.
-//
-// The server runs in the test's own process, so a test that is killed never runs the clean-up
-// (issue #648). Nothing else holds its connection (capfs_mount_test.go), so the kernel ends the
-// connection when the server dies, and the mount is left dead, not wedged. Before it mounts,
-// newCapVolume sweeps this user's capfs mounts whose endpoint is dead (sweepDeadCapMounts). A
-// mount found wedged (open, but its stat does not return) fails the test here, since any later
-// stat of it, or a removal of its directory, would block.
-func newCapVolume(t *testing.T, limit int64) *capVolume {
-	t.Helper()
-	if res := sweepDeadCapMounts(realSweepEnv(t.Logf)); res.failure() != "" {
-		t.Fatal(res.failure())
-	}
-	dir, err := os.MkdirTemp("", "cv")
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, err := mountCapVolume(dir, limit, capFsName, true)
-	if err != nil {
-		if rerr := capRemoveDir(dir); rerr != nil {
-			t.Logf("%v", rerr)
-		}
-		var me capMountError
-		if !errors.As(err, &me) {
-			t.Fatal(err)
-		}
-		msg := "the store-full test needs a size-limited file system, and a user-level FUSE mount failed: " + err.Error()
-		if os.Getenv("HPCBURST_REQUIRE_INTEGRATION") == "1" {
-			t.Fatal(msg)
-		}
-		t.Skip("SKIPPED, NOT TESTED: " + msg)
-	}
-	t.Cleanup(func() {
-		if err := v.unmount(30 * time.Second); err != nil {
-			t.Errorf("unmount %s: %v", v.mount, err)
-		}
-		if err := capRemoveDir(dir); err != nil {
-			t.Errorf("%v", err)
-		}
-	})
-	return v
 }
 
 // capRemoveDir removes dir, unless /proc/self/mountinfo lists a mount at or under it: a removal would stat that mount, and block for
