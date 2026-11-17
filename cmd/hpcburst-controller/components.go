@@ -44,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -436,7 +437,7 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 	controller := eventcount.ControllerProvider(provider)
 	return providerctl.Setup(pm, providerctl.Options{
 		Provider:       provider,
-		Profiles:       &slurm.ProfileReader{Reader: pm.GetClient()},
+		Profiles:       w.profileReader(pm.GetClient()),
 		NewPlatform:    w.newPlatform,
 		CredentialsDir: w.host.CredentialsDir(),
 		AgentBuildsDir: w.host.AgentBuildsDir(),
@@ -455,6 +456,18 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		// (providerctl.ForgetSeries).
 		Counter: w.events,
 	})
+}
+
+// profileReader is every batch Provider's profile reader: it checks the
+// Provider's partition against the launcher's recorded dial-home mode, the one
+// of the front settings (HBEP-4, Core operations, ReadProfile). A launcher that
+// recorded no front leaves the mode empty, and then nothing is checked.
+func (w wiring) profileReader(r client.Reader) *slurm.ProfileReader {
+	pr := &slurm.ProfileReader{Reader: r}
+	if w.front != nil {
+		pr.DialHomeMode = w.front.Mode
+	}
+	return pr
 }
 
 // relaySettings are host-dialed mode's relay settings for every batch

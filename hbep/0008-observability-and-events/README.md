@@ -336,6 +336,8 @@ Prometheus's advice to export 0 for series that may exist ([instrumentation prac
 | `hpcburst_usage_records_total` | counter | records written and synced |
 | `hpcburst_usage_write_failures_total` | counter | records not written: a failed write or sync of their batch, or a failed counter-block reservation |
 | `hpcburst_usage_dir_free_bytes` | gauge | free space of `usageDir`'s file system |
+| `hpcburst_usage_unlogged_records` | gauge | records in the files the durable log doesn't hold yet; no value while the files' counter is unknown |
+| `hpcburst_usage_skipped_total` | counter | records the log can't take (over its size), skipped once; they stay in the files |
 
 No client key ID is a label: per-key usage is in the records.
 
@@ -392,7 +394,7 @@ No client key ID is a label: per-key usage is in the records.
 | Label or usage field (HBEP-5, Usage records) | OpenTelemetry attribute ([`docs/registry/attributes/gen-ai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/registry/attributes/gen-ai.md)) | Differences |
 |---|---|---|
 | the `endpoint` label; the field `path` | `gen_ai.operation.name`: `chat`, `text_completion` and `embeddings` for chat, completions and embeddings | `/v1/responses` has no value of its own; it maps to `chat` with `openai.api.type` `responses` ([`docs/gen-ai/openai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/openai.md)), a choice of this HBEP; `models` and `other` have none |
-| `requestedModel` | `gen_ai.request.model` | as sent |
+| `requestedModel` | `gen_ai.request.model` | as sent, cut at 1,291 bytes at a character boundary, with a marker (HBEP-5, Usage records) |
 | `promptTokens`, `completionTokens`, `cachedTokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` | ours are null when unknown (`countsSource: front_events`) |
 | `finish` | `gen_ai.response.finish_reasons` | ours is one value, theirs an array |
 | `firstTokenMs` | `gen_ai.response.time_to_first_chunk` | milliseconds; theirs is seconds |
@@ -462,7 +464,7 @@ Decided for beta (open question 11; amended 2026-11-16). Each part is marked by 
 | `HB_USAGE` | `hb.usage` | up to 256 usage records, as the files' lines, byte for byte | `usage-<first counter>-<last counter>` | the front |
 
 - **Subjects by UID, not name.** A Kubernetes name may "contain only lowercase alphanumeric characters, '-' or '.'" ([Object Names and IDs](https://github.com/kubernetes/website/blob/8a342c522c21f05564881573fcca7d5910a2ebb5/content/en/docs/concepts/overview/working-with-objects/names.md), accessed 2026-11-16), and S8's layer refuses `.` in a subject. A reused name would also join an old object's history (HBEP-10, open question 11). A UID has neither problem.
-- **The envelope** (HBEP-10, Notes; S8): `specversion` `1.0`; `id`; `source` `/hpcburst/<controller>`, with the raised-events counter's `controller` value; `type` `io.hpcburst.event.v1`; `subject` `<kind>/<namespace>/<name>`, or `<kind>/<name>` for a cluster-scoped object; `time`, the event's `eventTime`; and `data` with the Kubernetes Event's fields: `action`, `reason`, `type`, `regarding` and `related` with their UIDs, `note` and `reportingController`. Both copies come from one recorder call, so they agree.
+- **The envelope** (HBEP-10, Notes; S8): `specversion` `1.0`; `id`; `source` `/hpcburst/<controller>`, with the raised-events counter's `controller` value; `type` `io.hpcburst.event.v1`; `subject` `<kind>/<namespace>/<name>`, or `<kind>/<name>` for a cluster-scoped object; `time`, the publishing wrapper's wall clock, read once per call just before the recorder's own; and `data` with the Kubernetes Event's fields: `action`, `reason`, `type`, `regarding` and `related` with their UIDs, `note` and `reportingController`. Both copies come from one call, so their fields agree. Their times differ by microseconds, since client-go's recorder reads its own clock for `eventTime` inside the call and gives no hook to read it back, and re-implementing the recorder would lose its series merging (What the recorder merges and drops). A reader matching the log with the API matches on the regarding UID, reason, action and note, with the times within 1 s (science-agent ruling on #625's PR E2, 16 Nov 2026).
 - **The event's id.** An Allocation event that marks a transition (Events, Allocation events) has the id `<Allocation UID>/<reason>/<fact>`, where the fact is the status value that marks the transition. So a transition raised again after a failed status write keeps its id, and a second transition with the same reason gets its own:
   - the attempt's number for `JobSubmitted` and `JobAdopted`;
   - the restart count for `HoldLifted`, `JobStarted` and `Requeued`;
@@ -550,12 +552,19 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
   - **Test hooks** that signal after a pass, for the observer (`onPass`, `internal/lifecycle/observers.go`), the gap emitter (`internal/lifecycle/gap.go`) and the front's request path (`internal/front/proxy.go`).
   - **The drift guard's check** that every recorder is wrapped (`internal/reasondrift/scan`).
   - **The four-condition absence check** (`internal/eventcount/absence.go`), which the rehearsal's absence checks use (`internal/rehearsal/scenario`).
-- **Beta's designs (16 Nov 2026):** partly done: the Allocation events are, and the rest is not yet. The designs and what each needs:
-  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); the publisher beside the counting wrapper (`internal/eventcount`); and the usage forwarder with its gauge and `/healthz` fields (`internal/front/usage`).
+- **Beta's designs (16 Nov 2026):** partly done: the Allocation events and the usage forwarder are, and the rest is not yet. The designs and what each needs:
+  - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); and the publisher beside the counting wrapper (`internal/eventcount`).
   - **Allocation events:** done in PR C of #625 (erratum, 2026-11-16): the Provider controller's `events.k8s.io` recorder and its map from reason to type (`allocationEventType`, `internal/providerctl/events.go`, which the drift guard reads from the source), the typed events' notes without job IDs (the Provider's `SubmittedAsOther` and `RelayEndedForGood` condition messages name none, and a note that names the job ID is refused), its managers' `ObservationGap` through `leaderlock.GapLock`, and its cache index of Instances by `spec.allocationRef`, for the drain case. The reasons joined the Reasons table, the untyped Provider reasons list is shorter (`internal/reasondrift/exceptions.go`), and the type `ended` joined the drift guard's `Actions` (`internal/reasondrift/docs.go`).
   - **The log's caps,** their launcher setting and `up`'s free-space check (HBEP-11).
   - **The OpenTelemetry check** of the mapping's first column.
   - **Billing** (amended 2026-11-16): the `billing` entry of the accounting read and `allocatedBilling` (`internal/slurm`; `api/v1alpha1/accounting.go`), the record's new fields, the profile's `billingUnit` (HBEP-4), and `hpcburst accounting` (`cmd/hpcburst`).
+  - **The usage forwarder (done in #625's usage change; erratum, 16 Nov 2026):** `internal/front/usage/forward` and the sink's post-sync hook (`usage.Options.Synced`, `usage.Stats.LastSynced`); the front's `/healthz` `usage.log`, `loggedCounter` and `behindSince`, `hpcburst_usage_unlogged_records` (`internal/front/metrics.go`), and `hpcburst status`'s "degraded: usage log behind" (`internal/launcher/status_controllers.go`). It reads what the HBEP leaves open as follows:
+    - a front started with no log says `log` `down` too, as the HBEP has it, and `status` tells it from a front whose log is down by the launcher's recorded `--event-log` choice;
+    - the gauge has no series until the forwarder has read the stream's last counter, since an unknown is not a 0 (Unknown samples), and `loggedCounter` is null then;
+    - the gauge is a difference of counters, so a crash's gap counts as unlogged records while the forwarder is behind;
+    - the 5 minutes are the front's own `behindSince`, read from its `/healthz`, against the launcher's clock;
+    - R4's file sizes are the files' bytes, and the newest file alone is the set when it is over the cap;
+    - a usage line can exceed the log's message size: files written before the front bounded the record's client text (HBEP-5, Usage records, #649) may hold one, so the forwarder skips such a line once and counts it. Such a line is not copied: the files hold it, the front's log names its counter, and it is counted once, in `hpcburst_usage_skipped_total` (a counter, at 0 from the start on a front with the log), never as lag: the gauge and `behindSince` mean a copy that is behind, and one client-written line does not set them (the science agent's ruling on #644, 16 Nov 2026). Reading the files never stops the front: the sink's `Open` reads the last counter of a line of any length by its first bytes, and a read that fails leaves the forwarder with no reading of the sink's position (no gauge value) until the first batch is synced, never a failed start.
 
 ### Test plan
 
@@ -787,6 +796,9 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: erratum: `RankedOut`, the `replaced` event regarding each ranked-out Instance, with the Instance it ranked below, or that outranked it, in `related`, joins the Reasons table with the code that raises it (#616), as HBEP-7's Over-allocation and qualification (beta) says.
 - 2026-11-16: the durable log's build rulings for #625: no job ID in any note the log keeps; the forwarder on an empty stream starts within the cap; the store's size on disk for the floor; the log's copy is paired with its backup; ids and the deletion trigger fixed.
 - 2026-11-16: no path, user name, account or grant in a note the log keeps; a copied error gives the reason code and a fixed description (for #640).
+- 2026-11-16: `requestedModel` is cut at 1,291 bytes with a marker, as HBEP-5 records it (for #645).
+- 2026-11-16: the log's envelope `time` is the publishing wrapper's clock, within microseconds of the API's `eventTime` (for #625's PR E2).
+- 2026-11-16: erratum: the forwarder's two metrics in the front's table (#644).
 - 2026-11-16: erratum: the typed Allocation events join the Reasons table with the code that raises them (#625).
 - 2026-11-16: erratum: `HoldLifted` is raised at the controller's own lift of the recorded job's hold, after the hold-lifted marker is written, not on a stored phase change from `Held` to `Pending`: in hold mode the hold lasts one listing read, so the stored phase is never `Held` and a phase rule would never fire. Its id's fact is the restart count, 0 at a lift (#625).
 
@@ -862,3 +874,4 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 
   Before, the job-ID rule covered the typed Allocation events only, an empty stream replayed every file, the floor read the streams' logical bytes, and a restore could pair the log with a later backup.
 - **2026-11-16: no path or name in a logged note** (Allocation events, No job ID in a note). An amendment by the science agent's ruling on #640 (#625's PR C). A note the log keeps names no path, user name, account or grant, as well as no job ID, and a note that would copy another component's error text gives the reason code and a fixed description, with the detail left in status. Before, the rule named job IDs only, and `AllocationRefused`'s note copied the profile reader's error, which can name a credentials file's path on the host.
+- **2026-11-16: the envelope's time** (The durable log, Streams). An amendment by the science agent's ruling on #625's PR E2. The CloudEvent's `time` is the publishing wrapper's clock, read once per call, and the API's `eventTime` is client-go's own, read microseconds later in the same call, so the two copies match on their fields and agree on their times within 1 s. Before, the text said the envelope's `time` was the event's `eventTime` and that the copies agree, which client-go's recorder can't give without being re-implemented.

@@ -100,7 +100,7 @@ func TestVersionFlagKeepsItsK3sMeaning(t *testing.T) {
 	}
 
 	code, _, errs = runInProcess(t)
-	if code != exitUsage || !strings.Contains(errs, "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|version> [flags]") {
+	if code != exitUsage || !strings.Contains(errs, "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|accounting|version> [flags]") {
 		t.Errorf("no command: exit %d, stderr %q; want the usage naming version", code, errs)
 	}
 }

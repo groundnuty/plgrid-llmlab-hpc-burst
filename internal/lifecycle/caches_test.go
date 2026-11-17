@@ -154,7 +154,7 @@ func heldConfig(cfg *rest.Config, resource string, gate <-chan struct{}) (*rest.
 	return c, h.arrived
 }
 
-// The six kinds whose informers "caches" waits for (HBEP-11): the resource name each is listed by.
+// The nine kinds whose informers "caches" waits for (HBEP-11; the three of HBEP-10, #589, are the last): the resource name each is listed by.
 type cachesKind struct {
 	name, resource string
 	obj            client.Object
@@ -167,6 +167,9 @@ var cachesKinds = []cachesKind{
 	{"Provider", "providers", &v1alpha1.Provider{}},
 	{"PlatformProfile", "platformprofiles", &v1alpha1.PlatformProfile{}},
 	{"ControllerRevision", "controllerrevisions", &appsv1.ControllerRevision{}},
+	{"Operation", "operations", &v1alpha1.Operation{}},
+	{"Approval", "approvals", &v1alpha1.Approval{}},
+	{"ApprovalPolicy", "approvalpolicies", &v1alpha1.ApprovalPolicy{}},
 }
 
 // othersSynced says whether the informers of every kind but held have synced, read from the same
@@ -308,7 +311,7 @@ func (g *cachesRig) holdOne(t *testing.T, h cachesHold, k cachesKind, standby bo
 }
 
 // TestCachesNeedsEveryWatchedInformer is HBEP-11's case on a real manager built through
-// NewManager's production wiring, for each of the six kinds, each held two ways (through the
+// NewManager's production wiring, for each of the nine kinds, each held two ways (through the
 // manager's cache hook, and by holding the kind's initial list in front of the API server) and on
 // two copies. A leader holds the Lease. A standby starts with one kind's informer held unsynced:
 // its caches check fails and `hpcburst status` reads "starting"; once released its caches check

@@ -252,7 +252,7 @@ An Operation is a namespaced kind: one request to lower capacity, planned before
 #### The plan
 
 The lifecycle controller writes `status.plan` without side effects:
-- **each target:** its kind, name, UID and generation; its effect: cancel a pending Allocation, drain an Instance, drain the deployment's last ready Instance, release a kept Allocation, or keep an Allocation under its policy; whether the effect needs approval (What needs approval), and if so, each ApprovalPolicy that applies, with its generation and approvers;
+- **each target:** its kind, name, UID and generation; its effect: cancel a pending Allocation, drain an Instance, drain the deployment's last ready Instance, end an Instance that is still starting on a started Allocation, release a kept Allocation, or keep an Allocation under its policy; whether the effect needs approval (What needs approval), and if so, each ApprovalPolicy that applies, with its generation and approvers;
 - **the release cost** of every target that lowers capacity, whether or not it needs approval (The release cost);
 - **the observation time** of every fact;
 - **`id`:** a hash over the targets' UIDs and generations, their effects, which of them need approval, and the policies that apply. Cost figures are left out, since they age; the CLI shows their age instead.
@@ -282,7 +282,8 @@ The plan comes from the same code that executes: a `Scale` plan runs the control
 #### The report
 
 - `status.targets[]` holds one outcome per target: done, failed with its reason, or not started.
-- A target that fails is retried with backoff until it succeeds. The Operation is `PartlyFailed` meanwhile, never a single "rejected" (L-11.7).
+- A target that fails is retried with backoff until it succeeds, when a retry can succeed: a refused cancel, or the controller's own write error. The Operation is `PartlyFailed` meanwhile, never a single "rejected" (L-11.7).
+- **A failure no retry can fix is final** (science-agent ruling on #664, 16 Nov 2026). A committed `CancelPending` target whose job started between the commit and the act is never released under that approval, since the approval was to cancel a queued job: it's left to its retention policy, and its target is reported `Failed` with reason `JobStartedSinceCommit`. Once every target is done or finally failed, the Operation is `PartlyFailed` and finished, so it frees its deployment for the next Operation and is removed 7 days later. A target is never reported done when its approved act didn't happen. `OperationPartlyFailed` is raised either way.
 - A released Allocation is done when its object is gone. Its finalizer allows that only once every job with its tag is cancelled (HBEP-11, Ownership, records and deletion).
 
 ### What needs approval
@@ -295,6 +296,7 @@ The plan comes from the same code that executes: a `Scale` plan runs the control
 | Release an Allocation that its retention policy keeps | yes | HBEP-7, open question 8 |
 | Drain an Instance whose Allocation its retention then releases before its hard end: under `ReleaseWhenIdle`, a keep date before the hard end, or the profile's `maxIdle` | yes: a release of a started Allocation before its hard end | the science agent, review round of PR #582 |
 | Drain an Instance while another stays ready, its Allocation kept until its hard end | no | |
+| End an Instance that is still starting on a started Allocation (a scale-down's rank 1, HBEP-7, Reconcile loop, step 7), its Allocation then following retention | the drain's rule: yes when retention then releases the Allocation before its hard end, as in the two rows above; no when it is kept until its hard end | the science agent, ruling on question 10 of #589's plan, 15 Nov 2026 |
 | The controller's own release, under `ReleaseWhenIdle` after its idle limit, of an Allocation emptied under the agreed spec (a handover, a failure), with no Operation | no: the policy agreed to it | HBEP-7, open question 8 |
 | Repurpose under the agreed policy | no | owner, 14 Nov 2026 |
 | Delete audit records | a person, outside any policy | owner, 14 Nov 2026 |
@@ -584,7 +586,9 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-15: erratum (the science agent's ruling on #589's plan, Q7): ApprovalPolicy names are plain forms that admission checks, in place of a hashed long-value name, which CEL cannot compute.
 - 2026-11-15: a confirm exists only by an update that follows a written plan (for #589).
 - 2026-11-15: the capacity guard's allowlist admits an agent's change of `spec.hedgeWidth` (for #604, #589).
+- 2026-11-16: erratum (the science agent's ruling on #589's plan, Q10): `EndStarting` joins the plan's effects and What needs approval, with the drain's rule. A scale-down ends an Instance that is still starting on a started Allocation (HBEP-7, Reconcile loop, step 7), which neither drains nor cancels a pending Allocation, and the effect list had no entry for it.
 - 2026-11-16: erratum: the events stream never evicts, so a gap marker marks a subscriber behind a confirmed prune (HBEP-8's amendment of the same day, revised by its Fable review, PR #615).
+- 2026-11-16: a failure no retry can fix is final, and an Operation with only done and finally failed targets finishes `PartlyFailed` (for #664).
 
 ## Amendments
 
@@ -592,3 +596,4 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - **2026-11-15: no confirm at create** (Operations, Confirm). An amendment by the science agent's ruling on #593's review (#589): the CRD and the owner pin refuse `confirm` at create, the pin requires a written plan on update, and the controller refuses an Operation confirmed without a plan it wrote. Before, the set-once rule, which reads `oldSelf`, ran only on update, so an Operation could be created already confirmed with a precomputed plan ID, and a plan needing no approval would run with no one having seen it.
 - **2026-11-15: agents may set `hedgeWidth`** (The capacity guard). An amendment by the science agent's ruling on #606 (#604, #589). An agent's change of `spec.hedgeWidth`, either way, is on the allowlist: lowering it cancels nothing, and raising it reserves capacity, at a grant-hour cost the owner has accepted. Before, the field didn't exist, and the fail-closed allowlist would have refused it.
 - **2026-11-16: erratum** (Risks, Subscriptions nobody reads; Operational readiness 5). HBEP-8's beta design keeps the events stream for the grant, never evicting, by the owner's retention rule (owner, 14 Nov 2026; HBEP-8, Retention, In the durable log); a full stream refuses new events. A subscriber's gap marker therefore marks a reader that fell behind the stream's first sequence, which only a person's confirmed prune moves, and retention per event class (open question 8) is decided at stable within that rule. Found by the Fable review of PR #615. Before, the text said retention evicts by age or size, and a full log evicts its oldest events.
+- **2026-11-16: final failures** (Operations, The report). An amendment by the science agent's ruling on #664 (#589's PR 5). A failure no retry can fix, such as a pending target whose job started after the commit, is final: it isn't retried, its Allocation follows retention, and the Operation finishes `PartlyFailed` once every target is done or finally failed. Before, every failed target was retried until it succeeded, so an Operation with such a target would stay `PartlyFailed` and unfinished forever, blocking later Operations on its deployment.

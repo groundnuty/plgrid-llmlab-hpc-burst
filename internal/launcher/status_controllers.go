@@ -45,6 +45,14 @@ type EntryHealth struct {
 	// (HBEP-8, Usage records): "ok" or "failing". The front reports it; it is empty for a process
 	// whose body has no usage member, such as the controller.
 	UsageState string `json:"usage_state,omitempty"`
+	// UsageLog is the front's usage forwarder as its /healthz body states it in usage.log (HBEP-8,
+	// The durable log, When it is down): "connected" or "down". It is empty for a body that has no
+	// such member (an older front, or a process that is not the front). A front started without the
+	// log says "down" too, so status reads it only on a host whose recorded choice is the log.
+	UsageLog string `json:"usage_log,omitempty"`
+	// UsageBehindSince is when the front's usage records not yet in the log last became more than
+	// none, from usage.behindSince; nil while there are none.
+	UsageBehindSince *time.Time `json:"usage_behind_since,omitempty"`
 	// FrpsPluginOK is whether the front's frps plugin answered the launcher's no-op call on the
 	// front's health address (checkFrontPlugin): frps refuses every new proxy while it does not
 	// (HBEP-6, Admission and Operational readiness). nil: not asked, which is every process but the
@@ -61,17 +69,35 @@ type EntryHealth struct {
 	OpenFiles        *OpenFiles `json:"open_files,omitempty"`
 	OpenFilesUnknown string     `json:"open_files_unknown,omitempty"`
 	// Degraded names what is degraded while the process keeps serving, joined with "; ":
-	// DegradedUsage while its usage sink says failing, and DegradedOpenFiles while its descriptors
-	// in use pass 80% of its soft limit. It is not a health problem: the report stays healthy and
-	// status exits 0, and only this process's line says degraded (@hpc-burst-science-agent,
-	// 31 Oct 2026; HBEP-8, Usage records, and HBEP-11).
+	// DegradedUsage while its usage sink says failing, DegradedUsageLogBehind while the front's
+	// copy of its usage records in the durable log is behind (judgeUsageLog), and
+	// DegradedOpenFiles while its descriptors in use pass 80% of its soft limit. It is not a
+	// health problem: the report stays healthy and status exits 0, and only this process's line
+	// says degraded (@hpc-burst-science-agent, 31 Oct 2026; HBEP-8, Usage records, and HBEP-11).
 	Degraded string `json:"degraded,omitempty"`
 	Detail   string `json:"detail,omitempty"`
+	// Gate is why the process is not started while its start gate is closed (state gated): the
+	// durable log, whose caps do not fit the disk (eventlog_status.go). Degraded says it too.
+	Gate string `json:"gate,omitempty"`
+	// Streams are the durable log's streams with their bytes and messages, read from nats-server's
+	// monitoring port while the log answers its /healthz; empty for every other process.
+	Streams []StreamHealth `json:"streams,omitempty"`
 }
 
 // DegradedUsage is EntryHealth.Degraded for a failing usage sink. Status prints it as "degraded:
 // usage writes failing" (@hpc-burst-science-agent, 31 Oct 2026); it is never reported as unhealthy.
 const DegradedUsage = "usage writes failing"
+
+// DegradedUsageLogBehind is EntryHealth.Degraded for a front whose usage copy in the durable log is
+// behind (HBEP-8, The durable log, When it is down): its usage.log says down, or the records not
+// yet in the log have stayed above none for UsageLogBehindAfter. Status prints it as "degraded:
+// usage log behind", exit code 0, as for a failing sink: the files keep every record, so nothing is
+// lost.
+const DegradedUsageLogBehind = "usage log behind"
+
+// UsageLogBehindAfter is how long the front's unlogged usage records must have stayed above none
+// before status calls the front behind while its log is up: the 5 minutes of HBEP-8.
+const UsageLogBehindAfter = 5 * time.Minute
 
 // The usage member's states (HBEP-8): ok, or failing while records are lost.
 const (
@@ -90,7 +116,9 @@ const healthzTimeout = 3 * time.Second
 // the supervisor, nil when it is not running; the caller has already counted that against health.
 // It reads supervisor.json only for the list of children and their identities: every child is
 // checked here, through its own pidfd.
-func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, bad func(string, ...any)) {
+//
+// now is the clock behind the 5-minute rule for the front's usage copy in the durable log.
+func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, now func() time.Time, bad func(string, ...any)) {
 	var supRec *ProcRec
 	for i := range st.Procs {
 		if st.Procs[i].Name == supervisorName {
@@ -124,9 +152,24 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, b
 		return
 	}
 	for _, e := range f.Entries {
+		if eventLogGated(e) {
+			// Not started on purpose, with the reason on record: degraded, never a fault (HBEP-8, A log
+			// refused for space). The host stays healthy and status exits 0.
+			rep.Controllers = append(rep.Controllers, gatedEventLogHealth(e))
+			continue
+		}
 		eh, problems := checkEntry(sup, supRec.PID, e)
+		if e.Name == eventLogEntryName && !eh.Running {
+			// A log that exited refusing its settings names them, from the file it wrote first.
+			if p := eventLogRefusalProblem(l); p != "" {
+				problems = append(problems, p)
+			}
+		}
 		if st.BulkPath && e.Name == frontEntryName && eh.HealthzOK != nil && *eh.HealthzOK {
 			checkFrontBulkPlugin(e.Health, &eh, func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) })
+		}
+		if st.EventLog != nil && e.Name == frontEntryName {
+			judgeUsageLog(&eh, now())
 		}
 		rep.Controllers = append(rep.Controllers, eh)
 		for _, p := range problems {
@@ -250,7 +293,13 @@ func checkEntry(sup *procHandle, supPID int, e EntryRecord) (EntryHealth, []stri
 	if ok && e.Name == frontEntryName {
 		checkFrontPlugin(e.Health, &eh, add)
 	}
+	if ok && e.Name == eventLogEntryName {
+		checkEventLogStreams(e.Health, &eh, add)
+	}
 	if ok {
+		if e.Name == frontEntryName {
+			eh.UsageLog, eh.UsageBehindSince = usageLogOf(body)
+		}
 		// A failing usage sink is stated, never counted against health: the front keeps serving.
 		switch eh.UsageState = usageStateOf(body); {
 		case eh.UsageState == usageFailing:
@@ -313,6 +362,47 @@ func probeEndpoint(addr, path string, timeout time.Duration) (int, []byte, error
 // controllerEntryName is the lifecycle controller's entry in the supervised set and in
 // supervisor.json: the one process whose health is judged by its /readyz.
 const controllerEntryName = "controller"
+
+// judgeUsageLog names the front as behind with its usage copy in the durable log (HBEP-8, The
+// durable log, When it is down): while its usage.log says down, or the records not yet in the log
+// have stayed above none for UsageLogBehindAfter by the front's own record of when they began
+// (usage.behindSince). It runs only on a host whose recorded choice is the log: a front started
+// without it says "down" too. It says nothing for a body that states no log member, which is an
+// older front's, and never touches the host's health: the files keep every record.
+func judgeUsageLog(eh *EntryHealth, now time.Time) {
+	switch {
+	case eh.UsageLog == usageLogDown:
+		eh.addDegraded(DegradedUsageLogBehind)
+	case eh.UsageBehindSince != nil && now.Sub(*eh.UsageBehindSince) >= UsageLogBehindAfter:
+		eh.addDegraded(DegradedUsageLogBehind)
+	}
+}
+
+// The usage member's log states (HBEP-8).
+const (
+	usageLogDown = "down"
+)
+
+// usageLogOf returns the usage member's log state and behindSince from a /healthz body: "" and nil
+// when the body has none, or a time that does not parse (an unknown is not a reading).
+func usageLogOf(body []byte) (string, *time.Time) {
+	var b struct {
+		Usage *struct {
+			Log         string `json:"log"`
+			BehindSince string `json:"behindSince"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &b) != nil || b.Usage == nil {
+		return "", nil
+	}
+	var since *time.Time
+	if b.Usage.BehindSince != "" {
+		if t, err := time.Parse(time.RFC3339Nano, b.Usage.BehindSince); err == nil {
+			since = &t
+		}
+	}
+	return b.Usage.Log, since
+}
 
 // usageStateOf returns the usage member's state from a /healthz body (HBEP-8: /healthz carries
 // usage with state ok or failing), or "" when the body is not a JSON object with that member.

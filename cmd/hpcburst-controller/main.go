@@ -107,6 +107,11 @@ type flags struct {
 	// for none, alpha's shape. It is recorded in each Instance's launch at
 	// creation, so a restart with another value changes no running Instance.
 	instanceRouter string
+	// eventLogTokenFile is --event-log-token-file (beta; HBEP-8, The durable log; #625): the durable
+	// log's token, <state-dir>/eventlog/token, which the launcher passes only while it runs the log.
+	// The address is derived from --port-base (agentapi.Host.EventLogAddr). It is accepted and kept
+	// here and nothing reads it yet: the event publisher that connects with it is #625's PR E2.
+	eventLogTokenFile string
 }
 
 func parse(args []string, stderr io.Writer) (flags, error) {
@@ -124,12 +129,17 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.relayKeeperSocket, "relay-keeper-socket", "", "the relay keeper's Unix socket, in host-dialed mode only (beta): the keeper holds the relays; unset, the controller does (alpha)")
 	fs.BoolVar(&f.bulkPath, "bulk-path", false, "the launcher runs the second frps for the bulk path (beta): serve its plugin path, read its proxy list and stage the second certificate; direct and host-dialed mode only")
 	fs.StringVar(&f.instanceRouter, "instance-router", "", "the router each new Instance runs in front of its worker (beta): envoy; unset, none (alpha)")
+	fs.StringVar(&f.eventLogTokenFile, "event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. Accepted and stored, and not used yet: the publisher that connects to the log is a later change")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
 	switch {
 	case fs.NArg() > 0:
 		return flags{}, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	case f.eventLogTokenFile != "" && !filepath.IsAbs(f.eventLogTokenFile):
+		return flags{}, fmt.Errorf("--event-log-token-file %q must be an absolute path", f.eventLogTokenFile)
+	case f.eventLogTokenFile != "" && f.host.PortBase > 65535-agentapi.EventLogMonitorPortOffset:
+		return flags{}, fmt.Errorf("--port-base %d is out of range with --event-log-token-file: the block reaches base+%d", f.host.PortBase, agentapi.EventLogMonitorPortOffset)
 	case f.host.StateDir == "":
 		return flags{}, errors.New("--state-dir is required")
 	// The block ends at the controller's metrics, base+12 (HBEP-8, Metrics).

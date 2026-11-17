@@ -640,9 +640,27 @@ func allocatedCPUsOfTresList(l []tresEntry) *int32 {
 	return nil
 }
 
+// allocatedBillingOfTresList reads the scheduler's billing count of a
+// tres.allocated list: the count of its first entry of type billing (beta;
+// HBEP-8, Provider accounting, Billing). It is nil when the list has none, and
+// when that count cannot be read (tresCount); a later billing entry is not
+// looked at then.
+func allocatedBillingOfTresList(l []tresEntry) *int32 {
+	for _, e := range l {
+		if e.Type != "billing" {
+			continue
+		}
+		if n, ok := tresCount(e.Count); ok {
+			return &n
+		}
+		return nil
+	}
+	return nil
+}
+
 // accountingOf reads the allocated time of a job from its records, oldest
 // first, one per execution (HBEP-8, Provider accounting). The allocated counts
-// are the latest execution's; the elapsed time is time.elapsed summed over all
+// (CPUs, GPUs and the billing count) are the latest execution's; the elapsed time is time.elapsed summed over all
 // the executions. It is unknown when an execution has none, and when the records
 // are fewer than the executions the latest record's restart count says there
 // were (v0.0.42): an earlier execution that the read did not return would
@@ -652,6 +670,7 @@ func accountingOf(rs []accountingRecord) *provider.JobAccounting {
 	latest := rs[len(rs)-1]
 	a.AllocatedCPUs = allocatedCPUsOfTresList(latest.Tres.Allocated)
 	a.AllocatedGPUs, a.GPUsListed = allocatedGPUsOfTresList(latest.Tres.Allocated)
+	a.AllocatedBilling = allocatedBillingOfTresList(latest.Tres.Allocated)
 	var total time.Duration
 	for _, r := range rs {
 		v, ok := r.Time.Elapsed.value()

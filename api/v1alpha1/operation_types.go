@@ -415,6 +415,16 @@ type TargetOutcome struct {
 // is present with its reason in unknown, and never as a zero (HBEP-8, Notes:
 // unknown is a value).
 type ReleaseCost struct {
+	// Note says in words what releasing the target gives up where no figure
+	// applies: "no HPC capacity held" for the End of a managed-source
+	// deployment that holds no Allocation (`@hpc-burst-science-agent`, 16 Nov
+	// 2026, #653). It is not an unknown: unknown stays for a figure that
+	// applies and cannot be observed.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Note string `json:"note,omitempty"`
+
 	// LeaseLeft is a started Allocation's hard end minus observedAt.
 	//
 	// +optional

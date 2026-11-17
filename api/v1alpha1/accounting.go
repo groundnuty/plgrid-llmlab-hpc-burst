@@ -203,10 +203,11 @@ type AccountingRecordData struct {
 
 	// Unknown names each field above that is absent because it was not known,
 	// in the order AllocatedCPUs, AllocatedGPUs, ElapsedSeconds, StartTime,
-	// EndTime. NewAccountingRecord fills it, so it always matches the fields.
-	// The beta fields join it, in their order above, with the code that fills
-	// them (#625); until then a record has none of them, as one written before
-	// them.
+	// EndTime, then the beta fields AllocatedBilling, BillingUnit, Grant and
+	// Account. NewAccountingRecord fills it, so it always matches the fields. A
+	// record written before the beta fields names none of them, and has none:
+	// absent and not named is what a reader takes for "written before", and
+	// reads as unknown (HBEP-8, Provider accounting, Billing).
 	//
 	// +optional
 	Unknown []string `json:"unknown,omitempty"`
@@ -229,6 +230,18 @@ func (d AccountingRecordData) unknownFields() []string {
 	}
 	if d.EndTime == nil {
 		u = append(u, AccountingFieldEndTime)
+	}
+	if d.AllocatedBilling == nil {
+		u = append(u, AccountingFieldAllocatedBilling)
+	}
+	if d.BillingUnit == "" {
+		u = append(u, AccountingFieldBillingUnit)
+	}
+	if d.Grant == "" {
+		u = append(u, AccountingFieldGrant)
+	}
+	if d.Account == "" {
+		u = append(u, AccountingFieldAccount)
 	}
 	return u
 }

@@ -105,6 +105,7 @@ func TestUpAndStatusCheckTheAgentBuilds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	addControllerCRDs(t, manifests) // up starts the controller only on a host that has the definitions it watches
 
 	// ---- up with the profile and no builds: the host runs, up says what is missing and exits 4 ----
 	r := cli(t, h.upArgs(base, append(frpsArgs(t), "--json", "--controller-bin", ctl, "--manifests", manifests)...)...)

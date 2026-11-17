@@ -31,7 +31,7 @@ func TestRecordOfARequeuedAllocationHasNoHoursAndIsWrittenAtOnce(t *testing.T) {
 			t.Fatal("the Allocation of a requeued job waited for a final read")
 		}
 		e.wantRecord("a1", recWant{start: tp(at(12, 15, 0)), end: tp(at(12, 20, 0)), jobIDs: []string{"998"},
-			unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds"}})
+			unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "allocatedBilling"}})
 	})
 	// The read at delete no longer shows the requeue (one execution, restart
 	// count 0), but the stored status recorded it: still no hours.
@@ -54,7 +54,7 @@ func TestRecordOfARequeuedAllocationHasNoHoursAndIsWrittenAtOnce(t *testing.T) {
 			t.Fatal("the Allocation of a requeued job waited for a final read")
 		}
 		e.wantRecord("a1", recWant{start: tp(at(12, 15, 0)), end: tp(at(12, 20, 0)), jobIDs: []string{"998"},
-			unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds"}})
+			unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "allocatedBilling"}})
 	})
 	// The job is in neither source: the start is the stored status's.
 	t.Run("no source shows the job", func(t *testing.T) {
@@ -73,7 +73,7 @@ func TestRecordOfARequeuedAllocationHasNoHoursAndIsWrittenAtOnce(t *testing.T) {
 			t.Fatal("the Allocation of a requeued job, read by neither source, waited for a final read")
 		}
 		e.wantRecord("a1", recWant{start: tp(at(12, 15, 0)), jobIDs: []string{"998"},
-			unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "endTime"}})
+			unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "endTime", "allocatedBilling"}})
 	})
 }
 

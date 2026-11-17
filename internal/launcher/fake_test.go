@@ -168,6 +168,10 @@ type fakeHost struct {
 	// request. A non-zero status with a body is served as JSON.
 	profilesStatus int
 	profilesBody   string
+	// globalPolicyStatus and globalPolicyBody are what the API server answers to a get of
+	// ApprovalPolicy/global (status reports it): the default, 0, is a server without the policy (404).
+	globalPolicyStatus int
+	globalPolicyBody   string
 	// writeStatus, when not 0, is the status the write probe's patch is answered with, with a Status
 	// body: 504, the answer of an API server whose store blocks (#192). The default succeeds.
 	writeStatus int
@@ -199,6 +203,10 @@ func newFakeHost(t *testing.T) *fakeHost {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(h.profilesStatus)
 			fmt.Fprint(w, h.profilesBody)
+		case r.Method == http.MethodGet && r.URL.Path == globalPolicyPath && h.globalPolicyStatus != 0:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(h.globalPolicyStatus)
+			fmt.Fprint(w, h.globalPolicyBody)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+AgentsNamespace+"/serviceaccounts":
 			// status asks for the agents' ServiceAccounts (identity_status.go): an API server answers
 			// a list of a namespace it holds, here with none.

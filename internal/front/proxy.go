@@ -158,7 +158,8 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 		p.fail(w, x, http.StatusBadRequest, codeInvalidRequest, "", "model", err.Error())
 		return
 	}
-	x.rec.RequestedModel = rb.model
+	// The record keeps a bounded copy of what the client sent; the grammar, the routing and the answer below use the whole name (recorded_text.go).
+	x.rec.RequestedModel = boundedText(rb.model, maxRoutableNameBytes)
 	x.rec.Stream = rb.stream
 	n, err := naming.Parse(rb.model)
 	if err != nil {
