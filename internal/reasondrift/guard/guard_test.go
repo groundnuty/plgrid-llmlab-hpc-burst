@@ -595,7 +595,7 @@ func mutantOverlay(t *testing.T) map[string][]byte {
 		// wrapped in two more packages.
 		// (The log option the call took is kept in use, so the changed file still compiles.)
 		filepath.Join(root, "internal/lifecycle/manager.go"): replaceIn(t, replaceOnce(t, "internal/lifecycle/manager.go",
-			"logOpt := o.EventLog.Option(", "_ = o.EventLog.Option("), "internal/lifecycle/manager.go",
+			"logOpt := o.EventLog.OptionFor(", "_ = o.EventLog.OptionFor("), "internal/lifecycle/manager.go",
 			"eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle, logOpt)",
 			"mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle)"),
 		filepath.Join(root, "internal/lifecycle/zz_mutant_recorders.go"): []byte(mutantLifecycleRecorders),
