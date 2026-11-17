@@ -118,6 +118,10 @@ type Counter struct {
 	// forgetMid, when set (tests only), is called by Forget between retiring the controller's route and
 	// deleting its series, the window in which an event of the controller can still be lost.
 	forgetMid func()
+	// forgetDecided, when set (tests only), is called by Forget after it has decided whether the label has
+	// another registration, and before it retires the route: the window in which a Zero could register, if
+	// nothing ordered it behind the Forget.
+	forgetDecided func()
 }
 
 // forgetHook registers f to run when the controller's series are forgotten.
@@ -259,6 +263,9 @@ func (c *Counter) Forget(controller string, series []Series) {
 		hooks = append([]func(){}, c.onForget[controller]...)
 	}
 	c.mu.Unlock()
+	if c.forgetDecided != nil {
+		c.forgetDecided()
+	}
 	for _, f := range hooks {
 		f() // retire the route: this waits for a raise that is handing its event to the recorder
 	}

@@ -267,7 +267,7 @@ func TestARegistrationInTheMiddleOfAForgetKeepsTheSeriesItCreated(t *testing.T) 
 	inner2 := &recInner{}
 	rec2 := Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
 	zeroed := make(chan struct{})
-	r.counter.forgetMid = func() { // the Forget has decided it was the last, and retired the route
+	r.counter.forgetDecided = func() { // the Forget has decided it was the last, and has not yet retired the route
 		go func() { r.counter.Zero(ctl, setB); close(zeroed) }()
 		select {
 		case <-zeroed: // nothing ordered it behind the Forget
@@ -336,6 +336,39 @@ func (c *Counter) registered(controller string, series []Series) bool {
 	return ok
 }
 
+// The seam that pins the order: a Zero that starts between Forget's decision that it was the last registration and its
+// retirement of the route is ordered behind the Forget, so the route it finds afterwards is dead and it revives it.
+func TestARegistrationBetweenAForgetsDecisionAndItsRetirementIsNotRetired(t *testing.T) {
+	clk := &fakeClock{t: base}
+	ctl := ControllerProvider("p1")
+	setA, setB := seriesSetA(), seriesSetB()
+	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, setA)
+	inner2 := &recInner{}
+	rec2 := Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
+	zeroed := make(chan struct{})
+	r.counter.forgetDecided = func() {
+		go func() { r.counter.Zero(ctl, setB); close(zeroed) }()
+		select {
+		case <-zeroed: // nothing ordered it behind the Forget
+		case <-time.After(time.Second): // it waits its turn
+		}
+	}
+	r.counter.Forget(ctl, setA)
+	select {
+	case <-zeroed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Zero did not finish after the Forget")
+	}
+	if rt := r.peekRoute(ctl); rt == nil || rt.isDead() {
+		t.Fatal("the label's route is dead though a manager registered between the Forget's decision and its retirement")
+	}
+	rec2.EventfID("dec-b", alloc(crashUID), nil, provider.EventKindOrdinary, "JobEnded", "ended", "%s", "a note")
+	clk.set(base.Add(101 * time.Second))
+	within(t, 20*time.Second, "the new manager's loss to be counted", func() bool { v, _ := r.counter.Unlogged(ctl); return v >= 1 })
+	within(t, 20*time.Second, "the new manager's EventsNotLogged", func() bool { return len(inner2.byReason(ReasonEventsNotLogged)) == 1 })
+}
+
 // A Zero makes the label's unlogged series stand at 0 when its route is live, not only when it revives it: a
 // registration that finds the series absent, as when an attach landed between a retirement and the deletes,
 // leaves it absent until the first loss otherwise, and an absent series reads as a log that never failed.
@@ -349,5 +382,29 @@ func TestAZeroCreatesTheUnloggedSeriesOfALiveRoute(t *testing.T) {
 	r.counter.Zero(ctl, seriesSetA())
 	if v, exists := r.counter.Unlogged(ctl); !exists || v != 0 {
 		t.Errorf("the unlogged series after the Zero is %v (exists %v), want 0 and existing", v, exists)
+	}
+}
+
+// Two managers of one label share a series, as the batch and managed sets of a Provider always do
+// (ObservationGap and EventsNotLogged are in both): forgetting one keeps the shared series and deletes only the
+// ones that were its own.
+func TestForgettingOneOfTwoOverlappingSetsKeepsTheSharedSeries(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	setA, setB := seriesSetA(), seriesSetB()
+	r := newRig(t, ctl, true, bigCaps, nil, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, setA)
+	r.counter.Zero(ctl, setB)
+	r.counter.Forget(ctl, setA)
+	if n := raisedSeries(r.counter, ctl, ReasonEventsNotLogged); n != 1 {
+		t.Errorf("%d EventsNotLogged series after forgetting one of two managers that both raise it, want the shared one kept", n)
+	}
+	if n := raisedSeries(r.counter, ctl, "JobStarted"); n != 0 {
+		t.Errorf("%d JobStarted series after forgetting the manager that alone raised it, want none", n)
+	}
+	if n := raisedSeries(r.counter, ctl, "JobEnded"); n != 1 {
+		t.Errorf("%d JobEnded series, want the other manager's own", n)
+	}
+	if _, exists := r.counter.Unlogged(ctl); !exists {
+		t.Error("the unlogged series went with the first manager")
 	}
 }
