@@ -471,7 +471,7 @@ The control plane replaces the files and scripts that held www-2027's state: per
 - 2026-11-15: amendment following HBEP-10 (PR #582): its three kinds; its three admission policies, with no webhook; agent and controller identities, the roles and the global ApprovalPolicy; the audit policy and rotation; the release cause; the Provider's grant end; the start estimate's writer; removing the CRD guard stays a person's step.
 - 2026-11-16: with `up --event-log`, the launcher supervises HBEP-8's durable log, and the upgrade's backup copies its store (HBEP-8's amendment of the same day).
 - 2026-11-16: revised by its Fable review (PR #615): the upgrade keeps one copy of the log's store, under the free-space floor, and a log refused for space leaves the control plane running without it, loudly, until it fits.
-- 2026-11-17: erratum (the science agent's S3 ruling on #660, 17 Nov 2026): the audit policy's "writes" are update, patch, delete and deletecollection, so an Allocation's create stays at `Metadata`; HBEP-10's kinds are logged at `RequestResponse` for their writes and at `Metadata` for their reads, with no `managedFields` in a logged body (HBEP-10, Audit).
+- 2026-11-17: erratum (the science agent's S3 ruling on #660, 17 Nov 2026): HBEP-10 left the audit policy to be fixed by the measurement of the log's size, and S3's measurement decided it: HBEP-10's kinds are logged at `RequestResponse` for their writes and at `Metadata` for their reads, with no `managedFields` in a logged body, and the "writes" to Allocations are update, patch, delete and deletecollection, so an Allocation's create stays at `Metadata` (HBEP-10, Audit).
 
 ## Amendments
 
