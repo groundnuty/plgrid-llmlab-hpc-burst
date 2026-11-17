@@ -69,6 +69,14 @@ type raiseJob struct {
 	started bool      // the notifier has taken it: it is no longer updated in place
 }
 
+// hold makes the closing job report sp as well as what it holds already: the earliest loss, the counts
+// summed, the latest generation.
+func (j *raiseJob) hold(sp span) {
+	h := span{gen: j.upTo, since: j.since, count: j.count}
+	h.add(sp)
+	j.upTo, j.since, j.count = h.gen, h.since, h.count
+}
+
 // jobData is what a started job says.
 type jobData struct {
 	kind      jobKind

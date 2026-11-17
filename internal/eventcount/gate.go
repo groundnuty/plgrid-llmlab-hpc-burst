@@ -17,7 +17,9 @@ package eventcount
 // one is handed to the recorder: the span of a run stays owed while its closing is queued, and if the
 // closing is itself lost, the next closing covers every unreported run, since the earliest unreported loss,
 // with the counts summed. A closing is raised at the end of a run and at any later publish the log takes
-// while a span is still owed.
+// while a span is still owed. The runs not yet reported are kept as ONE aggregate (the earliest loss, the
+// summed count, the latest generation), however many there are, so that a controller that can never raise a
+// closing (it has no Lease) holds a fixed amount of state and does a fixed amount of work per publish.
 //
 // Raising is the notifier's, in a goroutine of its own (notlogged.go). At most one loss job and one closing
 // job wait for it per route, and a new one for the same route and kind updates the waiting job in place, so
@@ -27,11 +29,27 @@ package eventcount
 
 import "time"
 
-// span is a run that has ended and that no stored closing event reports yet.
+// span is runs that have ended and that no stored closing event reports yet: one run, or the aggregate of
+// several. The zero span, with no events, is nothing.
 type span struct {
-	gen   uint64
-	since time.Time // the run's first loss
-	count int       // the events it did not log
+	gen   uint64    // the latest run's generation
+	since time.Time // the earliest first loss
+	count int       // the events not logged, summed
+}
+
+// add folds o into the span: the earliest loss, the counts summed, the latest generation.
+func (s *span) add(o span) {
+	switch {
+	case o.count == 0:
+	case s.count == 0:
+		*s = o
+	default:
+		if o.since.Before(s.since) {
+			s.since = o.since
+		}
+		s.count += o.count
+		s.gen = max(s.gen, o.gen)
+	}
 }
 
 // gate is the loss state of a route, guarded by route.mu.
@@ -44,8 +62,8 @@ type gate struct {
 	lastRaise time.Time // when this run's latest loss raise was handed over; zero until one was
 
 	loss    *raiseJob // the outstanding loss job: waiting for the notifier or running
-	owed    []span    // ended runs whose span no stored closing reports yet, oldest first
-	closing *raiseJob // the outstanding closing job: waiting, running, or its event queued and not yet settled
+	owed    span      // ended runs that no closing job holds and no stored closing event reports: one aggregate
+	closing *raiseJob // the outstanding closing job: waiting, running, or its event queued and not yet settled; it holds the runs it reports
 
 	emitting *raiseJob // the job whose recorder call is in progress on the notifier's goroutine
 }
@@ -131,7 +149,7 @@ func (r *route) logged(it *item) {
 	// pending counts the event just stored, which is still in flight.
 	if r.losing && (!r.runFull || (pending-1)*2 < r.p.o.QueueSize) {
 		r.losing = false
-		r.owed = append(r.owed, span{gen: r.gen, since: r.runStart, count: r.runCount})
+		r.owed.add(span{gen: r.gen, since: r.runStart, count: r.runCount})
 	}
 	job := r.closingJobLocked(now)
 	r.mu.Unlock()
@@ -140,48 +158,42 @@ func (r *route) logged(it *item) {
 	}
 }
 
-// closingJobLocked returns the closing job to push, if a span is owed and none is outstanding. A closing
-// that waits for the notifier is updated in place instead, and nil is returned.
+// closingJobLocked returns the closing job to push, if a span is owed and none is outstanding. The job takes
+// the owed span: it holds the runs it reports until its event is stored or lost. A closing that waits for the
+// notifier takes the span in place instead, and nil is returned; one that has started leaves it owed.
 func (r *route) closingJobLocked(now time.Time) *raiseJob {
-	if len(r.owed) == 0 {
+	if r.owed.count == 0 {
 		return nil
-	}
-	since, count, upTo := r.owed[0].since, 0, r.owed[len(r.owed)-1].gen
-	for _, s := range r.owed {
-		count += s.count
 	}
 	if j := r.closing; j != nil {
 		if !j.started {
-			j.since, j.count, j.upTo, j.at = since, count, upTo, now
+			j.hold(r.owed)
+			j.at = now
+			r.owed = span{}
 		}
 		return nil
 	}
-	j := &raiseJob{r: r, kind: jobRecovery, upTo: upTo, count: count, since: since, at: now}
+	j := &raiseJob{r: r, kind: jobRecovery, at: now}
+	j.hold(r.owed)
+	r.owed = span{}
 	r.closing = j
 	return j
 }
 
-// closingStoredLocked settles a closing whose event the log has stored: the runs it reported are no longer
-// owed. A run that ended after the closing was made stays owed.
+// closingStoredLocked settles a closing whose event the log has stored: the runs it held are reported. A run
+// that ended after the closing started is in r.owed and stays owed.
 func (r *route) closingStoredLocked(j *raiseJob) {
-	if j.kind != jobRecovery {
-		return
-	}
-	k := 0
-	for k < len(r.owed) && r.owed[k].gen <= j.upTo {
-		k++
-	}
-	r.owed = r.owed[k:]
-	if r.closing == j {
+	if j.kind == jobRecovery && r.closing == j {
 		r.closing = nil
 	}
 }
 
-// closingLostLocked settles a closing whose event was lost, or never made: its span stays owed, and the next
-// publish the log takes raises a closing for it.
+// closingLostLocked settles a closing whose event was lost, or never made: the runs it held are owed again,
+// and the next publish the log takes raises a closing for them with whatever has ended since.
 func (r *route) closingLostLocked(j *raiseJob) {
 	if j.kind == jobRecovery && r.closing == j {
 		r.closing = nil
+		r.owed.add(span{gen: j.upTo, since: j.since, count: j.count})
 	}
 }
 
