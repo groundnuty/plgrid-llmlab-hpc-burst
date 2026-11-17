@@ -380,8 +380,8 @@ The audit is the API server's audit log together with the release cause that the
 
 - **Today** the launcher logs every API request at the Metadata level, with no bodies (`internal/launcher/k3s.go:55`): the user, the verb, the object, the time and the response code. That names who asked and who approved, but not the plan.
 - **The policy** (proposed, by an amendment to HBEP-11). Audit policy levels run from `None` to `RequestResponse`, which logs "request metadata, request body and response body" ([auditing](https://github.com/kubernetes/website/blob/main/content/en/docs/tasks/debug/debug-cluster/audit.md), accessed 2026-11-14):
-  - this HBEP's kinds, Operation, Approval and ApprovalPolicy, at `RequestResponse`, so the log holds each request with its purpose, the plan and the per-target outcomes from the controller's status writes, and each Approval with the plan it names;
-  - the lifecycle controller's writes to Allocations at `Request`, so the release cause is logged before the delete that follows;
+  - this HBEP's kinds, Operation, Approval and ApprovalPolicy: their writes (create, update, patch, delete and deletecollection) at `RequestResponse`, so the log holds each write with its purpose, the plan and the per-target outcomes from the controller's status writes, and each Approval with the plan it names; their reads at `Metadata`, since the controllers list them on every pass; and no logged body carries `managedFields`;
+  - the lifecycle controller's writes to Allocations (update, patch, delete and deletecollection; a create stays at `Metadata`) at `Request`, so the release cause is logged before the delete that follows;
   - the controllers' Lease renewals and reads at `None`: they carry no decision, and they would fill most of the log;
   - everything else at `Metadata`, so a Secret's content is still never logged (HBEP-11, Security).
 - **The release cause.** Before the lifecycle controller deletes an Allocation, it writes the annotation `hpcburst.groundnuty.github.io/release-cause`. It holds the rule followed, the reason the controller already computes (`internal/lifecycle/writes.go:106`, such as "released when idle, after 30m" or "its deployment was deleted"), or the Operation's namespace, name and UID. So a retention release names its policy in the log, with no approval asked.
@@ -611,6 +611,7 @@ The primitives replace www-2027 practices: a shared gate on a common host (slots
 - 2026-11-16: the committed effect is checked by value before anything is released; if a spec edit undid it, the Operation fails finally with `SpecChangedSinceCommit` (for #664).
 - 2026-11-17: `LastReadySinceCommit` applies only to a `Scale` above zero; a final outcome is never acted on again (for #664).
 - 2026-11-17: an untaken unit gives back its share of the count, absolute and recorded; a target whose job started since the commit is kept warm by a durable mark, with a finalizer for `End` with `delete` (for #664; revised by its Fable and Gemini Carbon reviews, PR #698).
+- **2026-11-17: erratum** (Audit). By the science agent's S3 ruling on #660, 17 Nov 2026. The policy's "writes" are update, patch, delete and deletecollection, so a create of an Allocation stays at `Metadata`. This HBEP's kinds are logged at `RequestResponse` for their writes (create, update, patch, delete and deletecollection) and at `Metadata` for their reads, and no logged body carries `managedFields`: the measurement of the combined run (`internal/audit/e2e`) showed that logging the controllers' lists of these kinds with their whole answers was about half of an idle controller's log. Size stays a live week's to measure.
 
 ## Amendments
 

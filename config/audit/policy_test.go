@@ -132,9 +132,12 @@ func TestThePolicyGivesEachRequestItsLevel(t *testing.T) {
 	add(request{user: provider, verb: "update", group: hbGroup, resource: "providers", subresource: "status"}, meta, "providers/status")
 
 	// Rule 3, Request: the lifecycle controller's writes to Allocations.
-	for _, verb := range []string{"update", "patch", "delete"} {
+	for _, verb := range []string{"update", "patch", "delete", "deletecollection"} {
 		add(request{user: lifecycle, verb: verb, group: hbGroup, resource: "allocations"}, req, "rule 3: the lifecycle controller's Allocation write")
 	}
+	// The other users' deletecollection of Allocations stays at Metadata, as their other writes do.
+	add(request{user: provider, verb: "deletecollection", group: hbGroup, resource: "allocations"}, meta, "the Provider controller's collection delete of Allocations")
+	add(request{user: person, verb: "deletecollection", group: hbGroup, resource: "allocations"}, meta, "the person's collection delete of Allocations")
 	// Its non-matches: another verb, the status subresource, another user, another group.
 	for _, c := range []struct {
 		r   request

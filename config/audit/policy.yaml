@@ -16,8 +16,8 @@
 #                       controllers list these kinds on every reconcile pass, and a list logged with its whole answer
 #                       was most of an idle controller's log (measured in internal/audit/e2e, issue #660, S3). A
 #                       subresource is its own resource here: operations/status is not matched by operations.
-#   3. Request          the lifecycle controller's writes to Allocations, so a release cause is logged before
-#                       the delete that follows.
+#   3. Request          the lifecycle controller's writes to Allocations (update, patch, delete and deletecollection),
+#                       so a release cause is logged before the delete that follows. A create stays at Metadata.
 #   4. Metadata         everything else: the user, the verb, the object, the time and the answer, and never a
 #                       body, so no Secret's content is logged.
 #
@@ -51,7 +51,7 @@ rules:
   - level: Request
     users:
       - system:serviceaccount:hpcburst-system:hpcburst-lifecycle
-    verbs: ["update", "patch", "delete"]
+    verbs: ["update", "patch", "delete", "deletecollection"]
     resources:
       - group: hpcburst.groundnuty.github.io
         resources: ["allocations"]
