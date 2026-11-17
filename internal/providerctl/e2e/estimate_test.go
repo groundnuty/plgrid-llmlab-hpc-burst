@@ -134,7 +134,8 @@ func ownsEstimates(op *v1alpha1.Operation) []string {
 // covers both targets, written by server-side apply under the Provider's estimate manager.
 // P2: a re-plan with a new ID asks again and the entry replaces the old plan's; the same ID again asks nothing.
 func TestTheProviderEstimatesOnePerPlanAndShapeAndWritesThemByApply(t *testing.T) {
-	r := newEvRig(t, rigOpts{})
+	// No durable log: the estimate rows read no event, and a rig with the log starts the controller binary as a child process.
+	r := newEvRig(t, rigOpts{noLog: true})
 	r.sl.SetTestOnlyRaw(probeEpoch)
 	a1, a2 := r.newAlloc("est-alloc-1", "30m"), r.newAlloc("est-alloc-2", "30m")
 	stop := startEstimateManager(t, r)
