@@ -434,8 +434,7 @@ const (
 // tool-call smoke test judges (owner approval on #127). The settled round's
 // time per output token and time to first token are the throughput.
 func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, string, *v1alpha1.Throughput) {
-	rounds := append([]agentapi.WarmUpRound(nil), w.Rounds...)
-	sort.Slice(rounds, func(i, j int) bool { return rounds[i].Round < rounds[j].Round })
+	rounds := sortedRounds(w)
 	for _, r := range rounds {
 		for _, q := range r.Requests {
 			if q.Error != "" {
@@ -443,15 +442,41 @@ func judgeWarmUp(w *agentapi.WarmUpResult, targetSessions int32) (warmUpState, s
 			}
 		}
 	}
-	for i := 1; i < len(rounds); i++ {
-		if agentapi.WarmUpSettled(rounds[i-1], rounds[i]) {
-			return warmUpSettled, fmt.Sprintf("settled in round %d", rounds[i].Round), throughput(rounds[i], targetSessions)
-		}
+	if i := settledAt(rounds); i > 0 {
+		return warmUpSettled, fmt.Sprintf("settled in round %d", rounds[i].Round), throughput(rounds[i], targetSessions)
 	}
 	if w.Done || len(rounds) >= agentapi.MaxWarmUpRounds {
 		return warmUpFailed, fmt.Sprintf("warm-up did not settle after %d rounds", len(rounds)), nil
 	}
 	return warmUpRunning, "", nil
+}
+
+// sortedRounds is the warm-up's rounds in round order.
+func sortedRounds(w *agentapi.WarmUpResult) []agentapi.WarmUpRound {
+	rounds := append([]agentapi.WarmUpRound(nil), w.Rounds...)
+	sort.Slice(rounds, func(i, j int) bool { return rounds[i].Round < rounds[j].Round })
+	return rounds
+}
+
+// settledAt is the index of the first round that settled against the one before it, or 0 when none has: the
+// round whose requests are the warm-up's throughput.
+func settledAt(rounds []agentapi.WarmUpRound) int {
+	for i := 1; i < len(rounds); i++ {
+		if agentapi.WarmUpSettled(rounds[i-1], rounds[i]) {
+			return i
+		}
+	}
+	return 0
+}
+
+// settledRound is the round whose concurrent requests make the warm-up's throughput: the first that settled
+// against the round before it. The throughput gate reads the shape that round ran (gateRanShape).
+func settledRound(w *agentapi.WarmUpResult) (agentapi.WarmUpRound, bool) {
+	rounds := sortedRounds(w)
+	if i := settledAt(rounds); i > 0 {
+		return rounds[i], true
+	}
+	return agentapi.WarmUpRound{}, false
 }
 
 func throughput(r agentapi.WarmUpRound, targetSessions int32) *v1alpha1.Throughput {

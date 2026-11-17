@@ -29,6 +29,9 @@ const (
 // reports, then ready. A part that exits, or a start that outlasts
 // health.startTimeout, is a malfunction.
 func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av agentView, st settings) error {
+	if acted, err := p.resumeGateFailure(in, alloc); acted || err != nil {
+		return err
+	}
 	if several(in) {
 		return p.startingWorkers(in, alloc, av, st)
 	}
@@ -90,17 +93,32 @@ func (p *pass) starting(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, av ag
 		case warmUpRunning:
 			return nil
 		}
-		// The throughput gate judges the settled round in the write that records it, before the tunnel,
-		// router and ready gates below. It only records, so none of them waits on it (HBEP-7, The
-		// throughput gate). It is nil once the gate has given its verdict, which no later warm-up changes.
-		gate := p.gateRecord(in, sh, []*v1alpha1.Throughput{tp})
+		// The throughput gate judges the settled round before the Instance is warmed up, the tunnel, the
+		// router and ready (HBEP-7, The throughput gate): a first miss restarts the worker, which measures
+		// again, and a second fails the Instance. Otherwise its verdict is recorded in the write that
+		// records the warm-up. It gives no work once the gate has given its verdict, which no later warm-up
+		// changes.
+		work, err := p.gateJudge(in, sh, []gateWorker{{name: v1alpha1.WorkerName(0), tp: tp, warm: c.WarmUp, record: in.Status.VerificationRecord}})
+		if err != nil {
+			return err
+		}
+		// A Passed or Missed verdict counts toward its entry's suspension before the Instance's own write.
+		if err := p.recordVerdict(in, alloc, work); err != nil {
+			return err
+		}
+		switch {
+		case work.fail != nil:
+			return p.failGate(in, alloc, work.fail)
+		case work.restart != nil:
+			return p.restartForGate(in, alloc, work.restart, st)
+		}
 		if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 			cond(&s.Conditions, v1alpha1.ConditionWarmedUp, metav1.ConditionTrue, v1alpha1.ReasonPassed, msg, in.Generation, now)
 			if tp != nil {
 				s.Throughput = tp
 			}
-			if gate != nil {
-				gate(s)
+			if work.record != nil {
+				work.record(s)
 			}
 		}); err != nil {
 			return err

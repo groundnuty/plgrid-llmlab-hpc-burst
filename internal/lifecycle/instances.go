@@ -147,9 +147,18 @@ func (p *pass) allocationFailed(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 // is written Failed, status False (api/v1alpha1/conditions.go, ReasonFailed), and the Instance ends with
 // QualificationFailed. A failed verification writes its own condition where the verdict is recorded (verified).
 func (p *pass) failCheck(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, typ, msg string) error {
+	return p.failCheckWith(in, alloc, typ, msg, nil)
+}
+
+// failCheckWith is failCheck with also: a change to the status made in the write that fails the condition (the
+// throughput gate records its verdict through it).
+func (p *pass) failCheckWith(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, typ, msg string, also func(*v1alpha1.InstanceStatus)) error {
 	now := metav1.NewTime(p.now)
 	if err := p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
 		cond(&s.Conditions, typ, metav1.ConditionFalse, v1alpha1.ReasonFailed, msg, in.Generation, now)
+		if also != nil {
+			also(s)
+		}
 	}); err != nil {
 		return err
 	}

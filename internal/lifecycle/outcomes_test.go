@@ -84,6 +84,50 @@ func TestTheStartOutcomeOfAnInstance(t *testing.T) {
 	}
 }
 
+// Each outcome carries the gate's verdict and the matched entry's date (HBEP-7, How k adjusts, Recorded), in the one
+// classifier, for a ready Instance and an ended one alike: a gate failure is Failed with QualificationFailed and
+// carries Missed with the date; a pass carries Passed, a suspended entry Suspended, and an Instance judged with no
+// entry RecordOnly, which carries no date, though its record may (an aged entry's). An Instance whose first miss still
+// awaits its retry, and one that never reached the gate, carry none.
+func TestTheStartOutcomeCarriesTheGateVerdict(t *testing.T) {
+	r, e := hoT(8, 1, 10), hoT(8, 5, 0)
+	gate := func(verdict, date string, misses int) *v1alpha1.InstanceGate {
+		g := &v1alpha1.InstanceGate{Verdict: verdict, ReferenceDate: date}
+		for range misses {
+			g.Misses = append(g.Misses, v1alpha1.GateMiss{Worker: "worker-0"})
+		}
+		return g
+	}
+	for _, c := range []struct {
+		name     string
+		in       *v1alpha1.Instance
+		wantGate string
+		wantDate string
+		want     string
+	}{
+		{"a gate failure", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), nil, &e, v1alpha1.ReasonQualificationFailed, ""), gate("Missed", "2026-10-23", 2)), "Missed", "2026-10-23", v1alpha1.StartOutcomeFailed},
+		{"a pass, ready", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), &r, nil, "", ""), gate("Passed", "2026-10-23", 0)), "Passed", "2026-10-23", v1alpha1.StartOutcomeReady},
+		{"a pass on its retry, ready", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), &r, nil, "", ""), gate("Passed", "2026-10-23", 1)), "Passed", "2026-10-23", v1alpha1.StartOutcomeReady},
+		{"a suspended entry, ready", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), &r, nil, "", ""), gate("Suspended", "2026-10-23", 0)), "Suspended", "2026-10-23", v1alpha1.StartOutcomeReady},
+		{"no entry, ready", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), &r, nil, "", ""), gate("RecordOnly", "", 0)), "RecordOnly", "", v1alpha1.StartOutcomeReady},
+		{"an aged entry, ready: its date is not kept", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), &r, nil, "", ""), gate("RecordOnly", "2026-08-04", 0)), "RecordOnly", "", v1alpha1.StartOutcomeReady},
+		{"a pass, ranked out before ready", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), nil, &e, v1alpha1.ReasonRankedOut, ""), gate("Passed", "2026-10-23", 0)), "Passed", "2026-10-23", v1alpha1.StartOutcomeReady},
+		{"a first miss awaiting its retry, then a restart loop", instWithGate(outcomeInstance("i", "a", hoT(8, 0, 0), nil, &e, v1alpha1.ReasonRestartLoop, ""), gate("", "2026-10-23", 1)), "", "", v1alpha1.StartOutcomeFailed},
+		{"never at the gate", outcomeInstance("i", "a", hoT(8, 0, 0), nil, &e, v1alpha1.ReasonRegistrationTimeout, ""), "", "", v1alpha1.StartOutcomeFailed},
+	} {
+		o, ok := startOutcomeOf(c.in, started("a", "u1"))
+		if !ok || o.Result != c.want || o.Gate != c.wantGate || o.ReferenceDate != c.wantDate {
+			t.Errorf("%s: %v %+v, want %s with gate %q and date %q", c.name, ok, o, c.want, c.wantGate, c.wantDate)
+		}
+	}
+}
+
+// instWithGate sets the Instance's gate record.
+func instWithGate(in *v1alpha1.Instance, g *v1alpha1.InstanceGate) *v1alpha1.Instance {
+	in.Status.Gate = g
+	return in
+}
+
 func TestClassCounts(t *testing.T) {
 	o := func(result, reason string) v1alpha1.StartOutcome {
 		return v1alpha1.StartOutcome{Result: result, Reason: reason}
