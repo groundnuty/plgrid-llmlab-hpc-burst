@@ -1,10 +1,9 @@
 package lifecycle
 
 // Operations in the reconcile pass (HBEP-10, Operations; HBEP-7, Reconcile loop, the Operations step;
-// #589 plan, 7.1 to 7.3). This is the PLANNING half: the pass plans every Operation that names its
-// ModelDeployment, with no side effect but the Operation's own status, counts the Approvals of a confirmed
-// one, and sets its phase. It executes nothing: a confirmed Operation whose approvals are all in waits
-// with Executable=False, reason ExecutionNotBuilt, until the execution lands (PR 5).
+// #589 plan, 7.1 to 7.5). The pass plans every Operation that names its ModelDeployment, counts the
+// Approvals of a confirmed one, and, once every target that needs an approval has it, checks the plan for
+// staleness, commits it and executes it (opexec.go).
 //
 // The step sits between step 6 (the Instances' phases) and step 7 (capacity), so the planner sees the
 // phases step 6 just advanced. It runs whether or not the ModelDeployment exists: an Operation that names
@@ -18,14 +17,17 @@ package lifecycle
 //   - confirmed: the plan is frozen and never rewritten. A confirm whose plan ID is not the one this
 //     controller wrote and still holds in status is Refused: the backstop of HBEP-10's invariant, that a
 //     confirm exists only by an update that follows a written plan. Otherwise the Approvals are counted:
-//     AwaitingApproval while a target that needs one lacks it, and Executable=False/ExecutionNotBuilt when
-//     none does.
+//     AwaitingApproval while a target that needs one lacks it. With every approval in (or none needed) the
+//     plan is recomputed once, from what this pass read: a different ID turns the Operation Stale, terminal;
+//     the same ID commits it (Executing) and the pass acts on what it committed;
+//   - Executing: acted on by the committed list alone, and never planned again (executing).
 //
-// Done, Stale, Refused, Executing and PartlyFailed are not this step's to move.
+// Done, Stale and Refused are terminal and not this step's to move.
 
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -104,10 +106,13 @@ func (e *opEnv) request(op *v1alpha1.Operation, at metav1.Time) (planRequest, er
 	return req, nil
 }
 
-// operations is the pass's Operations step. It lists the namespace's Operations through the uncached
-// reader and keeps those that name this ModelDeployment, in p.ops: Reconcile keeps the key alive while
-// there is one. A failure of one Operation does not stop the others; they are returned joined.
-func (p *pass) operations() error {
+// loadOperations lists the namespace's Operations through the uncached reader and keeps those that name this
+// ModelDeployment, in p.ops, oldest first (the order the Operations are committed in, so two that are ready at once
+// commit in the order they were made): Reconcile keeps the key alive while there is one. It reads once per pass.
+func (p *pass) loadOperations() error {
+	if p.opsLoaded {
+		return nil
+	}
 	var list v1alpha1.OperationList
 	if err := p.r.Reader.List(p.ctx, &list, client.InNamespace(p.key.Namespace)); err != nil {
 		return fmt.Errorf("list Operations: %w", err)
@@ -118,11 +123,32 @@ func (p *pass) operations() error {
 			p.ops = append(p.ops, op)
 		}
 	}
+	sort.SliceStable(p.ops, func(i, j int) bool {
+		a, b := p.ops[i], p.ops[j]
+		if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+			return a.CreationTimestamp.Before(&b.CreationTimestamp)
+		}
+		return a.Name < b.Name
+	})
+	p.opsLoaded = true
+	return nil
+}
+
+// operations is the pass's Operations step. A failure of one Operation does not stop the others; they are
+// returned joined.
+func (p *pass) operations() error {
+	if err := p.loadOperations(); err != nil {
+		p.opsHold = true // an Operation may be committed and its spec unwritten: nothing is created in a pass that cannot tell
+		return err
+	}
 	env := &opEnv{p: p}
 	var errs []error
 	for _, op := range p.ops {
 		if err := p.operation(op, env); err != nil {
 			errs = append(errs, fmt.Errorf("Operation %s: %w", op.Name, err))
+		}
+		if err := p.releaseOperationFinalizer(op); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
@@ -131,9 +157,12 @@ func (p *pass) operations() error {
 // operation advances one Operation.
 func (p *pass) operation(op *v1alpha1.Operation, env *opEnv) error {
 	switch op.Status.Phase {
-	case v1alpha1.OperationPhaseRefused, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale,
-		v1alpha1.OperationPhaseExecuting, v1alpha1.OperationPhasePartlyFailed:
+	case v1alpha1.OperationPhaseRefused, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale:
 		return nil
+	case v1alpha1.OperationPhaseExecuting, v1alpha1.OperationPhasePartlyFailed:
+		// Committed: acted on by its committed list, never planned again, whatever the state is now. A PartlyFailed one with a
+		// finish time has only final failures left, and is done with.
+		return p.executing(op)
 	}
 	if op.Spec.Confirm != nil {
 		return p.confirmedOperation(op, env)
@@ -196,7 +225,7 @@ func figuresOnly(p *v1alpha1.OperationPlan) *v1alpha1.OperationPlan {
 }
 
 // confirmedOperation handles an Operation whose owner confirmed a plan: the plan is frozen, the backstop
-// checks the confirm, and the Approvals are counted.
+// checks the confirm, the Approvals are counted, and an Operation that is ready goes to the stale check.
 func (p *pass) confirmedOperation(op *v1alpha1.Operation, env *opEnv) error {
 	plan := op.Status.Plan
 	if plan == nil || plan.ID != op.Spec.Confirm.PlanID || planID(op.Spec.Action, plan.ModelDeployment, plan.Targets) != plan.ID {
@@ -226,22 +255,14 @@ func (p *pass) confirmedOperation(op *v1alpha1.Operation, env *opEnv) error {
 			waiting = append(waiting, s)
 		}
 	}
+	if len(waiting) == 0 {
+		// Nothing needs approval, or every target that does has it: the stale check, then the commit.
+		return p.readyOperation(op, env, plan, standings)
+	}
 	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 		s.ObservedGeneration = op.Generation
-		switch {
-		case len(standings) == 0:
-			// Nothing needs approval: the Operation stays as it was, and goes to the commit when
-			// execution exists.
-			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonExecutionNotBuilt,
-				"confirmed, and no target needs approval; this release plans Operations and does not execute them")
-		case len(waiting) == 0:
-			s.Phase = v1alpha1.OperationPhaseAwaitingApproval
-			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonExecutionNotBuilt,
-				"confirmed, and every target that needs approval has it; this release plans Operations and does not execute them")
-		default:
-			s.Phase = v1alpha1.OperationPhaseAwaitingApproval
-			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonAwaitingApproval, waitMessage(waiting))
-		}
+		s.Phase = v1alpha1.OperationPhaseAwaitingApproval
+		p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonAwaitingApproval, waitMessage(waiting))
 		p.setPolicyCondition(s, op, waiting)
 	})
 }
@@ -319,14 +340,18 @@ func (p *pass) setOperationStatus(op *v1alpha1.Operation, mutate func(*v1alpha1.
 }
 
 // opsNamingKey is whether a NON-terminal Operation names the pass's ModelDeployment: Reconcile keeps requeueing
-// the key of a deleted deployment while one does, so it is still planned, and later executed and reported. A
-// terminal one (Done, Stale, Refused) holds the key no longer: nothing removes a finished Operation until PR 5, so
-// holding it would requeue a deleted deployment every 30 s for as long as its Operations exist. Not terminal is no
-// phase yet, Planned, AwaitingApproval, Executing and PartlyFailed.
+// the key of a deleted deployment while one does, so it is still planned, executed and reported (End with delete
+// writes its final report). A terminal one (Done, Stale, Refused) holds the key no longer: it stays until the TTL
+// removes it, 7 days after it finished, and holding the key for it would requeue a deleted deployment every 30 s for
+// that long. Not terminal is no phase yet, Planned, AwaitingApproval, Executing and PartlyFailed.
 func (p *pass) opsNamingKey() bool {
 	for _, op := range p.ops {
 		switch op.Status.Phase {
 		case v1alpha1.OperationPhaseRefused, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale:
+		case v1alpha1.OperationPhasePartlyFailed:
+			if !finishedOperation(op) {
+				return true
+			}
 		default:
 			return true
 		}

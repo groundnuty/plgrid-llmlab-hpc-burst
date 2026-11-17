@@ -12,6 +12,7 @@ package lifecycle
 // agent A and not agent B. The rows run in the order below, since the first of them to change the world is the last.
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -348,8 +349,66 @@ func TestAgentCLIOnAControlPlane(t *testing.T) {
 		}
 	})
 
+	// Row 11 reads the world as rows 1 to 3 left it: row1 waiting for its approval, and the pending Allocation still there. Row 4
+	// executes that plan and changes the world, so it runs last.
 	t.Run("row 11: inventory shows the world, selects by owner, shows an object with no owner as unknown, and only reads", func(t *testing.T) {
 		w.inventoryRow(t, asA, asB)
+	})
+
+	t.Run("row 4: A's approval, through the CLI, runs the plan to Done: the pending Allocation goes, the started one stays", func(t *testing.T) {
+		r := w.cli(t, asA, false, "", "approve", "row1", "--plan", rowID)
+		if r.code != 0 {
+			t.Fatalf("exit %d, stderr %q", r.code, r.errs)
+		}
+		cliHas(t, "stdout", r.out, "approved plan "+rowID+" of Operation row1 as "+e.a.user)
+		done := w.operationIs(t, "row1", "is Done", hasPhase(v1alpha1.OperationPhaseDone))
+		var gone v1alpha1.Allocation
+		if err := e.admin.c.Get(e.ctx, types.NamespacedName{Namespace: rigNS, Name: "alloc-p"}, &gone); !apierrors.IsNotFound(err) {
+			t.Errorf("the pending Allocation: %v, want NotFound", err)
+		}
+		var kept v1alpha1.Allocation
+		if err := e.admin.c.Get(e.ctx, types.NamespacedName{Namespace: rigNS, Name: "alloc-r"}, &kept); err != nil {
+			t.Errorf("the started Allocation: %v, want it kept", err)
+		}
+		var ready v1alpha1.Instance
+		if err := e.admin.c.Get(e.ctx, types.NamespacedName{Namespace: rigNS, Name: "inst-r"}, &ready); err != nil || ready.Status.Phase != v1alpha1.InstanceReady {
+			t.Errorf("the ready Instance: %v, phase %q, want it untouched and Ready", err, ready.Status.Phase)
+		}
+		for _, o := range done.Status.Targets {
+			if o.State != v1alpha1.TargetStateDone {
+				t.Errorf("target %s %s is %s %s, want Done", o.Kind, o.Name, o.State, o.Reason)
+			}
+		}
+		// The report as the CLI shows it, read by agent A.
+		show := w.cli(t, asA, false, "", "operation", "row1", "--json")
+		if show.code != 0 {
+			t.Fatalf("operation --json: exit %d, stderr %q", show.code, show.errs)
+		}
+		var doc struct {
+			SchemaVersion int `json:"schemaVersion"`
+			Operation     struct {
+				Phase   string `json:"phase"`
+				Targets []struct {
+					Kind, Name, State string
+				} `json:"targets"`
+			} `json:"operation"`
+		}
+		if err := json.Unmarshal([]byte(show.out), &doc); err != nil {
+			t.Fatalf("operation --json is not JSON: %v\n%s", err, show.out)
+		}
+		if doc.SchemaVersion != 1 || doc.Operation.Phase != "Done" || len(doc.Operation.Targets) == 0 {
+			t.Fatalf("operation --json: %+v, want schema 1, phase Done and a report", doc)
+		}
+		sawAlloc := false
+		for _, tg := range doc.Operation.Targets {
+			sawAlloc = sawAlloc || (tg.Kind == "Allocation" && tg.Name == "alloc-p")
+			if tg.State != "Done" {
+				t.Errorf("the report shows %s %s as %s, want Done", tg.Kind, tg.Name, tg.State)
+			}
+		}
+		if !sawAlloc {
+			t.Errorf("the report names no target alloc-p: %+v", doc.Operation.Targets)
+		}
 	})
 
 	if errs := w.unexpectedStepErrors(); len(errs) > 0 {

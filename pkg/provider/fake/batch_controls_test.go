@@ -177,3 +177,52 @@ func TestCancelOfAHeldJob(t *testing.T) {
 		t.Fatalf("LiftHold of the cancelled job = %v, want ErrNotHeld", err)
 	}
 }
+
+// FailCancels: a live job's cancel fails with the error and changes nothing, an unknown job and an ended one answer as
+// before, the call is logged as scancel each time, and clearing it lets the cancel through. The expected results are
+// written out by hand.
+func TestFailCancelsFailsALiveJobsCancelAndChangesNothing(t *testing.T) {
+	b, clock := newTestBatch(t)
+	b.Enqueue(Script{QueueWait: 5 * time.Minute}, Script{QueueWait: 5 * time.Minute})
+	live := mustSubmit(t, b, gpuReq("example-tag", false))
+	other := mustSubmit(t, b, gpuReq("example-other", false))
+	boom := errors.New("scancel: Socket timed out on send/recv operation")
+	b.FailCancels(boom)
+
+	res := b.Cancel(context.Background(), []string{live, "999999"})
+	if len(res) != 2 {
+		t.Fatalf("%d results for 2 jobs", len(res))
+	}
+	if res[0].JobID != live || res[0].Outcome != provider.CancelError || !errors.Is(res[0].Err, boom) {
+		t.Errorf("a live job's cancel: %+v, want CancelError with the injected error", res[0])
+	}
+	if res[1].Outcome != provider.CancelError || !errors.Is(res[1].Err, provider.ErrNotFound) {
+		t.Errorf("an unknown job's cancel: %+v, want ErrNotFound as without the fault", res[1])
+	}
+	wantPhase(t, b, live, v1alpha1.AllocationPending) // still pending: nothing was cancelled
+	if n := b.Count("scancel"); n != 2 {
+		t.Errorf("scancel logged %d times, want 2: the call is logged whether or not it fails", n)
+	}
+
+	clock.Set(at(12, 6, 0))
+	wantPhase(t, b, live, v1alpha1.AllocationRunning)
+	if res := b.Cancel(context.Background(), []string{live}); res[0].Outcome != provider.CancelError {
+		t.Errorf("a running job's cancel: %+v, want CancelError", res[0])
+	}
+
+	b.FailCancels(nil)
+	if res := b.Cancel(context.Background(), []string{live}); res[0].Outcome != provider.Cancelled {
+		t.Errorf("after clearing the fault: %+v, want Cancelled", res[0])
+	}
+	j := wantPhase(t, b, live, v1alpha1.AllocationEnded)
+	if j.State[0] != "CANCELLED" {
+		t.Errorf("state %v, want CANCELLED", j.State)
+	}
+	// An ended job answers AlreadyEnded with the fault set again: the fault is for a live job's cancel.
+	b.FailCancels(boom)
+	if res := b.Cancel(context.Background(), []string{live}); res[0].Outcome != provider.AlreadyEnded {
+		t.Errorf("an ended job's cancel: %+v, want AlreadyEnded", res[0])
+	}
+	// The other job was never cancelled.
+	wantPhase(t, b, other, v1alpha1.AllocationRunning)
+}
