@@ -108,9 +108,8 @@ func TestTheBudgetCountsFromWhenTheEventWasQueued(t *testing.T) {
 	}
 	clk.set(base.Add(101 * time.Second))
 	eventually(t, "the event to be lost at 101 s", func() bool { return r.unlogged(ctl) == 1 })
-	if got := r.pub.Pending(); got != 0 {
-		t.Errorf("%d events still pending after the budget was spent", got)
-	}
+	// The count rises before the publisher's slot is freed, so the queue empties a moment after it.
+	r.settled()
 }
 
 // The budget keeps every retry inside the stream's duplicate window, so that a retry never stores a
