@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "result": "approved",
+  "approval": {
+    "name": "scale-m-711ca51436",
+    "namespace": "team",
+    "operation": "scale-m",
+    "planID": "0123456789abcdef",
+    "approver": {
+      "user": "system:serviceaccount:hpcburst-agents:agent-a",
+      "groups": ["system:serviceaccounts", "system:serviceaccounts:hpcburst-agents", "system:authenticated"]
+    }
+  }
+}
