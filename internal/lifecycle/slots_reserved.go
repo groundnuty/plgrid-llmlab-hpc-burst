@@ -152,6 +152,9 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 	// deployment's extra check (#616 PR 4).
 	surplus := map[*v1alpha1.Instance]bool{}
 	for _, v := range views {
+		if profile == nil {
+			break // no replacement slot is reserved without a profile, so the selection has nothing to decide
+		}
 		set, err := surplusOf(ctx, r, v, mds)
 		if err != nil {
 			return nil, err
@@ -285,8 +288,8 @@ func deploymentViews(ctx context.Context, r client.Reader, onProvider []v1alpha1
 // name owned, in the pass's order, and the deployment's Allocations), so the two make one selection (a parity
 // test pins it). A deployment that is gone has no ModelDeployment to read, and its Instances hold nothing here.
 func surplusOf(ctx context.Context, r client.Reader, v deploymentView, mds map[string]*v1alpha1.ModelDeployment) (map[*v1alpha1.Instance]bool, error) {
-	if len(v.insts) == 0 {
-		return nil, nil
+	if len(v.insts) == 0 || deploymentKey(v.insts[0]) == v.insts[0].Namespace+"/" {
+		return nil, nil // no Instance, or one that names no deployment: nothing to select over
 	}
 	md, err := deploymentOf(ctx, r, v.insts[0], mds)
 	if err != nil || md == nil {

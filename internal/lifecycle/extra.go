@@ -104,7 +104,11 @@ func (p *pass) holdsHandoverSlotLater(c *v1alpha1.Instance, a *v1alpha1.Allocati
 	if err != nil {
 		return true
 	}
-	drainStart := c.CreationTimestamp.Time.Add(limit).Add(-drainWindowOf(pv, p.md))
+	created := c.CreationTimestamp.Time
+	if created.IsZero() {
+		created = p.now // an Instance this pass made, before the API server stamped it
+	}
+	drainStart := created.Add(limit).Add(-drainWindowOf(pv, p.md))
 	return servesPast(p.md, drainStart)
 }
 
