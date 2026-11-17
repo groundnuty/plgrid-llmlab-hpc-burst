@@ -155,31 +155,47 @@ func assertNoControllerRequestRefused(t testing.TB, auditLog string) {
 
 // controllerIdentities makes the controller identities ready under state exactly as hpcburst up does, and asks the
 // API server who each kubeconfig is, through that kubeconfig. It returns the lifecycle's and the Provider
-// managers' kubeconfigs, the two the controller binary reads.
+// managers' kubeconfigs, the two the controller binary reads. The roles are installed and the tokens issued once
+// per API server, by the launcher's own function; a later state directory of the same API server gets the same
+// three files (the same tokens, which are valid for the whole server), so that a suite that prepares many
+// state directories does not repeat fifteen applies and three token requests in each.
 func (api *apiServer) controllerIdentities(t testing.TB, state string) (lifecycle, provider string) {
 	t.Helper()
-	ids, err := launcher.PrepareControllerIdentities(context.Background(), api.cfg, state, io.Discard)
-	if err != nil {
-		t.Fatalf("make the controller identities ready: %v", err)
-	}
-	if len(ids) != 3 {
-		t.Fatalf("%d controller identities were issued, want 3", len(ids))
-	}
-	for _, id := range ids {
-		if got := whoAmI(t, id.Kubeconfig, ""); got != id.Username || got != "system:serviceaccount:hpcburst-system:"+id.Name {
-			t.Fatalf("the kubeconfig of %s authenticates as %q, want %q", id.Name, got, id.Username)
+	api.idMu.Lock()
+	defer api.idMu.Unlock()
+	if api.idFiles == nil {
+		ids, err := launcher.PrepareControllerIdentities(context.Background(), api.cfg, state, io.Discard)
+		if err != nil {
+			t.Fatalf("make the controller identities ready: %v", err)
 		}
-		switch id.Name {
-		case launcher.ControllerLifecycleIdentity:
-			lifecycle = id.Kubeconfig
-		case launcher.ControllerProviderIdentity:
-			provider = id.Kubeconfig
+		if len(ids) != 3 {
+			t.Fatalf("%d controller identities were issued, want 3", len(ids))
+		}
+		api.idFiles = map[string][]byte{}
+		for _, id := range ids {
+			if got := whoAmI(t, id.Kubeconfig, ""); got != id.Username || got != controllerSA+id.Name {
+				t.Fatalf("the kubeconfig of %s authenticates as %q, want %q", id.Name, got, id.Username)
+			}
+			b, err := os.ReadFile(id.Kubeconfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.idFiles[id.Name] = b
+		}
+	} else {
+		dir := filepath.Dir(launcher.ControllerKubeconfig(state, launcher.ControllerLifecycleIdentity))
+		for _, d := range []string{filepath.Dir(dir), dir} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, b := range api.idFiles {
+			if err := os.WriteFile(launcher.ControllerKubeconfig(state, name), b, 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
-	if lifecycle == "" || provider == "" {
-		t.Fatalf("no lifecycle or provider identity among %+v", ids)
-	}
-	return lifecycle, provider
+	return launcher.ControllerKubeconfig(state, launcher.ControllerLifecycleIdentity), launcher.ControllerKubeconfig(state, launcher.ControllerProviderIdentity)
 }
 
 // restFor reads a kubeconfig file into a client configuration, under userAgent when one is given.

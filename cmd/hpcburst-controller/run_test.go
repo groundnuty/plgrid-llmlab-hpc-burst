@@ -130,6 +130,10 @@ type apiServer struct {
 	// auditLog is the API server's audit log file, which records each request the controllers' identities made
 	// and how it was answered (identities_test.go).
 	auditLog string
+	// idMu guards idFiles: the three controller kubeconfigs as the launcher's function issued them for this API
+	// server, by identity name; nil until the first state directory is prepared (controllerIdentities).
+	idMu    sync.Mutex
+	idFiles map[string][]byte
 }
 
 // startAPIServer starts etcd and kube-apiserver on ports the kernel chose,
