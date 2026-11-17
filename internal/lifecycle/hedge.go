@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -32,9 +33,45 @@ import (
 // winner's name. Its drain then ends with HedgeLost rather than Drained (drainEndReason), across a restart.
 const annotationHedgeLost = v1alpha1.Group + "/hedge-lost"
 
+// annotationCandidateOf is on a hedge's started loser that was kept as an over-allocation candidate at the win
+// (HBEP-7, Over-allocation and qualification (beta), Hedging's started losers; #616, PR 5): the winner's name. It is
+// written in the pass that resolves the hedge, before the loser's checks end, so a restarted controller reads it
+// from the object. It stays on the Instance for good, which is how its end is read: a marked Instance ends with
+// HedgeLost only at its ranking point, after it passed its checks (startOutcomeOf). It is a lifecycle-owned
+// annotation, proposed for api/v1alpha1/constants.go beside annotationRankedOut.
+const annotationCandidateOf = v1alpha1.Group + "/candidate-of"
+
+// candidateOf is the winner a marked Instance is the candidate of, or "".
+func candidateOf(in *v1alpha1.Instance) string { return in.Annotations[annotationCandidateOf] }
+
+// candidateWinnerOf is the winner a kept started loser still waits on: the Instance its mark names, when the Instance
+// has never been ready and that winner is countable (not ended, draining or deleting) and not stale. Such a
+// candidate is the surplus of its Provider whatever its rank, and is ranked against that winner alone
+// (HBEP-7, Hedging's started losers, How it counts). One whose winner has gone is chosen like any
+// Instance: the round's primary failed, so its extra is chosen in its place and no Allocation is made (How it counts).
+// named finds an Instance by name among the deployment's. The pass and the selection both read it through here, so
+// they never disagree.
+func candidateWinnerOf(in *v1alpha1.Instance, named func(string) *v1alpha1.Instance, stale map[types.UID]bool) *v1alpha1.Instance {
+	name := candidateOf(in)
+	if name == "" || in.Status.ReadyTime != nil || ended(in) {
+		return nil
+	}
+	w := named(name)
+	if w == nil || !countable(w) || stale[w.UID] {
+		return nil
+	}
+	return w
+}
+
 // hedgeKey is the hedge an Instance belongs to: its AnnotationHedgeGroup, or its own name for a first member or a
-// hedge of one.
+// hedge of one. A kept started loser, which carries annotationCandidateOf, is a hedge of one of its own from the
+// win on, under a key no member's can be: it is ranked against its hedge's winner and is no part of the hedge's
+// count, so the winner is never read as a member beside it (hedgeWinner would keep choosing the earlier ready
+// member, and resolveHedges would end the candidate once it served).
 func hedgeKey(in *v1alpha1.Instance) string {
+	if candidateOf(in) != "" {
+		return "candidate/" + in.Name
+	}
 	if k := in.Annotations[v1alpha1.AnnotationHedgeGroup]; k != "" {
 		return k
 	}
@@ -181,7 +218,8 @@ func (p *pass) replacementMembers(in *v1alpha1.Instance) []*v1alpha1.Instance {
 }
 
 // resolveHedges resolves every hedge whose member is ready: that member wins, and each other live member loses by
-// its own state (HBEP-7, Hedging (beta), The winner and the losers; step 6). The winner is read as this pass left
+// its own state (HBEP-7, Hedging (beta), The winner and the losers; step 6). A started loser may instead be kept as
+// an over-allocation candidate (keepsStartedLoser), which takes it out of the hedge. The winner is read as this pass left
 // it, after its phase was advanced, and a winner whose Allocation is being deleted resolves nothing, so no loser
 // ends beside a winner that no longer serves. Losers already draining or ended are skipped, so a pass cut short in
 // the middle is finished by the next one.
@@ -233,17 +271,21 @@ func (p *pass) allocationStillServes(in *v1alpha1.Instance) (bool, error) {
 
 // loseHedge takes one loser out of its resolved hedge (HBEP-7, Hedging (beta)): a pending one is cancelled, its
 // Allocation deleted; a started one ends with HedgeLost and keeps its Allocation, whose retention policy then
-// applies (anchorIfLast writes idle-since); a ready one drains first, marked so its drain ends with HedgeLost.
-// Each raises replaced with reason HedgeLost, regarding the loser, with the winner related. No approval is asked:
-// cancelling a hedge loser needs none (HBEP-10, What needs approval).
+// applies (anchorIfLast writes idle-since), or, with over-allocation on and no surplus or warm Allocation of the
+// deployment on its Provider, is kept as a candidate (keepsStartedLoser); a ready one drains first, marked so its
+// drain ends with HedgeLost. Each that ends raises replaced with reason HedgeLost, regarding the loser, with the
+// winner related. No approval is asked: cancelling a hedge loser needs none (HBEP-10, What needs approval).
 func (p *pass) loseHedge(key string, l, w *v1alpha1.Instance) error {
+	a := p.allocOf(l)
+	if l.Status.Phase != v1alpha1.InstanceReady && jobStarted(a) && p.keepsStartedLoser(l) {
+		return p.markCandidate(l, w)
+	}
 	// The words are the controller's own, so they are the release cause of a pending loser's Allocation too
 	// (endCause): "Instance <loser> ended: hedge lost to <winner>, ...".
 	msg := fmt.Sprintf("hedge lost to %s, on Provider %s (hedge %s)", w.Name, w.Labels[v1alpha1.LabelProvider], key)
 	if p.mem.once("hedge-lost/" + string(l.UID)) {
 		p.r.Recorder.Event(l, w, eventReplaced, v1alpha1.ReasonHedgeLost, msg)
 	}
-	a := p.allocOf(l)
 	switch {
 	case l.Status.Phase == v1alpha1.InstanceReady:
 		if err := p.setMeta(l, func(n *v1alpha1.Instance) {
@@ -260,6 +302,41 @@ func (p *pass) loseHedge(key string, l, w *v1alpha1.Instance) error {
 	default:
 		return p.end(l, a, v1alpha1.ReasonHedgeLost, msg, true)
 	}
+}
+
+// keepsStartedLoser reports whether a hedge's started loser, whose job has started and which is not ready, is kept
+// as an over-allocation candidate at the win, not ended (HBEP-7, Over-allocation and qualification (beta), Hedging's
+// started losers; D1): k is at least 1, it has never been ready, the deployment has no surplus Instance on its
+// Provider in the selection but it, and no warm Allocation there (warmOf, the extra's bound). The loser is then that
+// Provider's one surplus, and k's bound holds. Otherwise it ends at the win, as Hedging says.
+func (p *pass) keepsStartedLoser(l *v1alpha1.Instance) bool {
+	if p.md == nil || p.md.Spec.OverAllocationCount() < 1 || l.Status.ReadyTime != nil {
+		return false
+	}
+	pv := p.pvOf(l.Labels)
+	if pv == nil || len(p.warmOf(pv)) > 0 {
+		return false
+	}
+	_, surplus := selectPrimaries(p.selection(nil), p.desiredCount())
+	for _, rep := range surplus {
+		for _, m := range p.membersOf(rep) {
+			if m != l && m.Labels[v1alpha1.LabelProvider] == pv.name {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// markCandidate keeps a started loser as a candidate: its mark names the winner. The write is the whole act; its
+// Instance runs its checks as any does, and the ranking (rankCandidate) decides its end. Once per loser.
+func (p *pass) markCandidate(l, w *v1alpha1.Instance) error {
+	return p.setMeta(l, func(n *v1alpha1.Instance) {
+		if n.Annotations == nil {
+			n.Annotations = map[string]string{}
+		}
+		n.Annotations[annotationCandidateOf] = w.Name
+	})
 }
 
 // hedgeProviders describes, for Progressing's message, each hedge that has more than one live member and no

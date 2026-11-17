@@ -54,23 +54,33 @@ type selUnit struct {
 	passed  bool
 	started bool
 	marked  bool
+	// candidate: a kept started loser still waiting on its winner (candidateWinnerOf). It is surplus whatever its
+	// rank (HBEP-7, How it counts: a hedge's started loser kept as a candidate is surplus on its Provider too).
+	candidate bool
 }
 
 // primaryCandidatesOf are the Instances that count towards capacity, each member of a hedge apart: not draining,
-// ended or deleting, not stale, and not the replacement of a predecessor that still counts.
+// ended or deleting, not stale, and not the replacement of a predecessor that still counts. Two replacements are
+// counted all the same, so that the selection reads them (#616, PR 5): a kept started loser still waiting on its
+// winner (candidateWinnerOf), which is its Provider's surplus though its hedge is a replacement hedge, and a
+// replacement winner a candidate outranked (markedOut), whose drain step 7 then takes.
 func primaryCandidatesOf(insts []*v1alpha1.Instance, stale map[types.UID]bool) []*v1alpha1.Instance {
 	counted := map[string]bool{}
+	byName := map[string]*v1alpha1.Instance{}
 	for _, in := range insts {
+		byName[in.Name] = in
 		if countable(in) && !stale[in.UID] {
 			counted[in.Name] = true
 		}
 	}
+	named := func(name string) *v1alpha1.Instance { return byName[name] }
 	var out []*v1alpha1.Instance
 	for _, in := range insts {
 		if !countable(in) || stale[in.UID] {
 			continue
 		}
-		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] {
+		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] &&
+			candidateWinnerOf(in, named, stale) == nil && !markedOut(in, byName) {
 			continue
 		}
 		out = append(out, in)
@@ -120,6 +130,7 @@ func (s selection) units() []selUnit {
 		}
 		u.started = jobStarted(s.allocOf(rep))
 		u.marked = markedOut(rep, byName)
+		u.candidate = candidateWinnerOf(rep, func(name string) *v1alpha1.Instance { return byName[name] }, s.stale) != nil
 		out = append(out, u)
 	}
 	return out
@@ -207,14 +218,14 @@ func (s selection) ordered() []selUnit {
 	return us
 }
 
-// selectUnits is the selection by hedge: the chosen units, the first desired in HBEP-7's order (a marked peer
-// excepted: it is surplus), and the surplus units, both in that order. Instances that do not count, and a
+// selectUnits is the selection by hedge: the chosen units, the first desired in HBEP-7's order (a marked peer and a
+// kept started loser waiting on its winner excepted: they are surplus), and the surplus units, both in that order. Instances that do not count, and a
 // replacement whose predecessor still counts, are in neither: a replacement is never ranked. selectPrimaries
 // reads the representatives of these units; reservedOn reads their members (a surplus hedge's every member
 // holds no reserved slot).
 func selectUnits(s selection, desired int) (chosen, surplus []selUnit) {
 	for _, u := range s.ordered() {
-		if !u.marked && len(chosen) < desired {
+		if !u.marked && !u.candidate && len(chosen) < desired {
 			chosen = append(chosen, u)
 			continue
 		}

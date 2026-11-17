@@ -82,9 +82,15 @@ func inSelection(reps []*v1alpha1.Instance, in *v1alpha1.Instance) bool {
 // is then ranked against the peers: the chosen primaries on its Provider that are ready and have no live
 // replacement, which is a handover ranking leaves alone.
 func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ready func() error) error {
+	// A kept started loser is ranked against its hedge's winner alone, before the selection is read: its hedge is a
+	// replacement hedge or not, and whatever the selection says of its Provider's other primaries, they are no peers of
+	// it (HBEP-7, Hedging's started losers).
+	if w := p.candidateWinner(in); w != nil {
+		return p.rankCandidate(in, alloc, w, ready)
+	}
 	chosen, surplus := selectPrimaries(p.selection(in), p.desiredCount())
 	if !inSelection(surplus, in) || inSelection(chosen, in) {
-		return ready()
+		return p.readyUnmarked(in, ready)
 	}
 	// A peer that carries the mark has already lost to the Instance the mark names: it is a candidate that restarted
 	// inside the front's window and re-passed. It never outranks. Were it ranked, a better re-measurement could mark
@@ -114,10 +120,14 @@ func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, rea
 	if !outranks(in, peer) {
 		return p.rankOut(in, alloc, peer)
 	}
-	// The writes go in this order, so the intent is durable before either Instance changes: the peer's mark, the
-	// candidate's becoming ready, then, once the front's probe has had its interval since the candidate became
-	// healthy (frontAdmitsAt), the peer's drain (step 7, through scaleDownTargets), and its RankedOut event
-	// (rankedOutPeer).
+	return p.outrank(in, peer, ready)
+}
+
+// outrank makes the candidate ready over its peer. The writes go in this order, so the intent is durable before either
+// Instance changes: the peer's mark, the candidate's becoming ready, then, once the front's probe has had its
+// interval since the candidate became healthy (frontAdmitsAt), the peer's drain (step 7, through scaleDownTargets),
+// and its RankedOut event (rankedOutPeer).
+func (p *pass) outrank(in, peer *v1alpha1.Instance, ready func() error) error {
 	if peer.Annotations[annotationRankedOut] != in.Name {
 		if err := p.setMeta(peer, func(n *v1alpha1.Instance) {
 			if n.Annotations == nil {
@@ -135,6 +145,57 @@ func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, rea
 		p.at(at)
 	}
 	return nil
+}
+
+// readyUnmarked makes an Instance ready that the selection chose or that no ranking holds, and clears the candidate
+// mark of one whose winner has gone: it is chosen like any Instance, with no peer (the winner it was kept beside
+// failed, and its extra is chosen in its place: HBEP-7, How it counts).
+func (p *pass) readyUnmarked(in *v1alpha1.Instance, ready func() error) error {
+	if candidateOf(in) != "" {
+		if err := p.setMeta(in, func(n *v1alpha1.Instance) { delete(n.Annotations, annotationCandidateOf) }); err != nil {
+			return err
+		}
+	}
+	return ready()
+}
+
+// candidateWinner is the winner a kept started loser waits on, or nil (candidateWinnerOf).
+func (p *pass) candidateWinner(in *v1alpha1.Instance) *v1alpha1.Instance {
+	return candidateWinnerOf(in, p.instanceNamed, p.stale)
+}
+
+// rankCandidate ranks a hedge's kept started loser at its ranking point, against its hedge's winner alone, whatever
+// their classes (HBEP-7, Hedging's started losers; #616, PR 5). It is ranked as soon as it passes, the winner being
+// ready:
+//   - the winner has a live replacement: it is in its handover, which ranking leaves alone, so the loser ends with
+//     HedgeLost;
+//   - the winner is not ready (restarting): the loser waits, returning nil with no write, as one waits for a chosen
+//     primary that is not ready; the pass that sees the winner change brings it back (HBEP-7: ranked once every chosen
+//     primary on its Provider is ready or has ended);
+//   - faster than the winner by more than 10% (outranks): it becomes ready and serves in the winner's place, which
+//     drains and ends RankedOut (outrank);
+//   - otherwise it ends with HedgeLost, kept as a qualified warm spare.
+func (p *pass) rankCandidate(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, w *v1alpha1.Instance, ready func() error) error {
+	provider := in.Labels[v1alpha1.LabelProvider]
+	switch {
+	case p.replaced(w):
+		return p.endCandidate(in, alloc, w, fmt.Sprintf("hedge lost to %s, on Provider %s: it has a live replacement, a handover that ranking leaves alone, so Instance %s passed its checks on Provider %s and is kept as warm capacity", w.Name, w.Labels[v1alpha1.LabelProvider], in.Name, provider))
+	case w.Status.Phase != v1alpha1.InstanceReady:
+		return nil
+	case !outranks(in, w):
+		return p.endCandidate(in, alloc, w, fmt.Sprintf("hedge lost to %s, on Provider %s: Instance %s passed its checks on Provider %s and is not faster than it by more than 10%% in time per output token, so it is kept as warm capacity", w.Name, w.Labels[v1alpha1.LabelProvider], in.Name, provider))
+	}
+	return p.outrank(in, w, ready)
+}
+
+// endCandidate ends a kept started loser at its ranking point with HedgeLost, its Allocation kept as warm capacity
+// (end with release false, so anchorIfLast writes idle-since). It passed every check, so startOutcomeOf counts a
+// success for it. One replaced HedgeLost event regards it, with the winner related.
+func (p *pass) endCandidate(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, w *v1alpha1.Instance, msg string) error {
+	if p.mem.once("hedge-lost/" + string(in.UID)) {
+		p.r.Recorder.Event(in, w, eventReplaced, v1alpha1.ReasonHedgeLost, msg)
+	}
+	return p.end(in, alloc, v1alpha1.ReasonHedgeLost, msg, false)
 }
 
 // rankOut ends a candidate that did not outrank its peer, or had none: RankedOut, never ready, its Allocation kept
