@@ -119,14 +119,14 @@ func TestAFailedPrimaryWithAReplacementLeavesTheWaitingExtraChosen(t *testing.T)
 	})
 }
 
-// TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement: X's job starts at 00:05 (a wait of 4 min 50 s from
-// its submission at 08:00:30), before P's at 00:10. X is the more advanced, so it is chosen and its replacement is
+// TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement: X's job starts at 00:05 (a wait of 5 min from
+// its submission at 08:00:20, with P's), before P's at 00:10. X is the more advanced, so it is chosen and its replacement is
 // created at 00:05, 08:05:20. P, started later, is surplus: it gets no replacement. X is ready at 00:35. P reaches
 // its point at 00:40 and is ranked out against no peer, since X, chosen and ready, has a live replacement.
 func TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement(t *testing.T) {
 	rkBoth(t, func(t *testing.T, pTpot time.Duration) {
 		h := newRkRig(t, true)
-		p, x := h.start(nil, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 4*time.Minute + 50*time.Second}, pfake.Script{QueueWait: 3 * time.Hour})
+		p, x := h.start(nil, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 5 * time.Minute}, pfake.Script{QueueWait: 3 * time.Hour})
 		h.engineOf(x, rk200, 0)
 		h.engineOf(p, pTpot, 0)
 		h.stepTo(rkAt(0, 5, 20), 10*time.Second, nil)

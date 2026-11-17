@@ -725,26 +725,26 @@ func TestAPassedOverProviderRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestAnExtraGetsNoMember (#616; agreed with k616): a deployment of two Instances on A and B makes R and M on A at
-// 08:00:00, M pending 10 h. Its count is lowered to 1 before R's job starts at 08:00:10, so R is chosen and M is
-// surplus, left alone within overAllocation's k of 1. A then holds R's wait, so M's hedge time is at its submission,
-// 08:00:10: without the filter it would get a member on B at once. It gets none through 08:10:00, and M stays live.
+// TestAnExtraGetsNoMember (#616; agreed with k616): with k = 1 and A and B allowed, a deployment of one makes R and PR 4's
+// extra X on A at 08:00:00, X's job pends 10 h and R's starts at 08:00:10 (the first Allocation by name takes the first
+// script, so the roles are the jobs', not the selection's). R is chosen, started and X is surplus, left alone within
+// overAllocation's k of 1. A then holds R's 0 s wait, so X's hedge time is its submission plus hedgeMinWait, 08:10:10:
+// without the filter its hedge would get a member on B then. It gets none through 08:20:00, and X stays live on A.
 func TestAnExtraGetsNoMember(t *testing.T) {
 	h := newHedgeRig(t)
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
 	h.Step()
 	md := mdSpec(hoMD)
 	onBoth(md)
-	md.Spec.Instances = 2
+	md.Spec.OverAllocation = ptrTo(int32(1))
 	h.create(md)
-	h.Step() // 08:00:00: R and M on A
+	h.Step() // 08:00:00: R and the extra X on A
 	onA := h.onProvider(hoMD, rigProvider)
 	if len(onA) != 2 {
-		t.Fatalf("%d Instances on A at 08:00:00, want R and M", len(onA))
+		t.Fatalf("%d Instances on A at 08:00:00, want R and the extra", len(onA))
 	}
-	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
 	var m string
-	stepUntilClock(h.rig, hoT(8, 10, 0), 10*time.Second, func() {
+	stepUntilClock(h.rig, hoT(8, 20, 0), 10*time.Second, func() {
 		if n := len(h.onProvider(hoMD, hedgeB)); n != 0 {
 			t.Fatalf("at %s B has %d of the deployment's Instances: a surplus Instance's hedge grew", h.clock.Now().Format(time.TimeOnly), n)
 		}
@@ -755,7 +755,7 @@ func TestAnExtraGetsNoMember(t *testing.T) {
 		}
 	}
 	if m == "" {
-		t.Fatal("no pending surplus Instance left on A at 08:10:00: the fixture has no extra, so the test proves nothing")
+		t.Fatal("no pending surplus Instance left on A at 08:20:00: the extra was cancelled, so the test proves nothing")
 	}
 }
 
