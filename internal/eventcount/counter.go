@@ -250,6 +250,17 @@ func (p *Publisher) Option(scheme *runtime.Scheme, reporting string, lease Lease
 	return WithLog(Log{Publisher: p, Scheme: scheme, ReportingController: reporting, Lease: lease})
 }
 
+// OptionFor is Option for a call site whose scheme and Lease source are not at hand without a cost or a risk
+// when there is no log (a manager's scheme and API reader): f is called only when the process has a
+// publisher, so a process with none builds its recorder exactly as before, touching nothing new.
+func (p *Publisher) OptionFor(f func() (scheme *runtime.Scheme, reporting string, lease LeaseFunc)) Option {
+	if p == nil {
+		return func(*options) {}
+	}
+	scheme, reporting, lease := f()
+	return p.Option(scheme, reporting, lease)
+}
+
 // WithLog makes the wrapper publish each typed event, an event with an action, to the durable log as
 // well as to the Kubernetes recorder, and count what the log did not take in
 // hpcburst_events_unlogged_total{controller}, whose series starts at 0 here. Every wrapper of one

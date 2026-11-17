@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/runtime"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -109,7 +110,9 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, list
 		// The same controller label, so with the durable log the two recorders share the lifecycle
 		// controller's loss gate (eventcount.Publisher).
 		rec: lifecycle.KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), events, eventcount.ControllerLifecycle,
-			log.Option(mgr.GetScheme(), v1alpha1.FieldManagerLifecycle, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)))},
+			log.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+				return mgr.GetScheme(), v1alpha1.FieldManagerLifecycle, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
+			}))},
 		admitted: admitted,
 	}
 	var served http.Handler = handler

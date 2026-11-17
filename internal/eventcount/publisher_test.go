@@ -13,6 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
@@ -349,5 +350,26 @@ func TestEveryStoredMessageValidates(t *testing.T) {
 		for name := range ev.Extensions() {
 			t.Errorf("%s: unexpected extension attribute %q", m.ID, name)
 		}
+	}
+}
+
+// A process with no publisher builds its recorder as before, touching nothing new: the option's function,
+// which reads a manager's scheme and API reader, is not called. With a publisher it is.
+func TestOptionForCallsItsFunctionOnlyWithAPublisher(t *testing.T) {
+	called := 0
+	f := func() (*runtime.Scheme, string, LeaseFunc) {
+		called++
+		return testScheme(), "hpcburst-test", nil
+	}
+	var none *Publisher
+	Events(&recInner{}, New(), ControllerFront, none.OptionFor(f))
+	if called != 0 {
+		t.Fatalf("the function was called %d times without a publisher", called)
+	}
+	pub := NewPublisher(PublisherOptions{Addr: "127.0.0.1:1", Token: strings.Repeat("a", 64)})
+	t.Cleanup(func() { pub.Shutdown(t.Context()) })
+	Events(&recInner{}, New(), ControllerFront, pub.OptionFor(f))
+	if called != 1 {
+		t.Fatalf("the function was called %d times with a publisher, want 1", called)
 	}
 }

@@ -454,7 +454,9 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		// type in the action, beside the legacy one above, which keeps the
 		// Provider's untyped diagnostics.
 		TypedRecorder: eventcount.Events(pm.GetEventRecorder(v1alpha1.FieldManagerProvider), w.events, controller,
-			w.eventLog.Option(pm.GetScheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(pm.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(provider)))),
+			w.eventLog.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+				return pm.GetScheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(pm.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(provider))
+			})),
 		// The typed series are created at 0 under provider-<name> once the Provider's
 		// controller is set up, and deleted by the batch supervisor's Dropped hook
 		// (providerctl.ForgetSeries).

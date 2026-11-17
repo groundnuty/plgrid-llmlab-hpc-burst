@@ -13,6 +13,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -205,7 +206,9 @@ func SetupWithLog(events *eventcount.Counter, log *eventcount.Publisher) func(mg
 	return func(mgr manager.Manager, provider string) error {
 		controller := eventcount.ControllerProvider(provider)
 		rec := eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller,
-			log.Option(mgr.GetScheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(provider))))
+			log.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+				return mgr.GetScheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(provider))
+			}))
 		c, err := New(Options{
 			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
 			Recorder: rec,

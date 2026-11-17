@@ -342,7 +342,9 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	counted.Zero(eventcount.ControllerLifecycle, RaisedEvents())
 	// With the durable log, the controller's typed events are published too, and EventsNotLogged
 	// regards its own Lease, lifecycle (HBEP-8, The durable log, When it is down). No log, no option.
-	logOpt := o.EventLog.Option(mgr.GetScheme(), v1alpha1.FieldManagerLifecycle, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle))
+	logOpt := o.EventLog.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+		return mgr.GetScheme(), v1alpha1.FieldManagerLifecycle, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
+	})
 	r := &Reconciler{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clock: clock, Backend: backend, Checkpoints: src,
 		Recorder: KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle, logOpt)},
