@@ -28,6 +28,8 @@ const (
 
 type request struct {
 	user, verb, group, resource, subresource string
+	// namespace is the request's namespace; empty means example-ns, which no rule names.
+	namespace string
 	// path is set for a request that is not about a resource, such as /healthz.
 	path string
 }
@@ -35,9 +37,16 @@ type request struct {
 func (r request) attributes() authorizer.Attributes {
 	return authorizer.AttributesRecord{
 		User: &user.DefaultInfo{Name: r.user}, Verb: r.verb, APIGroup: r.group, APIVersion: "v1",
-		Resource: r.resource, Subresource: r.subresource, Namespace: "example-ns", Name: "example",
+		Resource: r.resource, Subresource: r.subresource, Namespace: cmpNS(r.namespace), Name: "example",
 		ResourceRequest: r.path == "", Path: r.path,
 	}
+}
+
+func cmpNS(ns string) string {
+	if ns == "" {
+		return "example-ns"
+	}
+	return ns
 }
 
 func (r request) String() string {
@@ -48,7 +57,7 @@ func (r request) String() string {
 	if r.subresource != "" {
 		res += "/" + r.subresource
 	}
-	return r.verb + " " + res + " (" + r.group + ") by " + r.user
+	return r.verb + " " + res + " (" + r.group + ", in " + cmpNS(r.namespace) + ") by " + r.user
 }
 
 func TestThePolicyGivesEachRequestItsLevel(t *testing.T) {
@@ -72,20 +81,29 @@ func TestThePolicyGivesEachRequestItsLevel(t *testing.T) {
 		}{r, want, why})
 	}
 
-	// Rule 1, None: the three controllers' reads and renewals of a Lease.
+	// Rule 1, None: the three controllers' reads and renewals of a Lease in hpcburst-system, where their locks live.
 	for _, u := range []string{lifecycle, provider, front} {
 		for _, verb := range []string{"get", "update", "list", "watch"} {
-			add(request{user: u, verb: verb, group: "coordination.k8s.io", resource: "leases"}, none, "rule 1: a controller's Lease read or renewal")
+			add(request{user: u, verb: verb, group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, none, "rule 1: a controller's Lease read or renewal")
+		}
+	}
+	// The same requests in any other namespace are logged at Metadata, refused or not: a level is chosen before the answer, so a
+	// controller identity that reads or rewrites kube-system's leader Leases must leave a line.
+	for _, u := range []string{lifecycle, provider, front} {
+		for _, ns := range []string{"kube-system", "default", "example-ns"} {
+			for _, verb := range []string{"get", "update", "list", "watch"} {
+				add(request{user: u, verb: verb, group: "coordination.k8s.io", resource: "leases", namespace: ns}, meta, "a controller's Lease request outside hpcburst-system is not rule 1's")
+			}
 		}
 	}
 	// Its non-matches: a create (the first Lease is worth a line), a delete, a patch, someone else, another kind.
-	add(request{user: lifecycle, verb: "create", group: "coordination.k8s.io", resource: "leases"}, meta, "a Lease create is not at None")
-	add(request{user: lifecycle, verb: "delete", group: "coordination.k8s.io", resource: "leases"}, meta, "a Lease delete is not at None")
-	add(request{user: lifecycle, verb: "patch", group: "coordination.k8s.io", resource: "leases"}, meta, "a Lease patch is not at None")
-	add(request{user: person, verb: "update", group: "coordination.k8s.io", resource: "leases"}, meta, "the person's Lease write is not at None")
-	add(request{user: agentA, verb: "get", group: "coordination.k8s.io", resource: "leases"}, meta, "an agent's Lease read is not at None")
-	add(request{user: "system:serviceaccount:hpcburst-system:hpcburst-other", verb: "update", group: "coordination.k8s.io", resource: "leases"}, meta, "another account of the namespace")
-	add(request{user: lifecycle, verb: "get", group: "", resource: "leases"}, meta, "a leases resource of another group")
+	add(request{user: lifecycle, verb: "create", group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, meta, "a Lease create is not at None")
+	add(request{user: lifecycle, verb: "delete", group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, meta, "a Lease delete is not at None")
+	add(request{user: lifecycle, verb: "patch", group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, meta, "a Lease patch is not at None")
+	add(request{user: person, verb: "update", group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, meta, "the person's Lease write is not at None")
+	add(request{user: agentA, verb: "get", group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, meta, "an agent's Lease read is not at None")
+	add(request{user: "system:serviceaccount:hpcburst-system:hpcburst-other", verb: "update", group: "coordination.k8s.io", resource: "leases", namespace: "hpcburst-system"}, meta, "another account of the namespace")
+	add(request{user: lifecycle, verb: "get", group: "", resource: "leases", namespace: "hpcburst-system"}, meta, "a leases resource of another group")
 	add(request{user: lifecycle, verb: "update", group: "", resource: "configmaps"}, meta, "a controller's other write")
 
 	// Rule 2, RequestResponse: Operations, their status, Approvals and ApprovalPolicies, by every user and verb.

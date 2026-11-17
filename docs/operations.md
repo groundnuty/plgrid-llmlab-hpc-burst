@@ -724,7 +724,7 @@ The API server writes an audit log of every request, and with the controllers' o
 
   | Level | What | Records |
   |---|---|---|
-  | `None` | `get`, `update`, `list` and `watch` of Leases (`coordination.k8s.io`) by the three controller identities | nothing: a leader election's renewals carry no decision and would fill most of the log. A Lease `create` is still logged, at Metadata |
+  | `None` | `get`, `update`, `list` and `watch` of Leases (`coordination.k8s.io`) in the namespace `hpcburst-system` by the three controller identities | nothing: a leader election's renewals carry no decision and would fill most of the log. A Lease `create` is still logged, at Metadata, and so is any Lease request in another namespace, which no controller role grants. A level is chosen from the request before the API server answers, so a Lease request **refused** inside `hpcburst-system` is not logged either; one in `kube-system` or any other namespace leaves a line at Metadata, refused or not |
   | `RequestResponse` | Operations, their `status`, Approvals and ApprovalPolicies, in every verb and by every user | the request and the answer with their bodies: the Operation with its spec and purpose, the plan and the per-target outcomes in each of the controller's status writes, each Approval with the plan ID it names. A controller's read of these kinds is logged with its whole answer too |
   | `Request` | `update`, `patch` and `delete` of Allocations by the lifecycle controller | the request body, so a release cause is logged before the delete that follows |
   | `Metadata` | everything else | who, the verb, the object, the time and the answer, never a body: no Secret's content is ever logged |

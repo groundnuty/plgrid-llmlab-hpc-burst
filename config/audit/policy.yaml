@@ -3,8 +3,12 @@
 # takes the same bytes, so the policy a test reads the log under is the one that is installed. Rules are
 # evaluated in order and the first match decides, so their order is part of the policy.
 #
-#   1. None             the controllers' Lease reads and renewals: they carry no decision, and they would fill
-#                       most of the log. A Lease CREATE is not listed here and stays at Metadata.
+#   1. None             the controllers' Lease reads and renewals IN hpcburst-system, where their leader locks live:
+#                       they carry no decision, and they would fill most of the log. A Lease CREATE is not listed
+#                       here and stays at Metadata, and so does any Lease request in another namespace, which no
+#                       controller role grants: a level is chosen from the request alone, before the answer, so a
+#                       controller's request for a kube-system Lease must still leave a line, refused or not. A
+#                       REFUSED request for a Lease inside hpcburst-system is not logged.
 #   2. RequestResponse  this framework's Operations, their status, Approvals and ApprovalPolicies, in every
 #                       verb: the log then holds each request with its purpose, the plan and the per-target
 #                       outcomes of the controller's status writes, and each Approval with the plan it names.
@@ -29,6 +33,7 @@ rules:
       - system:serviceaccount:hpcburst-system:hpcburst-provider
       - system:serviceaccount:hpcburst-system:hpcburst-front
     verbs: ["get", "update", "list", "watch"]
+    namespaces: ["hpcburst-system"]
     resources:
       - group: coordination.k8s.io
         resources: ["leases"]
