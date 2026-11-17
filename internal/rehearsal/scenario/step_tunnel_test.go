@@ -196,10 +196,15 @@ func (r *rig) checkTunnelBack(in *v1alpha1.Instance, key string, jobID int, stag
 		r.t.Errorf("step (e): the new frpc %d has parent %d; the killed one had %d, the agent", fresh, pp, parent)
 	}
 	lost := time.Now()
-	stack.WaitFor(r.t, stack.WaitDeadline, "TunnelConnected True and the front's registration back", func() bool {
+	// The key's request below follows at once: the front's own view must route the model too (#676). With
+	// the replacement standing that holds throughout the loss, so which Instance served is the record's
+	// check below, not this wait's.
+	stack.WaitState(r.t, stack.WaitDeadline, "TunnelConnected True, the front's registration back and the front routing the model", func() (bool, string) {
 		now, ok := r.instance(in.Name)
-		reg, known := stack.Registered(r.ports, in)
-		return ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
+		if !ok || !conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+			return false, "TunnelConnected is not True"
+		}
+		return r.routedNow(in)
 	})
 	r.t.Logf("step (e): the tunnel and the registration came back %s after the agent's new frpc was seen", time.Since(lost).Round(100*time.Millisecond))
 	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)

@@ -259,9 +259,10 @@ func TestPreBulkAllocationKeepsItsTokenTunnel(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(r.h.State, "agent-endpoint", "tls-bulk.crt")); err != nil {
 				t.Fatalf("up --bulk-path issued no second certificate: %v", err)
 			}
-			stack.WaitState(t, stack.WaitDeadline, "the Instance's token transport to register again", func() (bool, string) {
-				reg, _ := stack.Registered(r.ports, in)
-				return reg, "not registered"
+			// The key's request below follows after one more wait: the front's own view must route the model
+			// as well as hold the registration (#676).
+			stack.WaitState(t, stack.WaitDeadline, "the Instance's token transport to register again and the front to route the model", func() (bool, string) {
+				return r.routedNow(in)
 			})
 			r.waitFrpcs(in, 1, 0)
 			if code := r.sendSmall(key); code != http.StatusOK {

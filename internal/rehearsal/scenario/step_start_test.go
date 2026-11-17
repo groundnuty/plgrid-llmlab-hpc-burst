@@ -74,6 +74,9 @@ func (r *rig) stepStart() *v1alpha1.Instance {
 		}
 		return false
 	})
+	// Ready is the API's word, and the key search that follows in most scenarios sends at once: wait for
+	// the front's own view to route the model first (#676; the race of #671).
+	r.waitRouted("step (a)", ready)
 	if p := ready.Annotations[v1alpha1.AnnotationPredecessor]; p != "" {
 		r.t.Errorf("step (a): the Instance on the first Allocation %s has a predecessor %s", alloc.Name, p)
 	}
