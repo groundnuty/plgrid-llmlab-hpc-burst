@@ -28,7 +28,7 @@ var Wrappers = []Wrapper{
 	},
 	{
 		// EventfID has the event's id as its parameter 0, so each of Eventf's arguments is the parameter one after it.
-		Func: "internal/eventcount.eventsRecorder.EventfID", Why: "counts the event, then hands every argument but the id, which nothing reads until the durable log's publisher exists, unchanged to client-go's events.k8s.io recorder; the callers of the recorder it wraps are the emit sites",
+		Func: "internal/eventcount.eventsRecorder.EventfID", Why: "counts the event, then hands every argument but the id, which the durable log's publisher takes as the message's id, unchanged to client-go's events.k8s.io recorder; the callers of the recorder it wraps are the emit sites",
 		Forwards: []Forward{{Arg: 0, Param: 1}, {Arg: 1, Param: 2}, {Arg: 2, Param: 3}, {Arg: 3, Param: 4}, {Arg: 4, Param: 5}, {Arg: 5, Param: 6}, {Arg: 6, Param: 7}},
 	},
 	{

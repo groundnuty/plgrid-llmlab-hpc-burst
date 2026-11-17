@@ -94,6 +94,9 @@ func RaisedEvents() []eventcount.Series {
 	// ObservationGap, which each Provider manager raises at its start through the
 	// same recorder (gap.go), regarding its Lease.
 	out = append(out, eventcount.Series{Reason: reasonObservationGap, Action: eventDegraded, Type: provider.EventKindWarning})
+	// EventsNotLogged, which the durable log's publisher raises through the same recorder when the
+	// manager has one (internal/eventcount).
+	out = append(out, eventcount.Series{Reason: eventcount.ReasonEventsNotLogged, Action: eventDegraded, Type: provider.EventKindWarning})
 	sort.Slice(out, func(i, k int) bool { return out[i].Reason < out[k].Reason })
 	return out
 }
@@ -102,8 +105,10 @@ func RaisedEvents() []eventcount.Series {
 // object (nil for none), and the id <Allocation UID>/<reason>/<fact> that marks
 // the transition (HBEP-8, The durable log, Streams, The event's id): fact is
 // the status value that marks it, so a transition raised again after a failed
-// status write keeps its id. Until the durable log's publisher exists (PR E2,
-// #625) the id is handed to the recorder and not read.
+// status write keeps its id. The recorder's wrapper (eventcount.Events) publishes
+// the event to the durable log under the id as its Nats-Msg-Id when the process runs
+// with the log, where a second publish of the id inside the log's duplicate window
+// stores nothing; the API's Event holds no id (PR E2, #625).
 //
 // The type comes from allocationEventType, and the note is cut to
 // provider.MaxEventNote. A note that holds the Allocation's job ID as a token
@@ -143,12 +148,17 @@ func (e *external) typedUnmarked(a *v1alpha1.Allocation, reason, note string, re
 }
 
 // refuseNote reports whether note names the Allocation's job ID as a token, and
-// counts and logs the refusal if so.
+// counts and logs the refusal if so. The refused event reaches neither the API nor
+// the durable log's publisher, so the recorder it was to go through counts it as not
+// logged (eventcount.IDRecorder.NotLogged): in hpcburst_events_unlogged_total under
+// provider-<name>, with the rest of the events the log did not take, and never silently
+// lost (HBEP-8, The durable log, When it is down; team-lead, 16 Nov 2026).
 func (e *external) refuseNote(a *v1alpha1.Allocation, reason, note string) bool {
 	for _, id := range recordedJobIDs(a) {
 		if containsToken(note, id) {
 			e.s.refusedNotes.Add(1)
 			e.s.o.Log.Info("a typed event whose note names the job ID is not raised", "reason", reason, "allocation", a.Namespace+"/"+a.Name)
+			e.s.o.TypedRecorder.NotLogged(a, reason)
 			return true
 		}
 	}
@@ -309,5 +319,7 @@ func (*nopTypedRecorder) Eventf(runtime.Object, runtime.Object, string, string, 
 
 func (*nopTypedRecorder) EventfID(string, runtime.Object, runtime.Object, string, string, string, string, ...interface{}) {
 }
+
+func (*nopTypedRecorder) NotLogged(runtime.Object, string) {}
 
 var _ eventcount.IDRecorder = &nopTypedRecorder{}

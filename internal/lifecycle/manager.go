@@ -94,6 +94,11 @@ type Options struct {
 	// Provider managers count into too; nil means a new one for this manager.
 	// Never share one between copies.
 	Events *eventcount.Counter
+	// EventLog is this process's publisher to the durable log (beta; HBEP-8, The durable log):
+	// the lifecycle controller's typed events go to it as well as to the API, and it raises
+	// EventsNotLogged regarding the lifecycle Lease when the log cannot take one. Nil, the
+	// default and the command without --event-log-token-file, publishes nothing.
+	EventLog *eventcount.Publisher
 	// RelayKeeperSocket is the relay keeper's Unix socket (beta, HBEP-6, The
 	// relay keeper). Set, the serving collector reads the keeper's status over
 	// it at each scrape and exports the relays' series and
@@ -335,9 +340,14 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		counted = eventcount.New()
 	}
 	counted.Zero(eventcount.ControllerLifecycle, RaisedEvents())
+	// With the durable log, the controller's typed events are published too, and EventsNotLogged
+	// regards its own Lease, lifecycle (HBEP-8, The durable log, When it is down). No log, no option.
+	logOpt := o.EventLog.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+		return mgr.GetScheme(), v1alpha1.FieldManagerLifecycle, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
+	})
 	r := &Reconciler{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clock: clock, Backend: backend, Checkpoints: src,
-		Recorder: KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle)},
+		Recorder: KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle, logOpt)},
 		Config:   Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, HostDialed: o.HostDialed, AgentDigest: builds.digest},
 	}
 	r.Config.InstanceRouter = o.InstanceRouter

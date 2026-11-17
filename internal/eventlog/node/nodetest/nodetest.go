@@ -303,9 +303,12 @@ func StreamInfo(t testing.TB, js jetstream.JetStream, name string) *jetstream.St
 	return info
 }
 
-// Message is one message of a stream as a fresh reader sees it: its sequence, its id and its bytes.
+// Message is one message of a stream as a fresh reader sees it: its sequence, the subject it was
+// published on, its id and its bytes. (Subject was added for the event publisher's tests, which
+// check that each event is on its object's subject; #625, PR E2.)
 type Message struct {
 	Seq     uint64
+	Subject string
 	ID      string
 	Payload []byte
 }
@@ -342,7 +345,7 @@ func (d *Dir) ReadAll(t testing.TB, stream string) []Message {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out = append(out, Message{Seq: md.Sequence.Stream, ID: msg.Headers().Get(nats.MsgIdHdr), Payload: append([]byte(nil), msg.Data()...)})
+		out = append(out, Message{Seq: md.Sequence.Stream, Subject: msg.Subject(), ID: msg.Headers().Get(nats.MsgIdHdr), Payload: append([]byte(nil), msg.Data()...)})
 	}
 	return out
 }
