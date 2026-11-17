@@ -1,6 +1,7 @@
 package agentcli
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -140,15 +141,17 @@ func TestReleaseKeys(t *testing.T) {
 	if m2, m1 := w.operation("k-29c1b289").Spec.ModelDeploymentRef.Name, w.operation("k-ca0df2c9").Spec.ModelDeploymentRef.Name; m2 != "m2" || m1 != "m1" {
 		t.Errorf("k-29c1b289 acts on %q and k-ca0df2c9 on %q, want m2 and m1", m2, m1)
 	}
-	// One ModelDeployment: the key itself.
+	// One ModelDeployment: the key is still a prefix, so the name does not depend on how many deployments
+	// the selection covers.
 	w = newWorld(t, objs)
-	w.controller("k", simplePlan(planAB), "")
+	w.controller("k-ca0df2c9", simplePlan(planAB), "")
 	if code := w.run("", "release", "a1", "--key", "k"); code != exitOK {
 		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
 	}
-	if got := w.operations(); len(got) != 1 || got[0] != "k" {
-		t.Errorf("Operations %v, want k", got)
+	if got := w.operations(); len(got) != 1 || got[0] != "k-ca0df2c9" {
+		t.Errorf("Operations %v, want k-ca0df2c9 (the key, \"-\" and the digest of m1)", got)
 	}
+	contains(t, "stdout", w.out.String(), "operation: k-ca0df2c9")
 	// A derived name past 253 characters is refused before anything is created.
 	w = newWorld(t, objs)
 	if code := w.run("", "release", "a1", "a2", "--key", strings.Repeat("k", 246)); code != exitUsage {
@@ -175,5 +178,46 @@ func TestReleaseRefusesMoreThan64NamesOfOneDeployment(t *testing.T) {
 	contains(t, "stderr", w.errs.String(), "at most 64", "-l <selector>")
 	if got := w.writes(); len(got) != 0 {
 		t.Errorf("writes %v, want none", got)
+	}
+}
+
+// A retry of release --key k -l sel after one of its deployments' Allocations are gone makes no new
+// Operation: the survivor's Operation, k-<digest of m1>, exists with the same request, and the CLI continues
+// on it. Under a name that depended on the number of deployments the retry would be named k and make a
+// third Operation.
+func TestReleaseRetryAfterOneDeploymentIsGone(t *testing.T) {
+	w := newWorld(t, []client.Object{
+		alloc("a1", "m1", map[string]string{"tier": "kept"}),
+		alloc("a2", "m2", map[string]string{"tier": "kept"}),
+	})
+	w.onPause = func() {
+		for _, n := range w.operations() {
+			if w.operation(n).Status.Plan == nil {
+				w.planFor(n, simplePlan(planAB))
+			}
+		}
+	}
+	if code := w.run("", "release", "-l", "tier=kept", "--key", "k"); code != exitOK {
+		t.Fatalf("first call: exit %d, stderr %q", code, w.errs.String())
+	}
+	if got := w.operations(); len(got) != 2 || got[0] != "k-29c1b289" || got[1] != "k-ca0df2c9" {
+		t.Fatalf("Operations %v, want k-29c1b289 (m2) and k-ca0df2c9 (m1)", got)
+	}
+	// m2's Allocation is released meanwhile: the selection now covers m1 alone.
+	gone := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: "a2", Namespace: testNS}}
+	if err := w.store.Delete(context.Background(), gone); err != nil {
+		t.Fatal(err)
+	}
+	before := len(w.writes())
+	if code := w.run("", "release", "-l", "tier=kept", "--key", "k"); code != exitOK {
+		t.Fatalf("retry: exit %d, stderr %q", code, w.errs.String())
+	}
+	if got := w.operations(); len(got) != 2 {
+		t.Errorf("Operations after the retry %v, want the same two: the retry made a new one", got)
+	}
+	contains(t, "stderr of the retry", w.errs.String(), "Operation k-ca0df2c9 exists with the same request")
+	contains(t, "stdout of the retry", w.out.String(), "operation: k-ca0df2c9")
+	if got := w.writes()[before:]; len(got) != 1 || got[0] != "create *v1alpha1.Operation" {
+		t.Errorf("the retry's writes %v, want its one refused create", got)
 	}
 }

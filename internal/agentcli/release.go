@@ -127,8 +127,8 @@ func groupAllocations(allocs []v1alpha1.Allocation) (groups []allocationGroup, o
 
 // releaseRequests makes one Operation request per ModelDeployment. Named Allocations go into
 // release.allocations and a selector goes into release.selector, whole: the controller keeps only the
-// matches of the Operation's own ModelDeployment. A name past 253 characters is refused here, before
-// anything is created.
+// matches of the Operation's own ModelDeployment. With --key K each Operation is named K-<hash>: the key is a
+// prefix, even for one ModelDeployment. A name past 253 characters is refused here, before anything is created.
 func (rt *cli) releaseRequests(o *options, groups []allocationGroup, selector string, stderr io.Writer) ([]opRequest, int) {
 	var sel *metav1.LabelSelector
 	if selector != "" {
@@ -143,8 +143,11 @@ func (rt *cli) releaseRequests(o *options, groups []allocationGroup, selector st
 			}
 			rel.Allocations = g.names
 		}
+		// With a key, every Operation is K-<hash of its ModelDeployment's name>, whatever number of
+		// deployments the selection covers now: a retry after some deployments' Allocations are gone
+		// must find the Operations it made, and a name that depended on the count would make a new one.
 		name := rt.nameFor(o)
-		if o.key != "" && len(groups) > 1 {
+		if o.key != "" {
 			name = derivedKey(o.key, g.md)
 		}
 		if len(name) > maxName {
