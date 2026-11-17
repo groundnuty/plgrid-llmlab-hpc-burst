@@ -114,6 +114,29 @@ func allocationDead(a *v1alpha1.Allocation) bool {
 	return a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == "True"
 }
 
+// allocationFailed reports whether the Allocation's job failed or was lost, or nothing can reach it (a relay ended for
+// good): the failures that release it, as a failed Instance's does (releasePending).
+func allocationFailed(a *v1alpha1.Allocation) bool {
+	switch a.Status.AtProvider.Phase {
+	case v1alpha1.AllocationFailed, v1alpha1.AllocationLost:
+		return true
+	}
+	return a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == "True"
+}
+
+// failureOfAllocation is the reason of the failure that released the Allocation, when allocationFailed says one did.
+func failureOfAllocation(a *v1alpha1.Allocation) (reason string, ok bool) {
+	switch {
+	case a.Status.AtProvider.Phase == v1alpha1.AllocationFailed:
+		return v1alpha1.ReasonAllocationFailed, true
+	case a.Status.AtProvider.Phase == v1alpha1.AllocationLost:
+		return v1alpha1.ReasonAllocationLost, true
+	case a.GetCondition(v1alpha1.ConditionRelayEndedForGood).Status == "True":
+		return string(v1alpha1.ConditionRelayEndedForGood), true
+	}
+	return "", false
+}
+
 // addShutdownFate adds the Allocation target for what retention does with an Allocation the shutdown leaves:
 // released at once, by allocationNeeds' rule; or kept. A kept one on which the plan takes no Instance
 // (instanceTaken false) needs approval when its retention then releases it before its hard end

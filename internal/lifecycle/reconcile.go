@@ -266,10 +266,14 @@ func (p *pass) run() error {
 	if md == nil {
 		return instErr
 	}
+	var statusErr error
 	if md.Spec.Source.Managed != nil {
-		return errors.Join(instErr, p.writeManagedStatus())
+		statusErr = p.writeManagedStatus()
+	} else {
+		statusErr = p.writeStatus()
 	}
-	return errors.Join(instErr, p.writeStatus())
+	// The kept-warm finalizer last: the deployment may be gone after it (HBEP-10, The report, as amended by #698).
+	return errors.Join(instErr, statusErr, p.releaseKeptWarmFinalizer())
 }
 
 // observe lists the ModelDeployment's Allocations (by its model-deployment

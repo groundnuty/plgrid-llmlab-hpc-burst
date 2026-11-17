@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -105,7 +106,10 @@ func (p *pass) targetDone(t v1alpha1.CommittedTarget, specWritten bool) (bool, e
 		a, err := p.committedAllocation(t)
 		return a == nil, err
 	case v1alpha1.TargetKindModelDeployment:
-		return noActDone(t.Effect, specWritten, p.md == nil || p.md.UID != t.UID), nil
+		// Gone, or being deleted under the kept-warm finalizer: the delete was made and waits for the warm Allocations, which a
+		// new Operation's Release may then free, so the End must not hold the deployment's one-at-a-time slot meanwhile.
+		gone := p.md == nil || p.md.UID != t.UID || (!p.md.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(p.md, v1alpha1.FinalizerKeptWarm))
+		return noActDone(t.Effect, specWritten, gone), nil
 	}
 	return false, nil
 }
@@ -178,13 +182,19 @@ func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, 
 		if acted && p.lastReadyScaleTarget(op, t, p.instanceByUID(t.UID)) {
 			return reasonLastReadySinceCommit, lastReadyMessage, true, nil
 		}
+		if in := p.instanceByUID(t.UID); acted && in != nil && !ended(in) && scaleAboveZero(op) && startedSinceCommit(t, p.allocs[in.Spec.AllocationRef.Name]) {
+			return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued one: under a Scale above zero the Instance is not taken, ending it would be a release nobody approved, and it keeps starting and serving; its count is given back", true, nil
+		}
 	case v1alpha1.TargetKindAllocation:
 		a, err := p.committedAllocation(t)
 		if err != nil || a == nil {
 			return "", "", false, err
 		}
 		if startedSinceCommit(t, a) {
-			return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and its retention policy now keeps or releases it", true, nil
+			if !keptWarm(a) {
+				return "", "", false, nil // not final until the mark is written, in the act, before this record
+			}
+			return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and it is kept warm: only the profile's maxIdle, its hard end, a repurpose or a new approved Release releases it. A maxIdle the profile sets still applies, unpriced", true, nil
 		}
 		if acted && releasingEffect(t.Effect) {
 			// An Instance that is a committed target and has failed for good stays live, so this Allocation is never empty.
@@ -234,6 +244,8 @@ func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, dele
 				}
 			} else if reason, msg, bad, err = p.targetFailure(t, failed[t.UID], deleting); err != nil {
 				return nil, err
+			} else if !bad && t.Kind == v1alpha1.TargetKindAllocation && releasingEffect(t.Effect) {
+				o.Message = p.failedAllocationMessage(t)
 			}
 		}
 		if bad {
@@ -256,8 +268,19 @@ func (p *pass) releasedByMessage(t v1alpha1.CommittedTarget, was *v1alpha1.Targe
 	if reason, instance, ok := p.failureOn(t.Name); ok {
 		return eventNote(fmt.Sprintf("released by %s: Instance %s failed, and its failure released the Allocation before the Operation did, so the release cause is the failure's", reason, instance))
 	}
-	if was != nil && was.State == v1alpha1.TargetStateDone && strings.HasPrefix(was.Message, "released by ") {
-		return was.Message
+	if was != nil && strings.HasPrefix(was.Message, "released by ") {
+		return was.Message // said while it was going (failedAllocationMessage), kept once it is gone
+	}
+	return ""
+}
+
+// failedAllocationMessage is the message of a releasing Allocation target whose job failed or was lost, and that is not gone
+// yet: retention releases it by its own reason, which the report names, and the Operation does not (releasePending).
+func (p *pass) failedAllocationMessage(t v1alpha1.CommittedTarget) string {
+	if a, err := p.committedAllocation(t); err == nil && a != nil {
+		if reason, ok := failureOfAllocation(a); ok {
+			return eventNote(fmt.Sprintf("released by %s: its job failed or was lost, so retention releases the Allocation by that reason, and the release cause is retention's, not the Operation's", reason))
+		}
 	}
 	return ""
 }
@@ -273,6 +296,15 @@ func failureLines(out []v1alpha1.TargetOutcome) []string {
 	return lines
 }
 
+// partlyFailedText is what the OperationPartlyFailed event says: each failed target's line, or, for an Operation with none (a Scale
+// of no target that a person's edit stopped), the reason itself.
+func partlyFailedText(out []v1alpha1.TargetOutcome) string {
+	if lines := failureLines(out); len(lines) > 0 {
+		return strings.Join(lines, "; ")
+	}
+	return reasonSpecChangedSinceCommit + ": the deployment's spec changed after the Operation was committed, so that the effect it was approved for no longer holds"
+}
+
 // raisePartlyFailed raises the OperationPartlyFailed event of an Operation that is PartlyFailed: when it starts, then at
 // most once an hour while it lasts, whichever way it came to be (a retried failure, a final one, or a person's edit that
 // stopped it: failSpecChanged). The next phase that is not PartlyFailed clears it.
@@ -284,7 +316,7 @@ func (p *pass) raisePartlyFailed(op *v1alpha1.Operation, phase v1alpha1.Operatio
 	}
 	if p.mem.repeat(key, p.now) {
 		p.r.Recorder.Event(op, nil, eventFailing, v1alpha1.ReasonOperationPartlyFailed,
-			fmt.Sprintf("Operation %s/%s is partly failed: %s", op.Namespace, op.Name, strings.Join(failureLines(out), "; ")))
+			fmt.Sprintf("Operation %s/%s is partly failed: %s", op.Namespace, op.Name, partlyFailedText(out)))
 	}
 }
 
@@ -299,6 +331,10 @@ func (p *pass) report(op *v1alpha1.Operation, failed map[types.UID]error, deleti
 	}
 	failures := failureLines(targets)
 	phase, finished := phaseOf(targets)
+	givingBack := finished && op.Status.CountGivenBack == nil && p.untakenUnits(op, targets) > 0
+	if givingBack {
+		finished = false // the Operation finishes only after the record of its give-back lands (giveBack)
+	}
 	if phase == v1alpha1.OperationPhaseDone && !specWritten {
 		phase, finished = v1alpha1.OperationPhaseExecuting, false // a Scale whose targets are all done is not Done while its spec write has not landed
 	}
@@ -309,6 +345,8 @@ func (p *pass) report(op *v1alpha1.Operation, failed map[types.UID]error, deleti
 		switch {
 		case phase == v1alpha1.OperationPhaseDone:
 			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonDone, "every committed target is done")
+		case givingBack:
+			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionTrue, v1alpha1.ReasonExecuting, "every committed target is done or has failed for good, and the count the untaken units hold is given back before the Operation finishes")
 		case finished:
 			p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonDone, "every committed target is done or has failed for good: the Operation is finished")
 		case phase == v1alpha1.OperationPhasePartlyFailed:

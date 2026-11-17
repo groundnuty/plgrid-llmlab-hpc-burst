@@ -257,8 +257,9 @@ func TestAScaleToZeroDrainsAnEndStartingInstanceThatTurnedReadyAndIsDone(t *test
 
 // A Scale to ZERO commits to cancel P's pending job. The write fails; P's job starts and P turns Ready. When the write lands
 // P's target fails for good with its own reason, JobStartedSinceCommit (the approval was for a queued job), P's Instance is
-// DRAINED, since the spec says zero, and P's Allocation follows RETENTION, with retention's own cause: not the Operation's.
-func TestAScaleToZeroDrainsTheInstanceWhoseJobStartedAndItsAllocationFollowsRetention(t *testing.T) {
+// DRAINED, since the spec says zero, and P's Allocation is KEPT WARM, marked, and released by none of the Operation's passes
+// (HBEP-10, The report, as amended by #698).
+func TestAScaleToZeroDrainsTheInstanceWhoseJobStartedAndKeepsItsAllocationWarm(t *testing.T) {
 	// The Allocations are released the moment they are empty (retention), so P's is released by retention once its Instance ends.
 	w := newExecWorldWith(t, time.Hour, func(m *v1alpha1.ModelDeployment) {
 		m.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(0)}
@@ -286,12 +287,16 @@ func TestAScaleToZeroDrainsTheInstanceWhoseJobStartedAndItsAllocationFollowsRete
 	if in := w.instanceOrNil(w.pending); in != nil && !ended(in) && !isDraining(in) {
 		t.Errorf("P is %q, want drained and ended", in.Status.Phase)
 	}
-	w.until(30*time.Minute, 10*time.Second, "P's Allocation released by retention", func() bool {
-		_, deleted := w.log.deletedWith(w.pendingAlloc)
-		return deleted
-	})
-	cause, _ := w.log.deletedWith(w.pendingAlloc)
-	if _, _, _, ok := v1alpha1.ParseReleaseCauseOperation(cause); ok || cause == "" {
-		t.Errorf("P's Allocation was released with the cause %q, want retention's own: the Operation did not release it", cause)
+	for i := 0; i < 60; i++ { // 30 minutes more: retention's release-when-idle (0 s) does not take a marked Allocation
+		w.clock.Advance(30 * time.Second)
+		if err := w.stepKeepingErrors(); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationKeptWarm] == "" {
+		t.Errorf("P's Allocation is %+v (found %v), want it kept warm: marked, and released by none of the Operation's passes", a, ok)
+	}
+	if cause, deleted := w.log.deletedWith(w.pendingAlloc); deleted {
+		t.Errorf("P's Allocation was released with the cause %q: a kept-warm Allocation is released only by maxIdle, its hard end, a person's delete or an approved Release", cause)
 	}
 }

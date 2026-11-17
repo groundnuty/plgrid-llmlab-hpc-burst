@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -64,7 +65,9 @@ func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) 
 	switch {
 	case md == nil:
 		return nil, fmt.Sprintf("ModelDeployment %s does not exist", p.key)
-	case !md.DeletionTimestamp.IsZero():
+	case !md.DeletionTimestamp.IsZero() && !(req.op.Spec.Action == v1alpha1.OperationActionRelease && controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm)):
+		// A Release of a kept-warm Allocation is planned on a deployment an End with delete holds (HBEP-10, The report, as amended
+		// by #698): it is how a person gives up the warm capacity that holds the delete.
 		return nil, fmt.Sprintf("ModelDeployment %s is being deleted", p.key)
 	case md.Spec.Source.Managed != nil && req.op.Spec.Action != v1alpha1.OperationActionEnd:
 		return nil, fmt.Sprintf("ModelDeployment %s has a managed source: the lifecycle controller provisions nothing for it, so there is nothing to scale or release; only an End is planned", p.key)

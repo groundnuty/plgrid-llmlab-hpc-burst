@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -132,6 +133,7 @@ func (p *pass) commitOperation(op *v1alpha1.Operation, plan *v1alpha1.OperationP
 // becomes what the API server holds. When that read fails too, nothing is known, and no other Operation commits in this
 // pass (commitUnknown); the next pass reads again. The pass fails with the commit's own error either way.
 func (p *pass) afterCommitError(op *v1alpha1.Operation) {
+	p.commitUnknown = true // whatever the read below says, the pass's own view of the deployment is behind: no other commit in it
 	var cur v1alpha1.Operation
 	if err := p.r.Reader.Get(p.ctx, client.ObjectKeyFromObject(op), &cur); err != nil {
 		p.commitUnknown = true
@@ -169,6 +171,13 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 				failed[t.UID] = err
 			}
 		}
+	} else if units, due := p.giveBackDue(op); due {
+		// Every target is done or failed for good, and a unit stays: the count is given back before the Operation finishes. The
+		// value check does not run: spec.instances may be N + U already, written by a pass whose record did not land.
+		if err := p.giveBack(op, units); err != nil {
+			p.opsHold = true
+			errs = append(errs, err)
+		}
 	} else if !p.specEffectHolds(op, p.md) {
 		// On EVERY pass, before any act: the effect the Operation committed to must still hold. A person who raises the count
 		// while a Scale drains, or moves the end time of an End, would otherwise have the Operation release what the controller
@@ -202,6 +211,9 @@ var errSpecChanged = errors.New("the deployment's spec changed after the plan, a
 func (p *pass) specEffectHolds(op *v1alpha1.Operation, md *v1alpha1.ModelDeployment) bool {
 	switch op.Spec.Action {
 	case v1alpha1.OperationActionScale:
+		if rec := op.Status.CountGivenBack; rec != nil && rec.Instances != nil && md != nil && md.Spec.Instances == *rec.Instances {
+			return true // the count it gave back (giveBack)
+		}
 		return md == nil || op.Spec.Scale == nil || md.Spec.Instances <= op.Spec.Scale.Instances
 	case v1alpha1.OperationActionEnd:
 		if op.Status.Plan != nil && (md == nil || md.UID != op.Status.Plan.ModelDeployment.UID || !md.DeletionTimestamp.IsZero()) {
@@ -248,6 +260,11 @@ func (p *pass) failSpecChanged(op *v1alpha1.Operation) error {
 		out = append(out, o)
 	}
 	phase, finished := phaseOf(out)
+	if phase == v1alpha1.OperationPhaseDone {
+		// The effect did not hold: whatever was done stays done, and the Operation is not Done, a Scale that committed no target
+		// included, which has none to carry the failure.
+		phase, finished = v1alpha1.OperationPhasePartlyFailed, true
+	}
 	p.raisePartlyFailed(op, phase, out) // an Operation a person's edit stopped is PartlyFailed like any other: the event is raised here too
 	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 		s.Targets, s.Phase = out, phase
@@ -272,7 +289,9 @@ func (p *pass) lastReadyScaleTarget(op *v1alpha1.Operation, t v1alpha1.Committed
 	if op.Spec.Scale != nil && op.Spec.Scale.Instances == 0 {
 		return false // a Scale to zero is the shutdown, as an End is: every Instance is drained, and the approval took it to zero
 	}
-	if t.Effect != v1alpha1.PlanEffectCancelPending && t.Effect != v1alpha1.PlanEffectEndStarting {
+	// A DrainInstance target (no approval) that has become the last ready one is a drain nobody approved too; a
+	// DrainLastReady target was approved as that, and is not asked.
+	if t.Effect != v1alpha1.PlanEffectCancelPending && t.Effect != v1alpha1.PlanEffectEndStarting && t.Effect != v1alpha1.PlanEffectDrainInstance {
 		return false
 	}
 	taken := map[types.UID]bool{}
@@ -331,7 +350,13 @@ func (p *pass) applySpec(op *v1alpha1.Operation) error {
 		}
 	case v1alpha1.OperationActionEnd:
 		if op.Spec.End != nil && op.Spec.End.Delete {
-			if err := p.deleteDeployment(md); err != nil {
+			// A finalizer cannot be added once deletion has begun, and a started job may only be found after this write: it is
+			// added now, before the delete, and removed once no Allocation of the deployment carries the kept-warm mark
+			// (releaseKeptWarmFinalizer; HBEP-10, The report, as amended by #698).
+			if err := p.holdDeletionForKeptWarm(md); err != nil {
+				return err
+			}
+			if err := p.deleteDeployment(p.md); err != nil {
 				return err
 			}
 			return p.recordSpecWritten(op, "the deployment's delete was asked for")
@@ -367,11 +392,47 @@ func (p *pass) writeSpec(next *v1alpha1.ModelDeployment, what string) error {
 	return nil
 }
 
+// holdDeletionForKeptWarm adds FinalizerKeptWarm to the ModelDeployment, an update with the resourceVersion read, and makes the
+// pass work from the stored object.
+func (p *pass) holdDeletionForKeptWarm(md *v1alpha1.ModelDeployment) error {
+	if controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm) {
+		return nil
+	}
+	next := md.DeepCopy()
+	controllerutil.AddFinalizer(next, v1alpha1.FinalizerKeptWarm)
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+		return fmt.Errorf("add the kept-warm finalizer to ModelDeployment %s: %w", p.key, err)
+	}
+	p.md = next
+	return nil
+}
+
+// releaseKeptWarmFinalizer removes FinalizerKeptWarm once the deployment is being deleted and none of its Allocations carries the
+// kept-warm mark, an update with the resourceVersion read: the delete then completes. It is the last write of a pass, since the
+// deployment may be gone after it.
+func (p *pass) releaseKeptWarmFinalizer() error {
+	md := p.md
+	if md == nil || md.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm) {
+		return nil
+	}
+	for _, a := range p.allocs {
+		if keptWarm(a) && a.DeletionTimestamp.IsZero() {
+			return nil // held: an Allocation is kept warm
+		}
+	}
+	next := md.DeepCopy()
+	controllerutil.RemoveFinalizer(next, v1alpha1.FinalizerKeptWarm)
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("remove the kept-warm finalizer from ModelDeployment %s: %w", p.key, err)
+	}
+	return nil
+}
+
 // deleteDeployment deletes the ModelDeployment with a UID precondition, then reads it again: with a finalizer it stays,
 // being deleted, and without one it is gone. Either way the pass shuts down.
 func (p *pass) deleteDeployment(md *v1alpha1.ModelDeployment) error {
-	uid := md.UID
-	if err := p.r.Client.Delete(p.ctx, md, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+	uid, rv := md.UID, md.ResourceVersion // a person's edit after the pass read the deployment conflicts, like the spec write's
+	if err := p.r.Client.Delete(p.ctx, md, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ModelDeployment %s: %w", p.key, err)
 	}
 	var cur v1alpha1.ModelDeployment
@@ -431,6 +492,12 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 			return nil
 		}
 		alloc := p.allocs[in.Spec.AllocationRef.Name]
+		if scaleAboveZero(op) && startedSinceCommit(t, alloc) {
+			// Under a Scale above zero a CancelPending Instance whose job started since the commit is not taken: ending or draining
+			// it is a release nobody approved. It keeps starting and serving, fails JobStartedSinceCommit with its Allocation
+			// (finalFailure), and gives its count back (giveBack; HBEP-10, The report, as amended by #698).
+			return nil
+		}
 		// By the Instance's phase NOW, not as committed: a target committed as pending or still starting may have turned
 		// Ready since, and a serving Instance is drained (HBEP-7, Handover, Draining), never ended: its requests are in flight.
 		switch in.Status.Phase {
@@ -455,8 +522,9 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		}
 		if startedSinceCommit(t, a) {
 			// The approval was to cancel a QUEUED job, which costs a queue position; its job has started since, and releasing a
-			// running one is another price (ReleaseStarted). It is left to retention, and reported Failed for good.
-			return nil
+			// running one is another price (ReleaseStarted). It is kept warm, by a mark written here, before the report records the
+			// failure for good, and no step of an Operation's passes releases it (HBEP-10, The report, as amended by #698).
+			return p.keepWarm(op, a)
 		}
 		if len(p.liveOn(a.Name)) > 0 {
 			// An Instance still runs on it (a drain that has not finished): its release waits until it has ended,
@@ -469,6 +537,124 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		return p.deleteAllocation(a, v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID))
 	}
 	return nil
+}
+
+// scaleAboveZero reports whether the Operation is a Scale to a count above zero: the only Operation that gives back a count,
+// and under which a started-since-commit pair is not taken.
+func scaleAboveZero(op *v1alpha1.Operation) bool {
+	return op.Spec.Action == v1alpha1.OperationActionScale && op.Spec.Scale != nil && op.Spec.Scale.Instances > 0
+}
+
+// keepWarm writes the kept-warm mark on an Allocation whose job started since the Operation committed to cancel it as queued,
+// once: its value is the Operation in the release cause's form. The mark outlives the Operation; retention, the shutdown and the
+// deployment-deletion rule skip it (retention.go, keptWarm).
+func (p *pass) keepWarm(op *v1alpha1.Operation, a *v1alpha1.Allocation) error {
+	if keptWarm(a) {
+		return nil
+	}
+	next := a.DeepCopy()
+	if next.Annotations == nil {
+		next.Annotations = map[string]string{}
+	}
+	next.Annotations[v1alpha1.AnnotationKeptWarm] = v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID)
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // gone already
+		}
+		return fmt.Errorf("mark Allocation %s kept warm: %w", a.Name, err)
+	}
+	*a = *next
+	return nil
+}
+
+// unitOf is the unit an Instance belongs to: one primary's capacity, which is its Instance and Allocation, its hedge's members
+// and its pending replacement (HBEP-7, Hedging; Handover). The key is the first member of the hedge of the root of the
+// predecessor chain.
+func (p *pass) unitOf(in *v1alpha1.Instance) string {
+	for i := 0; i < 8; i++ {
+		pred := in.Annotations[v1alpha1.AnnotationPredecessor]
+		if pred == "" {
+			break
+		}
+		next := p.instanceNamed(pred)
+		if next == nil {
+			break
+		}
+		in = next
+	}
+	return hedgeKey(in)
+}
+
+// untakenUnits counts the units of a Scale that are untaken: a unit has an Instance, a committed target, that remains live
+// because the target failed finally with LastReadySinceCommit or JobStartedSinceCommit, or by their knock-on (the Allocation's
+// failure follows its Instance's). A hedge, with its members and replacement, is one unit. Only a Scale to a count above zero
+// has any.
+func (p *pass) untakenUnits(op *v1alpha1.Operation, outcomes []v1alpha1.TargetOutcome) int {
+	if !scaleAboveZero(op) {
+		return 0
+	}
+	units := map[string]bool{}
+	for _, c := range op.Status.Committed {
+		if c.Kind != v1alpha1.TargetKindInstance {
+			continue
+		}
+		for _, o := range outcomes {
+			if o.UID != c.UID || o.State != v1alpha1.TargetStateFailed || (o.Reason != reasonLastReadySinceCommit && o.Reason != reasonJobStartedSinceCommit) {
+				continue
+			}
+			if in := p.instanceByUID(c.UID); in != nil && !ended(in) {
+				units[p.unitOf(in)] = true
+			}
+		}
+	}
+	return len(units)
+}
+
+// giveBackDue reports whether a Scale's give-back is due, and for how many units: every committed target has an outcome that is
+// done or final, the spec write is recorded, there is at least one untaken unit and no record of a give-back yet.
+func (p *pass) giveBackDue(op *v1alpha1.Operation) (units int, due bool) {
+	if !scaleAboveZero(op) || op.Status.CountGivenBack != nil || !apimeta.IsStatusConditionTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) ||
+		len(op.Status.Targets) != len(op.Status.Committed) || p.md == nil || !p.md.DeletionTimestamp.IsZero() {
+		return 0, false
+	}
+	for _, o := range op.Status.Targets {
+		if o.State != v1alpha1.TargetStateDone && !(o.State == v1alpha1.TargetStateFailed && failureIsFinal(o.Reason)) {
+			return 0, false
+		}
+	}
+	units = p.untakenUnits(op, op.Status.Targets)
+	return units, units > 0
+}
+
+// giveBack raises spec.instances by the untaken units and records it (HBEP-10, The report, as amended by #698). With N the
+// plan's count and U the units, it writes N + U, absolute, with the resourceVersion read, ONLY while spec.instances is still N,
+// the value the Operation wrote; a count a person set stands, with nothing given back. A restart that finds N + U written and no
+// record writes the record alone. The Operation finishes only after the record lands (report).
+func (p *pass) giveBack(op *v1alpha1.Operation, units int) error {
+	n, u := op.Spec.Scale.Instances, int32(units)
+	rec := &v1alpha1.CountGivenBack{Units: u}
+	message := ""
+	switch cur := p.md.Spec.Instances; {
+	case cur == n:
+		next := p.md.DeepCopy()
+		next.Spec.Instances = n + u
+		if err := p.writeSpec(next, fmt.Sprintf("give back %d untaken units, set spec.instances to %d", units, n+u)); err != nil {
+			return err
+		}
+		v := n + u
+		rec.Instances = &v
+		message = fmt.Sprintf("%d untaken units: spec.instances is %d again, the plan's %d plus them", units, n+u, n)
+	case cur == n+u:
+		v := cur
+		rec.Instances = &v
+		message = fmt.Sprintf("%d untaken units: spec.instances is %d again, the plan's %d plus them", units, cur, n)
+	default:
+		message = fmt.Sprintf("%d untaken units, and nothing given back: a person set spec.instances to %d; it stands", units, cur)
+	}
+	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
+		s.CountGivenBack = rec
+		p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionTrue, v1alpha1.ReasonExecuting, "gave back "+message)
+	})
 }
 
 // recordedFinal reports whether the Operation's report already records the target as failed for good (failureIsFinal): such a

@@ -493,6 +493,8 @@ func TestACommittedInstanceThatTurnedReadyAndIsTheLastReadyOneIsNotDrained(t *te
 	if err := w.stepKeepingErrors(); err != nil {
 		t.Fatalf("the pass after the spec write can land: %v", err)
 	}
+	// The count is given back before the Operation finishes (opexec_giveback_test.go): one pass later.
+	w.stepsUntil(2*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
 	if in := w.instance(x); isDraining(in) || ended(in) || in.Status.Phase != v1alpha1.InstanceReady {
 		t.Errorf("X is %q: the last ready Instance is not drained under an approval that did not cover it", in.Status.Phase)
 	}
@@ -538,6 +540,7 @@ func TestTheAllocationOfAnInstanceThatFailedForGoodAsTheLastReadyOneFailsWithIt(
 	if err := w.stepKeepingErrors(); err != nil {
 		t.Fatalf("the pass after the spec write can land: %v", err)
 	}
+	w.stepsUntil(2*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
 	op := w.getOp("scale")
 	if o, ok := outcomeOf(op, x); !ok || o.State != v1alpha1.TargetStateFailed || o.Reason != reasonLastReadySinceCommit {
 		t.Errorf("X's Instance outcome is %+v (%v), want Failed with %s", o, ok, reasonLastReadySinceCommit)

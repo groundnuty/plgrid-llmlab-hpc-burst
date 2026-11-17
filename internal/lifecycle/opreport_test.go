@@ -160,16 +160,18 @@ func TestAFinalFailureStaysAndAStartedCancelIsNotDone(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		started   bool
+		marked    bool // the kept-warm mark is on the Allocation (written by the act, before the record)
 		gone      bool
 		prior     []v1alpha1.TargetOutcome
 		effect    v1alpha1.PlanEffect
 		wantState v1alpha1.TargetState
 	}{
-		{"queued, not cancelled yet", false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
-		{"gone: the Operation cancelled it queued", false, true, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateDone},
-		{"started since the commit", true, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
-		{"started, then released by retention: still the failure", true, true, []v1alpha1.TargetOutcome{record}, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
-		{"started with another effect is no failure", true, false, nil, v1alpha1.PlanEffectReleaseKept, v1alpha1.TargetStateNotStarted},
+		{"queued, not cancelled yet", false, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
+		{"gone: the Operation cancelled it queued", false, false, true, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateDone},
+		{"started since the commit and marked", true, true, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"started since the commit, not marked yet: not final until the mark is written", true, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
+		{"started, then released by retention: still the failure", true, true, true, []v1alpha1.TargetOutcome{record}, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"started with another effect is no failure", true, false, false, nil, v1alpha1.PlanEffectReleaseKept, v1alpha1.TargetStateNotStarted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpFixture(t, 1)
@@ -178,6 +180,9 @@ func TestAFinalFailureStaysAndAStartedCancelIsNotDone(t *testing.T) {
 			a.Status.AtProvider.StartTime = nil
 			if tc.started {
 				a.Status.AtProvider.StartTime = opTime(opT0)
+			}
+			if tc.marked {
+				a.Annotations = map[string]string{v1alpha1.AnnotationKeptWarm: "operation ns/op uid-op"}
 			}
 			target := cancel
 			target.Effect = tc.effect

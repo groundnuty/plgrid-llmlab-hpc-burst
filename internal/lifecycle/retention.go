@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
@@ -79,6 +81,9 @@ func (p *pass) releaseEmpty(a *v1alpha1.Allocation) (bool, string, error) {
 type fateView struct {
 	// deleted: the deployment is gone, or is being deleted.
 	deleted bool
+	// heldByKeptWarm: the deployment is being deleted and holds FinalizerKeptWarm, so an Operation's End with delete is
+	// deleting it, not a person (keptWarmSkipsDeletion).
+	heldByKeptWarm bool
 	// endTime is the deployment's end time, nil when it has none.
 	endTime *time.Time
 	// maxIdle is the profile's idle limit that releases even a kept Allocation; nil when the Provider's
@@ -89,6 +94,7 @@ type fateView struct {
 // retentionView is the pass's view for an Allocation.
 func (p *pass) retentionView(a *v1alpha1.Allocation) fateView {
 	v := fateView{deleted: p.md == nil || !p.md.DeletionTimestamp.IsZero()}
+	v.heldByKeptWarm = p.md != nil && !p.md.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(p.md, v1alpha1.FinalizerKeptWarm)
 	if p.md != nil && p.md.Spec.EndTime != nil {
 		t := p.md.Spec.EndTime.Time
 		v.endTime = &t
@@ -97,6 +103,20 @@ func (p *pass) retentionView(a *v1alpha1.Allocation) fateView {
 		v.maxIdle = pv.settings.maxIdle
 	}
 	return v
+}
+
+// keptWarm reports whether the Allocation carries the kept-warm mark: its job started after an Operation committed to cancel it
+// as queued, and no rule but the profile's maxIdle, its hard end, HBEP-7's unconditional releases and a person's direct delete of
+// its deployment releases it (HBEP-10, The report, as amended by #698).
+func keptWarm(a *v1alpha1.Allocation) bool { return a.Annotations[v1alpha1.AnnotationKeptWarm] != "" }
+
+// keptWarmSkipsDeletion is the ONE function that tells an Operation's delete of a deployment from a person's (HBEP-10, The
+// report, as amended by #698): a deployment that is being deleted AND holds FinalizerKeptWarm is an Operation's End with
+// delete, so its marked Allocations skip retention's deletion rule; a deployment that is gone, or is being deleted WITHOUT the
+// finalizer, was deleted by a person, a person's act outside the guard by design, and the deletion rule releases its marked
+// Allocations with retention's cause.
+func keptWarmSkipsDeletion(a *v1alpha1.Allocation, v fateView) bool {
+	return keptWarm(a) && v.heldByKeptWarm
 }
 
 // retentionFate is the pure decision of releaseEmpty: whether the empty Allocation a goes at now, why, and
@@ -124,7 +144,7 @@ func retentionFate(a *v1alpha1.Allocation, v fateView, now time.Time, emptiedAt 
 		// Allocation with no live Instance waits for nothing.
 		return true, time.Time{}, "a pending Allocation with no Instance is cancelled", false
 	}
-	if v.deleted {
+	if v.deleted && !keptWarmSkipsDeletion(a, v) {
 		// A user who deletes a deployment releases its GPUs, whatever its policy (HBEP-7, Release; the science agent's ruling on
 		// #503, 13 Nov 2026): release-when-idle's limit, like keep's date, is for a deployment that still exists. Before this, only
 		// keep was cut by the deletion (keepUntil), and a release-when-idle job ran on for its whole idle limit, 30 minutes in the
@@ -153,6 +173,12 @@ func retentionFate(a *v1alpha1.Allocation, v fateView, now time.Time, emptiedAt 
 		} else {
 			later(t)
 		}
+	}
+	if keptWarm(a) {
+		// Kept warm: the profile's maxIdle, its hard end and the unconditional releases above are all that release it, and
+		// every other rule, the idle limit, a keep date and the deployment's end time, skips it (HBEP-10, The report, as
+		// amended by #698).
+		return false, at, "", false
 	}
 	switch pol.EffectiveMode() {
 	case v1alpha1.RetentionReleaseWhenIdle:
