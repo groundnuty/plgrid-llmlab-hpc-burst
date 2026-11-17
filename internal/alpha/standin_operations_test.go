@@ -32,6 +32,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -380,6 +381,129 @@ func (s *opsStand) instancesLine(md string) string {
 	return strings.Join(parts, "; ")
 }
 
+// allInstancesOf lists every Instance of a deployment, ended ones too, the oldest first.
+func (s *opsStand) allInstancesOf(md string) []v1alpha1.Instance {
+	t := s.t
+	t.Helper()
+	var l v1alpha1.InstanceList
+	ctx, cancel := stack.CallCtx(t)
+	defer cancel()
+	if err := s.person.c.List(ctx, &l, client.InNamespace(stack.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md)}); err != nil {
+		t.Fatalf("list the Instances of %s: %v", md, err)
+	}
+	sort.Slice(l.Items, func(i, j int) bool { return l.Items[i].CreationTimestamp.Before(&l.Items[j].CreationTimestamp) })
+	return l.Items
+}
+
+// instanceLines logs one short line for each Instance of a deployment, for the reading of a run that passed as of one that
+// failed: "<label>: instance <name> phase=<phase> created=<time> predecessor=<name or none>". A handover replacement names the
+// primary it replaces; a primary provisioned in place of one a Scale ended has none.
+func (s *opsStand) instanceLines(label, md string) {
+	for _, in := range s.allInstancesOf(md) {
+		pred := in.Annotations[v1alpha1.AnnotationPredecessor]
+		if pred == "" {
+			pred = "none"
+		}
+		s.t.Logf("%s: instance %s phase=%s created=%s predecessor=%s", label, in.Name, in.Status.Phase, in.CreationTimestamp.UTC().Format(time.TimeOnly), pred)
+	}
+}
+
+// uidsOf is the set of the UIDs of the Instances in the list.
+func uidsOf(items []v1alpha1.Instance) map[types.UID]bool {
+	out := map[types.UID]bool{}
+	for _, in := range items {
+		out[in.UID] = true
+	}
+	return out
+}
+
+// primariesOf are a deployment's primaries as step 7 counts them: the Instances that have not ended and are not draining, and
+// whose predecessor is not itself such an Instance. A replacement is made before its predecessor drains, and counts for
+// nothing beside it.
+func primariesOf(items []v1alpha1.Instance) []v1alpha1.Instance {
+	serving := map[string]bool{}
+	for _, in := range items {
+		if in.Status.Phase != v1alpha1.InstanceEnded && in.Status.Phase != v1alpha1.InstanceDraining {
+			serving[in.Name] = true
+		}
+	}
+	var out []v1alpha1.Instance
+	for _, in := range items {
+		if !serving[in.Name] {
+			continue
+		}
+		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred == "" || !serving[pred] {
+			out = append(out, in)
+		}
+	}
+	return out
+}
+
+// reprovisioned lists the Instances created after an Operation's commit (the ones not in before) that are not a handover
+// replacement of a primary that stays: a new Instance with no predecessor is a primary provisioned in place of what the
+// Operation ended, which is churn at the cost of a queue position; one whose predecessor is a victim of the Operation was
+// replaced when it should have gone.
+func reprovisioned(items []v1alpha1.Instance, before map[types.UID]bool, victims map[string]bool) []string {
+	var out []string
+	for _, in := range items {
+		if before[in.UID] {
+			continue
+		}
+		switch pred := in.Annotations[v1alpha1.AnnotationPredecessor]; {
+		case pred == "":
+			out = append(out, fmt.Sprintf("%s (created %s, phase %s) has no predecessor", in.Name, in.CreationTimestamp.UTC().Format(time.TimeOnly), in.Status.Phase))
+		case victims[pred]:
+			out = append(out, fmt.Sprintf("%s (created %s) replaces %s, which the Operation took", in.Name, in.CreationTimestamp.UTC().Format(time.TimeOnly), pred))
+		}
+	}
+	return out
+}
+
+// afterScale is what an approved Scale's Done is followed by, on the deployment (HBEP-7, Handover; HBEP-10, The report): its
+// committed Instance targets, the victims, have ended Drained or are gone; the deployment has exactly one primary; and every
+// Instance created since the commit (not in before) is a handover replacement of a primary that stays, never a primary
+// provisioned in place of a victim. A pass of the deployment's key has run after Done, which a sentinel Operation shows. It
+// returns the victims' names, for the same check at the end of the run. The two Instances a deployment of two primaries has
+// after a Scale to one are the survivor and its replacement, both ready until the survivor's drain starts: the count of ready
+// Instances says nothing, the primaries do.
+func (s *opsStand) afterScale(op, md string, before map[types.UID]bool) map[string]bool {
+	t := s.t
+	t.Helper()
+	victims := map[string]bool{}
+	for _, c := range s.op(op).Status.Committed {
+		if c.Kind == v1alpha1.TargetKindInstance {
+			victims[c.Name] = true
+		}
+	}
+	if len(victims) == 0 {
+		t.Fatalf("Operation %s committed to no Instance target: a Scale of two primaries to one takes one of them", op)
+	}
+	s.instanceLines(op+" Done", md)
+	// A pass of md's key after Done: a fresh Operation, only ever planned, reads Planned once a pass has planned it.
+	s.request(s.a, "sentinel-"+op, md, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
+	stack.WaitState(t, 5*time.Minute, "after "+op+": its victims ended, one primary, no new primary", func() (bool, string) {
+		all := s.allInstancesOf(md)
+		var open []string
+		for _, in := range all {
+			if victims[in.Name] && (in.Status.Phase != v1alpha1.InstanceEnded || in.Status.EndReason != v1alpha1.ReasonDrained) {
+				open = append(open, fmt.Sprintf("%s %s/%s", in.Name, in.Status.Phase, in.Status.EndReason))
+			}
+		}
+		if bad := reprovisioned(all, before, victims); len(bad) > 0 {
+			t.Fatalf("after Operation %s, %s has Instances that are not a handover replacement of a primary that stays: %s", op, md, strings.Join(bad, "; "))
+		}
+		primaries, ready := primariesOf(all), 0
+		for _, in := range all {
+			if in.Status.Phase == v1alpha1.InstanceReady {
+				ready++
+			}
+		}
+		return len(open) == 0 && len(primaries) == 1 && ready >= 1, fmt.Sprintf("victims not ended Drained: %v; %d primaries; %d ready: %s", open, len(primaries), ready, s.instancesLine(md))
+	})
+	s.instanceLines(op+" settled", md)
+	return victims
+}
+
 // TestStandInOperations is the owner's Sano example and an approved End, end to end on the stand-in cluster, as the file's
 // comment says.
 //
@@ -441,7 +565,9 @@ func TestStandInOperations(t *testing.T) {
 	for _, name := range []string{opsMDP, opsMDQ} {
 		stack.WaitState(t, 10*time.Minute, "two ready Instances of "+name, func() (bool, string) {
 			live, ready := s.instancesOf(name)
-			return len(ready) == 2, fmt.Sprintf("%d live, %d ready", len(live), len(ready))
+			// At least two: every primary is given its make-before-break replacement as soon as its job starts (the stand-in's
+			// lease is 20 minutes), so a third and a fourth Instance may be ready beside the two primaries.
+			return len(ready) >= 2, fmt.Sprintf("%d live, %d ready: %s", len(live), len(ready), s.instancesLine(name))
 		})
 	}
 
@@ -482,16 +608,14 @@ func TestStandInOperations(t *testing.T) {
 	if got := s.deployment(opsMDP).Spec.Instances; got != 2 {
 		t.Fatalf("spec.instances of P's deployment is %d before the approval, want 2", got)
 	}
+	beforeP := uidsOf(s.allInstancesOf(opsMDP))
 	s.approve(s.a, "scale-p")
 	s.waitOp("scale-p", "Done", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseDone })
 	if got := s.deployment(opsMDP).Spec.Instances; got != 1 {
 		t.Errorf("after A's own approval, spec.instances of P's deployment is %d, want 1", got)
 	}
 	s.dump("A's Scale of the deployment on P is Done")
-	stack.WaitState(t, 5*time.Minute, "one ready Instance of "+opsMDP, func() (bool, string) {
-		live, ready := s.instancesOf(opsMDP)
-		return len(live) == 1 && len(ready) == 1, fmt.Sprintf("%d live, %d ready: %s", len(live), len(ready), s.instancesLine(opsMDP))
-	})
+	victimsP := s.afterScale("scale-p", opsMDP, beforeP)
 
 	// A's Scale of the deployment on Q: Provider Q has no policy of its own, so the global policy applies, which names the
 	// person alone. A's approval and B's count under none; the person's runs it.
@@ -525,11 +649,13 @@ func TestStandInOperations(t *testing.T) {
 	if got := s.deployment(opsMDQ).Spec.Instances; got != 2 {
 		t.Fatalf("spec.instances of Q's deployment is %d while the Operation waits for the person, want 2", got)
 	}
+	beforeQ := uidsOf(s.allInstancesOf(opsMDQ))
 	s.approve(s.person, "scale-q")
 	s.waitOp("scale-q", "Done", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseDone })
 	if got := s.deployment(opsMDQ).Spec.Instances; got != 1 {
 		t.Errorf("after the person's approval, spec.instances of Q's deployment is %d, want 1", got)
 	}
+	victimsQ := s.afterScale("scale-q", opsMDQ, beforeQ)
 
 	// The person's End of the deployment on P. The tags of its Allocations' jobs are read first: the fake Slurm's own record
 	// of those jobs is the end of the example.
@@ -591,6 +717,7 @@ func TestStandInOperations(t *testing.T) {
 			t.Errorf("the job %s is %s before the End is approved, want RUNNING", tag, state)
 		}
 	}
+	beforeEnd := uidsOf(s.allInstancesOf(opsMDP))
 	s.approve(s.person, "end-p")
 	// The End is Done once every target is. The Allocations are read while it runs: the release cause each carries, which is
 	// written before the delete, is the End's own proof that it, and not the end of a time limit, released the job.
@@ -614,7 +741,14 @@ func TestStandInOperations(t *testing.T) {
 		t.Error("the deployment on P has no end time after its End")
 	}
 	if live, _ := s.instancesOf(opsMDP); len(live) != 0 {
-		t.Errorf("the deployment on P still has %d live Instances after its End is Done", len(live))
+		t.Errorf("the deployment on P still has %d live Instances after its End is Done: %s", len(live), s.instancesLine(opsMDP))
+	}
+	// The End's shutdown provisions nothing: no Instance was created after its commit, whatever its predecessor.
+	s.instanceLines("end-p Done", opsMDP)
+	for _, in := range s.allInstancesOf(opsMDP) {
+		if !beforeEnd[in.UID] {
+			t.Errorf("Instance %s of the deployment on P was created after the End's commit (predecessor %q): the shutdown provisions nothing", in.Name, in.Annotations[v1alpha1.AnnotationPredecessor])
+		}
 	}
 	// The fake Slurm's own record: every job of the deployment's Allocations has ended, none is left running or pending.
 	stack.WaitState(t, 3*time.Minute, "the fake Slurm to show every job of the deployment on P ended", func() (bool, string) {
@@ -645,5 +779,20 @@ func TestStandInOperations(t *testing.T) {
 			t.Errorf("the job %s ended %s, and its Allocation's release cause was %q: want CANCELLED or the cause of Operation %s/%s %s", tag, state, causes[tag], end.Namespace, end.Name, end.UID)
 		}
 	}
+	// At the end of the run, again: a late re-provision after a Scale, or any Instance after the End's commit, is caught too.
+	allP := s.allInstancesOf(opsMDP)
+	if bad := reprovisioned(allP, beforeP, victimsP); len(bad) > 0 {
+		t.Errorf("at the end, the deployment on P has Instances that are not a handover replacement of a primary that stays: %s", strings.Join(bad, "; "))
+	}
+	for _, in := range allP {
+		if !beforeEnd[in.UID] {
+			t.Errorf("at the end, Instance %s of the deployment on P was created after the End's commit", in.Name)
+		}
+	}
+	if bad := reprovisioned(s.allInstancesOf(opsMDQ), beforeQ, victimsQ); len(bad) > 0 {
+		t.Errorf("at the end, the deployment on Q has Instances that are not a handover replacement of a primary that stays: %s", strings.Join(bad, "; "))
+	}
+	s.instanceLines("end of the run, P", opsMDP)
+	s.instanceLines("end of the run, Q", opsMDQ)
 	// The stack's own stop is down's, registered by StartHost; the cluster's clean-up kills what is left.
 }
