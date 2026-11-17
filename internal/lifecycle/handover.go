@@ -40,15 +40,23 @@ func (p *pass) capacity() error {
 	// predecessor's successor, marked, on its Provider first (HBEP-7,
 	// Handover, No-overlap mode, the one-slot path and the retries).
 	carriers := p.noOverlapCarriers()
+	var placed []string // the Providers where the loop made a new Allocation, in order
 	for i := len(prim); i < desired; i++ {
 		var ok bool
 		var err error
+		before := len(p.submitted)
 		if len(carriers) > 0 {
 			g := carriers[0]
 			carriers = carriers[1:]
 			ok, err = p.provisionWith(g.in, placeOpts{successorOf: g.why, gapOf: g.drained})
 		} else {
 			ok, err = p.provision(nil)
+		}
+		// Each Provider where this loop made a new Allocation (a submission, never a placement on a warm one) gets
+		// its extra below, a no-overlap successor's included: HBEP-7 refuses the extra in no-overlap mode by the
+		// slot and caps checks failing on the same counts, not by a skip.
+		for _, name := range p.submitted[before:] {
+			placed = appendOnce(placed, name)
 		}
 		if err != nil {
 			return err
@@ -59,6 +67,11 @@ func (p *pass) capacity() error {
 			}
 			break
 		}
+	}
+	// Each Provider where the loop made a new Allocation gets its extra, after every missing primary it could place
+	// (extra.go). An extra no check admits is silent, so it never reaches noProvider() above.
+	if err := p.createExtras(placed); err != nil {
+		return err
 	}
 	// The chosen primaries are read again: the loop above made Instances, which the selection counts. The surplus,
 	// ready or not, is taken every pass, not only when the count is lowered (scaleDownTargets).

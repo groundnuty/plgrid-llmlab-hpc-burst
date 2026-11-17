@@ -8,6 +8,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -81,8 +82,9 @@ const (
 // count's own list returned (listProviderAllocations), by namespace/name; profile is the Provider's, for the
 // drain start, and with none no primary's slot is reserved. The slots come in a fixed order.
 //
-// A primary holds one when it is countable (not draining, ended or deleting), no countable Instance is its
-// predecessor, no live Instance names it as its predecessor, its Allocation on this Provider is Running, and its
+// A primary holds one when it is countable (not draining, ended or deleting), it is not surplus in its
+// deployment's selection (surplusOf: an extra, or a primary a lowered count left over, holds none, #616), no
+// countable Instance is its predecessor, no live Instance names it as its predecessor, its Allocation on this Provider is Running, and its
 // deployment, not being deleted, serves past its drain start (servesPast). So does a hedge's winner whose
 // predecessor still serves on another Provider, from its win: it is ready, and its hedge's winner (hedgeWinner over
 // the hedge's countable members on every Provider), so another deployment's primary can't take the slot its own
@@ -144,6 +146,20 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 		carriers[g.in] = true
 	}
 	mds := map[string]*v1alpha1.ModelDeployment{}
+	// The selection of each deployment (selectPrimaries, as its own pass makes it): a surplus Instance holds no
+	// reserved slot and gets no replacement (HBEP-7, How it counts), so a started extra on a Running Allocation
+	// reserves nothing, as it would otherwise block another deployment's primary and be counted twice in its own
+	// deployment's extra check (#616 PR 4).
+	surplus := map[*v1alpha1.Instance]bool{}
+	for _, v := range views {
+		set, err := surplusOf(ctx, r, v, mds)
+		if err != nil {
+			return nil, err
+		}
+		for in := range set {
+			surplus[in] = true
+		}
+	}
 	var out []reservedSlot
 	for _, in := range here {
 		allocKey := in.Namespace + "/" + in.Spec.AllocationRef.Name
@@ -161,7 +177,7 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation, created: in.CreationTimestamp.Time, uid: string(in.UID)})
 			continue
 		}
-		if profile == nil || !countable(in) || replaced[in.Namespace+"/"+in.Name] {
+		if profile == nil || !countable(in) || replaced[in.Namespace+"/"+in.Name] || surplus[in] {
 			continue
 		}
 		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && countableNames[in.Namespace+"/"+pred] {
@@ -204,10 +220,15 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 type deploymentView struct {
 	key   string // namespace/the model-deployment label's value
 	insts []*v1alpha1.Instance
+	// allocs are the deployment's Allocations on every Provider by name, one List by the same label (#616 PR 4):
+	// what the selection reads (a hedge's representative, an Instance's job start). Empty for a view of one
+	// Instance that has no label.
+	allocs map[string]*v1alpha1.Allocation
 }
 
-// deploymentViews reads, for each deployment with an Instance among onProvider, its Instances on every Provider,
-// by its model-deployment label in its namespace, one List per deployment (#617; shared with #616's selection).
+// deploymentViews reads, for each deployment with an Instance among onProvider, its Instances on every Provider
+// and its Allocations, each by its model-deployment label in its namespace, one List per deployment each (#617;
+// shared with #616's selection, which reads both).
 // An Instance of onProvider that its deployment's List does not show (one with no label, or a cache between the
 // two Lists) is kept as listed, so the reserved count never reads fewer Instances than the Provider's own List.
 // The views come in the order of their deployments' first Instance in onProvider.
@@ -225,7 +246,7 @@ func deploymentViews(ctx context.Context, r client.Reader, onProvider []v1alpha1
 		if !ok {
 			j = len(out)
 			at[key] = j
-			v := deploymentView{key: key}
+			v := deploymentView{key: key, allocs: map[string]*v1alpha1.Allocation{}}
 			if label != "" {
 				var il v1alpha1.InstanceList
 				if err := r.List(ctx, &il, client.InNamespace(in.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: label}); err != nil {
@@ -233,6 +254,13 @@ func deploymentViews(ctx context.Context, r client.Reader, onProvider []v1alpha1
 				}
 				for k := range il.Items {
 					v.insts = append(v.insts, &il.Items[k])
+				}
+				var al v1alpha1.AllocationList
+				if err := r.List(ctx, &al, client.InNamespace(in.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: label}); err != nil {
+					return nil, fmt.Errorf("list Allocations of deployment %s for the reserved slots: %w", key, err)
+				}
+				for k := range al.Items {
+					v.allocs[al.Items[k].Name] = &al.Items[k]
 				}
 			}
 			out = append(out, v)
@@ -249,6 +277,52 @@ func deploymentViews(ctx context.Context, r client.Reader, onProvider []v1alpha1
 		}
 	}
 	return out, nil
+}
+
+// surplusOf returns the Instances the deployment's selection leaves out: every member of each hedge that
+// selectPrimaries does not choose, at the deployment's desired count: spec.instances, or 0 when it is being
+// deleted. It reads the objects its pass reads (the Instances it owns or that an earlier deployment of the same
+// name owned, in the pass's order, and the deployment's Allocations), so the two make one selection (a parity
+// test pins it). A deployment that is gone has no ModelDeployment to read, and its Instances hold nothing here.
+func surplusOf(ctx context.Context, r client.Reader, v deploymentView, mds map[string]*v1alpha1.ModelDeployment) (map[*v1alpha1.Instance]bool, error) {
+	if len(v.insts) == 0 {
+		return nil, nil
+	}
+	md, err := deploymentOf(ctx, r, v.insts[0], mds)
+	if err != nil || md == nil {
+		return nil, err
+	}
+	desired := 0
+	if md.DeletionTimestamp.IsZero() {
+		desired = int(md.Spec.Instances)
+	}
+	var insts []*v1alpha1.Instance
+	stale := map[types.UID]bool{}
+	for _, in := range v.insts {
+		owned, old := ownedBy(in, md.Name, md)
+		if owned || old {
+			insts = append(insts, in)
+		}
+		if old {
+			stale[in.UID] = true
+		}
+	}
+	sort.Slice(insts, func(i, j int) bool {
+		a, b := insts[i], insts[j]
+		if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+			return a.CreationTimestamp.Before(&b.CreationTimestamp)
+		}
+		return a.Name < b.Name
+	})
+	sel := selection{insts: insts, stale: stale, allocOf: func(in *v1alpha1.Instance) *v1alpha1.Allocation { return v.allocs[in.Spec.AllocationRef.Name] }}
+	_, out := selectUnits(sel, desired)
+	set := map[*v1alpha1.Instance]bool{}
+	for _, u := range out {
+		for _, m := range u.members {
+			set[m] = true
+		}
+	}
+	return set, nil
 }
 
 // deploymentKey names the Instance's ModelDeployment (namespace/name), from its controlling owner reference, or

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -102,11 +103,27 @@ type placeOpts struct {
 	// caps checks the Provider's per-user caps for the new Allocation beside
 	// ours there, inside the slot's reservation (capsFit).
 	caps bool
+	// extra marks the over-allocation extra (HBEP-7, Over-allocation and qualification (beta), When the extra is
+	// submitted; #616 PR 4): a Provider that refuses it is passed over in silence, since a refused extra is k = 0
+	// there in effect and no degradation. It implies quiet, which skips each of the three records a refusal
+	// would otherwise leave: p.noSlot (reserveSlotFor's quiet, so no SubmitLimitReached text), p.sizingRefused
+	// (the sizing branch's `if o.quiet { continue }`) and a Degraded reason (the loopPaused branch's
+	// `if !o.quiet`, and the same sizing branch for ProviderUnavailable). The fourth place, noProvider(), is
+	// never reached: capacity() calls provisionWith for the extra outside its missing-primary loop, and reads
+	// only the Provider that loop placed on.
+	extra bool
+	// alsoLeave is how many of the deployment's own chosen primaries on the Provider hold no reserved slot yet but
+	// will once Running (extraAlsoLeave), left free beside the new Allocation: the extra's slot is beyond its own
+	// handovers (HBEP-7, Its checks, a slot beyond its own handovers). Set with extra, on the Provider named by only.
+	alsoLeave int
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
+	}
+	if o.extra {
+		o.quiet = true // see placeOpts.extra
 	}
 	order := p.providers
 	if pred != nil {
@@ -179,7 +196,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if o.caps {
 			capsOf = &params
 		}
-		ok, holds, err := p.reserveSlotFor(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet)
+		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave)
 		if err != nil {
 			return false, err
 		}
@@ -199,19 +216,57 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			}
 			return true, err
 		}
+		// A new Allocation, a submission: capacity() reads where the missing primaries made one (the extra goes
+		// to those Providers only; a placement on a warm Allocation, which returned above, is none).
+		p.submitted = append(p.submitted, pv.name)
 		return true, nil
 	}
 	return false, nil
 }
 
+// warmOf returns the deployment's warm Allocations on the Provider: Running, not deleting, hosting no live
+// Instance, not pending release (releasePending) and whose relay has not ended for good (relayEnded), the latest
+// hard end first, then by name (HBEP-7, Over-allocation and qualification (beta), When the extra is submitted:
+// "Warm Allocations count toward k only here, in the extra's creation bound"). It checks no fit, no lease and no
+// registration: warmAllocation, which places on one, keeps those, and the extra's bound only asks whether one
+// exists. One predicate, so the placement and the bound never disagree about what is warm. An Allocation with no
+// hard end yet sorts last.
+func (p *pass) warmOf(pv *providerView) []*v1alpha1.Allocation {
+	var out []*v1alpha1.Allocation
+	for _, a := range p.allocs {
+		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
+			a.Status.AtProvider.Phase != v1alpha1.AllocationRunning || len(p.liveOn(a.Name)) > 0 ||
+			p.releasePending(a) || relayEnded(a) {
+			continue
+		}
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		hi, hj := out[i].Status.AtProvider.HardEnd, out[j].Status.AtProvider.HardEnd
+		switch {
+		case hi != nil && hj == nil:
+			return true
+		case hi == nil && hj != nil:
+			return false
+		case hi != nil && !hi.Equal(hj):
+			return hi.After(hj.Time)
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
 // warmAllocation returns a Running Allocation of this deployment on the
 // Provider that hosts no live Instance and has lease left above twice the
 // class's start-to-ready time plus the drain window (HBEP-7, open question 14).
+// It is the first of warmOf's, the latest hard end first, that fits and has a
+// registered agent, so its pick is the same on every pass (it ranged over a map
+// before).
 //
 // The Allocation must fit the launch: the same partition (so the same class)
 // and GPU count, and at least the CPUs and memory a new Allocation would
 // request (review of PR 88: a spec edit can change the GPUs an Instance needs).
-// One marked RelayEndedForGood is passed over (relayEnded): step 7, which
+// One marked RelayEndedForGood is passed over (relayEnded, in warmOf): step 7, which
 // places, runs before step 9, which releases an empty one, so one pass would
 // otherwise place an Instance on it and the next would fail that Instance,
 // which counts toward RestartLoop (issue #332).
@@ -220,11 +275,9 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 // says until when.
 func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters) (warm *v1alpha1.Allocation, deferUntil time.Time) {
 	need := 2*startToReady(p.md, pv.class) + drainWindowOf(pv, p.md)
-	for _, a := range p.allocs {
+	for _, a := range p.warmOf(pv) {
 		obs := a.Status.AtProvider
-		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
-			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) {
+		if obs.HardEnd == nil || obs.HardEnd.Sub(p.now) <= need || !fits(a, params) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {

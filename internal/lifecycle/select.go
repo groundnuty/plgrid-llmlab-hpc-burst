@@ -207,16 +207,32 @@ func (s selection) ordered() []selUnit {
 	return us
 }
 
+// selectUnits is the selection by hedge: the chosen units, the first desired in HBEP-7's order (a marked peer
+// excepted: it is surplus), and the surplus units, both in that order. Instances that do not count, and a
+// replacement whose predecessor still counts, are in neither: a replacement is never ranked. selectPrimaries
+// reads the representatives of these units; reservedOn reads their members (a surplus hedge's every member
+// holds no reserved slot).
+func selectUnits(s selection, desired int) (chosen, surplus []selUnit) {
+	for _, u := range s.ordered() {
+		if !u.marked && len(chosen) < desired {
+			chosen = append(chosen, u)
+			continue
+		}
+		surplus = append(surplus, u)
+	}
+	return chosen, surplus
+}
+
 // selectPrimaries returns the deployment's chosen primaries, the first desired of its Instances in HBEP-7's order
 // (a marked peer excepted: it is surplus), and its surplus, both in that order, one Instance per hedge: the hedge's
 // representative (hedgeRepresentative). Instances that do not count, and a replacement whose predecessor still
 // counts, are in neither: a replacement is never ranked.
 func selectPrimaries(s selection, desired int) (chosen, surplus []*v1alpha1.Instance) {
-	for _, u := range s.ordered() {
-		if !u.marked && len(chosen) < desired {
-			chosen = append(chosen, u.rep)
-			continue
-		}
+	cu, su := selectUnits(s, desired)
+	for _, u := range cu {
+		chosen = append(chosen, u.rep)
+	}
+	for _, u := range su {
 		surplus = append(surplus, u.rep)
 	}
 	return chosen, surplus

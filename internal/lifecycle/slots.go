@@ -72,10 +72,13 @@ const listTimeout = 30 * time.Second
 // the API and no other call: one List of the Allocations of every namespace,
 // and, for a Provider with a submit limit, one List of the Instances that carry
 // the Provider's label, one List of the Instances of each deployment with an
-// Instance among them (deploymentViews, by its model-deployment label, in its
-// namespace) and one Get of the ModelDeployment of each primary among them
-// (reservedOn), all under one context bounded by listTimeout. slotTable.mu is
-// never held across any of them.
+// Instance among them and one List of its Allocations (deploymentViews, each by
+// its model-deployment label, in its namespace; the Allocations are what the
+// selection that reservedOn applies reads, #616 PR 4) and one Get of the
+// ModelDeployment of each deployment among them (reservedOn), all under one
+// context bounded by listTimeout. slotTable.mu is never held across any of
+// them. The extra's alsoLeave (slotAsk) is counted by the asking pass from its
+// own deployment's objects before it asks, so nothing under the lock reads it.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
@@ -185,6 +188,13 @@ type slotAsk struct {
 	// member asks it (HBEP-7, Hedging (beta), Which Provider is next).
 	params *v1alpha1.BatchParameters
 	caps   v1alpha1.QOSLimits
+	// alsoLeave is how many slots the reservation leaves free beside the new Allocation, for the asking
+	// deployment's own chosen primaries that hold no reserved slot yet but will once Running (the extra's
+	// slot beyond its own handovers: HBEP-7, Over-allocation and qualification (beta), Its checks). The
+	// reservation then succeeds only when listed + expected + reserved + alsoLeave + 1 is within the limit.
+	// The pass counts it from its own objects (extraAlsoLeave); it adds to what reservedOn reads from the
+	// other deployments' and the Running primaries' own slots. Zero for every other ask.
+	alsoLeave int
 }
 
 // slotAnswer is a reservation's answer.
@@ -246,7 +256,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if q.limit != nil {
 		n, by = counted(rd.reserved, q.key, q.takers, t.expect[q.provider])
 		total += n
-		if total >= int(*q.limit) {
+		if total+q.alsoLeave >= int(*q.limit) {
 			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
 		}
 	}
@@ -453,8 +463,13 @@ func submitLimitText(pv *providerView) string {
 // condition: a hedge's member that finds no room is extra capacity, and the
 // Provider passed over sets no reason (HBEP-7, Hedging (beta)).
 func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool) (ok, holds bool, err error) {
+	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, 0)
+}
+
+// reserveSlotWith is reserveSlotFor leaving alsoLeave slots free beside the new Allocation (slotAsk.alsoLeave).
+func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int) (ok, holds bool, err error) {
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits}
+		params: params, caps: pv.limits, alsoLeave: alsoLeave}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}
