@@ -180,6 +180,7 @@ type OperationConfirm struct {
 // Provider's controller fills in (HBEP-11, Controllers, Field managers). Status
 // needs no CRD rule: an agent has no write to the status subresource, and a
 // create's status is dropped.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.countGivenBack) || has(self.countGivenBack)",message="status.countGivenBack is set once: it cannot be removed (HBEP-10, The report)"
 type OperationStatus struct {
 	// Phase is where the Operation is (HBEP-10, Operations, Phases).
 	//
@@ -222,12 +223,46 @@ type OperationStatus struct {
 	// +kubebuilder:validation:MaxItems=256
 	Targets []TargetOutcome `json:"targets,omitempty"`
 
-	// FinishedAt is when the Operation became Done, Stale or Refused. The
-	// controller removes the Operation 7 days later (HBEP-10, Operations,
-	// Removal).
+	// FinishedAt is when the Operation became Done, Stale or Refused, or
+	// PartlyFailed with every failure final (HBEP-10, The report, as amended by
+	// #665 and #666: the science agent's rulings on #664, 16 and 17 Nov 2026). The controller
+	// removes the Operation 7 days later (HBEP-10, Operations, Removal).
 	//
 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+
+	// CountGivenBack is a Scale's record of the count it gave back for its
+	// untaken units (HBEP-10, The report, as amended by #698). It is set ONLY
+	// when some unit is untaken: a Scale with no untaken unit never sets it, and
+	// does not wait for it. When set, the Operation finishes only after it is
+	// written. Written once by the lifecycle controller: a rule on status
+	// refuses dropping it while status stays, its own rule refuses changing it,
+	// and a rule at the Operation's root refuses removing the status that holds
+	// it, which the others could not see (a merge patch of status null leaves
+	// them nothing to run on).
+	//
+	// +optional
+	CountGivenBack *CountGivenBack `json:"countGivenBack,omitempty"`
+}
+
+// CountGivenBack records a give-back (HBEP-10, The report, as amended by #698).
+//
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="status.countGivenBack is set once: it cannot be changed (HBEP-10, The report)"
+type CountGivenBack struct {
+	// Units is U, the untaken units: each the capacity of one primary (its
+	// Instance and Allocation, its hedge's members, and its pending
+	// replacement).
+	//
+	// +kubebuilder:validation:Minimum=1
+	Units int32 `json:"units"`
+
+	// Instances is the spec.instances written: the plan's count plus Units,
+	// absolute. It is absent when a person had set another count, which stands,
+	// so nothing was given back.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Instances *int32 `json:"instances,omitempty"`
 }
 
 // OperationPlan is the plan of an Operation (HBEP-10, The plan).
@@ -390,7 +425,10 @@ type TargetOutcome struct {
 	// +kubebuilder:validation:MaxLength=64
 	UID types.UID `json:"uid"`
 
-	// State is done, failed (and retried with backoff) or not started.
+	// State is done, failed or not started. A failed target is retried with
+	// backoff unless its failure is final, as when the target changed since the
+	// commit so that its approved effect cannot apply (HBEP-10, The report, as
+	// amended by #665 and #666).
 	State TargetState `json:"state"`
 
 	// Reason is the CamelCase code of a failure.
@@ -399,7 +437,9 @@ type TargetOutcome struct {
 	// +kubebuilder:validation:MaxLength=256
 	Reason string `json:"reason,omitempty"`
 
-	// Message says what failed.
+	// Message says what failed. On a done Allocation that a failure released before the Operation did (a gate miss,
+	// RestartLoop, an Allocation failed or lost), it names that failure ("released by QualificationFailed"): the
+	// Allocation's release cause is the failure's, not the Operation's (HBEP-10, The release cause).
 	//
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
@@ -602,6 +642,7 @@ type QueueWaitsFigure struct {
 // +kubebuilder:printcolumn:name="Deployment",type=string,JSONPath=`.spec.modelDeploymentRef.name`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.countGivenBack) || has(self.status)",message="status.countGivenBack is set once: removing the status that holds it is refused (HBEP-10, The report)"
 type Operation struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

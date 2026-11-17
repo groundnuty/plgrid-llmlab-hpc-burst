@@ -224,7 +224,7 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
 			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) {
+			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) || p.committedForRelease(a) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {
@@ -241,6 +241,9 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 // Allocation is to be released (a release that failed or was interrupted is
 // made on a later pass): it is never warm capacity.
 func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
+	if allocationFailed(a) {
+		return true // a job that failed or was lost, or a relay ended for good: retention releases it by its own reason
+	}
 	for _, in := range p.insts {
 		if in.Spec.AllocationRef.Name == a.Name && releaseRequired(in) {
 			return true
