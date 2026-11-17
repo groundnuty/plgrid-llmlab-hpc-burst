@@ -104,7 +104,7 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLe
 // every namespace, and, for each deployment that allows the Provider, its Instances and Allocations by its model-deployment
 // label. A deployment with a missing primary may have NO Instance on this Provider, so no view of the Provider's own
 // Instances (deploymentViews) can tell. A deployment counts when it is not this one, not being deleted, serves, wants
-// Instances, has not passed its end time, allows the Provider (selectedProviderNames, as its own pass reads it) and its
+// Instances, has not passed its end time (by the clock read under the lock), allows the Provider (selectedProviderNames, as its own pass reads it) and its
 // shortage by Allocation presence (shortageOfDeployment) is above zero.
 func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 	return func(ctx context.Context) (int, error) {
@@ -116,6 +116,9 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 		if err := p.r.Reader.List(ctx, &provs); err != nil {
 			return 0, fmt.Errorf("list Providers for the extra's headroom: %w", err)
 		}
+		// The clock is read here, with the lock held and every read back, never the pass's p.now from before it: a pass that
+		// waited for the lock must not count a deployment whose end time passed meanwhile.
+		now := p.reserveTime()
 		h := 0
 		for i := range mds.Items {
 			md := &mds.Items[i]
@@ -123,7 +126,7 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 				continue
 			}
 			if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 ||
-				(md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time)) {
+				(md.Spec.EndTime != nil && !now.Before(md.Spec.EndTime.Time)) {
 				continue
 			}
 			allowed, err := selectedProviderNames(md.Spec.Providers, provs.Items)
@@ -134,13 +137,17 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 			if err != nil {
 				return 0, err
 			}
-			if short > 0 {
-				h++
-			}
+			h += headroomUnit(short)
 		}
 		return max(h, 1), nil
 	}
 }
+
+// headroomUnit is what a deployment missing short primaries adds to H: its missing PRIMARIES, short, so that one
+// deployment missing several leaves a slot for each, or, were the rule's "other deployments with a missing primary" read
+// as deployments, 1 for any short above 0. The one line the science agent's ruling on the unit flips (#711, Fable's
+// review of the headroom); 0 for a deployment missing none, either way.
+func headroomUnit(short int) int { return short }
 
 // shortageOf is how many primaries a deployment lacks, counted by ALLOCATION PRESENCE and never by the selection's
 // choice: its desired count less the units, one per hedge, that countable Instances make and that HAVE an Allocation. A
