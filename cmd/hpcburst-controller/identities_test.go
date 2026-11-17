@@ -141,7 +141,9 @@ func refusedEvents(evs []auditEvent) []auditEvent {
 // refused: a verb the role lacks, whatever the controller did with the answer.
 func assertNoControllerRequestRefused(t testing.TB, auditLog string) {
 	t.Helper()
-	refused := refusedEvents(readAuditEvents(t, auditLog))
+	evs := readAuditEvents(t, auditLog)
+	recordRoleCoverage(t, evs)
+	refused := refusedEvents(evs)
 	for i, e := range refused {
 		if i == 20 {
 			t.Errorf("... and %d more refused requests", len(refused)-i)
@@ -436,4 +438,35 @@ func leaseWrittenBy(evs []auditEvent, lease, user string) bool {
 		}
 	}
 	return false
+}
+
+// roleCoverageEnv names a directory: when it is set, each test that started an API server writes there, as
+// <test name>.jsonl, which requests each controller identity made that the API server ANSWERED (2xx), counted by
+// user, verb, group, resource and subresource. Run over the whole package it is the evidence of which rule of
+// each role some suite really exercises under that identity, and which none does (the PR's coverage table).
+// Unset, nothing is written.
+const roleCoverageEnv = "HPCBURST_ROLE_COVERAGE_DIR"
+
+func recordRoleCoverage(t testing.TB, evs []auditEvent) {
+	dir := os.Getenv(roleCoverageEnv)
+	if dir == "" {
+		return
+	}
+	type key struct{ user, verb, group, resource, sub string }
+	counts := map[key]int{}
+	for _, e := range evs {
+		if e.ResponseStatus.Code/100 == 2 && strings.HasPrefix(e.User.Username, controllerSA) {
+			counts[key{strings.TrimPrefix(e.User.Username, controllerSA), e.Verb, e.ObjectRef.APIGroup, e.ObjectRef.Resource, e.ObjectRef.Subresource}]++
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Errorf("role coverage: %v", err)
+		return
+	}
+	defer f.Close()
+	for k, n := range counts {
+		b, _ := json.Marshal(map[string]any{"test": t.Name(), "user": k.user, "verb": k.verb, "group": k.group, "resource": k.resource, "subresource": k.sub, "n": n})
+		fmt.Fprintf(f, "%s\n", b)
+	}
 }
