@@ -414,6 +414,8 @@ type slotReads struct {
 	// pendingSurplus are the surplus Instances of every deployment on the Provider whose Allocation holds a slot and
 	// whose job has not started, newest first (D8's views; read for the yield, with the reserved slots).
 	pendingSurplus []*v1alpha1.Instance
+	// yieldMarks are the Instances on the Provider that carry a yield mark while their Allocation still holds a slot.
+	yieldMarks []*v1alpha1.Instance
 }
 
 // readBounded makes the count's reads under one context bounded by the table's
@@ -427,7 +429,7 @@ func (t *slotTable) readBounded(ctx context.Context, r client.Reader, provider s
 		return slotReads{}, err
 	}
 	if withReserved {
-		if rd.reserved, rd.pendingSurplus, err = readReserved(ctx, r, provider, profile, rd.allocs); err != nil {
+		if rd.reserved, rd.pendingSurplus, rd.yieldMarks, err = readReserved(ctx, r, provider, profile, rd.allocs); err != nil {
 			return slotReads{}, err
 		}
 	}

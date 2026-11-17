@@ -83,8 +83,9 @@ func (p *pass) missingPrimaries() int {
 // yieldOnLimit is the callback of a missing primary's reservation (slotAsk.onLimit), called under the Provider's
 // lock when the reservation is refused for the submit limit alone: it records the refusal for this pass, and marks
 // one more pending extra on the Provider while the extras already marked for this deployment there number fewer
-// than the deployment's missing primaries. rd carries the pending surplus Instances of every deployment on the
-// Provider, newest first (D8's views).
+// than the deployment's missing primaries: the marks outstanding are the Instances carrying a mark that names it
+// while their Allocation still holds a slot, a cancelled extra's included until its deletion completes. rd carries
+// the pending surplus Instances of every deployment on the Provider, newest first (D8's views).
 func (p *pass) yieldOnLimit(pv *providerView) func(ctx context.Context, rd slotReads) error {
 	return func(ctx context.Context, rd slotReads) error {
 		if p.limitRefused == nil {
@@ -93,7 +94,7 @@ func (p *pass) yieldOnLimit(pv *providerView) func(ctx context.Context, rd slotR
 		p.limitRefused[pv.name] = true
 		me := p.deploymentKeyOf()
 		marked := 0
-		for _, in := range rd.pendingSurplus {
+		for _, in := range rd.yieldMarks {
 			if yieldsTo(in) == me {
 				marked++
 			}
