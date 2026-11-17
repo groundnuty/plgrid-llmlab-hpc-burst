@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	pfake "github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
@@ -39,9 +41,11 @@ type ordRig struct {
 }
 
 // ordOpts are what a row varies: A's and B's submit limits (0: none; the limit is declared in the profile's QOS and
-// enforced by the fake Slurm), and whether C exists.
+// enforced by the fake Slurm), A's per-user GPU cap (0: none), B's partition limit (0: 12 h), and whether C exists.
 type ordOpts struct {
 	aLimit, bLimit int32
+	aGPUCap        int32
+	bMaxTime       time.Duration
 	withC          bool
 }
 
@@ -49,9 +53,19 @@ func newOrdRig(t *testing.T, o ordOpts, opts ...rigOption) *ordRig {
 	t.Helper()
 	var qos []v1alpha1.QOSProfile
 	ropts := []rigOption{withMaxTime(4 * time.Hour)}
-	if o.aLimit > 0 {
-		qos = append(qos, v1alpha1.QOSProfile{Name: ordASlot, MaxSubmitPerUser: i32(o.aLimit)})
-		ropts = append(ropts, withProviderQOS(ordASlot), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = int(o.aLimit) }))
+	if o.aLimit > 0 || o.aGPUCap > 0 {
+		q := v1alpha1.QOSProfile{Name: ordASlot}
+		if o.aLimit > 0 {
+			q.MaxSubmitPerUser = i32(o.aLimit)
+		}
+		if o.aGPUCap > 0 {
+			q.MaxGPUsPerUser = i32(o.aGPUCap)
+		}
+		qos = append(qos, q)
+		ropts = append(ropts, withProviderQOS(ordASlot), withBatchConfig(func(c *pfake.Config) {
+			c.MaxSubmitPerUser = int(o.aLimit)
+			c.MaxGPUsPerUser = o.aGPUCap
+		}))
 	}
 	if o.bLimit > 0 {
 		qos = append(qos, v1alpha1.QOSProfile{Name: ordBSlot, MaxSubmitPerUser: i32(o.bLimit)})
@@ -61,7 +75,11 @@ func newOrdRig(t *testing.T, o ordOpts, opts ...rigOption) *ordRig {
 	}
 	rg := newRig(t, append(ropts, opts...)...)
 	r := &ordRig{rig: rg, warm: map[string]string{}}
-	r.b = rg.addProvider(ordB, "gpu-b", 12*time.Hour,
+	bMax := o.bMaxTime
+	if bMax == 0 {
+		bMax = 12 * time.Hour
+	}
+	r.b = rg.addProvider(ordB, "gpu-b", bMax,
 		func(pp *v1alpha1.PartitionProfile) {
 			if o.bLimit > 0 {
 				pp.QOS = ordBSlot
@@ -169,4 +187,31 @@ func (o *ordRig) subs() (a, b, c int) {
 // where names the Provider an Instance is on and the Allocation it runs in.
 func where(in v1alpha1.Instance) (prov, alloc string) {
 	return in.Labels[v1alpha1.LabelProvider], in.Spec.AllocationRef.Name
+}
+
+// idleSinceOf is the Allocation's idle-since anchor.
+func (o *ordRig) idleSinceOf(alloc string) time.Time {
+	o.t.Helper()
+	a, ok := o.allocation(alloc)
+	if !ok {
+		o.t.Fatalf("Allocation %s is gone", alloc)
+	}
+	since, found, err := v1alpha1.IdleSince(a)
+	if err != nil || !found {
+		o.t.Fatalf("Allocation %s has no idle-since anchor (%v, found %v)", alloc, err, found)
+	}
+	return since
+}
+
+// setMaxIdle sets the rig profile's maxIdle, as an operator's edit would; the controller reads it on its next pass.
+func (o *ordRig) setMaxIdle(d time.Duration) {
+	o.t.Helper()
+	var prof v1alpha1.PlatformProfile
+	if err := o.rig.c.Get(o.ctx, client.ObjectKey{Name: rigProfile}, &prof); err != nil {
+		o.t.Fatal(err)
+	}
+	prof.Spec.MaxIdle = dur(d)
+	if err := o.rig.c.Update(o.ctx, &prof); err != nil {
+		o.t.Fatal(err)
+	}
 }
