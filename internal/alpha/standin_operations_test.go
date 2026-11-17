@@ -459,13 +459,39 @@ func reprovisioned(items []v1alpha1.Instance, before map[types.UID]bool, victims
 	return out
 }
 
+// settle waits, on state, until every live Instance of the deployment is ready (none pending, starting, verifying or draining)
+// and the set of live Instances, with their phases, is the same on two successive reads, then logs them: an Operation is
+// requested of a deployment that is still, so that its plan is not turned stale between the plan and the commit.
+func (s *opsStand) settle(label, md string) {
+	t := s.t
+	t.Helper()
+	prev := "-"
+	stack.WaitState(t, 5*time.Minute, label+": every live Instance of "+md+" ready, the set unchanged between two reads", func() (bool, string) {
+		var parts []string
+		allReady := true
+		for _, in := range s.allInstancesOf(md) {
+			if in.Status.Phase == v1alpha1.InstanceEnded {
+				continue
+			}
+			parts = append(parts, in.Name+":"+string(in.Status.Phase))
+			allReady = allReady && in.Status.Phase == v1alpha1.InstanceReady
+		}
+		sig := strings.Join(parts, ",")
+		stable := sig == prev
+		last := prev
+		prev = sig
+		return allReady && stable && len(parts) > 0, fmt.Sprintf("%s (the read before: %s)", s.instancesLine(md), last)
+	})
+	s.instanceLines(label, md)
+}
+
 // afterScale is what an approved Scale's Done is followed by, on the deployment (HBEP-7, Handover; HBEP-10, The report): its
 // committed Instance targets, the victims, have ended Drained or are gone; the deployment has exactly one primary; and every
 // Instance created since the commit (not in before) is a handover replacement of a primary that stays, never a primary
 // provisioned in place of a victim. A pass of the deployment's key has run after Done, which a sentinel Operation shows. It
 // returns the victims' names, for the same check at the end of the run. The two Instances a deployment of two primaries has
-// after a Scale to one are the survivor and its replacement, both ready until the survivor's drain starts: the count of ready
-// Instances says nothing, the primaries do.
+// after a Scale to one are the survivor and its replacement, both ready until the survivor's drain starts (long after the run, with
+// the lease the stand-in has): the count of ready Instances says nothing, the primaries do.
 func (s *opsStand) afterScale(op, md string, before map[types.UID]bool) map[string]bool {
 	t := s.t
 	t.Helper()
@@ -514,7 +540,24 @@ func TestStandInOperations(t *testing.T) {
 	}
 	b := standInBinaries(t)
 	rehearsal.RequireTools(t)
-	stm := stack.Timing{Lease: "20m", MaxRequest: "60s", DrainMargin: "30s", DrainWindow: "10m", HandoverMargin: "30s", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
+	// The world is quiet while the Operations run, so that no Operation's plan is turned stale between its plan and its commit by
+	// an Instance that changes meanwhile. What changes Instances on a lease this short is the handover. The replacement of a
+	// primary is created at its planned time (HBEP-7, Test plan): "With no wait observed on the Provider, that is the primary's
+	// start. With observed waits, it is the drain start minus the p90 wait (the largest wait while fewer than 20 are observed),
+	// the class's start-to-ready time and the margin." And Operational readiness 6: "Before any wait is observed, or on a long
+	// queue, the replacement is submitted at the predecessor's start and can overlap it for most of the lease." While a class's
+	// start-to-ready time is unmeasured it is 30 minutes (defaultStartToReady), longer than a 20-minute lease's drain start, so
+	// the plan is clamped to the primary's start too: that is why the first hosted run had 2 primaries plus 2 replacements from
+	// the first minute, a test-world effect of a lease of minutes (production leases are hours), and why "one live and one ready
+	// Instance" after a Scale to one could not hold. The drain start is the hard end minus the drain window (the shorter of the
+	// profile's 10 minutes and the maximum request 60 s plus the drain margin 30 s: 90 s). A lease of 60 minutes puts the first
+	// drain start 58 minutes after the jobs start, past the run's whole length (its -timeout is 40 minutes), puts a replacement
+	// planned from observed waits (the drain start minus the wait, the start-to-ready time and the margin) after it too, and no
+	// job can run out its time limit during the run. A replacement planned from the primary's start (no wait observed) is made
+	// and turns ready during the setup. Either way nothing changes while the Operations run, and each Operation is requested
+	// only after a settle wait (settle): the instance lines at each settle show which of the two happened. The lease reaches the
+	// deployments only (spec.leaseLimit); the partition's maxTime, 30 minutes in the shared profile, is raised below to let it.
+	stm := stack.Timing{Lease: "60m", MaxRequest: "60s", DrainMargin: "30s", DrainWindow: "10m", HandoverMargin: "30s", StopGrace: "5s", AgentTimeout: "20s", StartTimeout: "4m"}
 	arch := stack.CPUArch(t)
 
 	// The stand-in cluster: job IDs of this process's own, one login node, and a Hub double for the checkpoint.
@@ -547,7 +590,9 @@ func TestStandInOperations(t *testing.T) {
 	// The Providers P and Q over the one login node, and a deployment of two Instances on each.
 	provP, provQ := stack.BatchProvider(creds), stack.BatchProvider(creds)
 	provQ.Name = opsProviderQ
-	stack.Create(t, admin, stack.BatchProfile(arch, stm), provP, provQ)
+	profile := stack.BatchProfile(arch, stm)
+	profile.Spec.Partitions[0].MaxTime = stack.Dur("90m") // an Allocation's time limit is the least of the partition's maxTime and the lease
+	stack.Create(t, admin, profile, provP, provQ)
 	for _, name := range []string{stack.ProviderName, opsProviderQ} {
 		var p v1alpha1.Provider
 		stack.WaitFor(t, stack.WaitDeadline, "Provider "+name+" to be Ready over the login node", func() bool {
@@ -565,8 +610,8 @@ func TestStandInOperations(t *testing.T) {
 	for _, name := range []string{opsMDP, opsMDQ} {
 		stack.WaitState(t, 10*time.Minute, "two ready Instances of "+name, func() (bool, string) {
 			live, ready := s.instancesOf(name)
-			// At least two: every primary is given its make-before-break replacement as soon as its job starts (the stand-in's
-			// lease is 20 minutes), so a third and a fourth Instance may be ready beside the two primaries.
+			// At least two: every primary is given its make-before-break replacement as soon as its job starts, so a third and a
+			// fourth Instance may be ready beside the two primaries.
 			return len(ready) >= 2, fmt.Sprintf("%d live, %d ready: %s", len(live), len(ready), s.instancesLine(name))
 		})
 	}
@@ -595,6 +640,7 @@ func TestStandInOperations(t *testing.T) {
 	}
 	stack.Create(t, admin, policyP)
 
+	s.settle("before scale-p", opsMDP)
 	s.dump("before A's Scale of the deployment on P")
 
 	// A's Scale of the deployment on P, to one Instance: its targets are on Provider P, whose policy names A, so A's own
@@ -617,6 +663,7 @@ func TestStandInOperations(t *testing.T) {
 	s.dump("A's Scale of the deployment on P is Done")
 	victimsP := s.afterScale("scale-p", opsMDP, beforeP)
 
+	s.settle("before scale-q", opsMDQ)
 	// A's Scale of the deployment on Q: Provider Q has no policy of its own, so the global policy applies, which names the
 	// person alone. A's approval and B's count under none; the person's runs it.
 	planQ := s.request(s.a, "scale-q", opsMDQ, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionScale, Scale: &v1alpha1.ScaleParameters{Instances: 1}})
@@ -657,6 +704,7 @@ func TestStandInOperations(t *testing.T) {
 	}
 	victimsQ := s.afterScale("scale-q", opsMDQ, beforeQ)
 
+	s.settle("before end-p", opsMDP)
 	// The person's End of the deployment on P. The tags of its Allocations' jobs are read first: the fake Slurm's own record
 	// of those jobs is the end of the example.
 	var tags []string
