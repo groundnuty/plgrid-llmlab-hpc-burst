@@ -56,6 +56,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -124,6 +125,11 @@ type apiServer struct {
 	env        *envtest.Environment
 	client     client.Client
 	kubeconfig []byte
+	// cfg reaches the API server as its administrator: the harness's own client, never the controllers'.
+	cfg *rest.Config
+	// auditLog is the API server's audit log file, which records each request the controllers' identities made
+	// and how it was answered (identities_test.go).
+	auditLog string
 }
 
 // startAPIServer starts etcd and kube-apiserver on ports the kernel chose,
@@ -153,6 +159,10 @@ func startAPIServer(t *testing.T) *apiServer {
 			APIServer: &envtest.APIServer{CertDir: certDir},
 		},
 	}
+	// The API server writes an audit log of what the controllers' identities ask, so that a request an
+	// identity is refused fails the test even when the controller retries it or logs it and carries on
+	// (identities_test.go): a role that lacks a verb must not pass as a slow test.
+	auditLog := configureControllerAudit(t, env, dir)
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatalf("start the API server: %v", err)
@@ -161,6 +171,7 @@ func startAPIServer(t *testing.T) *apiServer {
 		if err := env.Stop(); err != nil {
 			t.Errorf("stop the API server: %v", err)
 		}
+		assertNoControllerRequestRefused(t, auditLog)
 		for _, d := range []string{etcdDir, certDir} {
 			if pids := processesNaming(d); len(pids) > 0 {
 				t.Errorf("processes %v still run with %s on their command line", pids, d)
@@ -192,7 +203,12 @@ func startAPIServer(t *testing.T) *apiServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &apiServer{env: env, client: c, kubeconfig: env.KubeConfig}
+	// hpcburst-system, where the controllers' Leases live and their ServiceAccounts are made (hpcburst up
+	// makes it too): the one place the tests' namespace for them is created.
+	if err := c.Create(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}); err != nil {
+		t.Fatal(err)
+	}
+	return &apiServer{env: env, client: c, kubeconfig: env.KubeConfig, cfg: cfg, auditLog: auditLog}
 }
 
 // processesNaming returns the PIDs of the processes whose command line
@@ -478,9 +494,11 @@ func prepareStateAt(t *testing.T, api *apiServer, portBase int, mode, addr strin
 	t.Helper()
 	state := t.TempDir()
 	h := agentapi.Host{StateDir: state, PortBase: portBase}
-	if err := os.WriteFile(filepath.Join(state, "kubeconfig"), api.kubeconfig, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// No <state>/kubeconfig is written: the controller reads the identities' kubeconfigs that hpcburst up
+	// would issue, from the same function (launcher.PrepareControllerIdentities: the roles of
+	// config/rbac/controllers.yaml and a TokenRequest each), so the binary runs under its own RBAC and a
+	// default path that fell back to the admin credential would find no file.
+	lifecycleKubeconfig, providerKubeconfig := api.controllerIdentities(t, state)
 	for _, d := range []string{h.CredentialsDir(), h.AgentBuildsDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
@@ -495,10 +513,20 @@ func prepareStateAt(t *testing.T, api *apiServer, portBase int, mode, addr strin
 	cert := writeEndpointCert(t, h)
 	args := []string{"--state-dir", state, "--port-base", strconv.Itoa(h.PortBase),
 		"--health-addr", net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t))),
+		"--kubeconfig", lifecycleKubeconfig, "--provider-kubeconfig", providerKubeconfig,
 		"--front-mode", mode, "--front-addr", addr}
 	f, err := parse(append(args, extra...), io.Discard)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The binary runs on the identities, not on the admin credential: its flags name the two kubeconfigs, the
+	// default <state>/kubeconfig is not there to fall back to, and each identity file authenticates as its own
+	// ServiceAccount (api.controllerIdentities asked the API server through it).
+	if f.kubeconfig != lifecycleKubeconfig || f.providerKubeconfig != providerKubeconfig {
+		t.Fatalf("the flags name %q and %q, not the identities' %q and %q", f.kubeconfig, f.providerKubeconfig, lifecycleKubeconfig, providerKubeconfig)
+	}
+	if _, err := os.Stat(filepath.Join(state, "kubeconfig")); err == nil {
+		t.Fatal("an admin kubeconfig is in the state directory, where a default would find it")
 	}
 	return f, cert, digest
 }
@@ -662,10 +690,6 @@ func stagedConfig(t *testing.T, sl *fakeslurm.Platform, a *v1alpha1.Allocation) 
 
 func TestControllerBinary(t *testing.T) {
 	api := startAPIServer(t)
-	ctx := context.Background()
-	if err := api.client.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}); err != nil {
-		t.Fatal(err)
-	}
 
 	t.Run("refuses a Provider-manager scheme without apps/v1", func(t *testing.T) {
 		f, _, _ := prepareState(t, api, "direct", exampleFront)
@@ -1007,7 +1031,7 @@ func TestControllerBinaryStopDuringSubmission(t *testing.T) {
 	profile := batchProfile("hang-slurm")
 	prov := batchProvider("hang-batch", profile.Name, partX86, sshCredentials(t))
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "hang-allocs"}}
-	for _, o := range []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}, profile, prov, ns} {
+	for _, o := range []client.Object{profile, prov, ns} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
@@ -1110,7 +1134,7 @@ func TestControllerBinaryProvidersFollowTheLifecycleLeader(t *testing.T) {
 	c := api.client
 	profile := batchProfile("follow-slurm")
 	prov := batchProvider("follow-batch", profile.Name, partX86, sshCredentials(t))
-	for _, o := range []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}, profile, prov} {
+	for _, o := range []client.Object{profile, prov} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
