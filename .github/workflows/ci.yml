@@ -3,7 +3,8 @@
 # It runs the repository's own checks on every pull request and on every push to main:
 #   go              gofmt, go vet, go test (through hack/go-test.sh: the packages)
 #   go own-timeout  hack/go-test.sh's groups, the tests that run on their own -timeout (issue #295), in a
-#                   job of their own so that neither job comes near its 30 minutes
+#                   job of their own so that neither job comes near its 30 minutes; the groups of
+#                   different packages run at the same time, in lanes
 #   tidy         go mod tidy -diff, in a job of its own that restores no module cache (its Go tarball
 #                is the only thing it restores)
 #   crd          hack/check.sh: generated-CRD drift, envtest with the pinned binaries, sha256 checks
@@ -71,8 +72,9 @@
 #
 # crd and launcher-k3s call scripts from hack/. A missing script fails the job: a job that
 # skipped for lack of its script would turn a rename into a check that quietly stopped running.
-# One skip remains, and it is explicit: launcher-k3s leaves out the store-full tests on a runner
-# without FUSE, and says so in the job summary and in a check annotation.
+# One skip remains, and it is explicit: launcher-k3s leaves out the tests that mount a FUSE volume on a
+# runner without FUSE, and says so in the job summary and in a check annotation. Which tests those are
+# is read from the test sources by hack/fusetests (#657), never kept by hand.
 
 name: ci
 
@@ -298,10 +300,10 @@ jobs:
     name: go own-timeout
     runs-on: ubuntu-24.04
     # hack/go-test.sh's groups, the tests that run on their own -timeout, apart from the go job (issue
-    # #295): the two together ran 1,174-1,331 s of the go job's 30 minutes, 1.35x at worst, and with the
-    # groups here the go job keeps about 840 s of its 30 minutes and this job about 640 s of its own. The
-    # envoy-timeouts group (issue #429) adds about 370 s to this job, which leaves about 1,010 s of its 30
-    # minutes (a local estimate; the first run on CI will say).
+    # #295): the two together ran 1,174-1,331 s of the go job's 30 minutes, 1.35x at worst. The groups run in
+    # LANES, one per package (the groups of different packages at the same time, those of one package one
+    # after another), so the job costs its longest lane and not the sum of its groups, which was about
+    # 950-990 s of test time on 17 Nov 2026 (the envoy-timeouts group of issue #429 alone is about 360 s).
     # The same setup as the go job, step for step, since the groups need the same Go, the pinned frp and
     # Kubernetes binaries and sshd; no build cache is restored, so the Kubernetes libraries compile
     # from scratch here too. This job's name is a required check of main: a rename would stop every merge.
@@ -442,54 +444,27 @@ jobs:
       # was not verified: without steps.gocheck.outcome a failed install or check would leave PATH
       # without the pinned Go, and hack/go-test.sh would run the runner image's own, unchecked one.
       #
-      # One test of internal/lifecycle runs on its own, under its own timeout, so that the package
-      # stays clear of go test's 10-minute one, which keeps catching a real hang (issue #282). The step
-      # fails unless the test really ran and passed. It runs even if the packages failed. hack/check.sh
-      # runs the same parts, so the crd job runs this test too.
-      - name: go test, one test on its own timeout
+      # Every group runs in this one step, in lanes (see the top of hack/go-test.sh): one lane per
+      # package, the lanes at the same time, a package's groups one after another. The groups are the
+      # tests that run on their own -timeout so that their packages stay clear of go test's 10-minute
+      # one, which keeps catching a real hang (issues #282, #295, #306 and #429):
+      #   - internal/lifecycle: the lease test, four groups of tests that start a control plane, and the
+      #     fake-clock group of its slowest tests that start none (lifecycle-slow, issue #295 part B);
+      #   - cmd/hpcburst-controller: the two failover tests, which wait out two 15 s Leases each;
+      #   - internal/agent: the two real-Envoy tests that wait out Envoy's own defaults (a worker silent
+      #     for 310 s, an upstream connection idle for 50 s). The step fails unless both ran and passed,
+      #     with nothing skipped, so a runner without Envoy fails it (the job sets HPCBURST_REQUIRE_ENVOY=1
+      #     and fetches the pinned binary above);
+      #   - hack/livechecks: the dry runs through hack/live-checks.sh, which build and run the real test
+      #     binaries and agent, in two groups, and its five slowest other tests (livechecks-tree, issue #295
+      #     part B).
+      # The step fails unless every group's tests all ran and passed, with nothing skipped, and a failing
+      # group fails it, named in its output and its table, without stopping the other lanes. hack/check.sh
+      # runs the same groups, so the crd job runs these tests too. The step is gated as the groups' steps
+      # were: a CI guard (internal/testenv) refuses a second step for a group, as it would run twice.
+      - name: go test, the groups that run on their own timeout, in lanes
         if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lease
-
-      # internal/lifecycle's other tests that start a control plane, in three groups, and
-      # cmd/hpcburst-controller's two failover tests run on their own for the same reason (issue #295):
-      # with them, each package was within 1.5x of the 10 minutes on main's slow runs. Each step fails
-      # unless every one of its tests ran and passed, with nothing skipped, and hack/check.sh runs the
-      # same groups, so the crd job runs these tests too.
-      - name: go test, internal/lifecycle's caches tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lifecycle-caches
-
-      - name: go test, internal/lifecycle's two-copy tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lifecycle-copies
-
-      - name: go test, internal/lifecycle's other control-plane tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own lifecycle-control-plane
-
-      - name: go test, cmd/hpcburst-controller's failover tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own controller-failover
-
-      # internal/agent's two real-Envoy tests that wait out Envoy's own defaults (a worker silent for
-      # 310 s, an upstream connection idle for 50 s) run on their own timeout for the same reason (issue
-      # #429): about 6 minutes between them, which the package's run would carry. The step fails unless
-      # both ran and passed, with nothing skipped, so a runner without Envoy fails it (the job sets
-      # HPCBURST_REQUIRE_ENVOY=1 and fetches the pinned binary above).
-      - name: go test, internal/agent's real-Envoy timeout tests on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own envoy-timeouts
-
-      # hack/livechecks' dry runs through hack/live-checks.sh, which build and run the real test
-      # binaries and agent, run in two groups of their own for the same reason (PR #306): each step
-      # fails unless every one of its tests ran and passed, with nothing skipped.
-      - name: go test, hack/livechecks' host-dialed dry runs on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own livechecks-hostdialed
-
-      - name: go test, hack/livechecks' other dry runs on their own timeout
-        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
-        run: bash hack/go-test.sh own livechecks-dry
+        run: bash hack/go-test.sh own
 
   tidy:
     name: tidy
@@ -809,8 +784,9 @@ jobs:
       # volume of the store-full tests is a FUSE file system that go-fuse mounts through the
       # setuid helper fusermount3, or fusermount when there is no fusermount3. Rather than guess
       # from file modes, the probe does what go-fuse does: it runs that helper to mount a tiny
-      # file system as this user, checks the mount, and unmounts it. The three tests are
-      # excluded only when that fails. The job cannot install anything, because it never uses sudo.
+      # file system as this user, checks the mount, and unmounts it. The tests that mount a volume
+      # are excluded only when that fails (the next step names them). The job cannot install
+      # anything, because it never uses sudo.
       - name: Probe what this runner offers
         id: probe
         run: |
@@ -907,13 +883,20 @@ jobs:
           # test-launcher.sh turns a failed FUSE mount into a failure, so a runner where the
           # probe's mount failed would fail the whole job. The tests that need the volume are left
           # out instead, and the summary says so. go test -skip leaves no "--- SKIP" line, so the
-          # warning and the "excluded" line below are the only record.
+          # warning and the "excluded" line below are the only record. The tests are the ones
+          # that reach a mount, read from the test sources of the packages the script runs
+          # (hack/fusetests, #657): a list kept by hand went stale, and the tests it lacked would
+          # have failed here instead of being left out. A runner with FUSE excludes nothing.
           excluded=()
           if [ "$FUSE" != "yes" ]; then
-            excluded=(TestCapVolume TestStoreFull TestStoreFullWholeDataDir)
+            if ! derived=$(go run ./hack/fusetests ./internal/launcher ./cmd/hpcburst 2> "$RUNNER_TEMP/fusetests.err"); then
+              echo "::error title=hack/fusetests failed::could not tell which tests need FUSE: $(tr '\n' ' ' < "$RUNNER_TEMP/fusetests.err")"
+              exit 1
+            fi
+            mapfile -t excluded <<< "$derived"
             args+=(-skip "^($(IFS='|'; echo "${excluded[*]}"))\$")
-            msg="NOT RUN: ${excluded[*]} need a size-limited FUSE volume, and the mount probe failed on this runner ($FUSE_REASON)"
-            echo "::warning title=store-full tests not run::$msg"
+            msg="NOT RUN: ${#excluded[@]} tests that mount a size-limited FUSE volume (${excluded[*]}), and the mount probe failed on this runner ($FUSE_REASON)"
+            echo "::warning title=tests that need FUSE not run::$msg"
             {
               echo "### launcher-k3s"
               echo "$msg"
@@ -1246,17 +1229,22 @@ jobs:
   # mode as the science agent ruled on #563, (a) with the both-INVALID failure (hack/bulkverdict): it fails on
   # an S4 FAIL, on any functional witness failing whatever the control, on a bulk p99 over 75 ms even beside an
   # INVALID control, and on both modes INVALID; one mode INVALID, otherwise clean, warns with its figures and
-  # passes. It is the rehearsal job's setup with one test, without Envoy, in a job of its own, since its four
-  # stacks would take any other rehearsal job past half of its time limit (#295). Like the other rehearsal
-  # jobs, it is not one of the required checks.
+  # passes. It is the rehearsal job's setup with one judged test, without Envoy, in a job of its own, since its
+  # four stacks would take any other rehearsal job past half of its time limit (#295). A second step runs the bulk
+  # path's three operations tests (bulk_ops_test.go, #676), which no REHEARSAL_RUN matched before: they are a step
+  # of their own because the first step's verdict reads one test and discards hack/rehearsal.sh's exit. Like the
+  # other rehearsal jobs, it is not one of the required checks.
   rehearsal-bulk:
     name: rehearsal-bulk
     runs-on: ubuntu-24.04
-    # Compiling the four binaries and the test from scratch, then a run whose -test.timeout is 30
-    # minutes (hack/rehearsal.sh); about 19 minutes in all on #448's hosted runs, 9.5 on this job's first. The job
-    # must outlive the test's timeout, so that its own waits give up and its clean-up runs before the job
-    # is cancelled, and stay under half of its limit (#295).
-    timeout-minutes: 50
+    # Compiling the four binaries and the test from scratch, then the S4 run, whose -test.timeout is 30
+    # minutes (hack/rehearsal.sh); about 19 minutes in all on #448's hosted runs, 9.5 on this job's first.
+    # Then the operations step (#676): three tests of two stacks each, under the same 30 minutes, with the
+    # build cached. No test states a duration; from S4's four stacks they are estimated at 8 to 21 minutes. The
+    # job must outlive both timeouts, so that its own waits give up and its clean-up runs before the job is
+    # cancelled (setup about 5 + 30 + 30 = 65, under 80), and stay under half of its limit (#295): about 27 to
+    # 40 minutes expected, against 40.
+    timeout-minutes: 80
     env:
       # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
       # launcher-k3s).
@@ -1379,6 +1367,20 @@ jobs:
           REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestBulk64MiBReplyBesideEightStreams$' bash hack/rehearsal.sh 2>&1 | tee "$RUNNER_TEMP/rehearsal-bulk.log" || rc=$?
           echo "hack/rehearsal.sh exited $rc; the job's verdict is S4's mapping, read from the test's log (#563)"
           go run ./hack/bulkverdict "$RUNNER_TEMP/rehearsal-bulk.log"
+
+      # The bulk path's three operations tests (bulk_ops_test.go, #448 part 7; #676): the second frps's restart
+      # cuts only the bulk tunnels, a teardown leaves no bulk proxy, and an Allocation staged before the bulk path
+      # keeps its token tunnel. No REHEARSAL_RUN matched them before, so they ran only on hosted throwaways. They are
+      # a step of their own, and not in the pattern above, because that step discards hack/rehearsal.sh's exit and
+      # hack/bulkverdict reads only the S4 test: a failed or skipped test among them would leave the job green. Here
+      # hack/rehearsal.sh's exit is the step's, and the step runs even when the S4 verdict failed, so one red run
+      # shows both. The evidence that they ran is three "--- PASS" lines for them in this step's log, not a green
+      # step: a pattern that matches nothing exits 0, and so does a skip (hack/rehearsal.sh sets HPCBURST_REQUIRE_FRP
+      # and HPCBURST_REQUIRE_SSHD, so a missing input fails). A step that runs after a failure requires the verified
+      # toolchain (hack/gotoolchain/ci_workflow_test.go).
+      - name: hack/rehearsal.sh, the bulk path's operations tests
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^Test(FrpsBulkRestartCutsOnlyBulk|TeardownLeavesNoBulkProxy|PreBulkAllocationKeepsItsTokenTunnel)$' bash hack/rehearsal.sh
 
   # The one-host rehearsal's third part (issue #193), on #146's rig: HBEP-5's 7,000-token stream
   # and attribution, HBEP-8's events and metrics, HBEP-3's requeue, HBEP-6's controller restart

@@ -261,6 +261,7 @@ N/A: a process HBEP has no stages. It is `implemented` once three HBEPs after it
 
 - 2026-10-28: proposed as implementable (bootstrap), tracking issue #1. Revised after a fresh-context review.
 - 2026-11-15: an HBEP whose criteria start at beta records `implemented` at stage `beta` (owner decision, issue #1).
+- 2026-11-17: implemented: HBEP-3 to HBEP-11 and HBEP-15, ten HBEPs after it, were merged as `implementable` through it, past the three its Graduation criteria ask (owner's approval, 17 Nov 2026).
 
 ## Amendments
 

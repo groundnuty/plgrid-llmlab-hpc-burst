@@ -11,6 +11,15 @@
 #     start a control plane (envtest), about 170 s of the package's 435-447 s on main's slow runs, which
 #     took it below a 1.5x margin (issue #295). Their time is real work and waits on observable state (a
 #     manager's start and stop, Lease expiry, informer syncs), not a fixed sleep;
+#   - lifecycle-apiserver and lifecycle-slow: internal/lifecycle's slowest remaining tests (issue #295, part
+#     B), peeled out because the package's run reached 506 s of go test's 600 s on main's newest run of 17
+#     Nov 2026. lifecycle-apiserver is three more tests that start a control plane (envtest, the package's
+#     block). lifecycle-slow is eleven tests that start none: read through the package's helpers, they reach
+#     no control plane, listener or port constant. They run reconcile passes over a fake provider and a fake
+#     clock, with no sleep, so their time is CPU and moves with the runner's load (4.8 s to 33.9 s for one).
+#     Each of the fourteen is a test whose worst across the five newest go-job logs was at least 9 s. Taking
+#     them from those logs, the package's slowest logged run would have been 335 s, a margin of 1.79x (a
+#     projection: CI's runs of this change are the measurement);
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
@@ -19,11 +28,34 @@
 #     observable state (a response, the worker's connection events), never a fixed sleep;
 #   - livechecks-hostdialed and livechecks-dry: hack/livechecks' dry runs through hack/live-checks.sh, the
 #     tests that build and run the real conformance and alpha test binaries and a real agent, which took
-#     that package to the 10 minutes in the crd and envtest job (the science agent's ruling on PR #306).
+#     that package to the 10 minutes in the crd and envtest job (the science agent's ruling on PR #306);
+#   - livechecks-tree: the five tests of that package whose worst across the five newest go-job logs was at
+#     least 15 s (issue #295, part B): its package run reached 459 s, and without these five the slowest
+#     logged run would have been 345 s, 1.74x (a projection, as above).
 #
 #   hack/go-test.sh packages        every package without the groups' tests, at go test's default timeout
-#   hack/go-test.sh own [group]     one group, or every group in turn; each test must really run and pass
+#   hack/go-test.sh own [group]     one group alone, or every group in lanes; each test must really run and pass
 #   hack/go-test.sh all             both in that order; the groups run even if the packages fail
+#
+# LANES (issue #295). "own" with no group runs the groups of DIFFERENT packages at the same time, so that the
+# job costs its longest lane and not the sum of its groups (about 950-990 s on CI, which took go own-timeout
+# and the crd and envtest job below a 1.5x margin of their limits). A lane is a package: its groups run one
+# after another in table order, since two go test runs of one package share its fixed ports, its envtest
+# block and its build. Every group keeps its own -timeout, its own checks and its own exit. A failing group
+# stops neither its lane nor the others; the exit is the first non-zero group's in table order, and the
+# output names every group that failed. Each lane's output goes to a file of its own and is printed whole
+# when the lane ends, so that no two groups' lines interleave, under a ::group:: in GitHub Actions (a lane
+# that failed stays unfolded). While the lanes run, one line is printed at each group's start and end, and a
+# table at the end gives each group's start, end and WALL time (its build and checks included, so not a
+# margin to -timeout: that is the ok line of the group's output), so that the overlap can be read from the
+# log. A stop signal (INT, TERM, HUP) is passed to every lane's process group; each lane has one of its own
+# (set -m), so nothing a lane started is left behind, and the partial output is printed. (SIGKILL of this
+# script cannot be passed on.) "own <group>" runs that group alone, in the foreground, exactly as before.
+#
+# A warm-up build runs first in "own" (not in "all", whose package run has just compiled every test
+# variant): one go test of every group package with -exec true, which compiles and links the test binaries
+# and runs none of them, so that the lanes do not each compile the same dependencies at the same time. Its
+# failure fails the step by name.
 #
 # A plain go test ./... still runs every test, in one package run.
 set -uo pipefail
@@ -40,16 +72,23 @@ cd "$root" || exit 1
 # controller-failover 150.5 s. envoy-timeouts' 1200 s is about 3x its local run, not yet a CI one:
 # TestEnvoyStreamIdleOutlivesTheDefault took 310.7 s (its two halves run at once, bound by the worker's
 # silence of 310 s) and TestEnvoyClosesIdleUpstreamConnectionsFirst 50.7 s (bound by Envoy's 50 s upstream
-# idle), 362 s in all. The first green CI run should replace it with 3x its own.
+# idle), 362 s in all. The first green CI run should replace it with 3x its own. Part B's groups of issue
+# #295 take 3x the sum of each test's worst in the go job of main's five newest runs of 17 Nov 2026 (03:01Z
+# to 08:55Z), a bound on the group's worst: lifecycle-apiserver 43.0 s (130 s), lifecycle-slow 172.8 s
+# (520 s) and livechecks-tree 126.9 s (390 s). The selection rule is in the bullets above, and the tests'
+# worst times are in the issue's record.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
   "lifecycle-copies|./internal/lifecycle|TestMetricsStandbyOnTwoManagers TestMetricsLostLeaseStopsBeforeANewCopyLeads TestMetricsCopiesStartAgainOnALostPort TestRaisedEventsOnTwoManagers|190s"
   "lifecycle-control-plane|./internal/lifecycle|TestManagerOnControlPlane TestVerificationRecordRoundTripsThroughTheAPIServer TestLifecycleLeaseReleaseUnderLatency TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead|170s"
+  "lifecycle-apiserver|./internal/lifecycle|TestOperationsOnAControlPlaneWithTwoAgents TestMetricsKeeperModeThroughNewManager TestRecordedOutcomesPassTheAPIServersRules|130s"
+  "lifecycle-slow|./internal/lifecycle|TestScaleDownWithASurplus TestARankedOutAllocationIsKeptUnderItsPolicy TestHandoverLateReplacementDegradesThenTakesOver TestHandoverReplacementCreatedAtItsPlannedTime TestAWaitingCandidateIsNotFailedByStartTimeout TestACandidateWithNoTunnelFailsAtItsDeadline TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear TestAWarmAllocationDoesNotCancelAPendingSurplus TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations TestAMarkedPeerThatRestartsNeverOutranks TestAReplacementHedgesByItsWaits|520s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
   "livechecks-dry|./hack/livechecks|TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt TestADryBinaryRefusesLiveSettings TestAJobPendingPastTheBoundIsNotRunOnEveryRow TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt TestACatchUpThatCannotTellIsAFailureOnATwoJobRow TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows TestEveryReachRowReportsEachOutcomeThroughTheScript TestADryReachBinaryRefusesLiveSettingsAndARealGateway TestAReachRowWhoseSlotIsHeldIsNotRun|270s"
+  "livechecks-tree|./hack/livechecks|TestRegistryFailsOnTheRealTreeWhenAPartIsRemoved TestPlanMapsChangedFilesToTheLiveTestsThatRunThem TestTheBulkRowsFourVerdictsThroughTheScript TestTheFindingMarkerIsTheBulkRowsAlone TestMutateAlphaEndsAHangAtItsBoundAndRestoresTheFile|390s"
 )
 
 # field <row> <n>: the row's n-th field (1-based).
@@ -115,15 +154,234 @@ run_group() {
   return "$status"
 }
 
-# own [group]: that group, or every group in turn, each even if an earlier one failed.
-own() {
-  local g want=${1:-} status=0 ran=0 rc
+# lane_packages: the distinct packages of the groups, in table order, one per line. A lane is a package.
+lane_packages() {
+  local g p seen=" "
   for g in "${groups[@]}"; do
-    if [ -z "$want" ] || [ "$(field "$g" 1)" = "$want" ]; then
+    p=$(field "$g" 2)
+    case "$seen" in
+      *" $p "*) ;;
+      *)
+        seen+="$p "
+        printf '%s\n' "$p"
+        ;;
+    esac
+  done
+}
+
+# lane_groups <package>: the names of the package's groups, in table order, separated by ", ".
+lane_groups() {
+  local g list=""
+  for g in "${groups[@]}"; do
+    [ "$(field "$g" 2)" = "$1" ] || continue
+    list+="${list:+, }$(field "$g" 1)"
+  done
+  printf '%s' "$list"
+}
+
+# run_lane <dir> <package>: the package's groups, one after another in table order, in a background
+# subshell. A group's whole output goes to <dir>/<group>.log, and its result ("status start end", seconds
+# since own began) to <dir>/<group>.result, written when the group ends and at no other time: a group with
+# no result file did not end. <dir>/events gets a line at each start and end, which own_lanes prints while
+# the lane runs.
+run_lane() {
+  local dir=$1 pkg=$2 g name began status
+  for g in "${groups[@]}"; do
+    [ "$(field "$g" 2)" = "$pkg" ] || continue
+    name=$(field "$g" 1)
+    began=$SECONDS
+    echo "start $name $began" >> "$dir/events"
+    run_group "$g" > "$dir/$name.log" 2>&1 < /dev/null
+    status=$?
+    echo "$status $began $SECONDS" > "$dir/$name.result"
+    echo "end $name $status $SECONDS" >> "$dir/events"
+  done
+}
+
+# show_events <index> <dir> <package>: the lane's start and end lines not printed yet, one line each. Only
+# the parent prints, so that no line of it lands inside a lane's block.
+show_events() {
+  local i=$1 dir=$2 pkg=$3 total kind name a b
+  total=$(($(wc -l < "$dir/events")))
+  [ "$total" -gt "${events_seen[$i]}" ] || return 0
+  while read -r kind name a b; do
+    if [ "$kind" = start ]; then
+      echo "own: lane ${pkg}: group ${name} started at +${a} s"
+    else
+      echo "own: lane ${pkg}: group ${name} ended with status ${a} at +${b} s"
+    fi
+  done < <(sed -n "$((${events_seen[$i]} + 1)),${total}p" "$dir/events")
+  events_seen[$i]=$total
+}
+
+# print_lane <dir> <package>: the lane's groups' whole output, in table order. In GitHub Actions a lane
+# whose groups all passed is folded; one that did not stays open, so that its failure is in view.
+print_lane() {
+  local dir=$1 pkg=$2 g name st rest folded=0
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    folded=1
+    for g in "${groups[@]}"; do
+      [ "$(field "$g" 2)" = "$pkg" ] || continue
+      name=$(field "$g" 1)
+      if ! { [ -f "$dir/$name.result" ] && read -r st rest < "$dir/$name.result" && [ "$st" = 0 ]; }; then
+        folded=0
+      fi
+    done
+  fi
+  [ "$folded" -eq 0 ] || echo "::group::own: lane ${pkg} ($(lane_groups "$pkg"))"
+  for g in "${groups[@]}"; do
+    [ "$(field "$g" 2)" = "$pkg" ] || continue
+    name=$(field "$g" 1)
+    echo "=== own: group ${name} (${pkg}, -timeout $(field "$g" 4))"
+    if [ -f "$dir/$name.log" ]; then
+      cat "$dir/$name.log"
+    else
+      echo "(the group did not start)"
+    fi
+    [ -f "$dir/$name.result" ] || echo "(the group did not end: it was stopped, or its lane died)"
+  done
+  [ "$folded" -eq 0 ] || echo "::endgroup::"
+}
+
+# own_work is the scratch directory of a lanes run; the EXIT trap removes it. stop_code is the exit a stop
+# signal asks for (128 + the signal), 0 while none came.
+own_work=""
+stop_code=0
+
+# stop_lanes <code>: a stop signal reached this script. Remember it, and send TERM to the process group of
+# every lane that still runs. Every lane has a group of its own (set -m), which holds its go test, the test
+# binary and what that started. The groups come from "jobs -r -p", which lists only the jobs bash has not
+# reaped, so no PID recorded earlier is ever signalled (a reaped lane's number can name another process).
+stop_lanes() {
+  local pg
+  stop_code=$1
+  for pg in $(jobs -r -p); do
+    kill -TERM -- "-$pg" 2> /dev/null
+  done
+}
+
+# own_lanes <prebuilt>: every group, the groups of different packages at the same time. With prebuilt 0 a
+# warm-up build comes first (see the top of this file); "all" passes 1, since its package run has compiled
+# everything already.
+own_lanes() {
+  local prebuilt=$1 i g name pkg dir running warm=0 began tag st b e serial=0 failed="" status=0 wall
+  local -a lanes pids events_seen shown
+  local -A dirs
+  mapfile -t lanes < <(lane_packages)
+  own_work=$(mktemp -d) || return 1
+  trap 'rm -rf "$own_work"' EXIT
+  trap 'stop_lanes 129' HUP
+  trap 'stop_lanes 130' INT
+  trap 'stop_lanes 143' TERM
+  set -m
+
+  if [ "$prebuilt" -eq 0 ] && [ "${#lanes[@]}" -gt 1 ]; then
+    began=$SECONDS
+    go test -count=1 -exec true "${lanes[@]}" > "$own_work/warmup.log" 2>&1 < /dev/null &
+    wait "$!"
+    warm=$?
+    if [ "$stop_code" -eq 0 ]; then
+      if [ "$warm" -eq 0 ]; then
+        echo "own: warm-up build of ${#lanes[@]} packages took $((SECONDS - began)) s"
+      else
+        cat "$own_work/warmup.log"
+        echo "FAIL hack/go-test.sh: the warm-up build of the groups' packages failed with status ${warm}: the lanes run anyway, each compiling for itself, and the step fails"
+      fi
+    fi
+  fi
+  if [ "$stop_code" -ne 0 ]; then
+    echo "FAIL hack/go-test.sh: own stopped by a signal before the lanes started"
+    return "$stop_code"
+  fi
+
+  SECONDS=0
+  echo "own: ${#groups[@]} groups in ${#lanes[@]} lanes, one per package: a package's groups run one after another, the lanes at the same time"
+  for i in "${!lanes[@]}"; do
+    dir="$own_work/lane$i"
+    if ! mkdir "$dir"; then
+      # Lanes already started must not outlive the step: stop them and wait for them.
+      stop_lanes 1
+      wait
+      return 1
+    fi
+    : > "$dir/events"
+    dirs[${lanes[$i]}]=$dir
+    events_seen[i]=0
+    shown[i]=0
+    run_lane "$dir" "${lanes[$i]}" &
+    pids[i]=$!
+    echo "own: lane ${lanes[$i]} started: $(lane_groups "${lanes[$i]}")"
+  done
+
+  while :; do
+    running=" $(jobs -r -p | tr '\n' ' ')"
+    for i in "${!lanes[@]}"; do
+      show_events "$i" "${dirs[${lanes[$i]}]}" "${lanes[$i]}"
+      if [ "${shown[$i]}" -eq 0 ] && [[ "$running" != *" ${pids[$i]} "* ]]; then
+        print_lane "${dirs[${lanes[$i]}]}" "${lanes[$i]}"
+        shown[i]=1
+      fi
+    done
+    [ "$stop_code" -eq 0 ] || break
+    [ "$(jobs -r -p | wc -l)" -gt 0 ] || break
+    sleep 1
+  done
+  # Every exit path waits for every lane: nothing is left running when the step ends. After a stop the
+  # lanes were sent TERM above, and what they printed so far is shown.
+  for i in "${!lanes[@]}"; do
+    wait "${pids[$i]}" 2> /dev/null
+    if [ "${shown[$i]}" -eq 0 ]; then
+      show_events "$i" "${dirs[${lanes[$i]}]}" "${lanes[$i]}"
+      print_lane "${dirs[${lanes[$i]}]}" "${lanes[$i]}"
+      shown[i]=1
+    fi
+  done
+  set +m
+
+  echo "== own: each group's start, end and WALL time in seconds since own began, which includes its build and its checks: read a margin to -timeout from the ok line of the group's own output above, not from this"
+  for g in "${groups[@]}"; do
+    name=$(field "$g" 1)
+    pkg=$(field "$g" 2)
+    dir=${dirs[$pkg]}
+    if [ -f "$dir/$name.result" ] && read -r st b e < "$dir/$name.result"; then
+      tag=ok
+      [ "$st" -eq 0 ] || tag=FAIL
+      printf '%-5s %-24s %-28s +%ss..+%ss, %ss wall (build and checks included), -timeout %s\n' "$tag" "$name" "$pkg" "$b" "$e" "$((e - b))" "$(field "$g" 4)"
+      serial=$((serial + e - b))
+      if [ "$st" -ne 0 ]; then
+        failed+=" $name"
+        [ "$status" -ne 0 ] || status=$st
+      fi
+    else
+      printf '%-5s %-24s %-28s no result: the group did not end\n' FAIL "$name" "$pkg"
+      failed+=" $name"
+      [ "$status" -ne 0 ] || status=1
+    fi
+  done
+  wall=$SECONDS
+  echo "own: ${wall} s in all; the groups' wall times add to ${serial} s"
+  if [ -n "$failed" ]; then
+    echo "FAIL hack/go-test.sh: own: the groups that failed:${failed}"
+    [ "${GITHUB_ACTIONS:-}" != true ] || echo "::error title=hack/go-test.sh own::the groups that failed:${failed}"
+  fi
+  [ "$status" -ne 0 ] || [ "$warm" -eq 0 ] || status=1
+  [ "$stop_code" -eq 0 ] || status=$stop_code
+  return "$status"
+}
+
+# own [group] [prebuilt]: that group alone, in the foreground, or every group in lanes, each even if
+# another failed. prebuilt is 1 when the packages' run has just compiled everything ("all").
+own() {
+  local g want=${1:-} prebuilt=${2:-0} status=0 ran=0
+  if [ -z "$want" ]; then
+    own_lanes "$prebuilt"
+    return
+  fi
+  for g in "${groups[@]}"; do
+    if [ "$(field "$g" 1)" = "$want" ]; then
       ran=1
       run_group "$g"
-      rc=$?
-      [ "$status" -ne 0 ] || status=$rc
+      status=$?
     fi
   done
   if [ "$ran" -eq 0 ]; then
@@ -146,7 +404,7 @@ case "${1:-}" in
     [ "$#" -eq 1 ] || { echo "usage: hack/go-test.sh all" >&2; exit 2; }
     packages
     first=$?
-    own
+    own "" 1
     second=$?
     [ "$first" -eq 0 ] || exit "$first"
     exit "$second"
