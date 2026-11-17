@@ -20,7 +20,7 @@ var raisedByLifecycle = map[string][]string{
 	eventDegraded: {
 		v1alpha1.ReasonReplacementLate, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonIdentityUnresolved,
 		v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonCapacityDropped, v1alpha1.EventReasonTunnelOrphaned,
-		reasonObservationGap, v1alpha1.ReasonReferenceSuspect,
+		reasonObservationGap, v1alpha1.ReasonPlanStale, v1alpha1.ReasonReferenceSuspect,
 		// EventsNotLogged, raised through this controller's recorder by the durable log's publisher
 		// (internal/eventcount) when it has one (beta; HBEP-8, The durable log, When it is down).
 		eventcount.ReasonEventsNotLogged,
@@ -33,7 +33,7 @@ var raisedByLifecycle = map[string][]string{
 		v1alpha1.ReasonQualificationFailed, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonAllocationFailed,
 		v1alpha1.ReasonAllocationLost, v1alpha1.ReasonAllocationRefused, v1alpha1.ReasonRequeued,
 		string(v1alpha1.ConditionSubmittedAsOther), string(v1alpha1.ConditionRelayEndedForGood),
-		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed,
+		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed, v1alpha1.ReasonOperationPartlyFailed,
 	},
 	eventReplaced:   {v1alpha1.EventReasonHandedOver, v1alpha1.ReasonHedgeLost, v1alpha1.ReasonRankedOut},
 	eventEndingSoon: {v1alpha1.EventReasonNoReplacementReady},

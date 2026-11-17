@@ -165,6 +165,9 @@ type Batch struct {
 	// liftErrs are the errors the next LiftHold calls return, one each, in
 	// order (FailNextLiftHold).
 	liftErrs []error
+	// cancelErr, while set, is the error every Cancel of a live job returns
+	// (FailCancels).
+	cancelErr error
 	// late are the jobs a RegisteredLate Script lost the reply of and the
 	// scheduler registers at the next Submit (batch_late.go).
 	late []lateJob
@@ -492,6 +495,8 @@ func (b *Batch) Cancel(_ context.Context, jobIDs []string) []provider.CancelResu
 			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: fmt.Errorf("job %s: %w", id, provider.ErrNotFound)})
 		case !live(b.record(j, now)):
 			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.AlreadyEnded})
+		case b.cancelErr != nil:
+			out = append(out, provider.CancelResult{JobID: id, Outcome: provider.CancelError, Err: b.cancelErr})
 		default:
 			t := now
 			j.cancelledAt = &t

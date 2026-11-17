@@ -411,6 +411,41 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              countGivenBack:
+                description: |-
+                  CountGivenBack is a Scale's record of the count it gave back for its
+                  untaken units (HBEP-10, The report, as amended by #698). It is set ONLY
+                  when some unit is untaken: a Scale with no untaken unit never sets it, and
+                  does not wait for it. When set, the Operation finishes only after it is
+                  written. Written once by the lifecycle controller: a rule on status
+                  refuses dropping it while status stays, its own rule refuses changing it,
+                  and a rule at the Operation's root refuses removing the status that holds
+                  it, which the others could not see (a merge patch of status null leaves
+                  them nothing to run on).
+                properties:
+                  instances:
+                    description: |-
+                      Instances is the spec.instances written: the plan's count plus Units,
+                      absolute. It is absent when a person had set another count, which stands,
+                      so nothing was given back.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  units:
+                    description: |-
+                      Units is U, the untaken units: each the capacity of one primary (its
+                      Instance and Allocation, its hedge's members, and its pending
+                      replacement).
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - units
+                type: object
+                x-kubernetes-validations:
+                - message: 'status.countGivenBack is set once: it cannot be changed
+                    (HBEP-10, The report)'
+                  rule: self == oldSelf
               estimates:
                 description: |-
                   Estimates are the Provider controllers' advisory start estimates for the
@@ -501,9 +536,10 @@ spec:
                 x-kubernetes-list-type: map
               finishedAt:
                 description: |-
-                  FinishedAt is when the Operation became Done, Stale or Refused. The
-                  controller removes the Operation 7 days later (HBEP-10, Operations,
-                  Removal).
+                  FinishedAt is when the Operation became Done, Stale or Refused, or
+                  PartlyFailed with every failure final (HBEP-10, The report, as amended by
+                  #665 and #666: the science agent's rulings on #664, 16 and 17 Nov 2026). The controller
+                  removes the Operation 7 days later (HBEP-10, Operations, Removal).
                 format: date-time
                 type: string
               observedGeneration:
@@ -931,7 +967,10 @@ spec:
                       format: date-time
                       type: string
                     message:
-                      description: Message says what failed.
+                      description: |-
+                        Message says what failed. On a done Allocation that a failure released before the Operation did (a gate miss,
+                        RestartLoop, an Allocation failed or lost), it names that failure ("released by QualificationFailed"): the
+                        Allocation's release cause is the failure's, not the Operation's (HBEP-10, The release cause).
                       maxLength: 1024
                       type: string
                     name:
@@ -943,8 +982,11 @@ spec:
                       maxLength: 256
                       type: string
                     state:
-                      description: State is done, failed (and retried with backoff)
-                        or not started.
+                      description: |-
+                        State is done, failed or not started. A failed target is retried with
+                        backoff unless its failure is final, as when the target changed since the
+                        commit so that its approved effect cannot apply (HBEP-10, The report, as
+                        amended by #665 and #666).
                       enum:
                       - NotStarted
                       - Done
@@ -968,9 +1010,17 @@ spec:
                 maxItems: 256
                 type: array
             type: object
+            x-kubernetes-validations:
+            - message: 'status.countGivenBack is set once: it cannot be removed (HBEP-10,
+                The report)'
+              rule: '!has(oldSelf.countGivenBack) || has(self.countGivenBack)'
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: 'status.countGivenBack is set once: removing the status that holds
+            it is refused (HBEP-10, The report)'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.countGivenBack) || has(self.status)'
     served: true
     storage: true
     subresources:
