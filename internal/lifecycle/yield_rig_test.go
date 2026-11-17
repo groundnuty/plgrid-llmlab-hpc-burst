@@ -368,3 +368,76 @@ func TestARefusalForTheCapsCallsNoYield(t *testing.T) {
 		t.Fatalf("limit 3: ok %v, %d calls, want reserved and no new call", a.ok, calls)
 	}
 }
+
+// TestACancelledExtrasMarkStaysWhileItsAllocationHoldsTheSlot: md-b cancels its marked extra at 08:01:10 and the extra's
+// Allocation is deleting, still holding the slot, while only the controller runs (no provider pass, which would complete
+// the deletion): six controller-only passes, 08:01:20 to 08:02:10. md-c, still refused for the limit alone, marks no second
+// extra in them: the cancelled extra's mark counts as the slot md-c waits for until its Allocation is gone, and md-b does not
+// clear it from the cancelled Instance. md-a's Instances are never marked. Once the provider completes the deletion, md-c's
+// primary is submitted, and nothing else was cancelled.
+func TestACancelledExtrasMarkStaysWhileItsAllocationHoldsTheSlot(t *testing.T) {
+	log := newCauseLog()
+	rg := yieldRig(t, log)
+	rg.batch.Enqueue(pending10h(8)...)
+	yieldStart(rg)
+	ms := marks(rg)
+	if len(ms) != 1 {
+		t.Fatalf("the marks at 08:00:50 are %v, want one", markNames(ms))
+	}
+	e2, e2Alloc := ms[0].Name, ms[0].Spec.AllocationRef.Name
+	for range 2 { // 08:01:00, 08:01:10
+		tick10(rg)
+	}
+	if _, deleted := log.deletedWith(e2Alloc); !deleted {
+		t.Fatal("md-b's extra was not cancelled by 08:01:10")
+	}
+	if a, ok := rg.allocation(e2Alloc); !ok || a.DeletionTimestamp.IsZero() {
+		t.Fatalf("the cancelled extra's Allocation is %+v (found %v), want it deleting: the row proves nothing otherwise", a, ok)
+	}
+	for range 6 {
+		rg.clock.Advance(10 * time.Second)
+		rg.reconcileAll() // no provider pass: the deletion does not complete
+		for _, m := range marks(rg) {
+			if m.Name != e2 {
+				t.Fatalf("at %s %s/%s is marked: md-c marked a second extra for one primary while the first still holds the slot", rg.clock.Now().Format(time.TimeOnly), deploymentOfInstance(m), m.Name)
+			}
+		}
+		if n := len(rg.allocations("md-c")); n != 0 {
+			t.Fatalf("md-c has %d Allocations at %s, want none: the slot is still held", n, rg.clock.Now().Format(time.TimeOnly))
+		}
+	}
+	rg.run(2*time.Minute, 10*time.Second)
+	if n, c := len(rg.allocations("md-c")), len(rg.allocations("md-a")); n != 1 || c != 2 {
+		t.Fatalf("md-c has %d Allocations and md-a %d, want 1 (its primary, submitted in the freed slot) and 2 (untouched)", n, c)
+	}
+	log.mu.Lock()
+	cancels := len(log.cause)
+	log.mu.Unlock()
+	if cancels != 1 {
+		t.Fatalf("%d Allocations deleted, want md-b's extra alone", cancels)
+	}
+}
+
+// TestAMarkNamesADeploymentPastItsEndTime: md-c marks at 08:00:50 and its end time passes (set to 08:00:50) before md-b's
+// pass: a deployment past its end time makes no primary, and its shutdown pass never reaches the clearing of its own marks,
+// so md-b reads it. At 08:01:00 md-b re-reads md-c, finds it past its end time, clears the mark and cancels nothing.
+func TestAMarkNamesADeploymentPastItsEndTime(t *testing.T) {
+	log := newCauseLog()
+	rg := yieldRig(t, log)
+	rg.batch.Enqueue(pending10h(8)...)
+	yieldStart(rg)
+	ms := marks(rg)
+	if len(ms) != 1 {
+		t.Fatalf("the marks at 08:00:50 are %v, want one", markNames(ms))
+	}
+	e2, e2Alloc := ms[0].Name, ms[0].Spec.AllocationRef.Name
+	rg.mutateMD("md-c", func(m *v1alpha1.ModelDeployment) { now := metav1.NewTime(rg.clock.Now()); m.Spec.EndTime = &now })
+	tick10(rg) // 08:01:00
+	if in := instOrNil(rg, e2); in == nil || in.Annotations[annotationYieldTo] != "" || ended(in) {
+		t.Fatalf("md-b's extra %v at 08:01:00, want it alive with its mark cleared", in)
+	}
+	rg.run(5*time.Minute, 10*time.Second)
+	if _, deleted := log.deletedWith(e2Alloc); deleted {
+		t.Fatal("md-b's extra's Allocation was deleted for a deployment that is past its end time")
+	}
+}

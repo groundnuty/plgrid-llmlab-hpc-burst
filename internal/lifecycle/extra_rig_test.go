@@ -89,9 +89,16 @@ func TestTheExtraAndTheSlotBeyondItsOwnHandovers(t *testing.T) {
 			md.Spec.Instances = c.instances
 			md.Spec.EndTime = c.end
 			rg.create(md)
-			for range 7 {
+			for i := range 7 {
 				rg.clock.Advance(10 * time.Second)
 				rg.Step()
+				if i == 0 {
+					// The pass at 08:00:10 is the only one that tries an extra, so a refusal that set a Degraded reason
+					// would show in this status and be overwritten by the next pass: it is read here.
+					if d := rg.condition(hoMD, v1alpha1.ConditionDegraded); d.Status != metav1.ConditionFalse || d.Reason != v1alpha1.ReasonAsDesired {
+						t.Fatalf("Degraded = %s/%s %q right after the pass that makes the primaries and tries the extra, want False/AsDesired: a refused extra is silent", d.Status, d.Reason, d.Message)
+					}
+				}
 			}
 			rg.run(10*time.Minute, 10*time.Second)
 			if n := len(rg.allAllocations()); n != c.want {
