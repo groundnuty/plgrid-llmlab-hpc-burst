@@ -356,6 +356,8 @@ type Ports struct {
 	DialHomeListen string
 	// BulkPath grows up's block to base..base+15, as up --bulk-path does (BulkPath, bulk.go).
 	BulkPath bool
+	// EventLog adds the durable log's two ports, base+16 and base+17, as up --event-log does (EventLog, eventlog.go).
+	EventLog bool
 }
 
 // URL is http://127.0.0.1:<base+off><path>, one of up's listeners.
@@ -364,7 +366,8 @@ func (p Ports) URL(off int, path string) string {
 }
 
 // All lists the stack's listening ports: the front's client and dial-home
-// listeners, those that are set, and up's block from Base (13 ports).
+// listeners, those that are set, and up's block from Base (13 ports; 16 with the
+// bulk path), then the durable log's two, base+16 and base+17, when it runs.
 func (p Ports) All() []int {
 	var out []int
 	for _, a := range []string{p.ClientAddr, p.DialHomeListen} {
@@ -380,6 +383,9 @@ func (p Ports) All() []int {
 	}
 	for n := p.Base; n <= p.Base+last; n++ {
 		out = append(out, n)
+	}
+	if p.EventLog {
+		out = append(out, p.Base+agentapi.EventLogPortOffset, p.Base+agentapi.EventLogMonitorPortOffset)
 	}
 	return out
 }
