@@ -16,8 +16,15 @@ func TestNamesForTheLifecycleControllerAndTheFront(t *testing.T) {
 		AnnotationHedgeGroup: "hpcburst.groundnuty.github.io/hedge-group",
 		// HBEP-7, Over-allocation and qualification (beta): the ranked-out Instance's end reason and replaced event's
 		// reason, and the suspended expected-performance entry's degraded event's reason (HBEP-8's Reasons table).
-		ReasonRankedOut:        "RankedOut",
-		ReasonReferenceSuspect: "ReferenceSuspect",
+		// HBEP-10, Approval and execution: an Operation's conditions and the reasons of its Executable condition, and the
+		// reason of the degraded event regarding a stale Operation.
+		ConditionSpecWritten:            "SpecWritten",
+		ReasonExecuting:                 "Executing",
+		ReasonDone:                      "Done",
+		ReasonAnotherOperationExecuting: "AnotherOperationExecuting",
+		ReasonPlanStale:                 "PlanStale",
+		ReasonRankedOut:                 "RankedOut",
+		ReasonReferenceSuspect:          "ReferenceSuspect",
 		// HBEP-7, The throughput gate: the gate's four verdicts, written on Instances and start-up outcomes.
 		GatePassed:     "Passed",
 		GateMissed:     "Missed",

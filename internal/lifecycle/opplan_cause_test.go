@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
@@ -260,8 +262,9 @@ func TestScalingOrReleasingAManagedDeploymentIsRefused(t *testing.T) {
 }
 
 // Through the Operations step: the End of a managed-source deployment is planned with its one target, and once
-// confirmed it waits with Executable=False/ExecutionNotBuilt, since no target needs approval.
-func TestAManagedEndIsPlannedByTheStepAndWaitsAsNotBuiltOnceConfirmed(t *testing.T) {
+// confirmed, since no target needs approval, it is committed and executed at once: the end time is set to now, which is
+// all there is to do, and the Operation is Done in the same pass.
+func TestAManagedEndIsPlannedByTheStepAndExecutedOnceConfirmed(t *testing.T) {
 	f := newOpFixture(t, 1)
 	f.withGlobalPolicy()
 	f.md.Spec.Source = v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{}}
@@ -272,9 +275,17 @@ func TestAManagedEndIsPlannedByTheStepAndWaitsAsNotBuiltOnceConfirmed(t *testing
 		t.Fatalf("phase %q, plan %+v: want Planned with one target", planned.Status.Phase, planned.Status.Plan)
 	}
 	g.confirm("end", planned.Status.Plan.ID)
-	g.step(opAt.Add(time.Minute))
+	at := opAt.Add(time.Minute)
+	g.step(at)
 	op := g.op("end")
-	if c := condOf(op, v1alpha1.ConditionExecutable); c == nil || c.Status != "False" || c.Reason != v1alpha1.ReasonExecutionNotBuilt {
-		t.Errorf("Executable %+v, want False/ExecutionNotBuilt", c)
+	if op.Status.Phase != v1alpha1.OperationPhaseDone || op.Status.FinishedAt == nil {
+		t.Errorf("phase %q, finishedAt %v, want Done with a finish time", op.Status.Phase, op.Status.FinishedAt)
+	}
+	var md v1alpha1.ModelDeployment
+	if err := g.c.Get(g.ctx, types.NamespacedName{Namespace: opNS, Name: opMD}, &md); err != nil {
+		t.Fatal(err)
+	}
+	if md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(at) {
+		t.Errorf("the deployment's end time is %v, want %v, the pass's time", md.Spec.EndTime, at)
 	}
 }

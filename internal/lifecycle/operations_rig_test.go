@@ -326,24 +326,57 @@ func TestTheKeyOfADeletedDeploymentStopsWhenItsOperationsAreFinished(t *testing.
 	}
 }
 
-// The key stays alive while an Operation that is not finished names the deleted deployment: one in Executing,
-// whose status the test sets, as the admin does, is left alone by the planning step and requeues the key.
+// The key stays alive while an Operation that is not finished names the deleted deployment: an Executing Release of
+// one Allocation whose finalizer holds it, so the target is not done and the Operation stays Executing, requeues the
+// key. Once the finalizer goes, the target is done, the Operation is Done, and the key stops.
 func TestTheKeyOfADeletedDeploymentStaysAliveWhileAnUnfinishedOperationNamesIt(t *testing.T) {
 	rg := newRig(t)
 	key := client.ObjectKey{Namespace: rigNS, Name: "gone"}
-	op := opRigOp("scale", v1alpha1.OperationSpec{Action: v1alpha1.OperationActionScale, Scale: &v1alpha1.ScaleParameters{Instances: 0}})
+	held := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{
+		Name: "held", Namespace: rigNS, Finalizers: []string{"example.test/hold"},
+		Labels: map[string]string{v1alpha1.LabelModelDeployment: "gone"},
+	}}
+	held.Spec.ModelDeploymentRef = &v1alpha1.ObjectReference{Name: "gone"}
+	rg.create(held)
+	var stored v1alpha1.Allocation
+	if err := rg.c.Get(rg.ctx, client.ObjectKeyFromObject(held), &stored); err != nil {
+		t.Fatal(err)
+	}
+	op := opRigOp("release", v1alpha1.OperationSpec{Action: v1alpha1.OperationActionRelease, Release: &v1alpha1.ReleaseParameters{Allocations: []string{"held"}}})
 	op.Spec.ModelDeploymentRef.Name = "gone"
 	rg.create(op)
 	var got v1alpha1.Operation
 	if err := rg.c.Get(rg.ctx, client.ObjectKeyFromObject(op), &got); err != nil {
 		t.Fatal(err)
 	}
+	// The admin commits it, as the controller would after approval: the target is the Allocation, by its UID.
 	got.Status.Phase = v1alpha1.OperationPhaseExecuting
+	got.Status.Committed = []v1alpha1.CommittedTarget{{Kind: v1alpha1.TargetKindAllocation, Name: "held", UID: stored.UID, Effect: v1alpha1.PlanEffectReleaseKept}}
+	got.Status.Plan = &v1alpha1.OperationPlan{ModelDeployment: v1alpha1.PlannedDeployment{Name: "gone", UID: "uid-gone"}}
 	if err := rg.c.Status().Update(rg.ctx, &got); err != nil {
 		t.Fatal(err)
 	}
 	res, err := rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: key})
 	if err != nil || res.RequeueAfter == 0 {
 		t.Fatalf("with an Executing Operation naming it: result %+v, error %v, want the key requeued", res, err)
+	}
+	// The finalizer goes: the Allocation is gone, the target is done, the Operation is Done, and the key stops.
+	var held2 v1alpha1.Allocation
+	if err := rg.c.Get(rg.ctx, client.ObjectKeyFromObject(held), &held2); err != nil {
+		t.Fatal(err)
+	}
+	if held2.DeletionTimestamp.IsZero() {
+		t.Fatal("the Release did not delete the Allocation")
+	}
+	held2.Finalizers = nil
+	if err := rg.c.Update(rg.ctx, &held2); err != nil {
+		t.Fatal(err)
+	}
+	res, err = rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: key})
+	if err != nil || res.RequeueAfter != 0 {
+		t.Fatalf("with the Operation done: result %+v, error %v, want no more passes", res, err)
+	}
+	if err := rg.c.Get(rg.ctx, client.ObjectKeyFromObject(op), &got); err != nil || got.Status.Phase != v1alpha1.OperationPhaseDone {
+		t.Fatalf("the Operation is %q (%v), want Done", got.Status.Phase, err)
 	}
 }
