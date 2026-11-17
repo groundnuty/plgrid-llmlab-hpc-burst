@@ -43,6 +43,8 @@ type scenario struct {
 	rd   *reader
 	prov *v1alpha1.Provider
 
+	keptAlloc v1alpha1.Allocation // md2's started Allocation, held by no Instance: rule 3's subject
+
 	plannedA               *v1alpha1.Operation // agent A's Operation as planned, whose plan ID the confirm and the Approval carry
 	planID                 string
 	purposeA, purposeB     string    // the Operations' purposes; B's holds markerB
@@ -53,10 +55,12 @@ type scenario struct {
 func TestTheAuditLogOfAnOperationsLifeAndItsRotation(t *testing.T) {
 	s := newScenario(t)
 	s.deploy()
+	s.keep()
 	s.operations()
 	s.secret()
 	set := s.waitLife()
 	t.Run("b: each write under its own identity, at its level, with its content", func(t *testing.T) { s.checkLife(t, set) })
+	t.Run("rule 3: the lifecycle's update of an Allocation is logged at Request, with its body", func(t *testing.T) { s.checkAllocationWrite(t, set) })
 	t.Run("e: the Secret's requests are logged at Metadata, and its content is not in any file", func(t *testing.T) { s.checkSecretLogged(t, set) })
 	t.Run("lease: the controller's renewals happened and are not in the log", s.checkLease)
 	t.Run("size: the log per Operation and per minute of an idle controller", func(t *testing.T) {
@@ -166,7 +170,7 @@ func (s *scenario) secret() {
 
 // waitLife reads the log's FILES until everything (b) and (e) look for is in them, and returns what it read.
 func (s *scenario) waitLife() *logSet {
-	w, rd, planID := s.world, s.rd, s.planID
+	w, rd, planID, name := s.world, s.rd, s.planID, s.keptAlloc.Name
 	// Everything (b) says, read from the log's FILES.
 	return w.waitLog(rd, "(b) the Operation's life and the Secret's requests", func(s *logSet) bool {
 		return len(s.find("create", "operations", "", "end-a", w.a.user)) > 0 &&
@@ -174,6 +178,7 @@ func (s *scenario) waitLife() *logSet {
 			len(s.find("update", "operations", "", "end-a", w.a.user)) > 0 &&
 			len(s.find("create", "approvals", "", "ap-person", w.admin.user)) > 0 &&
 			hasPlanWrite(s, w.lc.user, "end-a", planID) &&
+			hasIdleWrite(s, w.lc.user, name) &&
 			len(s.find("create", "secrets", "", "audit-secret", w.admin.user)) > 0 &&
 			len(s.find("patch", "secrets", "", "audit-secret", w.admin.user)) > 0 &&
 			len(s.find("get", "secrets", "", "audit-secret", w.admin.user)) > 0

@@ -55,6 +55,26 @@ func (w *world) keepProviderFresh(prov *v1alpha1.Provider) {
 	w.t.Cleanup(func() { cancel(); wg.Wait() })
 }
 
+// startAllocation writes what the Provider's controller writes when the job has started: the phase, the start time and the
+// hard end, under the Provider's field manager. No Provider controller runs in this world, so the test plays it.
+func (w *world) startAllocation(a *v1alpha1.Allocation) {
+	w.t.Helper()
+	eventually(w.t, 30*time.Second, "the Allocation "+a.Name+"'s job started", func() (bool, string) {
+		var cur v1alpha1.Allocation
+		if err := w.admin.c.Get(w.ctx, client.ObjectKeyFromObject(a), &cur); err != nil {
+			return false, err.Error()
+		}
+		started := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+		hardEnd := metav1.NewTime(started.Add(30 * 24 * time.Hour))
+		cur.Status.AtProvider.Phase, cur.Status.AtProvider.StartTime, cur.Status.AtProvider.HardEnd = v1alpha1.AllocationRunning, &started, &hardEnd
+		err := w.admin.c.Status().Update(w.ctx, &cur, client.FieldOwner(v1alpha1.FieldManagerProvider))
+		if err == nil {
+			*a = cur
+		}
+		return err == nil, fmt.Sprintf("%v", err)
+	})
+}
+
 // endOperation builds an End Operation of the deployment, owned by the identity that creates it.
 func endOperation(name string, owner who, purpose string) *v1alpha1.Operation {
 	return &v1alpha1.Operation{

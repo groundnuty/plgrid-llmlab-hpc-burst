@@ -183,3 +183,21 @@ func (s *scenario) checkNoRefusals(t *testing.T) {
 		}
 	}
 }
+
+// checkAllocationWrite is rule 3 in the log FILE: the lifecycle identity's update of an Allocation is at level Request, with
+// the request body (the idle-since annotation it wrote), and no response body: the level is not RequestResponse. The levels
+// of every rule are judged by the API server's own evaluator, in config/audit; this is what the API server wrote.
+func (s *scenario) checkAllocationWrite(t *testing.T, set *logSet) {
+	w := s.world
+	var n int
+	for _, e := range set.find("update", "allocations", "", s.keptAlloc.Name, w.lc.user) {
+		n++
+		if e.Level != "Request" || len(e.RequestObject) == 0 || len(e.ResponseObject) != 0 {
+			t.Errorf("the lifecycle identity's update of Allocation %s is logged at %s with a request body of %d bytes and a response body of %d, want Request, a request body and no response body: %s",
+				s.keptAlloc.Name, e.Level, len(e.RequestObject), len(e.ResponseObject), e)
+		}
+	}
+	if n == 0 {
+		t.Errorf("the log holds no update of Allocation %s by the lifecycle identity", s.keptAlloc.Name)
+	}
+}
