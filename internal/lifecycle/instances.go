@@ -35,6 +35,11 @@ func (p *pass) instance(in *v1alpha1.Instance) error {
 	}
 	if alloc == nil {
 		if (in.Status.Phase == "" || in.Status.Phase == v1alpha1.InstancePending) && in.DeletionTimestamp.IsZero() && !p.shutdown && p.md != nil {
+			// From an Operation's commit until its spec write lands the controller creates no Allocation, and none for an Instance
+			// an Operation committed to: the Instance waits, and the Operation's act ends it (HBEP-7, Reconcile loop, steps 6 to 8).
+			if p.creationHeld() || p.committedInstance(in) {
+				return nil
+			}
 			// Created before its Allocation; the Allocation's create was cut
 			// short (Provisioning): create it now, under the name the
 			// Instance already holds.
@@ -298,7 +303,7 @@ func (p *pass) shutdownInstance(in *v1alpha1.Instance, alloc *v1alpha1.Allocatio
 	case v1alpha1.InstanceDraining:
 		return p.running(in, alloc)
 	}
-	release := alloc.Status.AtProvider.StartTime == nil
+	release := !jobStarted(alloc)
 	return p.end(in, alloc, v1alpha1.ReasonDrained, "the deployment is shutting down", release)
 }
 

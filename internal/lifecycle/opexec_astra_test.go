@@ -188,9 +188,9 @@ func TestAnEndWithDeleteThatFinishesWithoutDeletingRemovesItsFinalizerAndAPerson
 		t.Errorf("the finished End left the kept-warm finalizer on a LIVE deployment: %v", md.Finalizers)
 	}
 
-	// The second End's plan approved releasing P's marked Allocation (a release now priced and approved), so its mark was cleared at the
-	// commit and the End's own release took it. Nothing marked remains, and a person's delete of the deployment, now that no finalizer
-	// holds, completes at once: it is not held by the orphan the aborted End would have left.
+	// The second End aborted before its Delete, so P's Allocation is still marked and nothing holds the deployment: a person's delete of
+	// it completes at once (no finalizer holds, so the deletion rule releases P), and is not held by an orphan the aborted End would have
+	// left.
 	if err := w.c.Delete(w.ctx, md); err != nil { // a person's delete
 		t.Fatal(err)
 	}

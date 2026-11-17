@@ -212,6 +212,7 @@ func TestAReleaseCauseIsTheOperationsOnlyForAReleasingCommittedTarget(t *testing
 			a := f.emptyAllocation("alloc-k", nil)
 			if tc.queued {
 				a.Status.AtProvider.StartTime = nil
+				a.Status.AtProvider.Phase = v1alpha1.AllocationPending // a queued job is Pending, not Running (jobStarted reads both)
 			}
 			op := executingOp("rel", releaseOp(v1alpha1.ReleaseParameters{Allocations: []string{"alloc-k"}}),
 				[]v1alpha1.CommittedTarget{committedOf(v1alpha1.TargetKindAllocation, "alloc-k", tc.effect)})

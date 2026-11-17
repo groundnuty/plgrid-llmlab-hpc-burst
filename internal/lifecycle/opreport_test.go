@@ -188,8 +188,10 @@ func TestAFinalFailureStaysAndAStartedCancelIsNotDone(t *testing.T) {
 				a = f.emptyAllocation("alloc-p", nil)
 			}
 			a.Status.AtProvider.StartTime = nil
+			a.Status.AtProvider.Phase = v1alpha1.AllocationPending
 			if tc.started {
 				a.Status.AtProvider.StartTime = opTime(opT0)
+				a.Status.AtProvider.Phase = v1alpha1.AllocationRunning
 			}
 			if tc.marked {
 				a.Annotations = map[string]string{v1alpha1.AnnotationKeptWarm: "operation ns/op uid-op"}

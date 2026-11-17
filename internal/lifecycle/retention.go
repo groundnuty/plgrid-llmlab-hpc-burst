@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -102,6 +103,14 @@ type fateView struct {
 	// heldByKeptWarm: the deployment is being deleted and holds FinalizerKeptWarm, so an Operation's End with delete is
 	// deleting it, not a person (keptWarmSkipsDeletion).
 	heldByKeptWarm bool
+	// approvedRelease: a committed, unfinished Operation whose spec write has landed has the Allocation as a target its plan releases
+	// (ReleaseStarted, or a kept Allocation's release), so the mark does not block that approved release, by whichever path its
+	// action uses (its act, the shutdown or retention). The mark is not cleared by it: the Allocation is released with its mark, and if
+	// the Operation finishes without releasing it the mark still protects it (HBEP-10, The report, Kept warm, as #707 at 7bb52fc1 says).
+	approvedRelease bool
+	// markPending: an Operation committed to cancel the Allocation as queued and its mark has not landed yet, so retention treats it
+	// as marked: nothing but the profile's maxIdle, its hard end and the failure releases releases a started one.
+	markPending bool
 	// endTime is the deployment's end time, nil when it has none.
 	endTime *time.Time
 	// maxIdle is the profile's idle limit that releases even a kept Allocation; nil when the Provider's
@@ -113,6 +122,8 @@ type fateView struct {
 func (p *pass) retentionView(a *v1alpha1.Allocation) fateView {
 	v := fateView{deleted: p.md == nil || !p.md.DeletionTimestamp.IsZero()}
 	v.heldByKeptWarm = p.md != nil && !p.md.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(p.md, v1alpha1.FinalizerKeptWarm)
+	v.approvedRelease = p.approvedRelease(a)
+	v.markPending = p.markPending(a)
 	if p.md != nil && p.md.Spec.EndTime != nil {
 		t := p.md.Spec.EndTime.Time
 		v.endTime = &t
@@ -132,18 +143,20 @@ func keptWarm(a *v1alpha1.Allocation) bool { return a.Annotations[v1alpha1.Annot
 // keptWarmStarted reports whether the Allocation carries the mark and its job has started: the one state retention's policy rules, the
 // shutdown and, while the finalizer holds, the deployment-deletion rule skip.
 func keptWarmStarted(a *v1alpha1.Allocation) bool {
-	return keptWarm(a) && a.Status.AtProvider.StartTime != nil
+	return keptWarm(a) && jobStarted(a)
 }
 
-// markCleared reports whether a marked Allocation's mark goes now. Two conditions, each read from the cluster's state:
-//   - an Instance is placed on it (a replacement, an added Instance, a repurpose): a live Instance that the marking Operation did not
-//     commit to, or any live Instance when that Operation is gone;
-//   - it hosts a live Instance that the spec keeps, with its deployment not in shutdown (HBEP-7, Reconcile loop, step 4) and no
-//     committed, unfinished Operation targeting it, which is the serving pair of a Scale above zero once the Operation has finished.
-//     Under an End or a Scale to zero the spec ends that Instance, so the mark stays.
+// markCleared reports whether a marked Allocation's mark goes now. Two conditions, each read from the cluster's state, and neither reads
+// the Operation that marked it:
+//   - an Instance is placed on it while an Operation that targets it is committed and unfinished (a replacement, an added Instance, a
+//     repurpose): a live Instance that is not on its way out and that Operation did not commit to;
+//   - it hosts a live Instance that the spec keeps and that is not on its way out, with its deployment not in shutdown (HBEP-7,
+//     Reconcile loop, step 4) and no committed, unfinished Operation targeting it, which is the serving pair of a Scale above zero once
+//     the Operation has finished. Under an End or a Scale to zero the spec ends that Instance, so the mark stays.
 //
-// An Operation whose approved plan releases a marked Allocation clears its mark at its commit (markBeforeActing). Once the mark is
-// gone, the Allocation follows its retention policy as any other does (HBEP-10, The report, Kept warm).
+// An Operation whose approved plan releases a marked Allocation does not clear its mark: the mark does not block that release
+// (approvedRelease), and the Allocation goes with it. Once the mark is gone, the Allocation follows its retention policy as any other
+// does (HBEP-10, The report, Kept warm).
 //
 // Two stated limits, which no design here closes: a mark is cleared when an Instance is placed on its Allocation, so a later shutdown
 // of that Instance follows retention as for any serving Allocation, and an agent that extends a deployment's end time, which needs no
@@ -151,30 +164,28 @@ func keptWarmStarted(a *v1alpha1.Allocation) bool {
 // maxIdle a marked, started Allocation idles until its hard end, which the report names.
 func (p *pass) markCleared(a *v1alpha1.Allocation) bool {
 	live := p.liveOn(a.Name)
-	if len(live) == 0 {
-		return false
+	if len(live) == 0 || p.md == nil || p.shutdown {
+		return false // nothing hosted, or the deployment is shutting down: the spec keeps nothing
 	}
-	var marking *v1alpha1.Operation
-	if ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(a.Annotations[v1alpha1.AnnotationKeptWarm]); ok {
-		for _, op := range p.ops {
-			if op.Namespace == ns && op.Name == name && op.UID == uid {
-				marking = op
-			}
-		}
-	}
+	// The mark is the Allocation's own, so no condition reads the Operation that marked it: removing an Operation, finished or not, by
+	// its 7 days or by a person, never removes a mark. Only an Operation that is committed and not finished and targets the Allocation
+	// is read, and it is the one in force (HBEP-10, The report, Kept warm).
+	targeting := p.unfinishedOperationTargeting(a)
 	for _, in := range live {
-		if marking == nil || !committedInstanceOf(marking, in) {
-			return true // placed after the mark
+		if in.Status.Phase == v1alpha1.InstanceDraining || !in.DeletionTimestamp.IsZero() {
+			continue // on its way out
 		}
-	}
-	if p.targetedByUnfinishedOperation(a) || p.md == nil || p.shutdown {
-		return false
-	}
-	for _, in := range live {
-		if in.Status.Phase != v1alpha1.InstanceDraining && in.DeletionTimestamp.IsZero() && p.keptBySpec(in) {
-			if _, began := drainBegan(in); !began {
-				return true // it serves on, the spec keeps it, and no Operation ends it
+		if _, began := drainBegan(in); began {
+			continue
+		}
+		if targeting != nil {
+			if !committedInstanceOf(targeting, in) {
+				return true // placed while the Operation is unfinished: a replacement, an added Instance, a repurpose
 			}
+			continue
+		}
+		if p.keptBySpec(in) {
+			return true // it serves on, the spec keeps it, and no Operation ends it
 		}
 	}
 	return false
@@ -201,20 +212,20 @@ func committedInstanceOf(op *v1alpha1.Operation, in *v1alpha1.Instance) bool {
 	return false
 }
 
-// targetedByUnfinishedOperation reports whether an Operation that is committed and not finished has the Allocation as a committed
-// target.
-func (p *pass) targetedByUnfinishedOperation(a *v1alpha1.Allocation) bool {
+// unfinishedOperationTargeting returns the Operation that is committed and not finished and has the Allocation as a committed
+// target, or nil.
+func (p *pass) unfinishedOperationTargeting(a *v1alpha1.Allocation) *v1alpha1.Operation {
 	for _, op := range p.ops {
 		if !isExecuting(op) {
 			continue
 		}
 		for _, t := range op.Status.Committed {
 			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID {
-				return true
+				return op
 			}
 		}
 	}
-	return false
+	return nil
 }
 
 // keptWarmSkipsDeletion is the ONE function that says when the deployment-deletion rule skips a marked Allocation: while its
@@ -222,7 +233,42 @@ func (p *pass) targetedByUnfinishedOperation(a *v1alpha1.Allocation) bool {
 // the marked, started Allocations; a deployment that is gone, or is being deleted WITHOUT the finalizer, was deleted when nothing
 // held it, and the deletion rule releases its marked Allocations with retention's cause (HBEP-10, The report, Kept warm).
 func keptWarmSkipsDeletion(a *v1alpha1.Allocation, v fateView) bool {
-	return keptWarm(a) && v.heldByKeptWarm
+	return (keptWarm(a) || v.markPending) && v.heldByKeptWarm && !v.approvedRelease
+}
+
+// approvedRelease reports whether a committed, unfinished Operation whose spec write has landed has the Allocation as a target its
+// plan releases as started or kept (priced, as ReleaseStarted): the mark does not block that release.
+func (p *pass) approvedRelease(a *v1alpha1.Allocation) bool {
+	for _, op := range p.ops {
+		if !isExecuting(op) || !apimeta.IsStatusConditionTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) {
+			continue
+		}
+		for _, t := range op.Status.Committed {
+			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID && releasingEffect(t.Effect) && t.Effect != v1alpha1.PlanEffectCancelPending {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// markPending reports whether an Operation that is committed and not finished committed to cancel the Allocation as queued and its
+// mark has not landed: the write failed and is retried each pass, and until it lands retention treats the Allocation as marked.
+func (p *pass) markPending(a *v1alpha1.Allocation) bool {
+	if keptWarm(a) {
+		return false
+	}
+	for _, op := range p.ops {
+		if !isExecuting(op) {
+			continue
+		}
+		for _, t := range op.Status.Committed {
+			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID && t.Effect == v1alpha1.PlanEffectCancelPending {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // retentionFate is the pure decision of releaseEmpty: whether the empty Allocation a goes at now, why, and
@@ -245,7 +291,7 @@ func retentionFate(a *v1alpha1.Allocation, v fateView, now time.Time, emptiedAt 
 		// The condition's message, the Provider controller's, stays out of the release cause.
 		return true, time.Time{}, "a relay ended for good", false
 	}
-	if obs.StartTime == nil {
+	if !jobStarted(a) {
 		// An Instance is created before its Allocation, so an unstarted
 		// Allocation with no live Instance waits for nothing.
 		return true, time.Time{}, "a pending Allocation with no Instance is cancelled", false
@@ -280,7 +326,7 @@ func retentionFate(a *v1alpha1.Allocation, v fateView, now time.Time, emptiedAt 
 			later(t)
 		}
 	}
-	if keptWarm(a) {
+	if (keptWarm(a) || v.markPending) && !v.approvedRelease {
 		// Kept warm and started (a marked, pending one was released above, since its queued cancel was approved): the profile's
 		// maxIdle, its hard end and the unconditional releases above are all that release it, and every other rule, the idle limit,
 		// a keep date and the deployment's end time, skips it (HBEP-10, The report, Kept warm: protect first).

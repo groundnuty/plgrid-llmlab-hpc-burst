@@ -101,15 +101,15 @@ func TestNoAllocationOrInstanceIsCreatedBetweenTheCommitAndTheSpecWrite(t *testi
 	}
 }
 
-// An Operation whose approved plan RELEASES a marked, started Allocation clears its mark at its commit, since that release is now priced
-// and approved, and the release happens. An End left P's started Allocation marked; a Release of it is approved. The Allocation's own
-// release is made to stall (its release cause's write fails), so the commit's clearing is seen on its own; once allowed, the Allocation
-// is released with the Release's cause.
-func TestAPlanThatReleasesAMarkedStartedAllocationClearsItsMarkAtItsCommitAndTheReleaseHappens(t *testing.T) {
+// An Operation whose approved plan RELEASES a marked, started Allocation passes the mark where it blocks the release, and never clears
+// it. An End left P's started Allocation marked; a Release of it is approved. Its release is made to stall (the release cause's write
+// fails), so the commit is seen on its own: the mark is still there, not cleared at the commit. Once allowed, the Allocation is
+// released, with the Release's cause, going with its mark.
+func TestAnApprovedReleaseOfAMarkedStartedAllocationLeavesItsMarkUntilTheReleaseAndThenReleasesIt(t *testing.T) {
 	w, pAlloc, stop := keptWarmWorld(t, false)
 	stop()
 	w.passes(60, nil)
-	if a, ok := w.allocation(pAlloc); !ok || !keptWarm(a) || a.Status.AtProvider.StartTime == nil {
+	if a, ok := w.allocation(pAlloc); !ok || !keptWarm(a) || !jobStarted(a) {
 		t.Fatalf("P's Allocation is %+v (found %v), want it marked and started: the case did not arise", a, ok)
 	}
 	causeFails := true
@@ -125,8 +125,8 @@ func TestAPlanThatReleasesAMarkedStartedAllocationClearsItsMarkAtItsCommitAndThe
 	w.approve("rel", "person", userPerson)
 	w.stepsUntil(time.Minute, 10*time.Second, "the commit", func() bool { return len(w.getOp("rel").Status.Committed) > 0 })
 	w.passes(3, nil)
-	if a, ok := w.allocation(pAlloc); !ok || !a.DeletionTimestamp.IsZero() || keptWarm(a) {
-		t.Fatalf("P's Allocation is %+v (found %v) after the Release committed, want it present with its mark CLEARED at the commit", a, ok)
+	if a, ok := w.allocation(pAlloc); !ok || !a.DeletionTimestamp.IsZero() || !keptWarm(a) {
+		t.Fatalf("P's Allocation is %+v (found %v) after the Release committed, want it present and STILL marked: the commit clears nothing", a, ok)
 	}
 	causeFails = false
 	w.releaseDone("rel")

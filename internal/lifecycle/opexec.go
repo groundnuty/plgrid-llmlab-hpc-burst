@@ -273,6 +273,15 @@ func (p *pass) failSpecChanged(op *v1alpha1.Operation) error {
 		}
 		out = append(out, o)
 	}
+	// A Scale above zero that leaves untaken units gives them back before it finishes, whether or not a person's edit stopped it: the
+	// larger of the count a person raised it to and N + U is written and recorded, so the controller's own scale-down does not take
+	// an Instance the plan did not name (HBEP-10, The report, Kept warm: the give-back).
+	if units := p.untakenUnits(op, out); units > 0 && op.Status.CountGivenBack == nil && p.md != nil && p.md.DeletionTimestamp.IsZero() && p.untakenGiveBackAllowed(op) {
+		if err := p.giveBack(op, units); err != nil {
+			p.opsHold = true
+			return err
+		}
+	}
 	phase, finished := phaseOf(out)
 	if phase == v1alpha1.OperationPhaseDone {
 		// The effect did not hold: whatever was done stays done, and the Operation is not Done, a Scale that committed no target
@@ -289,6 +298,12 @@ func (p *pass) failSpecChanged(op *v1alpha1.Operation) error {
 			s.FinishedAt = &t
 		}
 	})
+}
+
+// untakenGiveBackAllowed reports whether a give-back may be written for the Operation: the spec write landed, so the count N the plan
+// wrote is what a raise or a lowering is read against.
+func (p *pass) untakenGiveBackAllowed(op *v1alpha1.Operation) bool {
+	return scaleAboveZero(op) && apimeta.IsStatusConditionTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten)
 }
 
 // lastReadyScaleTarget reports whether the committed Instance target is one that a Scale committed as CancelPending or
@@ -422,14 +437,14 @@ func (p *pass) holdDeletionForKeptWarm(md *v1alpha1.ModelDeployment) error {
 }
 
 // markBeforeActing writes the kept-warm mark on every committed Allocation target approved only as a queued cancel (CancelPending)
-// that does not carry this Operation's mark, and clears the mark of every Allocation the approved plan releases as started or kept,
-// since that release is now priced and approved; it returns the errors of the writes that failed. It runs first in every pass of a
-// committed, unfinished Operation, before the spec write and before any act, and nothing else happens in a pass in which a write did
-// not land (executing). A target whose Allocation is gone needs no mark.
+// that does not carry this Operation's mark, and returns the errors of the writes that failed. It runs first in every pass of a
+// committed, unfinished Operation, before the spec write and before any act, and nothing else happens in a pass in which a mark did
+// not land (executing). A target whose Allocation is gone needs no mark. It clears no mark: an approved release passes the mark where
+// it blocks (approvedRelease), so an Operation that is aborted before it releases leaves the Allocation protected.
 func (p *pass) markBeforeActing(op *v1alpha1.Operation) error {
 	var errs []error
 	for _, t := range op.Status.Committed {
-		if t.Kind != v1alpha1.TargetKindAllocation || !releasingEffect(t.Effect) {
+		if t.Kind != v1alpha1.TargetKindAllocation || t.Effect != v1alpha1.PlanEffectCancelPending {
 			continue
 		}
 		a, err := p.committedAllocation(t)
@@ -440,14 +455,8 @@ func (p *pass) markBeforeActing(op *v1alpha1.Operation) error {
 		if a == nil || !a.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if t.Effect == v1alpha1.PlanEffectCancelPending {
-			if err := p.keepWarm(op, a); err != nil {
-				errs = append(errs, err)
-			}
-		} else if keptWarm(a) {
-			if err := p.clearKeptWarm(a); err != nil {
-				errs = append(errs, err)
-			}
+		if err := p.keepWarm(op, a); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
@@ -824,7 +833,7 @@ func recordedFinal(op *v1alpha1.Operation, uid types.UID) bool {
 // when the plan was made, since the plan's ID covers the effect and the stale check passed, so a start time now is a start
 // after it.
 func startedSinceCommit(t v1alpha1.CommittedTarget, a *v1alpha1.Allocation) bool {
-	return t.Effect == v1alpha1.PlanEffectCancelPending && a != nil && a.Status.AtProvider.StartTime != nil
+	return t.Effect == v1alpha1.PlanEffectCancelPending && jobStarted(a)
 }
 
 // opMessage names the Operation in a stop's message.

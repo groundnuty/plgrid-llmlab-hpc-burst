@@ -169,6 +169,9 @@ const (
 	ReasonStable = "Stable"
 	// ReasonAsDesired: Degraded is false.
 	ReasonAsDesired = "AsDesired"
+	// ReasonHeldByKeptWarm: Progressing is false while the deployment's delete waits on the held-by-kept-warm finalizer for marked,
+	// started Allocations; the controller is waiting on a release, which an approved Release can make (HBEP-10, The report, Kept warm).
+	ReasonHeldByKeptWarm = "HeldByKeptWarm"
 )
 
 // Instance condition types (metav1.Condition), written by the lifecycle
