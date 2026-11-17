@@ -225,10 +225,10 @@ func (p *pass) waitsForWarmBefore(pred *v1alpha1.Instance, st step, later []step
 	return time.Time{}, false
 }
 
-// placeOnWarm is a warm step: it places the Instance on the Provider's warm Allocation that warmFor picks. An
-// Allocation whose agent has not registered again yet, during the grace after the controller's restart, is waited for
-// (stepDeferred, with the wait's end; deferralEnd) while none is placed here.
-func (p *pass) placeOnWarm(pv *providerView, t *placeTarget, pred *v1alpha1.Instance, o placeOpts) (stepResult, time.Time, error) {
+// warmStep is a warm step: it places the Instance on the Provider's warm Allocation that warmFor picks, through
+// placeOnWarm, which takes the Provider's lock. An Allocation whose agent has not registered again yet, during the grace
+// after the controller's restart, is waited for (stepDeferred, with the wait's end; deferralEnd) while none is placed here.
+func (p *pass) warmStep(pv *providerView, t *placeTarget, pred *v1alpha1.Instance, o placeOpts) (stepResult, time.Time, error) {
 	warm, deferUntil := p.warmFor(pv, t.params, pred)
 	if warm == nil {
 		if until, ok := p.deferralEnd(pred, o, deferUntil); ok {
@@ -240,14 +240,15 @@ func (p *pass) placeOnWarm(pv *providerView, t *placeTarget, pred *v1alpha1.Inst
 	// is written once, in an Allocation's create request, and an existing one is never marked later
 	// (HBEP-7, Handover, No-overlap mode: "fixed at creation"). A reusable warm Allocation also
 	// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
-	if err := p.createInstance(pv, t.cid, pred, warm.Name, o); err != nil {
+	// placeOnWarm takes the Provider's lock around the create, so a pass that reads the reserved slots and the extra's
+	// headroom never sees the Instance half-counted (#708); it also clears the Allocation's idle anchor.
+	if err := p.placeOnWarm(pv, t.cid, pred, warm, o); err != nil {
 		if errors.Is(err, errDeploymentGone) {
 			return stepStopped, time.Time{}, nil
 		}
 		return stepStopped, time.Time{}, err
 	}
-	// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
-	return stepPlaced, time.Time{}, p.writeIdleSince(warm, nil)
+	return stepPlaced, time.Time{}, nil
 }
 
 // submitOn is a submit step: it reserves a slot on the Provider and makes the Instance and its Allocation. A

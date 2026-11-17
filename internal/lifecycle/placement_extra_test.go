@@ -80,7 +80,8 @@ func missingOnAThenB(name string) *v1alpha1.ModelDeployment {
 
 // TestAMissingPrimaryTakesTheSlotHeadroomLeavesItOnAAndNothingIsCancelled: A's submit limit is 4, B has none. md-a (k = 1,
 // an end time before its drain start, so its handover reserves no slot) makes its primary and its extra at 08:00:10: 1 listed
-// + 0 + 1 + H, with H floored at 1, is 3 <= 4. md-b (k = 1) and md-c arrive at 08:00:20, and md-b sorts before md-c, so at
+// + 0 + 1 + H is 2 <= 4, H being 0 (#711's rule: the other deployments with a missing primary, with no floor; md-b and md-c
+// arrive later). md-b (k = 1) and md-c arrive at 08:00:20, and md-b sorts before md-c, so at
 // md-b's pass md-c is a missing primary that A allows (H = 1): md-b's primary makes 3 listed, and its extra, 3 + 0 + 1 + 1 =
 // 5 > 4, is refused. md-c's primary then takes the fourth slot, on A, the first allowed Provider with room, and not on B: no
 // pending extra is cancelled for it, and none could be, since headroom kept its slot (HBEP-7, Its checks). md-a has 2
@@ -114,7 +115,7 @@ func TestAMissingPrimaryTakesTheSlotHeadroomLeavesItOnAAndNothingIsCancelled(t *
 }
 
 // TestAMissingPrimaryRefusedOnAForTheLimitGoesToBAndNothingIsCancelled: A's submit limit is 3, B has none. md-a (k = 1,
-// an end time) makes its primary and its extra at 08:00:10 (1 + 0 + 1 + H floored at 1 = 3 <= 3), and md-b (k = 0) its
+// an end time) makes its primary and its extra at 08:00:10 (1 + 0 + 1 + H = 2 <= 3, H = 0: no other deployment is missing a primary, #711's rule), and md-b (k = 0) its
 // primary at 08:00:30: 3 listed, A is full. md-c, allowed on A and then B, arrives at 08:00:40 and is refused on A for the
 // limit alone at 08:00:50, and its primary goes to B, the next allowed Provider, in the same pass. Nothing is cancelled for
 // it: md-a keeps its primary and its extra, md-b its primary, in ten minutes, and md-c has its one Instance on B.

@@ -123,8 +123,24 @@ type placeOpts struct {
 	headroom func(context.Context) (int, error)
 }
 
+// placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
+// every reservation takes (slots.go), and clears the Allocation's idle anchor: the Allocation is no longer idle
+// (v1alpha1.ClearIdleSince). The Instance becomes a Running primary that reserves a handover slot and ends its
+// deployment's missing primary, so both the reserved slots and the admission headroom an extra reads change with
+// it; made outside the lock, another pass could read the one before and the other after (#708, the delta review of the
+// headroom). The lock is held across two API writes of no other lock of this package.
+func (p *pass) placeOnWarm(pv *providerView, cid *classID, pred *v1alpha1.Instance, warm *v1alpha1.Allocation, o placeOpts) error {
+	l := p.r.slots().slotLock(pv.name)
+	l.Lock()
+	defer l.Unlock()
+	if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+		return err
+	}
+	return p.writeIdleSince(warm, nil)
+}
+
 // provisionWith places one Instance by the steps placementOrder gives: the first that places it ends the walk. A warm
-// step that finds an unregistered warm Allocation (placeOnWarm: stepDeferred) holds the NEW SUBMISSIONS that come
+// step that finds an unregistered warm Allocation (warmStep: stepDeferred) holds the NEW SUBMISSIONS that come
 // after it, and no more: the walk goes on to the later warm steps, so a registered spare on a later Provider is still
 // taken, and retention cannot release it during the wait (HBEP-7, Provisioning, Where; amendment #719 as reworded,
 // and Astra's review of #724, point 4). With nothing placed and a hold standing, the placement is deferred until the
@@ -156,7 +172,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		var err error
 		switch {
 		case st.kind == stepWarm:
-			res, until, err = p.placeOnWarm(st.pv, t, pred, o)
+			res, until, err = p.warmStep(st.pv, t, pred, o)
 		default:
 			if until, ok := p.waitsForWarmBefore(pred, st, steps[i+1:], o); ok {
 				hold(until)
@@ -422,6 +438,7 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 			}
 		}
 	}
+	stampOwner(&in.ObjectMeta, p.md) // last: the blocks above may assign a whole annotation map
 	if err := p.confirmDeployment(); err != nil {
 		return err
 	}
@@ -459,6 +476,7 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 	if queuedOf != "" {
 		a.Annotations = map[string]string{v1alpha1.AnnotationQueuedSuccessor: queuedOf}
 	}
+	stampOwner(&a.ObjectMeta, p.md) // after the mark, which assigns the annotation map
 	if err := p.confirmDeployment(); err != nil {
 		p.releaseSlot(pv, name)
 		return err

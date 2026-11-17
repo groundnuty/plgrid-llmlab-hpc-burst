@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 )
 
 // waitExecOfSleep waits until the shell with this PID has exec'd sleep, which is when its ignored
@@ -185,7 +187,10 @@ func standInProc(t *testing.T) (*FrpsProc, *exec.Cmd) {
 // takeDescriptorNumber opens pidfds for pid until one gets the number n, as the kernel hands out
 // the lowest free number, and closes the others. It stands for "something opened a file after n
 // was freed": here another process's pidfd. It fails the test when n was taken by something
-// else, so a run can never close a descriptor that is not its own.
+// else, so a run can never close a descriptor that is not its own. That makes it reliable only in
+// a process where nothing else opens a file between the close of n and this call, which a test
+// binary running other tests is not (#718): both tests that call it run it in a child test binary
+// of its own.
 func takeDescriptorNumber(t *testing.T, n, pid int) {
 	t.Helper()
 	var spare []int
@@ -201,6 +206,7 @@ func takeDescriptorNumber(t *testing.T, n, pid int) {
 		}
 		if fd == n {
 			t.Cleanup(func() { _ = unix.Close(n) })
+			t.Logf("descriptor %d: the bystander's pidfd took the number the closed handle held", n)
 			return
 		}
 		spare = append(spare, fd)
@@ -211,68 +217,145 @@ func takeDescriptorNumber(t *testing.T, n, pid int) {
 	t.Fatalf("no pidfd got the number %d", n)
 }
 
-// TestFrpsProcClosedHandleNeverTouchesAReusedDescriptor is the regression for the closed-handle
-// bug: Release (or a Stop) closes the pidfd, the kernel gives its number to another process's
-// pidfd, and a later Stop used to verify frps by /proc but poll and signal through that number,
-// killing the other process and leaving frps running. Now the later Stop fails and sends nothing.
-func TestFrpsProcClosedHandleNeverTouchesAReusedDescriptor(t *testing.T) {
-	for _, c := range []struct {
-		name  string
-		close func(p *FrpsProc)
-	}{
-		{"after Release", func(p *FrpsProc) { p.Release() }},
-		{"after a Stop", func(p *FrpsProc) {
-			if _, err := p.Stop(context.Background(), 5*time.Second); err != nil {
-				t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			frps, _ := standInProc(t)
-			bystander := startBystander(t, "sleep", "300")
-			n := frps.h.fd
-			c.close(frps)
-			takeDescriptorNumber(t, n, bystander.Process.Pid)
+// The closed-handle tests (the regression below and TestSignalHandleRefusesAClosedHandle) need a
+// process in which nothing else opens a file between the close of the handle's pidfd and the
+// reopening of its number. The test binary is not one: the
+// package's t.Parallel tests, a goroutine that a finished test left draining and the runtime all
+// open files, and when one of them took the number first the test failed by design (#718). So each
+// case runs in a child, this test binary on one test alone (testenv.StartChild, as frps_leak_test.go
+// does), where only the case's own goroutines exist. The child makes every check the test makes,
+// and a precondition it cannot reproduce is a failure there, never a skip. It also writes what it
+// saw, and the parent checks that again: a child that ran no test at all, or returned early, exits 0
+// and would otherwise pass.
 
-			start := time.Now()
-			rep, err := frps.Stop(context.Background(), 3*time.Second)
-			time.Sleep(100 * time.Millisecond)
-			if !runningNow(bystander.Process.Pid) {
-				t.Fatalf("the process that owns the reused descriptor number was signalled (Stop = %+v, %v)", rep, err)
-			}
-			if !errors.Is(err, ErrFrpsReleased) {
-				t.Fatalf("Stop = %+v, %v, want ErrFrpsReleased", rep, err)
-			}
-			if rep.Signals != "" {
-				t.Errorf("signals sent: %q", rep.Signals)
-			}
-			if d := time.Since(start); d > 2*time.Second {
-				t.Errorf("Stop took %s: it waited on a closed handle", d)
-			}
-			// The record still works: it reopens the process by PID and checks it.
-			if c.name == "after Release" {
-				if rep, err := StopFrps(context.Background(), frps.Rec(), 5*time.Second); err != nil || rep.Signals != "TERM" {
-					t.Errorf("StopFrps(record) = %+v, %v", rep, err)
-				}
-				if !runningNow(bystander.Process.Pid) {
-					t.Fatal("StopFrps stopped the wrong process")
-				}
-			}
-		})
-	}
+const (
+	// closedHandleChildTest is the test the children run; closedHandleCaseEnv names the case.
+	closedHandleChildTest = "TestFrpsProcClosedHandleChild"
+	closedHandleCaseEnv   = "HPCBURST_CLOSED_HANDLE_CHILD_CASE"
+	// signalHandleCaseKey is the case of TestSignalHandleRefusesAClosedHandle: the plain handle,
+	// without an FrpsProc.
+	signalHandleCaseKey = "plain"
+)
+
+// closedHandleCases are the ways an FrpsProc's pidfd gets closed. key is what the parent tells the
+// child; the parent's subtests keep their names.
+var closedHandleCases = []struct {
+	name  string
+	key   string
+	close func(t *testing.T, p *FrpsProc)
+}{
+	{"after Release", "release", func(t *testing.T, p *FrpsProc) { p.Release() }},
+	{"after a Stop", "stop", func(t *testing.T, p *FrpsProc) {
+		if _, err := p.Stop(context.Background(), 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}},
 }
 
-// TestSignalHandleRefusesAClosedHandle: the shared rule under the test above, on the plain handle.
-func TestSignalHandleRefusesAClosedHandle(t *testing.T) {
+// closedHandleRecord is what a child saw, written after its checks have passed.
+type closedHandleRecord struct {
+	Case           string            `json:"case"`
+	Descriptor     int               `json:"descriptor"`      // the closed handle's number, then held by the bystander's pidfd
+	BystanderAlive bool              `json:"bystander_alive"` // after the later Stop
+	Released       bool              `json:"released"`        // the later Stop failed with ErrFrpsReleased
+	Signals        string            `json:"signals"`         // what the later Stop sent
+	StopMS         int64             `json:"stop_ms"`
+	RecordStop     *closedHandleStop `json:"record_stop,omitempty"` // after Release: StopFrps with the record
+}
+
+// closedHandleStop is the result of StopFrps(record).
+type closedHandleStop struct {
+	OK      bool   `json:"ok"`
+	Signals string `json:"signals"`
+}
+
+// signalHandleRecord is what the child of TestSignalHandleRefusesAClosedHandle saw.
+type signalHandleRecord struct {
+	Case           string `json:"case"`
+	Descriptor     int    `json:"descriptor"`      // the closed handle's number, then held by the bystander's pidfd
+	BystanderAlive bool   `json:"bystander_alive"` // after the checks
+	SignalRefused  bool   `json:"signal_refused"`  // signalHandle sent nothing and failed with errHandleClosed
+	ExitedRefused  bool   `json:"exited_refused"`  // exited failed with errHandleClosed
+	DescriptorOpen bool   `json:"descriptor_open"` // after a second Close, the number is still open
+}
+
+// TestFrpsProcClosedHandleChild is run only as a child of the two tests that use it, and returns
+// at once otherwise. It runs one case, named by closedHandleCaseEnv.
+func TestFrpsProcClosedHandleChild(t *testing.T) {
+	if _, ok := testenv.ChildRecordPath(); !ok {
+		return
+	}
+	key := os.Getenv(closedHandleCaseEnv)
+	if key == signalHandleCaseKey {
+		runSignalHandleCase(t)
+		return
+	}
+	for _, c := range closedHandleCases {
+		if c.key == key {
+			runClosedHandleCase(t, c.key, c.close)
+			return
+		}
+	}
+	t.Fatalf("%s=%q is not a case", closedHandleCaseEnv, key)
+}
+
+// runClosedHandleCase closes an frps stand-in's handle, makes the bystander's pidfd take the
+// number it held, and checks that a later Stop touches nothing.
+func runClosedHandleCase(t *testing.T, key string, closeHandle func(t *testing.T, p *FrpsProc)) {
+	frps, _ := standInProc(t)
+	bystander := startBystander(t, "sleep", "300")
+	n := frps.h.fd
+	closeHandle(t, frps)
+	takeDescriptorNumber(t, n, bystander.Process.Pid)
+
+	start := time.Now()
+	rep, err := frps.Stop(context.Background(), 3*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	if !runningNow(bystander.Process.Pid) {
+		t.Fatalf("the process that owns the reused descriptor number was signalled (Stop = %+v, %v)", rep, err)
+	}
+	if !errors.Is(err, ErrFrpsReleased) {
+		t.Fatalf("Stop = %+v, %v, want ErrFrpsReleased", rep, err)
+	}
+	if rep.Signals != "" {
+		t.Errorf("signals sent: %q", rep.Signals)
+	}
+	d := time.Since(start)
+	if d > 2*time.Second {
+		t.Errorf("Stop took %s: it waited on a closed handle", d)
+	}
+	rec := closedHandleRecord{Case: key, Descriptor: n, BystanderAlive: true, Released: true, Signals: rep.Signals, StopMS: d.Milliseconds()}
+	// The record still works: it reopens the process by PID and checks it.
+	if key == "release" {
+		rs, err := StopFrps(context.Background(), frps.Rec(), 5*time.Second)
+		if err != nil || rs.Signals != "TERM" {
+			t.Errorf("StopFrps(record) = %+v, %v", rs, err)
+		}
+		if !runningNow(bystander.Process.Pid) {
+			t.Fatal("StopFrps stopped the wrong process")
+		}
+		rec.RecordStop = &closedHandleStop{OK: err == nil, Signals: rs.Signals}
+	}
+	testenv.WriteChildRecord(t, rec)
+}
+
+// runSignalHandleCase closes a plain handle, makes the bystander's pidfd take its number, and
+// checks that signalHandle and exited refuse the closed handle, that a second Close leaves the
+// number alone, and that the bystander is never signalled.
+func runSignalHandleCase(t *testing.T) {
 	p, _ := standInProc(t)
 	bystander := startBystander(t, "sleep", "300")
 	n := p.h.fd
 	p.h.Close()
 	takeDescriptorNumber(t, n, bystander.Process.Pid)
-	if sent, err := signalHandle(p.h, syscall.SIGTERM); sent || !errors.Is(err, errHandleClosed) {
+	sent, err := signalHandle(p.h, syscall.SIGTERM)
+	signalRefused := !sent && errors.Is(err, errHandleClosed)
+	if !signalRefused {
 		t.Fatalf("signalHandle = %v, %v, want an errHandleClosed and nothing sent", sent, err)
 	}
-	if _, err := p.h.exited(); !errors.Is(err, errHandleClosed) {
+	_, err = p.h.exited()
+	exitedRefused := errors.Is(err, errHandleClosed)
+	if !exitedRefused {
 		t.Errorf("exited on a closed handle: %v", err)
 	}
 	p.h.Close() // idempotent: it must not close the number a second time
@@ -281,8 +364,104 @@ func TestSignalHandleRefusesAClosedHandle(t *testing.T) {
 		t.Fatal("the other process was signalled")
 	}
 	var st unix.Stat_t
-	if err := unix.Fstat(n, &st); err != nil {
+	err = unix.Fstat(n, &st)
+	if err != nil {
 		t.Errorf("a second Close closed descriptor %d, which now belongs to the other process's pidfd: %v", n, err)
+	}
+	testenv.WriteChildRecord(t, signalHandleRecord{Case: signalHandleCaseKey, Descriptor: n, BystanderAlive: true,
+		SignalRefused: signalRefused, ExitedRefused: exitedRefused, DescriptorOpen: err == nil})
+}
+
+// runClosedHandleChild runs one case in a child and requires what every case shares: a clean exit
+// and the child's PASS line. The caller reads the record and calls requireReuseLogged.
+func runClosedHandleChild(t *testing.T, key string) (child *testenv.Child, out string) {
+	t.Helper()
+	child = testenv.StartChild(t, closedHandleChildTest, closedHandleCaseEnv+"="+key)
+	// d only bounds a child that never ends: a run that touches the closed handle takes 10 to
+	// 13 s, and the child's own test timeout is 3 minutes.
+	code, out := child.Wait(2 * time.Minute)
+	if code != 0 {
+		t.Fatalf("the child exited %d:\n%s", code, out)
+	}
+	if !strings.Contains(out, "--- PASS: "+closedHandleChildTest+" ") {
+		t.Fatalf("the child has no PASS line for %s, so it ran no test, or skipped it:\n%s", closedHandleChildTest, out)
+	}
+	return child, out
+}
+
+// requireReuseLogged requires that the child logged the reuse of descriptor n, which it does only
+// once the bystander's pidfd has taken the number the closed handle held.
+func requireReuseLogged(t *testing.T, out string, n int) {
+	t.Helper()
+	if n < 3 {
+		t.Fatalf("the child's descriptor number is %d", n)
+	}
+	if want := "descriptor " + strconv.Itoa(n) + ": the bystander's pidfd took the number"; !strings.Contains(out, want) {
+		t.Errorf("the child did not log %q, so the reuse was not reproduced there:\n%s", want, out)
+	}
+}
+
+// TestFrpsProcClosedHandleNeverTouchesAReusedDescriptor is the regression for the closed-handle
+// bug: Release (or a Stop) closes the pidfd, the kernel gives its number to another process's
+// pidfd, and a later Stop used to verify frps by /proc but poll and signal through that number,
+// killing the other process and leaving frps running. Now the later Stop fails and sends nothing.
+// Each case runs in a child (see above); here the child's exit, its PASS line, the reuse it
+// logged and its record are checked.
+func TestFrpsProcClosedHandleNeverTouchesAReusedDescriptor(t *testing.T) {
+	for _, c := range closedHandleCases {
+		t.Run(c.name, func(t *testing.T) {
+			child, out := runClosedHandleChild(t, c.key)
+			var rec closedHandleRecord
+			child.WaitRecord(10*time.Second, &rec)
+			if rec.Case != c.key {
+				t.Fatalf("the child ran the case %q, want %q: %+v", rec.Case, c.key, rec)
+			}
+			requireReuseLogged(t, out, rec.Descriptor)
+			if !rec.BystanderAlive {
+				t.Error("the bystander that owned the reused number was signalled")
+			}
+			if !rec.Released {
+				t.Errorf("the later Stop did not fail with ErrFrpsReleased: %+v", rec)
+			}
+			if rec.Signals != "" {
+				t.Errorf("signals sent: %q", rec.Signals)
+			}
+			if rec.StopMS > 2000 {
+				t.Errorf("Stop took %d ms: it waited on a closed handle", rec.StopMS)
+			}
+			if c.key == "release" {
+				if rec.RecordStop == nil || !rec.RecordStop.OK || rec.RecordStop.Signals != "TERM" {
+					t.Errorf("StopFrps(record) after Release: %+v", rec.RecordStop)
+				}
+			} else if rec.RecordStop != nil {
+				t.Errorf("the %q case recorded a StopFrps(record): %+v", c.key, rec.RecordStop)
+			}
+		})
+	}
+}
+
+// TestSignalHandleRefusesAClosedHandle: the shared rule under the test above, on the plain handle.
+// It runs in a child for the same reason (see above): the child makes the checks, and the parent
+// checks the child's exit, its PASS line, the reuse it logged and its record.
+func TestSignalHandleRefusesAClosedHandle(t *testing.T) {
+	child, out := runClosedHandleChild(t, signalHandleCaseKey)
+	var rec signalHandleRecord
+	child.WaitRecord(10*time.Second, &rec)
+	if rec.Case != signalHandleCaseKey {
+		t.Fatalf("the child ran the case %q, want %q: %+v", rec.Case, signalHandleCaseKey, rec)
+	}
+	requireReuseLogged(t, out, rec.Descriptor)
+	if !rec.BystanderAlive {
+		t.Error("the bystander that owned the reused number was signalled")
+	}
+	if !rec.SignalRefused {
+		t.Errorf("signalHandle on the closed handle did not fail with errHandleClosed and send nothing: %+v", rec)
+	}
+	if !rec.ExitedRefused {
+		t.Errorf("exited on the closed handle did not fail with errHandleClosed: %+v", rec)
+	}
+	if !rec.DescriptorOpen {
+		t.Errorf("a second Close closed descriptor %d, which belongs to the other process's pidfd: %+v", rec.Descriptor, rec)
 	}
 }
 
