@@ -15,6 +15,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -193,8 +194,8 @@ func TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry(t *testing.T) {
 	bWaits()
 }
 
-// fixedInstances is a client.Reader that lists a fixed set of Instances and no Allocation, and reads one
-// ModelDeployment.
+// fixedInstances is a client.Reader that lists a fixed set of Instances, by the list's namespace and label
+// selector, and no Allocation, and reads one ModelDeployment.
 type fixedInstances struct {
 	client.Reader
 	insts []v1alpha1.Instance
@@ -209,7 +210,7 @@ func (f fixedInstances) Get(_ context.Context, key client.ObjectKey, obj client.
 	return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("modeldeployments").GroupResource(), key.Name)
 }
 
-func (f fixedInstances) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+func (f fixedInstances) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if al, ok := list.(*v1alpha1.AllocationList); ok {
 		al.Items = nil // no Allocation has been made
 		return nil
@@ -218,8 +219,18 @@ func (f fixedInstances) List(_ context.Context, list client.ObjectList, _ ...cli
 	if !ok {
 		return fmt.Errorf("fixedInstances lists only Instances and Allocations, not %T", list)
 	}
+	lo := &client.ListOptions{}
+	for _, o := range opts {
+		o.ApplyToList(lo)
+	}
 	il.Items = nil
 	for _, in := range f.insts {
+		if lo.Namespace != "" && in.Namespace != lo.Namespace {
+			continue
+		}
+		if lo.LabelSelector != nil && !lo.LabelSelector.Matches(labels.Set(in.Labels)) {
+			continue
+		}
 		il.Items = append(il.Items, *in.DeepCopy())
 	}
 	return nil
@@ -242,6 +253,8 @@ func (f fixedInstances) List(_ context.Context, list client.ObjectList, _ ...cli
 //	u6  an unstamped successor, ended                    no gap
 //	p8  drained in the mode, ended, s8 stamped for it    passed on
 //	s8  p8's stamped successor, pending, no Allocation   its own slot
+//	p9  drained in the mode, ended, s9 stamped for it    passed on
+//	s9  p9's stamped successor, lost its hedge (HedgeLost) no gap: a member of its hedge served
 func TestReservedSlotCarriersAreStepSevensCarriers(t *testing.T) {
 	md := &v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: hoMD}}
 	began := hoT(9, 50, 20).Format(time.RFC3339)
@@ -277,6 +290,12 @@ func TestReservedSlotCarriersAreStepSevensCarriers(t *testing.T) {
 		mk("u6", ended, map[string]string{v1alpha1.AnnotationPredecessor: "p6", annotationNoOverlapSuccessor: "the one slot"}, nil),
 		mk("p8", ended, drained(), nil),
 		mk("s8", pending, stamped("p8"), nil),
+		mk("p9", ended, drained(), nil),
+		func() v1alpha1.Instance {
+			in := mk("s9", ended, stamped("p9"), nil)
+			in.Status.EndReason = v1alpha1.ReasonHedgeLost
+			return in
+		}(),
 	}
 	// Every Instance's Allocation exists, ended, but s8's.
 	allocs := map[string]*v1alpha1.Allocation{}

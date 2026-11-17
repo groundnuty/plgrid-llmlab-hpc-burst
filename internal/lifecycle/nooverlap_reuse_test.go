@@ -184,7 +184,13 @@ func TestNoOverlapSuccessorStaysWhenTheModeLifts(t *testing.T) {
 	succ := reps[0].Name
 	hoStepTo(rg, hoT(9, 30, 0), 5*time.Minute, nil)
 	rg.addProvider("example-second", "gpu-long", 4*time.Hour, nil, nil)
-	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{rigProvider, "example-second"} })
+	// hedgeWidth 1: this row is the single successor's, which stays where it is when the mode lifts. With hedging
+	// on, the second Provider would get a member of the successor's hedge at once, which serves before the drain
+	// start (hedge_grow_rig_test.go covers that rescue).
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) {
+		m.Spec.Providers.Names = []string{rigProvider, "example-second"}
+		m.Spec.HedgeWidth = ptrTo(int32(1))
+	})
 
 	hoStepTo(rg, hoT(9, 49, 20), time.Minute, nil)
 	hoStepTo(rg, hoT(9, 49, 30), 10*time.Second, nil)
