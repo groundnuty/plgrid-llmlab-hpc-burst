@@ -383,28 +383,52 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	// (c) A worker killed while a stream runs on the other: it restarts at its own rung alone, the
 	// Instance stays ready and the stream ends uncut, healthyWorkers goes 2, 1, 2, and the restarted
 	// worker takes requests only once verified again.
-	// The stream's key is the primary's (KeyFor); which worker Envoy gives it is read from Envoy, and the
-	// victim is the other. The probes go in a key pinned to the primary and, on its Envoy, to the victim
-	// (keyOn), so each probe is one the dead or restarted victim would get without the fix: the front's
-	// ring would otherwise send a share to the handover replacement, and Envoy a share to the sibling
-	// (#510's review).
-	before := hostStats(t, admin)
-	r.sendOn(in, key, "step (c)")
-	after := hostStats(t, admin)
-	var streamOn string
-	for w := range after {
-		if after[w]["rq_success"] > before[w]["rq_success"] {
-			streamOn = w
-		}
+	// The stream's key is the primary's (KeyFor). Which worker Envoy gives it is read from the stream
+	// itself, never from an earlier probe in the key (#634: a probe's worker was not always the stream's, and
+	// the step then killed the worker its stream ran on): once the stream's first chunk has arrived, its
+	// worker is the one worker Envoy shows a request active on. The victim is the other. The probes go in
+	// a key pinned to the primary and, on its Envoy, to the victim (keyOn), so each probe is one the dead
+	// or restarted victim would get without the fix: the front's ring would otherwise send a share to the
+	// handover replacement, and Envoy a share to the sibling (#510's review). The victim is known only
+	// once the stream runs, and keyOn's requests would use up the stream's 30 s (1,500 tokens at
+	// tokenDelay), so a key is found for each worker before it starts.
+	probeKeys := map[string]string{}
+	for _, w := range []string{"worker-0", "worker-1"} {
+		probeKeys[w] = r.keyOn(in, admin, w, "victim-"+w)
 	}
-	victim := map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[streamOn]
-	if victim == "" {
-		t.Fatalf("step (c): Envoy's counters name no worker for the stream's key: %v, then %v", before, after)
-	}
-	probeKey := r.keyOn(in, admin, victim, "victim")
 	first, done := r.fc.StartStream(stack.ChatBody(stack.Model, 1500, 1500, true, ""), key)
 	<-first
-	stack.WaitFor(t, stack.WaitDeadline, "Envoy to show the stream on "+streamOn, func() bool { return hostStats(t, admin)[streamOn]["rq_active"] > 0 })
+	// A keyless /health probe also crosses Envoy, to a random worker (landsOn), so Envoy shows a request
+	// active on the sibling now and then. A read is decisive only when exactly one worker shows one: both
+	// is a probe beside the stream, and the read is repeated. The stream must still run at the read, or
+	// a probe alone would look like it: the stream's end fails the step here, with what Envoy showed.
+	var streamOn, seen string
+	stack.WaitFor(t, stack.WaitDeadline, "Envoy to show the stream active on exactly one worker", func() bool {
+		st := hostStats(t, admin)
+		select {
+		case s := <-done:
+			t.Fatalf("step (c): the stream ended before Envoy showed it on one worker: status %d, err %v, ending %.200q; rq_active worker-0 %d, worker-1 %d",
+				s.Status, s.Err, s.Body[max(0, len(s.Body)-200):], st["worker-0"]["rq_active"], st["worker-1"]["rq_active"])
+		default:
+		}
+		var active []string
+		for _, w := range []string{"worker-0", "worker-1"} {
+			if st[w]["rq_active"] > 0 {
+				active = append(active, w)
+			}
+		}
+		if len(active) == 1 {
+			streamOn = active[0]
+			return true
+		}
+		if now := fmt.Sprintf("worker-0 %d, worker-1 %d", st["worker-0"]["rq_active"], st["worker-1"]["rq_active"]); now != seen {
+			t.Logf("step (c): Envoy's active requests: %s; waiting for exactly one worker", now)
+			seen = now
+		}
+		return false
+	})
+	victim := map[string]string{"worker-0": "worker-1", "worker-1": "worker-0"}[streamOn]
+	probeKey := probeKeys[victim]
 	pidfdKill(t, engines[victim].pid, "--uds")
 	killAt := time.Now()
 	// From the kill on, strictly: a request is served, Envoy's route retrying one it sends the dead worker
@@ -457,6 +481,11 @@ func TestRehearsalTwoWorkers(t *testing.T) {
 	streamed := <-done
 	if body := string(streamed.Body); streamed.Status != http.StatusOK || !strings.Contains(body, "[DONE]") || strings.Contains(body, "stream_cut") {
 		t.Errorf("step (c): the stream on %s: %d, ending %.200q; want it uncut, with [DONE]", streamOn, streamed.Status, body[max(0, len(body)-200):])
+	}
+	// The stream was the Instance's own, so the one worker Envoy showed active was its worker: without the
+	// earlier sendOn, nothing else checks that the key stayed pinned to the Instance.
+	if got := streamed.Header.Get(headerInstanceUID); got != string(in.UID) {
+		t.Errorf("step (c): the stream was answered by Instance %q, not %s", got, in.UID)
 	}
 	if !slices.Contains(counts, 1) || counts[len(counts)-1] != 2 {
 		t.Errorf("step (c): healthyWorkers went %v, want 2, 1, 2", counts)
