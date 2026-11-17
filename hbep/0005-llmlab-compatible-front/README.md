@@ -108,7 +108,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
    - **Open (blocks beta):** S2 phase B ran four workers sharing one GPU, which keeps the hit-rate comparison but understates time to first token and the cost of an unbalanced router. Spike S2c (issue #62), one worker per GPU, measures hit rate, balance across workers and latency, for Envoy's `ring_hash` and for vllm-router's `consistent_hash`. Until then the default is a candidate. **What decides it** (sharpened 17 Nov 2026):
      - **The measurement:** S2c on Athena `plgrid-gpu-a100`, where it was retargeted on 13 Nov 2026 while Helios's GH200 nodes are down: four vLLM v0.32.0 workers with a GPU each, S2b's workload, against round robin (`spikes/s2c/README.md`, Question and Arms).
      - **The rule** is #62's: a router passes if it beats round robin on prefix-cache hit rate, no worker carries more than 40% of the requests, and its TTFT p95 is no worse than round robin's.
-     - **Envoy's `ring_hash` passes,** as the agent renders it now, without bounded loads: it's the default.
+     - **Envoy's `ring_hash` passes,** as the agent renders it now, without bounded loads: it's the default, **per platform** (revised by its Fable and Gemini Carbon reviews, PR #679). The controller's one setting goes into every Instance today (`internal/lifecycle/provision.go:371`), so passing on Athena would put bare Envoy on GH200 too, where an old glibc fails the router and the restart ladder could release Allocations. So the default applies only on a partition whose profile records its compute nodes' glibc at 2.30 or later, `partitions[].computeGlibc` (proposed; HBEP-4). Absent means no router, and the controller-wide setting becomes per profile (HBEP-7, Several workers).
      - **It fails and vllm-router's `consistent_hash` passes:** the patched vllm-router becomes the default once its patch is built and passes S13's harness (#62).
      - **Neither passes** (proposal): there's no default. Several workers stay behind `--instance-router envoy` (HBEP-7, Several workers), and S2c's results go to a design round.
    - **Measured (S13, issue #312, PR #324):** the router in front of several workers must deliver the client's request as sent.
@@ -134,9 +134,9 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
 
      **Open (blocks beta):**
      - S2c (issue #62) measures its hit rate, balance across workers and latency on GPUs, beside vllm-router's `consistent_hash`, and names the builds it measures, by the rule above;
-     - **Envoy on Helios GH200's compute nodes** (the Helios router row, issue #566). Helios's login node runs glibc 2.28 (12 Nov 2026), and the GH200 nodes aren't measured. **What decides it** is a GH200 node's glibc, read in that row's job:
+     - **Envoy on Helios GH200's compute nodes** (the Helios router row, issue #566). Helios's login node runs glibc 2.28 (12 Nov 2026), and the GH200 nodes aren't measured. **What decides it** is a GH200 node's glibc, read in that row's job and recorded as GH200's `partitions[].computeGlibc`:
        - 2.30 or later: Envoy runs bare there, as on Athena;
-       - older: the agent's check already refuses to start Envoy, naming the node's glibc (`internal/agent/envoyglibc.go`), so an Instance with several workers fails its start there, as any failed start does (HBEP-7, Health and restarts). Running Envoy from an image under Apptainer on such a node is then built, by amendment (proposal).
+       - older: GH200 gets no router, so it hosts no Instance of several workers. The agent's check also refuses to start Envoy on such a node (`internal/agent/envoyglibc.go`). Running Envoy from an image under Apptainer there is then built, by amendment (proposal).
 
      **Decided for beta:**
      - **membership** (erratum, 17 Nov 2026: decided on 11 and 12 Nov 2026, and the "open" label was stale). An Instance's workers are fixed at its creation, in its immutable `launch.workers` (HBEP-7, Several workers), and Envoy takes them from its configuration file, which a restart reads again (Inside an Instance, the three conditions). A worker leaves and rejoins only through Envoy's health checks (Worker health, below), so the dynamic configuration S13 named for membership changes (S13, open points) isn't needed;
@@ -694,7 +694,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-16: no bounded loads inside an Instance: the bound let a retry reach a dead worker while a sibling was healthy (#614); S2c decides whether a bound returns.
 - 2026-11-16: the usage record cuts `requestedModel` at 1,291 bytes and the decoded `path` at 1,302 bytes, at a character boundary, with a marker (for #645).
 - 2026-11-17: beta's open questions sharpened without a live job: S2c's rule and its three outcomes; GH200's glibc rule; membership's stale "open" label fixed (erratum); the bound's return rule; weighting's GPU-free measurement; the front's `capacity` answer matches `gateway.overloadStatus`, whose value no longer gates beta.
-- 2026-11-17: revised by its Fable review (PR #679), and the owner's answers of 17 Nov 2026: LLMLab takes overflow only (open question 4), and one front for beta, revisited with the team option (open question 11).
+- 2026-11-17: revised by its Fable and Gemini Carbon reviews (PR #679), and the owner's answers of 17 Nov 2026: S2c's default router applies per platform, only where the profile records the compute nodes' glibc at 2.30 or later (open question 2); LLMLab takes overflow only (open question 4), and one front for beta, revisited with the team option (open question 11).
 
 ## Amendments
 
@@ -769,7 +769,8 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
   - **The bound's return** needs S2c's bounded arm to pass and to beat the unbounded one by more than step B's run-to-run spread, with a structural guard. Before, S2c "decides whether a bound returns", with no rule.
   - **Weighting** (open question 4) is decided by a GPU-free simulation at the ratio of two classes' expected-performance entries; LLMLab sharing load is the owner's, answered below. Before, both were one open line.
   - **LLMLab's overload status** (open question 6): the front's `capacity` answer takes `gateway.overloadStatus` when every managed profile that sets it agrees, else 503, and the value is set by PR from real traffic, no longer gating beta. The front's `capacity` error (in `internal/front`) follows, reading the managed PlatformProfiles it already watches. Before, the front always answered 503, and beta waited for the value.
-  - **Revised by its Fable review (PR #679), and the owner's answers of 17 Nov 2026** (recorded on #679):
+  - **Revised by its Fable and Gemini Carbon reviews (PR #679), and the owner's answers of 17 Nov 2026** (recorded on #679):
+    - **S2c's default router applies per platform** (open question 2): only on a partition whose profile records `partitions[].computeGlibc` (proposed; HBEP-4) at 2.30 or later; absent means no router, and GH200 with an older glibc hosts no Instance of several workers. `internal/lifecycle/provision.go` follows, choosing `launch.router` per profile. Before, "the default" meant the controller-wide setting, which would have put bare Envoy on every platform;
     - **LLMLab takes overflow only** (owner; open question 4): traffic reaches it only when our Instances are full, as in alpha, so no code changes. Before, whether it should share load while our Instances have room was open, blocking beta;
     - **one front for beta** (owner; open question 11), revisited with the team option. Before, replicas for the team option were open, blocking beta;
     - **HBEP-4's `gateway.overloadStatus` row** now reads the records' status alone, as open question 6 does. Before, it named `errorCode` as a source too.
