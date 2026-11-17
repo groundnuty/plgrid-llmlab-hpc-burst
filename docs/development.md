@@ -71,8 +71,8 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 ### Single writer of the API
 
 - **Only the contracts owner edits `api/` and `config/crd/`.** A builder who needs a field, a condition type or a reason asks for it and gets a small PR. Builders never regenerate or hand-edit the CRDs.
-- **Each field of each object has one writer.** Every write carries a resourceVersion precondition: an Update, or a patch with an optimistic lock. A conflict means re-read, never overwrite (HBEP-7, open question 11). The one server-side apply is the lifecycle controller's `DialHomeUnreachable` (below).
-- **Field managers.** Every write names its controller's field manager, so `managedFields` shows who wrote what: `v1alpha1.FieldManagerLifecycle` (`hpcburst-lifecycle`) for the lifecycle controller and its `Backend`, and `v1alpha1.FieldManagerProvider` (`hpcburst-provider`) for every Provider's controller.
+- **Each field of each object has one writer.** Every write carries a resourceVersion precondition: an Update, or a patch with an optimistic lock. A conflict means re-read, never overwrite (HBEP-7, open question 11). The server-side applies are the lifecycle controller's `DialHomeUnreachable` and each Provider controller's Operation estimates (below).
+- **Field managers.** Every write names its controller's field manager, so `managedFields` shows who wrote what: `v1alpha1.FieldManagerLifecycle` (`hpcburst-lifecycle`) for the lifecycle controller and its `Backend`, and `v1alpha1.FieldManagerProvider` (`hpcburst-provider`) for every Provider's controller, except its apply of an Operation's estimates, which is under `v1alpha1.FieldManagerProviderEstimate(provider)` (`hpcburst-provider-<provider>`): an apply removes the entries its manager owned and it leaves out, so a manager shared by every Provider would let one erase another's.
 
 | Object, part | Writer |
 |---|---|
@@ -85,6 +85,7 @@ The lifecycle controller never imports `internal/slurm` or `internal/providerctl
 | Instance: `status.leaseEnd` | lifecycle controller: on every observe it copies the Allocation's `status.atProvider.hardEnd`, so a later hard end moves it. The front reads it and never routes to an Instance without it (HBEP-5, HBEP-7) |
 | ModelDeployment status, including a managed source's `Ready` and `Progressing` and the reason `ProviderNotOnPlatform` | lifecycle controller. The front only filters: it routes a managed entry to no Provider off `spec.source.managed.platform` |
 | Provider status, the managed `catalog` and `lastCatalogRead` included | the Provider's controller, under `hpcburst-provider`. It keeps every condition it does not own |
+| Operation status: `estimates` (beta; HBEP-10, The release cost) | each Provider's controller, by server-side apply to the status subresource under `hpcburst-provider-<provider>`, with forced ownership, owning only its own entries. Each apply carries all of that Provider's entries for the Operation's current plan, never one at a time (`v1alpha1.EstimateApply`). The lifecycle controller carries the list over untouched and never reads it into a plan, so an estimate never changes the plan's ID |
 | Provider status: the condition `DialHomeUnreachable` | lifecycle controller, by server-side apply to the status subresource under `hpcburst-lifecycle`, with forced ownership, owning only that list entry (`v1alpha1.DialHomeUnreachableApply`). Neither writer removes the other's condition (`@hpc-burst-science-agent`, 31 Oct 2026) |
 | identity and verification records | lifecycle controller (its verification controller) |
 | PlatformProfile status (`lastChecked`) | nobody in alpha: no component checks a profile's facts yet |
