@@ -16,10 +16,11 @@ import (
 // so the guide, the code and the HBEPs agree through the HBEPs:
 //   - the guide's Degraded headings are HBEP-7's ranking, in its order;
 //   - every event the guide states, a type and a reason, is a row of HBEP-8's table with that type;
-//   - every failing reason HBEP-8's table regards an Instance alone with is stated by the guide,
-//     whose section on failing reasons says an Instance that fails ends with one of them. A reason
-//     that regards other kinds too, such as HeartbeatMissed, is not an end reason of an Instance
-//     and is not in that section.
+//   - every failing reason HBEP-8's table regards an Instance with, kinds beyond it or not, is stated
+//     by the guide, whose section on failing reasons says an Instance that fails ends with one of
+//     them. The reasons of HBEP-8's Observers table are left out (HeartbeatMissed today): an observer
+//     going stale does not end the Instance it regards, so it is not in that section. A test pins
+//     that set to the table's text.
 
 // guideEvent is an HBEP-8 event type with a reason.
 type guideEvent struct{ action, reason string }
@@ -99,9 +100,12 @@ func guideDegradedHeadings(t *testing.T) []string {
 	return out
 }
 
-// failsAnInstance is true for a failing reason that HBEP-8's table regards an Instance alone with.
-func failsAnInstance(e reasondrift.TableEntry) bool {
-	return e.Action == "failing" && slices.Equal(e.Kinds, []string{"Instance"})
+// failsAnInstance is true for a failing reason that HBEP-8's table regards an Instance with, among
+// other kinds or alone, unless it is one of the observers' reasons (the reasons of HBEP-8's
+// Observers table): a stale observer is not the end of what it regards. A reason that regards
+// more kinds than the Instance, such as an Allocation in beta, is one the guide still states.
+func failsAnInstance(e reasondrift.TableEntry, observers []string) bool {
+	return e.Action == "failing" && slices.Contains(e.Kinds, "Instance") && !slices.Contains(observers, e.Reason)
 }
 
 // driftProblems sets the guide's headings and events against what the HBEPs state, as the drift
@@ -123,7 +127,7 @@ func driftProblems(docs *reasondrift.Docs, headings []string, events []guideEven
 		}
 	}
 	for _, e := range docs.Table {
-		if failsAnInstance(e) && !stated[guideEvent{e.Action, e.Reason}] {
+		if failsAnInstance(e, docs.ObserverReasons) && !stated[guideEvent{e.Action, e.Reason}] {
 			out = append(out, fmt.Sprintf("HBEP-8 lists a failing event %s regarding an Instance, which the guide does not state", e.Reason))
 		}
 	}
@@ -159,7 +163,7 @@ func TestOperationsDriftComparisonFailsOnAMutant(t *testing.T) {
 	// Instance with.
 	var victim string
 	for _, e := range docs.Table {
-		if failsAnInstance(e) && slices.Contains(events, guideEvent{"failing", e.Reason}) {
+		if failsAnInstance(e, docs.ObserverReasons) && slices.Contains(events, guideEvent{"failing", e.Reason}) {
 			victim = e.Reason
 			break
 		}
@@ -201,5 +205,106 @@ func TestOperationsDriftComparisonFailsOnAMutant(t *testing.T) {
 		if !strings.Contains(got, m.want) {
 			t.Errorf("%s: the comparison reports\n%s\nwant a line with %q", m.name, got, m.want)
 		}
+	}
+}
+
+// observerReasonsInTheTable reads the reasons HBEP-8's Observers table raises, from the text of the
+// table, without the drift guard's parser (ParseObserverReasons), so that a test of the exclusion
+// does not check the parser against itself: the rows are the lines of pipes under the lead-in
+// "**Observers.**", the column is the one headed "Event when stale", and a reason is the backticked
+// CamelCase word that the cell follows with ", regarding".
+func observerReasonsInTheTable(t *testing.T) []string {
+	t.Helper()
+	lines := strings.Split(readRepoFile(t, reasondrift.HBEP8Path), "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "**Observers.**") {
+			start = i
+		}
+	}
+	if start < 0 {
+		t.Fatal("HBEP-8 has no \"**Observers.**\" lead-in")
+	}
+	reason := regexp.MustCompile("`([A-Z][A-Za-z0-9]*)`, regarding")
+	column := -1
+	seen := map[string]bool{}
+	rows := 0
+	for _, l := range lines[start+1:] {
+		if !strings.HasPrefix(l, "|") {
+			if column >= 0 {
+				break // the table ended
+			}
+			continue
+		}
+		cells := strings.Split(l, "|")
+		if column < 0 {
+			for i, c := range cells {
+				if strings.TrimSpace(c) == "Event when stale" {
+					column = i
+				}
+			}
+			if column < 0 {
+				t.Fatalf("the first table row after the Observers lead-in is not the header: %q", l)
+			}
+			continue
+		}
+		if strings.Contains(l, "---") {
+			continue // the separator line
+		}
+		rows++
+		found := reason.FindStringSubmatch(cells[column])
+		if found == nil {
+			t.Fatalf("the Observers table's row %d has no reason in its \"Event when stale\" cell: %q", rows, cells[column])
+		}
+		seen[found[1]] = true
+	}
+	if rows == 0 {
+		t.Fatal("found no row in the Observers table")
+	}
+	var out []string
+	for r := range seen {
+		out = append(out, r)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// The reasons the guide's check leaves out are those of HBEP-8's Observers table, by the table's
+// text: a reason added to the table is left out at once, and one that is not in the table never is.
+func TestTheObserverReasonsLeftOutAreTheObserversTables(t *testing.T) {
+	want := observerReasonsInTheTable(t)
+	got := loadDriftDocs(t).ObserverReasons
+	if !slices.Equal(got, want) {
+		t.Errorf("the check leaves out %v, HBEP-8's Observers table raises %v", got, want)
+	}
+	if !slices.Contains(want, "HeartbeatMissed") {
+		t.Errorf("the Observers table raises %v, and not HeartbeatMissed, which this test was written for", want)
+	}
+}
+
+// An observer's reason is no end reason of an Instance, so the guide is not required to state it:
+// the exclusion decides that. Run on the guide's events with its statements of HeartbeatMissed
+// removed (the real guide states it, in its table of the Instance's conditions and in its own
+// entry, so the real comparison passes with or without the exclusion today), the comparison passes
+// with the exclusion and, without it, reports exactly HeartbeatMissed.
+func TestTheObserverExclusionSparesTheGuideAStatement(t *testing.T) {
+	docs := loadDriftDocs(t)
+	heads, events := guideDegradedHeadings(t), guideEvents(t)
+	if p := driftProblems(docs, heads, events); len(p) != 0 {
+		t.Fatalf("the guide itself differs from the HBEPs, so a mutant proves nothing:\n%s", strings.Join(p, "\n"))
+	}
+	if !slices.Contains(events, guideEvent{"failing", "HeartbeatMissed"}) {
+		t.Fatal("the guide no longer states a failing event HeartbeatMissed: this test removes what it states")
+	}
+	unstated := slices.DeleteFunc(slices.Clone(events), func(ev guideEvent) bool { return ev.reason == "HeartbeatMissed" })
+	if p := driftProblems(docs, heads, unstated); len(p) != 0 {
+		t.Errorf("with the exclusion, a guide that does not state HeartbeatMissed is reported: %q", p)
+	}
+	without := *docs
+	without.ObserverReasons = nil
+	got := driftProblems(&without, heads, unstated)
+	const want = "HBEP-8 lists a failing event HeartbeatMissed regarding an Instance, which the guide does not state"
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("without the exclusion the comparison reports %q, want only %q", got, want)
 	}
 }

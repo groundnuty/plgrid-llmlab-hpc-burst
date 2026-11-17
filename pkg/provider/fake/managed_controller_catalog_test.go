@@ -51,7 +51,7 @@ func TestManagedSkipsAnEntryTheStatusCannotHold(t *testing.T) {
 		{"an entry with no name", entry(""),
 			`Warning CatalogEntrySkipped catalog entry "" skipped: an empty name`},
 		{"a name above 253 characters", entry(long),
-			`Warning CatalogEntrySkipped catalog entry "` + strings.Repeat("n", 64) + `..." skipped: a name of 254 characters, above 253`},
+			`Warning CatalogEntrySkipped catalog entry "` + strings.Repeat("n", 128) + `..." skipped: a name of 254 characters, above 253`},
 		{"a revision above 256 characters", provider.CatalogEntry{Name: "example-a", Revision: rev(strings.Repeat("r", 257))},
 			`Warning CatalogEntrySkipped catalog entry "example-a" skipped: a revision of 257 characters, above 256`},
 	} {
@@ -100,7 +100,7 @@ func TestManagedSkipsAnEntryTheStatusCannotHold(t *testing.T) {
 		e.syncAt(at(12, 0, 0))
 		want := []string{
 			`Warning CatalogEntrySkipped catalog entry "" skipped: an empty name`,
-			`Warning CatalogEntrySkipped catalog entry "` + strings.Repeat("n", 64) + `..." skipped: a name of 254 characters, above 253`,
+			`Warning CatalogEntrySkipped catalog entry "` + strings.Repeat("n", 128) + `..." skipped: a name of 254 characters, above 253`,
 			`Warning CatalogEntrySkipped catalog entry "example-a" skipped: a revision of 257 characters, above 256`,
 		}
 		if ev := drainEvents(rec); !slices.Equal(ev, want) {

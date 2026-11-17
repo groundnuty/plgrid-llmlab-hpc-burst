@@ -106,9 +106,13 @@ func (f *RelayFence) wrote(ler resourcelock.LeaderElectionRecord, err error) {
 type fencedManager struct {
 	manager.Manager
 	fence *RelayFence
+	gap   *leaderlock.GapLock
 }
 
 func (m fencedManager) RelayFence() *RelayFence { return m.fence }
+
+// GapLock is the lock's start observation (gapLocked).
+func (m fencedManager) GapLock() *leaderlock.GapLock { return m.gap }
 
 // Unwrap is the manager under the fence.
 func (m fencedManager) Unwrap() manager.Manager { return m.Manager }

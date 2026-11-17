@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/reasondrift"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -59,6 +60,45 @@ func TestEventProblems(t *testing.T) {
 	} {
 		if m, p := EventProblems(breakIt(good()), want, forbid); len(m) == 0 && len(p) == 0 {
 			t.Errorf("%s: eventProblems found nothing", name)
+		}
+	}
+}
+
+// TestTheTypesAreThoseOfTheDriftGuard: this package's list of HBEP-8's types is
+// internal/reasondrift's Actions, both ways, so that a type one list gains and
+// the other does not fails here (`ended` joined both in beta).
+func TestTheTypesAreThoseOfTheDriftGuard(t *testing.T) {
+	for _, a := range reasondrift.Actions {
+		if !hbep8Actions[a] {
+			t.Errorf("the drift guard knows the type %q and the rehearsal's check does not", a)
+		}
+	}
+	if len(hbep8Actions) != len(reasondrift.Actions) {
+		t.Errorf("the rehearsal's check has %d types, the drift guard %d: %v", len(hbep8Actions), len(reasondrift.Actions), reasondrift.Actions)
+	}
+}
+
+// TestTheFormAcceptsEndedAsNormalOnly: an ended event is a Normal one, as the
+// types other than degraded and failing are (HBEP-8, Form), and a type that is
+// none of HBEP-8's is refused. Each fixture breaks one rule.
+func TestTheFormAcceptsEndedAsNormalOnly(t *testing.T) {
+	for _, c := range []struct {
+		name, action, typ string
+		wantProblem       string // "" for a correct event
+	}{
+		{"ended as Normal", "ended", provider.EventKindOrdinary, ""},
+		{"ended as a Warning", "ended", provider.EventKindWarning, `type "Warning" for action "ended"`},
+		{"a type that does not exist", "finished", provider.EventKindOrdinary, "action is not one of HBEP-8's types"},
+	} {
+		got := formProblems(event(c.action, "JobEnded", "Allocation", "a", LifecycleController, c.typ))
+		if c.wantProblem == "" {
+			if len(got) != 0 {
+				t.Errorf("%s: problems %v, want none", c.name, got)
+			}
+			continue
+		}
+		if len(got) != 1 || !strings.Contains(got[0], c.wantProblem) {
+			t.Errorf("%s: problems %v, want one that says %q", c.name, got, c.wantProblem)
 		}
 	}
 }

@@ -17,10 +17,12 @@ package lifecycle
 // controller (pkg/provider/fake, the read-back of HBEP-4) writes it on the
 // first observe of a job that the fake Slurm established with another time
 // limit (Script.AsTimeLimit), so the message has the shape the Provider writes
-// (internal/providerctl/observe.go, readBack): "job <ID> was established with
-// other settings than requested: <field>: requested <a>, got <b>".
+// (internal/providerctl/observe.go, readBack): "the job was established with
+// other settings than requested: <field>: requested <a>, got <b>", with no job ID
+// (R2 of #625).
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +122,25 @@ func TestASubmittedAsOtherFailureCarriesTheReadBackMessage(t *testing.T) {
 	if got := rg.submissions(); got != 2 {
 		t.Errorf("sbatch calls = %d, want 2 (the first job and its one replacement)", got)
 	}
+	// No job ID in the note: the event goes to the durable log in beta, which is
+	// kept and may be exported (HBEP-8, Allocation events, No job ID in a note;
+	// R2 of #625). The ID is the one the Allocation records, and it is matched
+	// as a token, so a time or a count that holds its digits does not count.
+	jobID := a.Annotations[v1alpha1.AnnotationJobID]
+	if jobID == "" {
+		t.Fatal("the Allocation records no job ID, so the check that no note names it proves nothing")
+	}
+	for _, c := range []struct{ what, got string }{{"the failing event", ev[0].Message}, {"the Instance's Healthy condition", healthyMessage(healthy)}, {"the Provider's condition", cm}} {
+		if hasToken(c.got, jobID) {
+			t.Errorf("%s names the job ID %s: %q", c.what, jobID, c.got)
+		}
+	}
+}
+
+// hasToken reports whether s holds token as a whole token: not inside a longer
+// run of letters, digits or underscores.
+func hasToken(s, token string) bool {
+	return regexp.MustCompile(`(^|[^0-9A-Za-z_])` + regexp.QuoteMeta(token) + `($|[^0-9A-Za-z_])`).MatchString(s)
 }
 
 func healthyMessage(c *metav1.Condition) string {

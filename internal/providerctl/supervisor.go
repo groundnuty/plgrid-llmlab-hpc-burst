@@ -71,9 +71,13 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 		return nil, fmt.Errorf("provider %s: the leader Lease's lock: %w", provider, err)
 	}
 	lock := leaderlock.TrackRenewals(inner)
+	// The start's observation of the Lease (HBEP-8, Gaps after a restart): the
+	// Lease's previous renewTime is read before this copy takes it, and
+	// AddGapEmitter raises the ObservationGap once it holds it.
+	gap := leaderlock.NewGapLock(lock)
 	// The relays' fence: the epoch of this copy's own acquisition, and the
 	// relays stopped before any release (HBEP-6, Fencing).
-	fence := NewRelayFence(lock)
+	fence := NewRelayFence(gap)
 	skip := true
 	mo := manager.Options{
 		Scheme:                              scheme,
@@ -104,7 +108,7 @@ func NewProviderManager(cfg *rest.Config, scheme *runtime.Scheme, provider strin
 	if err != nil {
 		return nil, err
 	}
-	return fencedManager{Manager: leaderlock.ReleaseAfterStart(mgr, lock, ctrl.Log), fence: fence}, nil
+	return fencedManager{Manager: leaderlock.ReleaseAfterStart(mgr, lock, ctrl.Log), fence: fence, gap: gap}, nil
 }
 
 // Supervisor runs one manager per Provider of one kind, batch by default

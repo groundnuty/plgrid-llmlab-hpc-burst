@@ -178,11 +178,17 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `degraded` | `DrainWindowShort` | PlatformProfile | front |
 | `degraded` | `PathProbeFailing` | Instance | front |
 | `degraded` | `TunnelOrphaned` | the Allocation whose credential admitted the tunnel, else the `lifecycle` `Lease` | lifecycle controller |
-| `degraded` | `ObservationGap` | the emitter's own `Lease` | the lifecycle controller and the front, at start |
+| `degraded` | `ObservationGap` | the emitter's own `Lease` | the lifecycle controller and the front, at start, and each Provider manager |
 | `failing` | `WorkerRestart`, `InstanceRestart`, `RouterRestart`, `CrashCorrelated`, `RestartLoop`, `RegistrationTimeout`, `StartTimeout`, `TunnelNotConnected`, `QualificationFailed`, `VerificationFailed`, `AllocationFailed`, `AllocationLost`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `RelayEndedForGood`, `AllocationEndedEarly` | Instance | lifecycle controller |
 | `failing` | `HeartbeatMissed` | the stale observer's resource (Observers) | the component that judges it |
 | `failing` | `UsageWriteFailed` | the front's `Lease` | front |
 | `replaced` | `HandedOver`, `HedgeLost`, `RankedOut` | Instance | lifecycle controller |
+| `started` | `JobSubmitted`, `JobAdopted`, `HoldLifted` | Allocation | Provider controller |
+| `ready` | `JobStarted`, `JobReappeared` | Allocation | Provider controller |
+| `degraded` | `AdminHold`, `JobCompleting` | Allocation | Provider controller |
+| `failing` | `AllocationFailed`, `AllocationEndedEarly`, `AllocationRefused`, `Requeued`, `SubmittedAsOther`, `JobLost` | Allocation | Provider controller |
+| `ending-soon` | `HardEndNear` | Allocation | Provider controller |
+| `ended` | `JobEnded` | Allocation | Provider controller |
 | `ending-soon` | `NoReplacementReady` | Instance | lifecycle controller |
 
 - An event about a deployment caused by one Instance regards the ModelDeployment, with the Instance in `related`. `VerificationFailed`'s `degraded` event and `CapacityDropped`'s regard the Instance instead once the ModelDeployment is gone (`mdObject`, `internal/lifecycle/verify.go`), since nothing else is left to attach them to.
@@ -210,7 +216,7 @@ The API refuses a new event without `action` or `reason`, with either over 128 c
 | `AdminHold` | `degraded` | the job carries an admin hold, a repeating condition | the state reason |
 | `JobCompleting` | `degraded` | the job has carried `COMPLETING` for 10 minutes, a repeating condition | the base state, and since when |
 
-- **The reasons.** `JobSubmitted`, `JobAdopted`, `HoldLifted`, `JobLost`, `JobReappeared` and `SubmittedAsOther` are the Provider controller's untyped reasons on `main` (`providerControllerEvents`, `internal/reasondrift/exceptions.go`), raised typed instead. `AllocationEndedEarly`, `AllocationFailed`, `Requeued` and `AllocationRefused` are the lifecycle controller's Instance reasons, now regarding the Allocation too. `JobStarted`, `HardEndNear`, `JobEnded`, `AdminHold` and `JobCompleting` are new. All are proposed. Each joins the Reasons table, with the Allocation in its Regarding cell, only with the code that raises it, since #239's drift guard checks the table against the code.
+- **The reasons.** `JobSubmitted`, `JobAdopted`, `HoldLifted`, `JobLost`, `JobReappeared` and `SubmittedAsOther` are the Provider controller's untyped reasons on `main` (`providerControllerEvents`, `internal/reasondrift/exceptions.go`), raised typed instead. `AllocationEndedEarly`, `AllocationFailed`, `Requeued` and `AllocationRefused` are the lifecycle controller's Instance reasons, now regarding the Allocation too. `JobStarted`, `HardEndNear`, `JobEnded`, `AdminHold` and `JobCompleting` are new. Each joins the Reasons table, with the Allocation in its Regarding cell, with the code that raises it (#625), since #239's drift guard checks the table against the code.
 - **Held and pending need no events of their own.** In hold mode a job is held from its submission, which `JobSubmitted` says, and pends from its lift, `HoldLifted`. In fallback mode it pends from its submission.
 - **The types.** `JobEnded` takes beta's seventh type, `ended`: a job that ended at its planned end, or by its retention, never by a failure (Notes; the science agent's decision, 16 Nov 2026). `replaced` keeps its meaning, that something took the place of what ended (`HandedOver`, and HBEP-7's proposed `HedgeLost`). `JobReappeared` takes `ready`, as a cleared condition does (the managed catalog controller's `ready` events).
 - **Planned or not,** as the lifecycle controller judges an Instance's end: a lease end is not a failure, and neither is a hard end that passes while the Instance drains (`internal/lifecycle/instances.go`, lines 118–124; HBEP-7, Test plan). So a job that ends at or after its hard end, or while its Instance drains, is `JobEnded`, whatever Slurm's state: `TIMEOUT`, `COMPLETED` or `CANCELLED`. The Provider controller reads that Instance's phase from its cache, by the Instance's `spec.allocationRef` (an index on that field; its identity may read Instances).
@@ -546,9 +552,9 @@ What the code had to change to match this HBEP, as read on 31 Oct 2026. The PRs 
   - **Test hooks** that signal after a pass, for the observer (`onPass`, `internal/lifecycle/observers.go`), the gap emitter (`internal/lifecycle/gap.go`) and the front's request path (`internal/front/proxy.go`).
   - **The drift guard's check** that every recorder is wrapped (`internal/reasondrift/scan`).
   - **The four-condition absence check** (`internal/eventcount/absence.go`), which the rehearsal's absence checks use (`internal/rehearsal/scenario`).
-- **Beta's designs (16 Nov 2026):** not yet. Still to come:
+- **Beta's designs (16 Nov 2026):** partly done: the Allocation events and the usage forwarder are, and the rest is not yet. The designs and what each needs:
   - **The durable log:** `hpcburst-controller eventlog` and its start checks; the launcher's `--event-log`, ports, token, supervision and backup (HBEP-11); and the publisher beside the counting wrapper (`internal/eventcount`).
-  - **Allocation events:** the Provider controller's `events.k8s.io` recorder and its map from reason to type, the typed events' notes without job IDs, and its managers' `ObservationGap`, and its cache index of Instances by `spec.allocationRef`, for the drain case (`internal/providerctl`). With each, its rows of the Reasons table and a shorter list of untyped Provider reasons (`internal/reasondrift/exceptions.go`). With `JobEnded`, the type `ended` joins the drift guard's `Actions` (`internal/reasondrift/docs.go`).
+  - **Allocation events:** done in PR C of #625 (erratum, 2026-11-16): the Provider controller's `events.k8s.io` recorder and its map from reason to type (`allocationEventType`, `internal/providerctl/events.go`, which the drift guard reads from the source), the typed events' notes without job IDs (the Provider's `SubmittedAsOther` and `RelayEndedForGood` condition messages name none, and a note that names the job ID is refused), its managers' `ObservationGap` through `leaderlock.GapLock`, and its cache index of Instances by `spec.allocationRef`, for the drain case. The reasons joined the Reasons table, the untyped Provider reasons list is shorter (`internal/reasondrift/exceptions.go`), and the type `ended` joined the drift guard's `Actions` (`internal/reasondrift/docs.go`).
   - **The log's caps,** their launcher setting and `up`'s free-space check (HBEP-11).
   - **The OpenTelemetry check** of the mapping's first column.
   - **Billing** (amended 2026-11-16): the `billing` entry of the accounting read and `allocatedBilling` (`internal/slurm`; `api/v1alpha1/accounting.go`), the record's new fields, the profile's `billingUnit` (HBEP-4), and `hpcburst accounting` (`cmd/hpcburst`).
@@ -794,6 +800,8 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-16: `requestedModel` is cut at 1,291 bytes with a marker, as HBEP-5 records it (for #645).
 - 2026-11-16: the log's envelope `time` is the publishing wrapper's clock, within microseconds of the API's `eventTime` (for #625's PR E2).
 - 2026-11-16: erratum: the forwarder's two metrics in the front's table (#644).
+- 2026-11-16: erratum: the typed Allocation events join the Reasons table with the code that raises them (#625).
+- 2026-11-16: erratum: `HoldLifted` is raised at the controller's own lift of the recorded job's hold, after the hold-lifted marker is written, not on a stored phase change from `Held` to `Pending`: in hold mode the hold lasts one listing read, so the stored phase is never `Held` and a phase rule would never fire. Its id's fact is the restart count, 0 at a lift (#625).
 
 ## Amendments
 

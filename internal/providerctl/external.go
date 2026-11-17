@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
@@ -43,6 +45,14 @@ type shared struct {
 	limitEvents sync.Map
 	// relays is host-dialed mode's relay owner; nil in the other modes.
 	relays *relayState
+	// gates are the typed Allocation events' in-memory gates (events.go).
+	gates eventGates
+	// refusedNotes counts the typed events not raised because their note named
+	// the job ID (typed).
+	refusedNotes atomic.Int64
+	// draining reads whether an Instance of an Allocation is Draining, for
+	// JobEnded against AllocationEndedEarly (planned.go).
+	draining drainingFunc
 }
 
 // connector implements managed.ExternalConnector.
@@ -168,8 +178,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 	if e.refused != nil {
 		if rec.jobID == "" && rec.sub == nil && !meta.WasDeleted(a) {
+			first := o.Phase != v1alpha1.AllocationRefused
 			o.Phase, o.Reason = v1alpha1.AllocationRefused, truncate(e.refused.Error())
 			a.SetConditions(xpv2.Unavailable().WithMessage(o.Reason))
+			if first {
+				e.typed(a, v1alpha1.ReasonAllocationRefused, attemptFact(rec), "the Allocation is refused: "+invalidProfileNote(e.refused), nil)
+			}
 		}
 		return exists, e.refused
 	}
@@ -244,7 +258,8 @@ func (e *external) adopt(ctx context.Context, a *v1alpha1.Allocation, rec *recor
 		return err
 	}
 	*rec = r
-	e.event(a, event.Normal("JobAdopted", fmt.Sprintf("job %s, found by tag in %s, is the Allocation's", job.ID, job.Source)))
+	e.typed(a, evJobAdopted, attemptFact(*rec),
+		fmt.Sprintf("a job found by its tag in the %s is now the Allocation's: partition %s, time limit %s", job.Source, job.Partition, job.TimeLimit), nil)
 	e.markResolved(a, rec.sub, now)
 	return nil
 }
@@ -275,9 +290,14 @@ func (e *external) establish(ctx context.Context, a *v1alpha1.Allocation, rec *r
 		return exists, true, nil
 	}
 	if tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID); name != tag {
+		first := o.Phase != v1alpha1.AllocationRefused
 		o.Phase = v1alpha1.AllocationRefused
 		o.Reason = fmt.Sprintf("the external name %q is not this Allocation's job tag %q (set by hand, or kept across a UID change); nothing is submitted under it", name, tag)
 		a.SetConditions(xpv2.Unavailable().WithMessage(o.Reason))
+		if first {
+			e.typed(a, v1alpha1.ReasonAllocationRefused, attemptFact(*rec),
+				"the Allocation is refused: its external name is not its job tag, so nothing is submitted under it", nil)
+		}
 		return exists, true, nil
 	}
 	if why := e.prerequisites(a); why != "" {
@@ -458,4 +478,21 @@ func truncate(s string) string {
 		return s[:1000] + "..."
 	}
 	return s
+}
+
+// invalidProfileNote says that the Provider's profile or settings are invalid
+// and names the fields, never the messages: a message can carry a value of the
+// Provider's settings (its account, a credentials path), and a typed event's
+// note goes to the durable log (HBEP-8, Allocation events, No job ID in a note;
+// the Provider's Ready condition and status hold the full text).
+func invalidProfileNote(err error) string {
+	var invalid *provider.InvalidProfileError
+	if !errors.As(err, &invalid) || len(invalid.Fields) == 0 {
+		return "the Provider's profile or settings are invalid"
+	}
+	fields := make([]string, len(invalid.Fields))
+	for i, f := range invalid.Fields {
+		fields[i] = f.Field
+	}
+	return "the Provider's profile or settings are invalid at " + strings.Join(fields, ", ")
 }

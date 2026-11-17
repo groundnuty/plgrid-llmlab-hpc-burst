@@ -20,7 +20,10 @@ const (
 // reference. Each of Reasons, Actions and Kinds is the set of values that can
 // reach the call's argument, resolved from constants through variables,
 // parameters and results. When one of them cannot be resolved, Unresolved says
-// which and why, and the three sets are not used.
+// which and why, and the three sets are not used. A call of a sink that takes its
+// type from a map of reasons to types has one Emit for each reason it can raise,
+// so that the product of Reasons and Actions never pairs a reason with the type
+// of another.
 type Emit struct {
 	// Package is the package's directory relative to the module root, such as
 	// internal/lifecycle.

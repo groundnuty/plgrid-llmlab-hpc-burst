@@ -3,6 +3,7 @@ package reasondrift
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -55,7 +56,10 @@ func TestParsesTheRealHBEPs(t *testing.T) {
 		{"degraded", "TunnelOrphaned", []string{"Allocation", "Lease"}},
 		{"degraded", "ObservationGap", []string{"Lease"}},
 		{"failing", "UsageWriteFailed", []string{"Lease"}},
-		{"failing", "AllocationEndedEarly", []string{"Instance"}},
+		// The Provider controller raises it regarding the Allocation too (beta, #625).
+		{"failing", "AllocationEndedEarly", []string{"Allocation", "Instance"}},
+		{"ended", "JobEnded", []string{"Allocation"}},
+		{"ending-soon", "HardEndNear", []string{"Allocation"}},
 		// The Regarding cell of HeartbeatMissed points at the Observers table,
 		// whose "Event when stale" column regards a Provider, an Instance and
 		// the Leases.
@@ -78,6 +82,11 @@ func TestParsesTheRealHBEPs(t *testing.T) {
 	for _, r := range []string{"RestartLoop", "VerificationFailed"} {
 		entry(t, d.Table, "degraded", r)
 		entry(t, d.Table, "failing", r)
+	}
+	// HBEP-8's Observers table raises HeartbeatMissed in every row, and no
+	// other reason (the `Lease` its cells regard is a kind).
+	if want := []string{"HeartbeatMissed"}; !slices.Equal(d.ObserverReasons, want) {
+		t.Errorf("the Observers table's reasons are %v, want %v", d.ObserverReasons, want)
 	}
 	wantRanking := []string{
 		"SpecUnsupported", "PartitionTooShort", "FrontNotConfigured", "VerificationFailed",
@@ -333,6 +342,127 @@ func TestParseManagedIsStrict(t *testing.T) {
 			got, err := ParseManaged([]byte(mutated))
 			if err == nil {
 				t.Fatalf("parsed %d entries, want an error containing %q", len(got), c.want)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q lacks %q", err, c.want)
+			}
+		})
+	}
+}
+
+// TestTheTypesAreThoseOfHBEP8sFormTable: Actions holds the types the Form
+// table's action row names, no more and no fewer, so a type the HBEP adds or
+// drops fails here (the seventh, `ended`, joined in beta). The row is read here
+// by its own pattern, not by the parser.
+func TestTheTypesAreThoseOfHBEP8sFormTable(t *testing.T) {
+	md8, err := os.ReadFile(filepath.Join(repoRoot(t), HBEP8Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row string
+	for _, l := range strings.Split(string(md8), "\n") {
+		if strings.HasPrefix(l, "| `action` | HBEP-8's type:") {
+			row = l
+		}
+	}
+	if row == "" {
+		t.Fatal("HBEP-8's Form table has no row \"| `action` | HBEP-8's type: ...\"")
+	}
+	var want []string
+	for _, m := range regexp.MustCompile("`([a-z-]+)`").FindAllStringSubmatch(strings.TrimPrefix(row, "| `action` |"), -1) {
+		want = append(want, m[1])
+	}
+	got := slices.Clone(Actions)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("Actions are %v, HBEP-8's Form table names %v", got, want)
+	}
+	if !slices.Contains(Actions, "ended") {
+		t.Errorf("Actions %v lack ended, which HBEP-8 adds in beta", Actions)
+	}
+}
+
+// TestAnEndedRowIsRead: a row of the reasons table of type ended parses, with
+// its kinds, as one of the six older types does.
+func TestAnEndedRowIsRead(t *testing.T) {
+	// The row sits in the table, before the blank line that ends it.
+	md := strings.Replace(goodTable, "| the component that judges it |\n", "| the component that judges it |\n| `ended` | `JobEnded` | Allocation | the Provider controller |\n", 1)
+	if md == goodTable {
+		t.Fatal("the row was not added")
+	}
+	got, err := ParseEventTable([]byte(md))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := entry(t, got, "ended", "JobEnded"); !slices.Equal(e.Kinds, []string{"Allocation"}) {
+		t.Errorf("JobEnded regards %v, want [Allocation]", e.Kinds)
+	}
+}
+
+// TestParsesTheObserverReasons: the reasons are the backticked CamelCase words
+// of the "Event when stale" column before "regarding", distinct and sorted; a
+// kind after it (`Lease`), the type and the words of other columns are not.
+func TestParsesTheObserverReasons(t *testing.T) {
+	got, err := ParseObserverReasons([]byte(goodTable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"HeartbeatMissed"}; !slices.Equal(got, want) {
+		t.Errorf("reasons %v, want %v", got, want)
+	}
+	md := strings.Replace(goodTable, "| One | a | `failing`, `HeartbeatMissed`, regarding the Provider |",
+		"| One | a | `failing`, `ZStale` and `AStale`, regarding the Provider |", 1)
+	md = strings.Replace(md, "| Two | b | `failing`, `HeartbeatMissed`, regarding the front's `Lease` |",
+		"| Two | b | `degraded`, `ZStale`, regarding the front's `Lease` |", 1)
+	if got, err = ParseObserverReasons([]byte(md)); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"AStale", "ZStale"}; !slices.Equal(got, want) {
+		t.Errorf("reasons %v, want %v", got, want)
+	}
+}
+
+// TestParseObserverReasonsIsStrict: a table it cannot read, or a row with no
+// reason, is an error, never an empty set.
+func TestParseObserverReasonsIsStrict(t *testing.T) {
+	const row1 = "| One | a | `failing`, `HeartbeatMissed`, regarding the Provider | x |"
+	const row2 = "| Two | b | `failing`, `HeartbeatMissed`, regarding the front's `Lease` | y |"
+	cases := []struct {
+		name   string
+		mutate func(string) string
+		want   string
+	}{
+		{"no table", func(s string) string { return strings.Replace(s, "**Observers.**", "**Watchers.**", 1) }, "the Observers table"},
+		{"no Event when stale column", func(s string) string { return strings.Replace(s, "Event when stale", "Event", 1) }, "has no \"Event when stale\" column"},
+		{"a row with no reason", func(s string) string {
+			return strings.Replace(s, row1, "| One | a | `failing`, regarding the Provider | x |", 1)
+		}, "row 1"},
+		{"a row whose only CamelCase word is a kind", func(s string) string {
+			return strings.Replace(s, row2, "| Two | b | `failing`, regarding the front's `Lease` | y |", 1)
+		}, "row 2"},
+		{"a reason in lower case", func(s string) string {
+			return strings.Replace(s, row1, "| One | a | `failing`, `heartbeatMissed`, regarding the Provider | x |", 1)
+		}, "row 1"},
+		{"a reason without backticks", func(s string) string {
+			return strings.Replace(s, row2, "| Two | b | `failing`, HeartbeatMissed, regarding the front's `Lease` | y |", 1)
+		}, "row 2"},
+		{"a short row", func(s string) string {
+			return strings.Replace(s, row1, "| One | a | `failing`, `HeartbeatMissed` |", 1)
+		}, "row 1 has 3 cells"},
+		{"a table that goes on after a blank line", func(s string) string {
+			return s + "\n| Three | c | `failing`, `HeartbeatMissed`, regarding the Provider | z |\n"
+		}, "goes on after a blank line"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mutated := c.mutate(goodTable)
+			if mutated == goodTable {
+				t.Fatal("the mutation changed nothing")
+			}
+			got, err := ParseObserverReasons([]byte(mutated))
+			if err == nil {
+				t.Fatalf("parsed %v, want an error containing %q", got, c.want)
 			}
 			if !strings.Contains(err.Error(), c.want) {
 				t.Errorf("error %q lacks %q", err, c.want)

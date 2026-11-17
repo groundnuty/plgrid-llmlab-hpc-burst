@@ -72,7 +72,7 @@ func TestS4Scenario1EndedJobPurgedFromTheQueueIsEndedNotMissing(t *testing.T) {
 			if ptJobID(e, "a") != id || got.Status.AtProvider.JobID != id {
 				t.Errorf("job ID changed: annotation %q, status %q, want %q", ptJobID(e, "a"), got.Status.AtProvider.JobID, id)
 			}
-			if e.rec.has("JobLost") {
+			if e.typed.has("JobLost") {
 				t.Error("a JobLost event for a job that ended")
 			}
 			if n := e.count("sbatch"); n != 1 {
@@ -139,7 +139,7 @@ func TestS4Scenario2KilledAfterSbatchReturned(t *testing.T) {
 			if p := ptPhase(e, "a"); p != v1alpha1.AllocationRunning {
 				t.Errorf("phase %s, want Running", p)
 			}
-			if !e.rec.has("JobAdopted") {
+			if !e.typed.has("JobAdopted") {
 				t.Error("no JobAdopted event")
 			}
 			// The adopted claimant's attempt is resolved by the job once its
