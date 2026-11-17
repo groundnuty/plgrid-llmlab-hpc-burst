@@ -26,10 +26,14 @@ func (p *pass) createExtras(placed []string) error {
 	}
 	for _, name := range placed {
 		pv := p.pvByName[name]
-		if pv == nil || !p.extraBound(pv) {
+		if pv == nil {
 			continue
 		}
-		if _, err := p.provisionWith(nil, placeOpts{only: pv.name, extra: true, caps: true, alsoLeave: p.extraAlsoLeave(pv)}); err != nil {
+		alsoLeave, ok := p.extraChecks(pv, nil)
+		if !ok {
+			continue
+		}
+		if _, err := p.provisionWith(nil, placeOpts{only: pv.name, extra: true, caps: true, alsoLeave: alsoLeave}); err != nil {
 			return err
 		}
 	}
@@ -40,11 +44,16 @@ func (p *pass) createExtras(placed []string) error {
 // the selection recomputed after this pass's creations (selectPrimaries over p.insts, which createInstance
 // appends to), and no warm Allocation there (warmOf). So k bounds the deployment's surplus Allocations per Provider
 // at any time, whatever their phase. A surplus hedge counts on every Provider one of its live members is on.
-func (p *pass) extraBound(pv *providerView) bool {
+func (p *pass) extraBound(pv *providerView) bool { return p.extraBoundWithout(pv, nil) }
+
+// extraBoundWithout is extraBound with one Instance left out of the selection: the cut-short extra whose retry asks
+// (extraChecks), which would otherwise be the surplus Instance that refuses it, or, when it wins the selection's UID
+// tie against its primary, make that primary the surplus.
+func (p *pass) extraBoundWithout(pv *providerView, exclude *v1alpha1.Instance) bool {
 	if len(p.warmOf(pv)) > 0 {
 		return false
 	}
-	_, surplus := selectPrimaries(p.selection(nil), p.desiredCount())
+	_, surplus := selectPrimaries(p.selectionWithout(exclude), p.desiredCount())
 	for _, rep := range surplus {
 		for _, m := range p.membersOf(rep) {
 			if m.Labels[v1alpha1.LabelProvider] == pv.name {
@@ -53,6 +62,34 @@ func (p *pass) extraBound(pv *providerView) bool {
 		}
 	}
 	return true
+}
+
+// selectionWithout is the pass's selection without one Instance (nil: none left out).
+func (p *pass) selectionWithout(exclude *v1alpha1.Instance) selection {
+	sel := p.selection(nil)
+	if exclude == nil {
+		return sel
+	}
+	insts := make([]*v1alpha1.Instance, 0, len(p.insts))
+	for _, in := range p.insts {
+		if in != exclude {
+			insts = append(insts, in)
+		}
+	}
+	sel.insts = insts
+	return sel
+}
+
+// extraChecks are the extra's first two checks on a Provider, the bound and the slot beyond its own handovers
+// (alsoLeave), in ONE place for createExtras, which makes the extra, and ensureAllocation, which retries one whose
+// Allocation's create was cut short, so the two never drift (#708, finding 4). exclude is the Instance that retries
+// (nil for a new extra). The third check, the per-user caps, and the silence are the reservation's own, asked with
+// params and quiet. ok is false when the bound refuses.
+func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLeave int, ok bool) {
+	if !p.extraBoundWithout(pv, exclude) {
+		return 0, false
+	}
+	return p.extraAlsoLeaveWithout(pv, exclude), true
 }
 
 // extraAlsoLeave is how many slots the extra leaves free beside itself on the Provider: one for each of the
@@ -65,9 +102,13 @@ func (p *pass) extraBound(pv *providerView) bool {
 // It reads the pass's own objects. The slots reserved by Running primaries, and by other deployments', are read
 // under the Provider's lock as the count always did (reservedOn), so none is counted twice here: a primary whose
 // Allocation is Running holds its slot there, and is no part of alsoLeave.
-func (p *pass) extraAlsoLeave(pv *providerView) int {
+func (p *pass) extraAlsoLeave(pv *providerView) int { return p.extraAlsoLeaveWithout(pv, nil) }
+
+// extraAlsoLeaveWithout is extraAlsoLeave over the chosen primaries of the selection without one Instance (extraChecks).
+func (p *pass) extraAlsoLeaveWithout(pv *providerView, exclude *v1alpha1.Instance) int {
 	n := 0
-	for _, c := range p.primaries() {
+	chosen, _ := selectPrimaries(p.selectionWithout(exclude), p.desiredCount())
+	for _, c := range chosen {
 		if c.Labels[v1alpha1.LabelProvider] != pv.name || p.replaced(c) {
 			continue
 		}

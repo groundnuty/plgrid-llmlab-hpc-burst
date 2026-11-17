@@ -577,18 +577,32 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	}
 	// It takes the reserved slot of its predecessor's chain, and a no-overlap successor its own, which is held
 	// for it while its Allocation waits for the slot its predecessor frees (slots_reserved.go).
-	// An Instance with no Allocation that is a primary, not a successor, replacement or hedge member, is a missing primary
-	// as the submit step sees one: its refusal for the submit limit alone makes a pending extra yield (yield.go), as at
-	// its creation (#708, finding 3). The deployment's units that have an Allocation decide it (shortageOf), never the
-	// selection's tie. A refused replacement does not yield (#713).
+	// An Instance with no Allocation is one of three things (#708): a successor or replacement or a hedge's member, which
+	// wait as they always did (a refused replacement does not yield: #713); the deployment's EXTRA, when the units that
+	// have an Allocation already number its desired count (shortageOf), which takes the extra's own checks, the bound,
+	// the slot beyond its primary's handover and the caps, silently, and is ended when one refuses; or a primary, whose
+	// refusal for the submit limit alone makes a pending extra yield (yield.go), as at its creation.
 	takers := p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor]))
 	var onLimit func(context.Context, slotReads) error
-	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() > 0 {
+	var capsOf *v1alpha1.BatchParameters
+	alsoLeave, quiet := 0, false
+	switch {
+	case handover || in.Annotations[v1alpha1.AnnotationHedgeGroup] != "":
+	case p.shortage() == 0:
+		var admitted bool
+		if alsoLeave, admitted = p.extraChecks(pv, in); !admitted {
+			return p.endCutShortExtra(in, "the bound on extras")
+		}
+		capsOf, quiet = &params, true
+	default:
 		onLimit = p.yieldOnLimit(pv)
 	}
-	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, nil, false, 0, onLimit)
+	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, alsoLeave, onLimit)
 	if err != nil {
 		return err
+	}
+	if !ok && quiet {
+		return p.endCutShortExtra(in, "the slot beyond its primary's handover and the caps")
 	}
 	if !ok {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
@@ -598,6 +612,13 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		return err
 	}
 	return nil
+}
+
+// endCutShortExtra ends a pending extra whose Allocation was never made and whose checks refuse it now, as step 7 ends
+// a pending surplus beyond k: over-allocation's own trim, outcome-neutral, with no Degraded and no SubmitLimitReached
+// (a refused extra is silent, D7).
+func (p *pass) endCutShortExtra(in *v1alpha1.Instance, why string) error {
+	return p.applyScaleTarget(scaleTarget{instance: in, effect: effectCancelPending, why: "scaled down: its Provider refuses the extra (" + why + ")", cause: scaleOverAllocationTrim})
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as
