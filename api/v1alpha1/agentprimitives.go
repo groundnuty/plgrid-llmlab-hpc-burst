@@ -1,5 +1,10 @@
 package v1alpha1
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
 // The constants of HBEP-10's agent primitives: the owner and purpose
 // annotations, and the vocabularies of Operation, Approval and ApprovalPolicy.
 // The kinds themselves are in operation_types.go, approval_types.go and
@@ -20,6 +25,28 @@ const (
 	// an Operation (HBEP-10, Owner and purpose).
 	AnnotationPurpose = Group + "/purpose"
 )
+
+// LabelOwnerHash selects the objects of one owner (HBEP-10, Owner and purpose,
+// Selection by owner). Its value is OwnerHash of the owner annotation: "u-" and
+// the first 12 hex characters of the SHA-256 of the owner's user name. The label
+// carries a hash because the user name holds ':' (a ServiceAccount's is
+// "system:serviceaccount:<namespace>:<name>"), which a label value refuses. The
+// lifecycle controller sets it on the Allocations and Instances it creates for a
+// ModelDeployment with an owner annotation, and on the ModelDeployment itself
+// (correcting a wrong value and removing it when the annotation is absent); it
+// sets it on nothing when there is no owner annotation
+// (`@hpc-burst-science-agent`, 17 Nov 2026, #662).
+const LabelOwnerHash = Group + "/owner-hash"
+
+// OwnerHash returns the value of LabelOwnerHash for a user name: "u-" and the
+// first 12 hex characters of the SHA-256 of the name. The value is always 14
+// characters (63 at most, a label value's limit) of lowercase letters, digits
+// and one hyphen, so it is a valid label value for every input, the empty name
+// included. The name itself cannot be a label value, since it holds ':'.
+func OwnerHash(user string) string {
+	sum := sha256.Sum256([]byte(user))
+	return "u-" + hex.EncodeToString(sum[:])[:12]
+}
 
 // PurposeMaxLength is the most characters the purpose annotation holds (HBEP-10,
 // Owner and purpose: "Lean: at most 256 characters").

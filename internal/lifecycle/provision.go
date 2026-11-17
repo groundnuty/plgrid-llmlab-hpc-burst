@@ -486,6 +486,7 @@ func (p *pass) createInstance(pv *providerView, cid *classID, pred *v1alpha1.Ins
 			}
 		}
 	}
+	stampOwner(&in.ObjectMeta, p.md) // last: the blocks above may assign a whole annotation map
 	if err := p.confirmDeployment(); err != nil {
 		return err
 	}
@@ -523,6 +524,7 @@ func (p *pass) createAllocation(pv *providerView, name string, params v1alpha1.B
 	if queuedOf != "" {
 		a.Annotations = map[string]string{v1alpha1.AnnotationQueuedSuccessor: queuedOf}
 	}
+	stampOwner(&a.ObjectMeta, p.md) // after the mark, which assigns the annotation map
 	if err := p.confirmDeployment(); err != nil {
 		p.releaseSlot(pv, name)
 		return err
