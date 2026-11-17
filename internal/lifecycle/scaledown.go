@@ -77,8 +77,7 @@ func frontAdmitsAt(in *v1alpha1.Instance) (time.Time, bool) {
 // scaleUnit is what a scale-down takes of one hedge: its representative and, when it takes less than the whole hedge,
 // the members it takes (only). A surplus hedge goes member by member where its Providers' room under k decides it
 // (trimSurplusMembers): a member beyond k is a unit of its own, so the effect cancels that member and no other. trim
-// is whether it is taken as over-allocation's own trim (non-ready surplus beyond k, a marked peer, or an extra that
-// yielded its submit slot), yield names the deployment an extra yielded to (annotationYieldTo), and, for a marked
+// is whether it is taken as over-allocation's own trim (non-ready surplus beyond k, or a marked peer), and, for a marked
 // peer, notTo is when its drain is due: not before notTo, and never while the Instance it made way for is not
 // healthy (waiting).
 type scaleUnit struct {
@@ -88,7 +87,6 @@ type scaleUnit struct {
 	marked  bool
 	waiting bool
 	notTo   time.Time
-	yield   string
 }
 
 // members are the Instances the unit takes: the members it names, or the whole hedge.
@@ -111,8 +109,7 @@ func (p *pass) unitMembers(u scaleUnit) []*v1alpha1.Instance {
 // it there, and only the members whose Provider has none are taken, each alone, as over-allocation's own trim; the
 // whole hedge goes only when no member's Provider has room (the science agent's ruling on #616, D9, 17 Nov 2026:
 // "Queue age is capacity in waiting"; trimSurplusMembers). A marked peer is taken once the Instance it made way for
-// has been healthy for the front's probe interval (frontAdmitsAt), and not before. A pending surplus Instance that
-// yields its submit slot (p.yielding, settleYields) is taken alone and takes no room.
+// has been healthy for the front's probe interval (frontAdmitsAt), and not before.
 func (p *pass) scaleUnits(desired int) []scaleUnit {
 	_, surplus := selectPrimaries(p.selection(nil), desired)
 	k := p.keepRoom()
@@ -127,29 +124,19 @@ func (p *pass) scaleUnits(desired int) []scaleUnit {
 		if rep.Status.Phase == v1alpha1.InstanceReady || p.replaced(rep) {
 			continue
 		}
-		var yields, rest []*v1alpha1.Instance
-		for _, m := range p.membersOf(rep) {
-			if _, ok := p.yielding[m.UID]; ok {
-				yields = append(yields, m)
-			} else {
-				rest = append(rest, m)
-			}
-		}
-		for _, m := range rest {
+		members := p.membersOf(rep)
+		for _, m := range members {
 			if _, ok := room[m.Labels[v1alpha1.LabelProvider]]; !ok {
 				room[m.Labels[v1alpha1.LabelProvider]] = k
 			}
 		}
-		kept, trimmed := trimSurplusMembers(rest, room)
+		kept, trimmed := trimSurplusMembers(members, room)
 		switch {
-		case len(yields) == 0 && len(trimmed) == 0:
+		case len(trimmed) == 0:
 			left[rep] = true
-		case len(yields) == 0 && len(kept) == 0:
+		case len(kept) == 0:
 			// no member's Provider has room: the whole hedge goes, as one unit
 		default:
-			for _, m := range yields {
-				parts[rep] = append(parts[rep], scaleUnit{rep: rep, only: []*v1alpha1.Instance{m}, trim: true, yield: p.yielding[m.UID]})
-			}
 			for _, m := range trimmed {
 				parts[rep] = append(parts[rep], scaleUnit{rep: rep, only: []*v1alpha1.Instance{m}, trim: true})
 			}
@@ -247,8 +234,7 @@ func (p *pass) rankedOutPeer(peer *v1alpha1.Instance) {
 // does not depend on the count.
 //
 // Each target carries its cause (scaleCause): overAllocationTrim only when the selection at the current count,
-// len(prim), takes it too and it is non-ready surplus beyond k, a marked peer or an extra that yielded its submit
-// slot; lowered for the rest.
+// len(prim), takes it too and it is non-ready surplus beyond k, or a marked peer; lowered for the rest.
 func (p *pass) scaleDownTargets(prim []*v1alpha1.Instance, surplus int) []scaleTarget {
 	now := len(prim)
 	trim := map[*v1alpha1.Instance]bool{}
@@ -267,13 +253,10 @@ func (p *pass) scaleDownTargets(prim []*v1alpha1.Instance, surplus int) []scaleT
 			continue
 		}
 		// The words are the release cause of a cancelled Allocation too (endCause): "scaled down" for every target but a
-		// marked peer, whose own are the ranking's, and an extra that yielded its slot.
+		// marked peer, whose own are the ranking's.
 		why := "scaled down"
 		if u.marked {
 			why = "ranked out: its successor serves"
-		}
-		if u.yield != "" {
-			why = "yielded its submit slot to " + u.yield
 		}
 		members := p.unitMembers(u)
 		for _, m := range members {

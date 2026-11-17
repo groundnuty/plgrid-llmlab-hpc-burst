@@ -139,16 +139,17 @@ func TestNoOverlapAWarmAllocationDrainingFirstGivesNoRoomBeside(t *testing.T) {
 
 // TestNoOverlapTheExtrasKeptAllocationIsNoRoomBeside is TestNoOverlapWarmAllocationTakesTheReplacement at k = 1, where
 // the warm Allocation the row is about is the ranked-out extra's, which started with the primary's job and so drains
-// with it: not later, so not room beside. The QOS allows 3 until 08:30 and 2 from then on, as an operator's edit would
-// (the original row's own device). At 08:01:10 the primary P is ready and the extra X, ranked out against it, is kept
-// (listed: P and X, two slots). At 09:19:30 P's replacement is planned: no free slot (2 listed, limit 2), and X's
+// with it: not later, so not room beside. The QOS allows 4 until 08:30 and 2 from then on, as an operator's edit would
+// (the original row's own device; it allowed 3 before the admission headroom, whose 1 + 1 + 1 + 1 = 4 the extra's own
+// admission now needs: P's expectation, its handover slot beside it, the extra, and the headroom). At 08:01:10 the primary P
+// is ready and the extra X, ranked out against it, is kept (listed: P and X, two slots). At 09:19:30 P's replacement is planned: no free slot (2 listed, limit 2), and X's
 // Allocation, with the same hard end 12:00:20, drain start 09:50:20, is not later than P's, so it takes nothing: the mode
 // is entered as it would be with no warm Allocation. No replacement at 09:19:40, and NoOverlapSlot at 09:50:30. The
 // original row's own k = 1 run is not possible: its scale-up at 09:00 would place the second primary on X's kept
 // Allocation, which is no longer the one with a later hard end that row needs; that case is the first row of
 // TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater.
 func TestNoOverlapTheExtrasKeptAllocationIsNoRoomBeside(t *testing.T) {
-	qos := []v1alpha1.QOSProfile{{Name: "example-s2", MaxSubmitPerUser: i32(3)}}
+	qos := []v1alpha1.QOSProfile{{Name: "example-s2", MaxSubmitPerUser: i32(4)}}
 	rg := newRig(t, append(qosOpts(qos, "", "example-s2"), withMaxTime(4*time.Hour), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 2 }))...)
 	p := hoStartK(rg, nil, true)
 	hoStepTo(rg, hoT(8, 30, 0), time.Minute, nil)

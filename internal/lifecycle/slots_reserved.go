@@ -100,21 +100,13 @@ const (
 // deployment recreated under the same name are not told apart here (noOverlapCarriers drops them as stale),
 // since a carrier's name is random and a stale successor naming it is not a case that arises.
 func reservedOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) ([]reservedSlot, error) {
-	slots, _, err := readReserved(ctx, r, provider, profile, allocs)
-	return slots, err
-}
-
-// readReserved is reservedOn, and it returns, from the same reads, the pending surplus Instances of every
-// deployment on the Provider (the yield's candidates): countable surplus Instances whose Allocation exists, holds a
-// slot and has no job started, newest first.
-func readReserved(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) ([]reservedSlot, []*v1alpha1.Instance, error) {
 	var il v1alpha1.InstanceList
 	if err := r.List(ctx, &il, client.MatchingLabels{v1alpha1.LabelProvider: provider}); err != nil {
-		return nil, nil, fmt.Errorf("list Instances for Provider %s's reserved slots: %w", provider, err)
+		return nil, fmt.Errorf("list Instances for Provider %s's reserved slots: %w", provider, err)
 	}
 	views, err := deploymentViews(ctx, r, il.Items)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Every read below but the slots' own is of the deployments' Instances on every Provider (#617): a primary
 	// whose replacement or hedge member is on another Provider is replaced all the same, and a gap's chain and a
@@ -156,31 +148,24 @@ func readReserved(ctx context.Context, r client.Reader, provider string, profile
 	// The selection of each deployment (selectPrimaries, as its own pass makes it): a surplus Instance holds no
 	// reserved slot and gets no replacement (HBEP-7, How it counts), so a started extra on a Running Allocation
 	// reserves nothing, as it would otherwise block another deployment's primary and be counted twice in its own
-	// deployment's extra check (#616 PR 4). The surplus Instances on this Provider that wait, with a slot held and
-	// no job started, are also the yield's candidates (yield.go).
+	// deployment's extra check (#616 PR 4).
 	surplus := map[*v1alpha1.Instance]bool{}
-	var pending []*v1alpha1.Instance
 	for _, v := range views {
 		set, err := surplusOf(ctx, r, v, mds)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		for in := range set {
 			surplus[in] = true
-			a := allocs[in.Namespace+"/"+in.Spec.AllocationRef.Name]
-			if in.Labels[v1alpha1.LabelProvider] == provider && countable(in) && a != nil && a.DeletionTimestamp.IsZero() && holdsSlot(a) && a.Status.AtProvider.StartTime == nil {
-				pending = append(pending, in)
-			}
 		}
 	}
-	newestPending(pending)
 	var out []reservedSlot
 	for _, in := range here {
 		allocKey := in.Namespace + "/" + in.Spec.AllocationRef.Name
 		if carriers[in] {
 			md, err := deploymentOf(ctx, r, in, mds)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			if md != nil && md.DeletionTimestamp.IsZero() {
 				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor})
@@ -216,7 +201,7 @@ func readReserved(ctx context.Context, r client.Reader, provider string, profile
 		}
 		md, err := deploymentOf(ctx, r, in, mds)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if md == nil || !md.DeletionTimestamp.IsZero() {
 			continue
@@ -227,7 +212,7 @@ func readReserved(ctx context.Context, r client.Reader, provider string, profile
 		}
 		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement})
 	}
-	return out, pending, nil
+	return out, nil
 }
 
 // deploymentView is one deployment's Instances on every Provider.
