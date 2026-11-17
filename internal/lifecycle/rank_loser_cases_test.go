@@ -273,15 +273,20 @@ func TestAKeptLoserThatFailsACheckIsReleased(t *testing.T) {
 	}
 }
 
-// TestAKeptLoserIsNoPrimaryWhileTheDeploymentIsShort: instances 2. P, the first primary, is ready on A at 08:01:10 and
-// its job fails at 08:04:20 (FailAfter 4 min from its start at 08:00:20). The second's hedge has M1 on A (started
-// 08:00:20, still verifying) and M2 on B, which wins at 08:01:10 measuring 20 ms. M1 is a candidate, the surplus of A
-// (HBEP-7, How it counts: a hedge's started loser kept as a candidate is surplus on its Provider too), not a primary:
-// so when P ends the deployment is a primary short, and the missing primary is submitted in that pass, at once: a
-// fourth job in all, P's, M1's, M2's and the new one, where a candidate counted as a primary would leave the
-// deployment at its two until M1 ended. M1 passes at 08:11:00, measuring 18.0 ms, and ends HedgeLost, ranked against
-// M2 alone; the new primary still pends, and no further job is made. Members are seeded.
-func TestAKeptLoserIsNoPrimaryWhileTheDeploymentIsShort(t *testing.T) {
+// TestAKeptLoserIsChosenWhenTheDeploymentIsShort (instances 2; HBEP-7, How it counts, which makes the chosen primaries
+// "the spec.instances most advanced of its Instances", and The ranking point, When: "ranking never holds back an
+// Instance the deployment needs"; the science agent's ruling on #721). P, the first primary, is ready on A at 08:01:10
+// and its job fails at 08:04:20 (FailAfter 4 min from its start at 08:00:20). The second's hedge has M1 on A (started
+// 08:00:20, still verifying, then kept as a candidate) and M2 on B, which wins at 08:01:10 measuring 20 ms.
+//
+// The derivation, by hand. At the win, M1 is kept and the deployment has 3 jobs: P's, M1's and M2's. When P ends at
+// 08:04:20 the Instances that count are M2 (ready) and M1 (its job started), 2 of the 2 the deployment wants. A kept
+// candidate is an ordinary Instance of the selection, so both are chosen and no primary is missing: no Allocation is
+// made, and the jobs stay 3 (a fourth is the third script's 10 h wait, which would show as a pending job). M1's worker
+// starts 10 min after its job (08:10:20) and its checks take 40 s, so it passes at 08:11:00; it is chosen, so it
+// becomes ready then with no ranking and its mark is cleared: M2 and M1 are both ready, 2 of 2, and no HedgeLost
+// event was raised. Its outcome is a success at 08:11:00. Members are seeded.
+func TestAKeptLoserIsChosenWhenTheDeploymentIsShort(t *testing.T) {
 	fail := 4 * time.Minute
 	h, p, m1, m2 := klMissingA(t, []pfake.Script{{FailAfter: &fail}, {}, {QueueWait: 10 * time.Hour}}, 2, rk180)
 	if in := h.mustInstance(m1); ended(in) || in.Annotations[annotationCandidateOf] != m2 {
@@ -294,16 +299,30 @@ func TestAKeptLoserIsNoPrimaryWhileTheDeploymentIsShort(t *testing.T) {
 	if in := h.mustInstance(p); !ended(in) || in.Status.EndReason == "" || cleanEnd(in.Status.EndReason) {
 		t.Fatalf("P is %s (end %q) at 08:04:40, want ended for a failure: the fixture's primary did not fail", in.Status.Phase, in.Status.EndReason)
 	}
-	if subs := h.sbatches(); subs != 4 {
-		t.Fatalf("%d jobs at 08:04:40, want 4: the missing primary is submitted when P ends, M1 being no primary", subs)
+	if subs := h.sbatches(); subs != 3 {
+		t.Fatalf("%d jobs at 08:04:40, want 3: M1 is chosen, so no primary is missing and none is submitted", subs)
 	}
+	hoStepTo(h.rig, hoT(8, 9, 50), 30*time.Second, nil)
 	hoStepTo(h.rig, hoT(8, 11, 0), 10*time.Second, nil)
 	l := h.mustInstance(m1)
-	if !ended(l) || l.Status.EndReason != v1alpha1.ReasonHedgeLost || l.Status.EndTime == nil || !l.Status.EndTime.Time.Equal(hoT(8, 11, 0)) {
-		t.Fatalf("M1 is %s (end %q at %v) at 08:11:00, want ended for HedgeLost at 08:11:00: 18.0 ms is not faster than M2's 20 ms by more than 10%%", l.Status.Phase, l.Status.EndReason, l.Status.EndTime)
+	if l.Status.Phase != v1alpha1.InstanceReady || l.Status.ReadyTime == nil || !l.Status.ReadyTime.Time.Equal(hoT(8, 11, 0)) {
+		t.Fatalf("M1 is %s (ready %v, end %q) at 08:11:00, want ready at 08:11:00: it is chosen, so it is not ranked", l.Status.Phase, l.Status.ReadyTime, l.Status.EndReason)
 	}
-	if subs := h.sbatches(); subs != 4 {
-		t.Fatalf("%d jobs at 08:11:00, want 4", subs)
+	if l.Annotations[annotationCandidateOf] != "" {
+		t.Fatalf("M1 still carries candidate-of %q once chosen, want it cleared", l.Annotations[annotationCandidateOf])
+	}
+	if n := h.readyCount(hoMD); n != 2 || h.mustInstance(m2).Status.Phase != v1alpha1.InstanceReady {
+		t.Fatalf("%d ready Instances at 08:11:00, M2 %s, want M2 and M1: 2 of 2", n, h.mustInstance(m2).Status.Phase)
+	}
+	if n := len(h.rec.Find(eventReplaced, v1alpha1.ReasonHedgeLost)); n != 0 {
+		t.Fatalf("%d HedgeLost events, want none", n)
+	}
+	if o, ok := h.outcomeOf(h.allocUID(l.Spec.AllocationRef.Name)); !ok || o.Result != v1alpha1.StartOutcomeReady || !o.Time.Time.Equal(hoT(8, 11, 0)) {
+		t.Fatalf("M1's outcome %+v (%v), want a success at its ready time, 08:11:00", o, ok)
+	}
+	h.run(20*time.Minute, time.Minute)
+	if subs := h.sbatches(); subs != 3 {
+		t.Fatalf("%d jobs by 08:31, want the three: no Allocation is made for the failed primary", subs)
 	}
 }
 

@@ -17,21 +17,23 @@ import (
 )
 
 // TestTheSelectionAndReservedOnReadAKeptLoser: one hand-written table through the selection and reservedOn, with
-// Providers A and B. A kept loser "l" (job started, verifying, annotation candidate-of naming its winner "w") is its
-// Provider's surplus while "w" is countable, whatever the count, and holds no reserved slot; once "w" has ended it is
-// chosen like any Instance and holds one; in a replacement hedge it is surplus though its predecessor "p" still counts,
-// and a replacement winner that a ready candidate outranked is surplus too, so step 7 takes its drain. The chosen set,
-// the surplus and the reserved slots on A are listed by hand.
+// Providers A and B. A kept loser "l" (job started, verifying, annotation candidate-of naming its winner "w") is an
+// ordinary Instance of the selection: chosen, with a reserved slot, when the deployment is short, surplus with none
+// when the count is met without it (the science agent's ruling on #721). In a replacement hedge, where its predecessor
+// still counts, it is surplus though it has passed, since a replacement never takes a primary's slot; once "w" has
+// ended it is chosen; and a replacement winner that a ready candidate outranked is surplus, so step 7 takes its drain.
+// The chosen set, the surplus and the reserved slots on A are listed by hand.
 func TestTheSelectionAndReservedOnReadAKeptLoser(t *testing.T) {
 	profile := &v1alpha1.PlatformProfileSpec{DrainWindow: dur(2*time.Hour + 10*time.Minute), DrainMargin: dur(10 * time.Minute)}
 	cand := map[string]string{annotationCandidateOf: "w"}
-	replacement := func(extra map[string]string) map[string]string {
-		m := map[string]string{v1alpha1.AnnotationPredecessor: "p"}
+	replacementOf := func(pred string, extra map[string]string) map[string]string {
+		m := map[string]string{v1alpha1.AnnotationPredecessor: pred}
 		for k, v := range extra {
 			m[k] = v
 		}
 		return m
 	}
+	replacement := func(extra map[string]string) map[string]string { return replacementOf("p", extra) }
 	for _, c := range []struct {
 		name    string
 		desired int32
@@ -40,12 +42,27 @@ func TestTheSelectionAndReservedOnReadAKeptLoser(t *testing.T) {
 		surplus []string
 		reserve []string // on A, "replacement:<Instance>"
 	}{
-		{"a kept loser beside a ready primary and its winner is surplus, though the deployment is a primary short", 3,
+		{"a kept loser is chosen when the deployment is a primary short, and holds a slot", 3,
+			[]v1alpha1.Instance{
+				crossInstance("p", provA, v1alpha1.InstanceReady, nil),
+				crossInstance("w", provB, v1alpha1.InstanceReady, nil),
+				crossInstance("l", provA, v1alpha1.InstanceVerifying, cand)},
+			[]string{"l", "p", "w"}, nil, []string{"replacement:l", "replacement:p"}},
+		{"a kept loser is surplus when the count is met without it, and holds none", 2,
 			[]v1alpha1.Instance{
 				crossInstance("p", provA, v1alpha1.InstanceReady, nil),
 				crossInstance("w", provB, v1alpha1.InstanceReady, nil),
 				crossInstance("l", provA, v1alpha1.InstanceVerifying, cand)},
 			[]string{"p", "w"}, []string{"l"}, []string{"replacement:p"}},
+		{"a kept loser in a replacement hedge never takes a primary's slot, though it has passed and the other primary has not started", 2,
+			func() []v1alpha1.Instance {
+				p1, p2 := crossInstance("p1", provA, v1alpha1.InstanceReady, nil), crossInstance("p2", provA, v1alpha1.InstancePending, nil)
+				w := crossInstance("w", provB, v1alpha1.InstanceReady, replacementOf("p1", nil))
+				l := crossInstance("l", provA, v1alpha1.InstanceVerifying, replacementOf("p1", cand))
+				passedAll(&l)
+				return []v1alpha1.Instance{p1, p2, w, l}
+			}(),
+			[]string{"p1", "p2"}, []string{"l"}, nil},
 		{"its winner has ended: it is chosen like any Instance and holds a slot", 2,
 			[]v1alpha1.Instance{
 				crossInstance("p", provA, v1alpha1.InstanceReady, nil),
@@ -71,7 +88,7 @@ func TestTheSelectionAndReservedOnReadAKeptLoser(t *testing.T) {
 			var allocs []v1alpha1.Allocation
 			for _, in := range c.insts {
 				if !ended(&in) {
-					allocs = append(allocs, parityAlloc(in.Name, true))
+					allocs = append(allocs, parityAlloc(in.Name, in.Status.Phase != v1alpha1.InstancePending))
 				}
 			}
 			byName := map[string]*v1alpha1.Allocation{}
