@@ -20,6 +20,20 @@
 #     Each of the fourteen is a test whose worst across the five newest go-job logs was at least 9 s. Taking
 #     them from those logs, the package's slowest logged run would have been 335 s, a margin of 1.79x (a
 #     projection: CI's runs of this change are the measurement);
+#   - lifecycle-slow2: eight more of internal/lifecycle's fake-clock tests (issue #295, part B2). Part B left the
+#     package's slowest go-job run, in the three that CI ran on its head, at 465 s of go test's 600 s (278 s and
+#     372 s in the other two), a 1.67x swing between runners, and the science agent ruled on 17 Nov 2026 that
+#     the worst of three must be 400 s or less before more lifecycle tests land. These are the next eight by
+#     their own (serial) time in that slowest run, each 8.9 s or more there. Like lifecycle-slow's, they run
+#     reconcile passes over a fake provider and a fake clock: read through the package's helpers with a
+#     type-checked call graph, they reach no control plane, listener or port constant, as lifecycle-slow's
+#     do not. Taking them from that run, the package would have taken 357 s (235 s and 307 s in the other two)
+#     (a projection: CI's runs of this change are the measurement). It is a group of its own, not more rows in
+#     lifecycle-slow, because 3x of lifecycle-slow's sum of worsts with them would pass 850 s. The two tests of
+#     that package with parallel subtests (TestTheTwoJobGuardKeepsALongWaitToTwoAllocations and
+#     TestADeadStepLeavesTheDeploymentAtItsLastEnd) stay in the packages run: their own lines read 0.00 s,
+#     since go test does not count a parallel subtest's time in its parent, and they run alone at the end of
+#     the package for about 38-58 s, which is the next lever if the package grows again;
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
@@ -76,7 +90,8 @@ cd "$root" || exit 1
 # #295 take 3x the sum of each test's worst in the go job of main's five newest runs of 17 Nov 2026 (03:01Z
 # to 08:55Z), a bound on the group's worst: lifecycle-apiserver 43.0 s (130 s), lifecycle-slow 172.8 s
 # (520 s) and livechecks-tree 126.9 s (390 s). The selection rule is in the bullets above, and the tests'
-# worst times are in the issue's record.
+# worst times are in the issue's record. Part B2's lifecycle-slow2 takes the sum of each test's worst over the
+# three go-job runs of PR #692's head (run attempts 1 to 3 of one run, 17 Nov 2026), 109.1 s, which gives 330 s.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
@@ -84,6 +99,7 @@ groups=(
   "lifecycle-control-plane|./internal/lifecycle|TestManagerOnControlPlane TestVerificationRecordRoundTripsThroughTheAPIServer TestLifecycleLeaseReleaseUnderLatency TestStartLifecycleLeaderOfAManagerThatLeadsBeforeTheLeaseIsRead|170s"
   "lifecycle-apiserver|./internal/lifecycle|TestOperationsOnAControlPlaneWithTwoAgents TestMetricsKeeperModeThroughNewManager TestRecordedOutcomesPassTheAPIServersRules|130s"
   "lifecycle-slow|./internal/lifecycle|TestScaleDownWithASurplus TestARankedOutAllocationIsKeptUnderItsPolicy TestHandoverLateReplacementDegradesThenTakesOver TestHandoverReplacementCreatedAtItsPlannedTime TestAWaitingCandidateIsNotFailedByStartTimeout TestACandidateWithNoTunnelFailsAtItsDeadline TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear TestAWarmAllocationDoesNotCancelAPendingSurplus TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations TestAMarkedPeerThatRestartsNeverOutranks TestAReplacementHedgesByItsWaits|520s"
+  "lifecycle-slow2|./internal/lifecycle|TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry TestRetentionNoneOutlivesHardEnd TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart TestMetricsNoProgressNeedsFreshKnownCounters TestNoOverlapModeBoundaries TestRetentionJobEndsAndLeavesListing TestTunnelDownAloneRestartsNothing TestMetricsDrainEndsOnAKnownZeroReadAfterTheDrainBegan|330s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"

@@ -448,7 +448,8 @@ jobs:
       # tests that run on their own -timeout so that their packages stay clear of go test's 10-minute
       # one, which keeps catching a real hang (issues #282, #295, #306 and #429):
       #   - internal/lifecycle: the lease test, four groups of tests that start a control plane, and the
-      #     fake-clock group of its slowest tests that start none (lifecycle-slow, issue #295 part B);
+      #     two fake-clock groups of its slowest tests that start none (lifecycle-slow and lifecycle-slow2,
+      #     issue #295 parts B and B2);
       #   - cmd/hpcburst-controller: the two failover tests, which wait out two 15 s Leases each;
       #   - internal/agent: the two real-Envoy tests that wait out Envoy's own defaults (a worker silent
       #     for 310 s, an upstream connection idle for 50 s). The step fails unless both ran and passed,
