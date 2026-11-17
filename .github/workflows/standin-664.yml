@@ -81,8 +81,12 @@ jobs:
       - name: Run TestStandInOperations in a systemd user scope
         run: |
           set -o pipefail
+          # As hack/rehearsal.sh does: a compiled test binary runs in its package's directory, so that
+          # its relative paths (the manifests, testdata) resolve as under go test.
+          cd internal/alpha
           HPCBURST_ALPHA_STANDIN=1 HPCBURST_REHEARSAL_BIN="$STANDIN_OUT" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
             systemd-run --user --scope --collect -q --unit=standin-664 \
+            -p MemoryMax=4G -p MemorySwapMax=0 \
             "$STANDIN_OUT/alpha.test" -test.v -test.timeout 40m -test.run '^TestStandInOperations$'
 
       - name: Stop the scope if it outlived the test
