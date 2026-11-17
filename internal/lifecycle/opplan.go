@@ -58,6 +58,13 @@ type planBuilder struct {
 	targets []v1alpha1.PlanTarget
 }
 
+// heldDeleteRelease reports whether the Operation is a Release of a deployment whose deletion the kept-warm finalizer holds: a person who
+// switched such a deployment to a managed source can still give up the warm capacity that holds the delete (HBEP-10, The report, Kept
+// warm: an approved Release may be planned while its deployment is being deleted).
+func heldDeleteRelease(md *v1alpha1.ModelDeployment, op *v1alpha1.Operation) bool {
+	return op.Spec.Action == v1alpha1.OperationActionRelease && !md.DeletionTimestamp.IsZero() && controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm)
+}
+
 // planOperation plans an Operation on the state the pass read. A refusal is the reason the Operation
 // cannot be planned.
 func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) {
@@ -69,7 +76,7 @@ func (p *pass) planOperation(req planRequest) (*v1alpha1.OperationPlan, string) 
 		// A Release of a kept-warm Allocation is planned on a deployment an End with delete holds (HBEP-10, The report, as amended
 		// by #698): it is how a person gives up the warm capacity that holds the delete.
 		return nil, fmt.Sprintf("ModelDeployment %s is being deleted", p.key)
-	case md.Spec.Source.Managed != nil && req.op.Spec.Action != v1alpha1.OperationActionEnd:
+	case md.Spec.Source.Managed != nil && req.op.Spec.Action != v1alpha1.OperationActionEnd && !heldDeleteRelease(md, req.op):
 		return nil, fmt.Sprintf("ModelDeployment %s has a managed source: the lifecycle controller provisions nothing for it, so there is nothing to scale or release; only an End is planned", p.key)
 	}
 	b := &planBuilder{p: p, req: req}

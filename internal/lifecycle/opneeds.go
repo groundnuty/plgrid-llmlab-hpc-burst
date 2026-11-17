@@ -130,7 +130,7 @@ func allocationFate(a *v1alpha1.Allocation, v fateView, at time.Time) (v1alpha1.
 		release, until, _, _ = retentionFate(a, v, at, &at)
 	}
 	switch {
-	case release && a.Status.AtProvider.StartTime == nil:
+	case release && !jobStarted(a):
 		return v1alpha1.PlanEffectCancelPending, time.Time{}
 	case release:
 		return v1alpha1.PlanEffectReleaseStarted, time.Time{}
