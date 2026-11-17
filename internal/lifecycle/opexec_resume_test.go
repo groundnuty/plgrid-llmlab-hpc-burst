@@ -32,11 +32,12 @@ func (w *execWorld) failSpecWrites() (stop func()) {
 	return func() { failing = false }
 }
 
-// A Scale commits to cancel a pending Allocation and its Instance; the spec write fails, so nothing is acted on; the job
-// starts and the Instance turns Ready. When the write lands, the Instance is DRAINED, not ended, its started Allocation is NOT
-// cancelled (the approval was for a queued job, which is priced differently), and the target is reported Failed for good with
-// JobStartedSinceCommit: the Operation, all else done, is PartlyFailed and finished.
-func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNotCancelled(t *testing.T) {
+// A Scale to one commits to cancel a pending Allocation and its Instance; the spec write fails, so nothing is acted on; the job
+// starts and the Instance turns Ready. When the write lands, the pair is NOT TAKEN (HBEP-10, The report, as amended by #698): the
+// Instance is neither drained nor ended, its started Allocation is not cancelled (the approval was for a queued job, which is
+// priced differently) and is kept warm, both targets fail for good with JobStartedSinceCommit, the count is given back, and the
+// Operation finishes after the record (opexec_giveback_test.go has the rows of the give-back itself).
+func TestACommittedCancelPendingThatStartedAndTurnedReadyIsNotTakenAndItsJobIsNotCancelled(t *testing.T) {
 	w := newExecWorld(t, time.Hour) // R drains from 1 h 50 min into its 4 h lease: it is still ready when P turns ready
 	pendingUID, pendingAllocUID := w.mustInstance(w.pending).UID, w.allocOrNil(w.pendingAlloc).UID
 	stop := w.failSpecWrites()
@@ -55,19 +56,16 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNot
 		t.Fatalf("P's Allocation is %+v: its job should have started, and nothing should have released it", a)
 	}
 	stop()
-	w.clock.Advance(10 * time.Second)
-	if err := w.stepKeepingErrors(); err != nil {
-		t.Fatalf("the pass after the spec write can land: %v", err)
-	}
+	w.stepsUntil(5*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
 
-	// P is drained, not ended; its started Allocation is untouched.
+	// P is not taken, and its started Allocation is kept warm.
 	in := w.instance(w.pending)
-	if in.UID != pendingUID || !isDraining(in) || ended(in) || in.Status.EndReason != "" {
-		t.Errorf("P's Instance is %q with end reason %q (draining %v): a serving Instance is drained, never ended", in.Status.Phase, in.Status.EndReason, isDraining(in))
+	if in.UID != pendingUID || isDraining(in) || ended(in) || in.Status.Phase != v1alpha1.InstanceReady {
+		t.Errorf("P's Instance is %q (draining %v): under a Scale above zero a started-since-commit Instance is not taken", in.Status.Phase, isDraining(in))
 	}
 	a, ok := w.allocation(w.pendingAlloc)
-	if !ok || a.UID != pendingAllocUID || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" {
-		t.Errorf("P's started Allocation is %+v (found %v): the approval to cancel a queued job does not release it", a, ok)
+	if !ok || a.UID != pendingAllocUID || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" || a.Annotations[v1alpha1.AnnotationKeptWarm] == "" {
+		t.Errorf("P's started Allocation is %+v (found %v): kept warm, and not released under the cancel approval", a, ok)
 	}
 	if _, deleted := w.log.deletedWith(w.pendingAlloc); deleted {
 		t.Error("P's Allocation was deleted under the cancel approval")
@@ -75,26 +73,19 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNot
 	if got := w.batch.Count("scancel"); got != 0 {
 		t.Errorf("the fake Slurm saw %d scancel calls, want none: the job that started is not cancelled", got)
 	}
-	if got := w.md(hoMD).Spec.Instances; got != 1 {
-		t.Errorf("spec.instances is %d, want 1", got)
+	if got := w.md(hoMD).Spec.Instances; got != 2 {
+		t.Errorf("spec.instances is %d, want 2: the untaken unit gave its count back", got)
 	}
 
-	// The drain ends; every target is Done or failed for good: PartlyFailed, finished, and the failure is the Allocation's.
-	// Until then it is PartlyFailed already (the final failure is known), and not finished.
-	w.until(30*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
 	op := w.getOp("scale")
-	if op.Status.Phase != v1alpha1.OperationPhasePartlyFailed {
-		t.Fatalf("the Operation is %q, want PartlyFailed", op.Status.Phase)
+	if op.Status.Phase != v1alpha1.OperationPhasePartlyFailed || op.Status.FinishedAt == nil || op.Status.CountGivenBack == nil {
+		t.Fatalf("the Operation is %q finished %v with the record %+v, want PartlyFailed, finished, after the record", op.Status.Phase, op.Status.FinishedAt, op.Status.CountGivenBack)
 	}
-	if op.Status.FinishedAt == nil {
-		t.Error("the Operation is PartlyFailed with no finish time: every failure is final, so it is finished")
-	}
-	if o, ok := outcomeOf(op, w.pendingAlloc); !ok || o.State != v1alpha1.TargetStateFailed || o.Reason != reasonJobStartedSinceCommit ||
-		o.UID != pendingAllocUID || !strings.Contains(o.Message, "started after the Operation was committed") {
-		t.Errorf("P's Allocation outcome is %+v (%v), want Failed with %s", o, ok, reasonJobStartedSinceCommit)
-	}
-	if o, ok := outcomeOf(op, w.pending); !ok || o.State != v1alpha1.TargetStateDone || o.UID != pendingUID {
-		t.Errorf("P's Instance outcome is %+v (%v), want Done: it was drained and has ended", o, ok)
+	for _, name := range []string{w.pendingAlloc, w.pending} {
+		if o, ok := outcomeOf(op, name); !ok || o.State != v1alpha1.TargetStateFailed || o.Reason != reasonJobStartedSinceCommit ||
+			!strings.Contains(o.Message, "started after the Operation was committed") {
+			t.Errorf("%s's outcome is %+v (%v), want Failed with %s", name, o, ok, reasonJobStartedSinceCommit)
+		}
 	}
 	if isExecuting(op) {
 		t.Error("a finished PartlyFailed Operation still holds the deployment's slot")
@@ -103,10 +94,7 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNot
 	if evs := w.partlyFailedEvents("scale"); len(evs) != 1 || !strings.Contains(evs[0].Message, reasonJobStartedSinceCommit) || evs[0].Type != "failing" {
 		t.Errorf("the OperationPartlyFailed events are %+v, want one, failing, naming %s", evs, reasonJobStartedSinceCommit)
 	}
-	// It frees the deployment: the next Operation is planned and not held back by it, and the Allocation stays with retention.
-	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() {
-		t.Errorf("P's Allocation after the Operation: %+v (found %v), want it kept, hosting nothing", a, ok)
-	}
+	// It frees the deployment: the next Operation is planned and not held back by it.
 	w.plan("next", endSpec(false))
 	w.confirm("next")
 	w.untilPhase("next", v1alpha1.OperationPhaseAwaitingApproval)

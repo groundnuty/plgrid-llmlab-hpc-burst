@@ -20,6 +20,16 @@ const (
 	// provider plugin, every live job that carries the Allocation's tag, and
 	// stays while an attempt is unresolved.
 	FinalizerCancelAll = Group + "/cancel-all"
+
+	// FinalizerKeptWarm is on a ModelDeployment that an End with delete is
+	// deleting while one of its Allocations is kept warm (AnnotationKeptWarm).
+	// The lifecycle controller adds it at the End's commit, before its delete,
+	// since a finalizer cannot be added once deletion has begun, and removes it
+	// once the deployment is being deleted and none of its Allocations carries
+	// the mark. While it holds, a marked Allocation skips retention's deletion
+	// rule, so a person's later direct delete, which has no finalizer of this
+	// kind, still releases it (HBEP-10, The report, as amended by #698).
+	FinalizerKeptWarm = Group + "/held-by-kept-warm"
 )
 
 // Label keys under the group's prefix (HBEP-11, API, Labels).
@@ -127,6 +137,19 @@ const (
 	// one line of at most 256 bytes (HBEP-7, Release, The release cause;
 	// HBEP-10, Audit).
 	AnnotationReleaseCause = Group + "/release-cause"
+
+	// AnnotationKeptWarm is on an Allocation whose job started after an
+	// Operation committed to cancel it as queued: the Allocation is kept warm,
+	// and no step of an executing Operation's passes releases it. Its value is
+	// the Operation, in the release cause's form, "operation <namespace>/<name>
+	// <uid>" (ReleaseCauseOperation, ParseReleaseCauseOperation). The lifecycle
+	// controller writes it, before it records the target's final failure
+	// JobStartedSinceCommit, and it outlives the Operation. Retention, the
+	// shutdown and the deployment-deletion rule skip a marked Allocation; the
+	// profile's maxIdle, its hard end, HBEP-7's unconditional releases and a
+	// new Operation's approved Release release it (HBEP-10, The report, as
+	// amended by #698).
+	AnnotationKeptWarm = Group + "/kept-warm"
 
 	// AnnotationRestartPrefix starts the key of a restart generation
 	// (RestartGenerationAnnotation).

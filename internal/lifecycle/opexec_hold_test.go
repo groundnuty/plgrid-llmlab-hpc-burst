@@ -145,23 +145,25 @@ func TestACommittedInstanceTargetGetsNoReplacement(t *testing.T) {
 	for _, in := range w.instances(hoMD) {
 		known[in.Name] = true
 	}
+	// While the Scale is Executing, no Instance is made for R1 or beside it. R2 ends at its own hard end, three hours in, and R1
+	// is then the last ready Instance: its drain is one nobody approved, so its target fails for good (LastReadySinceCommit)
+	// and the count is given back (opexec_giveback_test.go), and the Operation finishes; what the controller then provisions is
+	// its own, no longer an Executing Scale's.
 	w.stepsUntil(4*time.Hour, 2*time.Minute, "R1's replacement time passed", func() bool {
+		if isExecuting(w.getOp("scale")) {
+			for _, in := range w.instances(hoMD) {
+				if in.Annotations[v1alpha1.AnnotationPredecessor] == r1 {
+					t.Errorf("Instance %s was made as the replacement of R1, a committed target of the Executing Scale", in.Name)
+				}
+				if !known[in.Name] {
+					t.Errorf("Instance %s was made beside the Executing Scale: nothing is made for a committed target", in.Name)
+				}
+			}
+		}
 		in := w.instance(r1)
 		return in.Status.LeaseEnd != nil && w.clock.Now().After(in.Status.LeaseEnd.Add(-20*time.Minute))
 	})
 	if w.instance(r1).Status.Phase != v1alpha1.InstanceReady || isDraining(w.instance(r1)) {
 		t.Fatalf("R1 is %q: its drain write fails, so it is Ready and not draining", w.instance(r1).Status.Phase)
-	}
-	// R2 ended at its own hard end, three hours in; the deployment has one primary, R1, whose replacement would be due, and an
-	// Operation that takes R1: no replacement is made for it.
-	for _, in := range w.instances(hoMD) {
-		if in.Annotations[v1alpha1.AnnotationPredecessor] == r1 {
-			t.Errorf("Instance %s was made as the replacement of R1, a committed target of the Executing Scale", in.Name)
-		}
-	}
-	for _, in := range w.instances(hoMD) {
-		if !known[in.Name] {
-			t.Errorf("Instance %s was made beside the Executing Scale: nothing is made for a committed target", in.Name)
-		}
 	}
 }

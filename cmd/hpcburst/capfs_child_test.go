@@ -1,8 +1,9 @@
 package main
 
-// The mount and the sweep against real FUSE mounts (issue #648; the sweep is capfs_sweep_test.go's, the mount capfs_mount_test.go's). A
-// capfs server runs in a CHILD process, the test binary run again with HPCBURST_TEST_CAPFS_SERVER set (TestMain), so that the test can
-// end it the way a killed test ends: SIGKILL through a pidfd, which runs no clean-up. What is shown, on real mounts: a killed server
+// The mount and the sweep against real FUSE mounts (issue #648; the sweep is capfs_sweep_test.go's, the mount capfs_mount_test.go's), and
+// the child process that serves every volume (issue #658; capfs_volume_test.go says why). A capfs server runs in a CHILD process, the
+// test binary run again with HPCBURST_TEST_CAPFS_SERVER set (TestMain), so that the test can end it the way a killed test ends: SIGKILL
+// through a pidfd, which runs no clean-up. What is shown, on real mounts: a killed server
 // leaves its mount dead, never wedged, and no fusermount3 behind; the next newCapVolume sweeps a dead mount; a live mount of another
 // process is untouched; a wedged one (open, unserved) is reported, with its connection, and left alone, promptly; and neither the mount's
 // descriptor nor its socket reaches a process started later.
@@ -24,8 +25,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -45,14 +46,29 @@ const (
 	// capfsWedgeEnv, set to 1, makes the child mount (named capFsWedgeName) and then hold the descriptor without ever serving it: the
 	// mount is open, and a stat of it does not return, until the child exits, which leaves it dead.
 	capfsWedgeEnv = "HPCBURST_TEST_CAPFS_WEDGE"
+	// capfsLimitEnv is the size in bytes of the child's volume (capChildLimit when unset).
+	capfsLimitEnv = "HPCBURST_TEST_CAPFS_LIMIT"
+	// capfsDebugEnv, set to 1, turns on go-fuse's debug log of the child's mount, which goes to the child's output.
+	capfsDebugEnv = "HPCBURST_TEST_CAPFS_DEBUG"
+
+	// The exit codes of a child that does not serve: the FUSE mount itself failed (a test then skips, or fails under
+	// HPCBURST_REQUIRE_INTEGRATION=1); anything else failed in preparing for it; and the unmount at the end failed.
+	capfsExitMount   = 3
+	capfsExitPrepare = 2
+	capfsExitUnmount = 4
 
 	capChildLimit = 1 << 20
 	// capChildBound bounds each wait of these tests: on a child, on its mount, and on a file operation through a mount.
 	capChildBound = 20 * time.Second
+	// capChildExitBound bounds the wait for a child to exit once its stdin is closed. Its unmount is bounded by capChildBound in each of
+	// three steps (the unmount, the end of the server, the close of the socket), so a wait of one capChildBound would kill a child that was
+	// only slow.
+	capChildExitBound = 3 * capChildBound
 )
 
 // capfsServerMain is the child process: it mounts under dir and serves until its stdin closes. It watches stdin from the start, so that
-// a parent that is gone ends it even while it mounts.
+// a parent that is gone ends it even while it mounts. A parent that is stuck, and so closes nothing, ends it by its death instead: the
+// kernel kills the child then (StartDyingWithParent).
 func capfsServerMain(dir string) {
 	stdinClosed := make(chan struct{})
 	go func() { _, _ = io.Copy(io.Discard, os.Stdin); close(stdinClosed) }()
@@ -60,28 +76,48 @@ func capfsServerMain(dir string) {
 		point := filepath.Join(dir, "mnt")
 		if err := os.Mkdir(point, 0o700); err != nil {
 			fmt.Fprintln(os.Stderr, "capfs server:", err)
-			os.Exit(3)
+			os.Exit(capfsExitPrepare)
 		}
 		conn, err := fusermountCapfs(point, capFsWedgeName, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "capfs server:", err)
-			os.Exit(3)
+			os.Exit(capfsExitMount)
 		}
 		fmt.Println("mounted", point, "wedged")
 		<-stdinClosed
 		runtime.KeepAlive(conn) // exiting closes the descriptor, which ends the connection
 		os.Exit(0)
 	}
-	v, err := mountCapVolume(dir, capChildLimit, capFsName, os.Getenv(capfsServerAutoEnv) == "1")
+	limit := int64(capChildLimit)
+	if s := os.Getenv(capfsLimitEnv); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n < 0 {
+			fmt.Fprintf(os.Stderr, "capfs server: %s=%q is not a size\n", capfsLimitEnv, s)
+			os.Exit(capfsExitPrepare)
+		}
+		limit = n
+	}
+	var opts []func(*fuse.MountOptions)
+	if os.Getenv(capfsDebugEnv) == "1" {
+		opts = append(opts, func(o *fuse.MountOptions) {
+			o.Debug = true
+			o.Logger = log.New(os.Stderr, "", 0)
+		})
+	}
+	v, err := mountCapVolume(dir, limit, capFsName, os.Getenv(capfsServerAutoEnv) == "1", opts...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "capfs server:", err)
-		os.Exit(3)
+		var me capMountError
+		if errors.As(err, &me) {
+			os.Exit(capfsExitMount)
+		}
+		os.Exit(capfsExitPrepare)
 	}
 	fmt.Println("mounted", v.mount)
 	<-stdinClosed
 	if err := v.unmount(capChildBound); err != nil {
 		fmt.Fprintln(os.Stderr, "capfs server: unmount:", err)
-		os.Exit(4)
+		os.Exit(capfsExitUnmount)
 	}
 	os.Exit(0)
 }
@@ -256,12 +292,16 @@ func capUnmountIfDead(t *testing.T, point string, d time.Duration) bool {
 	return true
 }
 
-// capFuseOrSkip mounts a volume in this process, as the store-full tests do, so that a test of real mounts skips (or, with
-// HPCBURST_REQUIRE_INTEGRATION=1, fails) with newCapVolume's reason where FUSE cannot be mounted.
+// capFuseOrSkip mounts a volume, as the store-full tests do, so that a test of real mounts skips (or, with HPCBURST_REQUIRE_INTEGRATION=1,
+// fails) with newCapVolume's reason where FUSE cannot be mounted.
 func capFuseOrSkip(t *testing.T) { t.Helper(); newCapVolume(t, capChildLimit) }
 
-// capChildMode is how a child mounts: with auto_unmount, and wedged (mounted and never served).
-type capChildMode struct{ auto, wedge bool }
+// capChildMode is how a child mounts: with auto_unmount, wedged (mounted and never served), with go-fuse's debug log, and with a volume of
+// limit bytes (0: capChildLimit).
+type capChildMode struct {
+	auto, wedge, debug bool
+	limit              int64
+}
 
 // capChild is a capfs server in a child process.
 type capChild struct {
@@ -314,6 +354,12 @@ func launchCapServer(t *testing.T, mode capChildMode) *capChild {
 	if mode.wedge {
 		c.cmd.Env = append(c.cmd.Env, capfsWedgeEnv+"=1")
 	}
+	if mode.debug {
+		c.cmd.Env = append(c.cmd.Env, capfsDebugEnv+"=1")
+	}
+	if mode.limit > 0 {
+		c.cmd.Env = append(c.cmd.Env, capfsLimitEnv+"="+strconv.FormatInt(mode.limit, 10))
+	}
 	c.cmd.Stdout, c.cmd.Stderr = out, out
 	if c.stdin, err = c.cmd.StdinPipe(); err != nil {
 		t.Fatal(err)
@@ -331,13 +377,16 @@ func launchCapServer(t *testing.T, mode capChildMode) *capChild {
 // dead. One that is not dead is reported and left, with its directory.
 func (c *capChild) cleanUp(t *testing.T) {
 	c.stdin.Close()
-	if !c.ended(capChildBound) {
+	if !c.ended(capChildExitBound) {
 		t.Errorf("the capfs child did not exit when its stdin closed; killing it. Its output: %s", c.output())
 		c.sigkill()
 		if !c.ended(capChildBound) {
 			t.Errorf("the capfs child did not end after SIGKILL; its mount %s and directory are left", c.mount)
 			return
 		}
+	}
+	if ws, ok := c.cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Exited() && ws.ExitStatus() == capfsExitUnmount {
+		t.Errorf("the capfs child could not unmount its volume: %s", c.output())
 	}
 	if c.pidfd >= 0 {
 		unix.Close(c.pidfd)
@@ -357,18 +406,26 @@ func (c *capChild) cleanUp(t *testing.T) {
 	}
 }
 
-// startCapServer launches the child and returns once its mount is listed, and, unless it is wedged, answers a write.
-func startCapServer(t *testing.T, mode capChildMode) *capChild {
+// waitCapServerMounted waits until the child has printed that it mounted, and its mount is listed. A child that ends first is the end of
+// the test: a skip (or, with HPCBURST_REQUIRE_INTEGRATION=1, a failure) when the FUSE mount itself failed, a failure for any other reason.
+func waitCapServerMounted(t *testing.T, c *capChild) {
 	t.Helper()
-	c := launchCapServer(t, mode)
 	capWaitFor(t, capChildBound, "the child's mount to be listed", func() bool {
 		select {
 		case <-c.done:
+			capSkipOrFailOnMount(t, c)
 			t.Fatalf("the capfs child ended before its mount was ready: %v: %s", c.cmd.ProcessState, c.output())
 		default:
 		}
 		return strings.Contains(c.output(), "mounted "+c.mount) && capListed(c.mount)
 	})
+}
+
+// startCapServer launches the child and returns once its mount is listed, and, unless it is wedged, answers a write.
+func startCapServer(t *testing.T, mode capChildMode) *capChild {
+	t.Helper()
+	c := launchCapServer(t, mode)
+	waitCapServerMounted(t, c)
 	if !mode.wedge {
 		c.write(t, ".ready", "x")
 	}
@@ -409,8 +466,8 @@ func (c *capChild) write(t *testing.T, name, content string) {
 	}
 }
 
-// writeVolume writes a file through a volume of this process's, bounded: the volume works.
-func writeVolume(t *testing.T, v *capVolume) {
+// writeVolume writes a file through a volume, bounded: the volume works.
+func writeVolume(t *testing.T, v *capHandle) {
 	t.Helper()
 	p := filepath.Join(v.mount, "new")
 	if err := capDo(capChildBound, "a write to "+p, func() error { return os.WriteFile(p, []byte("new"), 0o600) }); err != nil {
@@ -436,6 +493,32 @@ func killLeavingADeadMount(t *testing.T) *capChild {
 	return c
 }
 
+// capAwaitDeadMount waits until the mount of a server that has ended is dead, never wedged: a bounded stat of it fails with ENOTCONN, or the
+// mount is gone. A stat that does not return fails the test: the mount is wedged. On fusermount3 3.16 and later, auto_unmount also
+// unmounts a dead mount, which the helper then waits for; before 3.16 it cannot (capfs_mount_test.go), which is reported as not checked
+// rather than skipped, since the launcher suite fails on any skip. The next newCapVolume sweeps a mount that is left.
+func capAwaitDeadMount(t *testing.T, point string) {
+	t.Helper()
+	capWaitFor(t, capChildBound, "the mount of the ended server to be dead (ENOTCONN) or gone", func() bool {
+		if !capListed(point) {
+			return true
+		}
+		errno, answered := capStatErrno(point, capChildBound)
+		if !answered {
+			t.Fatalf("a stat of the ended server's mount %s did not return within %s: it is wedged", point, capChildBound)
+		}
+		return errno == syscall.ENOTCONN
+	})
+	switch major, minor, err := fusermountVersion(); {
+	case err != nil:
+		t.Logf("NOT CHECKED: whether auto_unmount unmounts the dead mount, since the helper's version is unknown: %v", err)
+	case major > 3 || major == 3 && minor >= 16:
+		capWaitFor(t, capChildBound, "fusermount3's auto_unmount to unmount the dead mount", func() bool { return !capListed(point) })
+	default:
+		t.Logf("NOT CHECKED: that auto_unmount unmounts the dead mount. fusermount3 %d.%d, before 3.16, opens it as root, gets EACCES (no allow_other) and leaves it; the next newCapVolume sweeps it", major, minor)
+	}
+}
+
 // The incident's repair: a server killed with SIGKILL through its pidfd, its mount made as newCapVolume makes it (with auto_unmount),
 // leaves no fusermount3 behind (the one auto_unmount keeps sees the socket close, and exits) and leaves its mount DEAD, never wedged: a
 // bounded stat fails at once with ENOTCONN, or the mount is gone. On fusermount3 3.16 and later, auto_unmount also unmounts it; before
@@ -450,24 +533,7 @@ func TestAKilledServerLeavesADeadMountAndNoFusermount3(t *testing.T) {
 	c.write(t, "before-the-kill", "served")
 	c.kill(t)
 	capWaitFor(t, capChildBound, "the killed server's fusermount3 to exit", func() bool { return len(capFusermount3For(c.mount)) == 0 })
-	capWaitFor(t, capChildBound, "the killed server's mount to be dead (ENOTCONN) or gone", func() bool {
-		if !capListed(c.mount) {
-			return true
-		}
-		errno, answered := capStatErrno(c.mount, capChildBound)
-		if !answered {
-			t.Fatalf("a stat of the killed server's mount %s did not return within %s: it is wedged", c.mount, capChildBound)
-		}
-		return errno == syscall.ENOTCONN
-	})
-	switch major, minor, err := fusermountVersion(); {
-	case err != nil:
-		t.Logf("NOT CHECKED: whether auto_unmount unmounts the dead mount, since the helper's version is unknown: %v", err)
-	case major > 3 || major == 3 && minor >= 16:
-		capWaitFor(t, capChildBound, "fusermount3's auto_unmount to unmount the dead mount", func() bool { return !capListed(c.mount) })
-	default:
-		t.Logf("NOT CHECKED: that auto_unmount unmounts the dead mount. fusermount3 %d.%d, before 3.16, opens it as root, gets EACCES (no allow_other) and leaves it; the next newCapVolume sweeps it", major, minor)
-	}
+	capAwaitDeadMount(t, c.mount)
 	v := newCapVolume(t, capChildLimit)
 	if capListed(c.mount) {
 		t.Errorf("%s, the mount of the killed server, is still listed after newCapVolume", c.mount)
@@ -476,55 +542,35 @@ func TestAKilledServerLeavesADeadMountAndNoFusermount3(t *testing.T) {
 }
 
 // A volume's own unmount leaves no fusermount3 behind either: the one auto_unmount keeps while the volume is mounted exits once the
-// unmount closes the socket, so a long run of the store-full tests does not pile up one per volume until the test binary ends.
+// unmount closes the socket, so a long run of the store-full tests does not pile up one per volume until the test binary ends. The
+// unmount is the volume's server's own, which runs it when its stdin closes, as every test's clean-up ends a volume.
 func TestAnUnmountedVolumeLeavesNoFusermount3(t *testing.T) {
 	capFuseOrSkip(t)
-	dir, err := os.MkdirTemp("", "cu")
-	if err != nil {
-		t.Fatal(err)
+	c := startCapServer(t, capChildMode{auto: true})
+	if pids := capFusermount3For(c.mount); len(pids) != 1 {
+		t.Fatalf("the mounted volume %s has %d fusermount3 processes, want the one auto_unmount keeps", c.mount, len(pids))
 	}
-	v, err := mountCapVolume(dir, capChildLimit, capFsName, true)
-	if err != nil {
-		t.Fatalf("mount: %v", err)
+	c.stdin.Close()
+	if !c.ended(capChildExitBound) {
+		t.Fatalf("the server did not exit after its stdin closed: %s", c.output())
 	}
-	t.Cleanup(func() {
-		capKillLeftFusermount3(t, v.mount)
-		if capUnmountIfDead(t, v.mount, capChildBound) {
-			if err := capRemoveDir(dir); err != nil {
-				t.Errorf("%v", err)
-			}
-		}
-	})
-	if pids := capFusermount3For(v.mount); len(pids) != 1 {
-		t.Fatalf("the mounted volume %s has %d fusermount3 processes, want the one auto_unmount keeps", v.mount, len(pids))
+	if ws, ok := c.cmd.ProcessState.Sys().(syscall.WaitStatus); !ok || !ws.Exited() || ws.ExitStatus() != 0 {
+		t.Fatalf("the server ended %v, want a clean exit after its unmount: %s", c.cmd.ProcessState, c.output())
 	}
-	writeVolume(t, v)
-	if err := v.unmount(capChildBound); err != nil {
-		t.Fatalf("unmount: %v", err)
+	if capListed(c.mount) {
+		t.Fatalf("%s is still listed after its unmount", c.mount)
 	}
-	if capListed(v.mount) {
-		t.Fatalf("%s is still listed after its unmount", v.mount)
-	}
-	capWaitFor(t, capChildBound, "the volume's fusermount3 to exit after its unmount", func() bool { return len(capFusermount3For(v.mount)) == 0 })
+	capWaitFor(t, capChildBound, "the volume's fusermount3 to exit after its unmount", func() bool { return len(capFusermount3For(c.mount)) == 0 })
 }
 
-// capDebugLog collects the lines of go-fuse's debug log, which its server writes from its own goroutines.
-type capDebugLog struct {
-	mu    sync.Mutex
-	lines []string
-}
-
-func (l *capDebugLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.lines = append(l.lines, strings.Split(strings.TrimRight(string(p), "\n"), "\n")...)
-	return len(p), nil
-}
-
-func (l *capDebugLog) snapshot() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]string(nil), l.lines...)
+// completeLines are the whole lines of the child's output so far: the child writes while this reads, and a line cut off at the end of
+// what was read is not counted.
+func (c *capChild) completeLines() []string {
+	out := c.output()
+	if i := strings.LastIndexByte(out, '\n'); i >= 0 {
+		return strings.Split(out[:i], "\n")
+	}
+	return nil
 }
 
 // matching are the lines that re matches.
@@ -539,42 +585,21 @@ func matching(lines []string, re *regexp.Regexp) []string {
 }
 
 // The poll hack (capPollHack) runs while the mount is made, its own POLL answered by go-fuse's server, and afterwards the kernel sends the
-// server no POLL, even for a file this process opens through Go's os package, which registers the file with epoll. Without the hack the
-// kernel sends one, and in a process that serves its own mount that is what deadlocked a loaded run (capfs_mount_test.go). The requests
-// are read from go-fuse's debug log, which names each one's opcode ("rx 12: POLL n1 ..."); the file's own CREATE and OPEN must show in
-// it, so that a log that missed the requests cannot pass.
+// server no POLL, even for a file that a process opens through Go's os package, which registers the file with epoll. Without the hack the
+// kernel sends one, and in a process that serves its own mount (the volume's child, which runs the hack on its own mount) that is what
+// deadlocked a loaded run (capfs_mount_test.go). The requests are read from go-fuse's debug log, which the volume's child writes to its
+// output, and names each one's opcode ("rx 12: POLL n1 ..."); the file's own CREATE and OPEN must show in it, so that a log that missed
+// the requests cannot pass.
 func TestThePollHackLeavesTheKernelNoPOLLToSend(t *testing.T) {
 	capFuseOrSkip(t)
-	dir, err := os.MkdirTemp("", "cp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbg := &capDebugLog{}
-	v, err := mountCapVolume(dir, capChildLimit, capFsName, true, func(o *fuse.MountOptions) {
-		o.Debug = true
-		o.Logger = log.New(dbg, "", 0)
-	})
-	if err != nil {
-		t.Fatalf("mount: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := v.unmount(capChildBound); err != nil {
-			t.Errorf("unmount %s: %v", v.mount, err)
-		}
-		capKillLeftFusermount3(t, v.mount)
-		if capUnmountIfDead(t, v.mount, capChildBound) {
-			if err := capRemoveDir(dir); err != nil {
-				t.Errorf("%v", err)
-			}
-		}
-	})
+	c := startCapServer(t, capChildMode{auto: true, debug: true})
 	poll := regexp.MustCompile(`^rx \d+: POLL `)
-	before := dbg.snapshot()
+	before := c.completeLines()
 	if len(matching(before, poll)) == 0 {
 		t.Errorf("the server saw no POLL while the mount was made, so the poll hack did not run (%d debug lines)", len(before))
 	}
-	p := filepath.Join(v.mount, "opened")
-	err = capDo(capChildBound, "a write and a read of "+p+" through os", func() error {
+	p := filepath.Join(c.mount, "opened")
+	err := capDo(capChildBound, "a write and a read of "+p+" through os", func() error {
 		f, err := os.Create(p)
 		if err != nil {
 			return err
@@ -599,7 +624,7 @@ func TestThePollHackLeavesTheKernelNoPOLLToSend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	after := dbg.snapshot()[len(before):]
+	after := c.completeLines()[len(before):]
 	if polls := matching(after, poll); len(polls) != 0 {
 		t.Errorf("the kernel sent %d POLL requests for a file opened after the mount: %q", len(polls), polls)
 	}

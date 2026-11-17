@@ -48,7 +48,8 @@ func TestUnionProblemsFindsADroppedOrDuplicatedTest(t *testing.T) {
 func TestCIProblemsFindsAPartThatCIDoesNotRunOnce(t *testing.T) {
 	gated := func(run string) ciStep { return ciStep{Run: run, If: verifiedGate} }
 	goSteps := []ciStep{{Run: "go vet ./..."}, {Run: "log=x\nbash hack/go-test.sh packages 2>&1 | tee \"$log\" || rc=$?"}}
-	ownSteps := []ciStep{gated("bash hack/go-test.sh own g1"), gated("bash hack/go-test.sh own g2")}
+	// The go-own job's one step, "own", runs every group in lanes.
+	ownSteps := []ciStep{gated("bash hack/go-test.sh own")}
 	crdSteps := []ciStep{{Run: "bash hack/check.sh 2>&1 | tee \"$log\" || rc=$?"}}
 	jobs := func(goS, ownS, crdS []ciStep) map[string]ciJob {
 		return map[string]ciJob{"go": {Steps: goS}, "go-own": {Steps: ownS}, "crd": {Steps: crdS}}
@@ -65,22 +66,35 @@ func TestCIProblemsFindsAPartThatCIDoesNotRunOnce(t *testing.T) {
 		return s
 	}
 	more := func(steps []ciStep, extra ...ciStep) []ciStep { return append(append([]ciStep{}, steps...), extra...) }
+	const noOwn = `CI's go-own job runs "bash hack/go-test.sh own" in 0 steps, want 1`
 	for _, c := range []struct {
 		name string
 		jobs map[string]ciJob
 		want []string
 	}{
 		{"every part once", jobs(goSteps, ownSteps, crdSteps), nil},
-		{"a group has no step", jobs(goSteps, ownSteps[:1], crdSteps), []string{`CI's go-own job runs "bash hack/go-test.sh own g2" in 0 steps, want 1`}},
-		{"a group has two", jobs(goSteps, more(ownSteps, gated("bash hack/go-test.sh own g1")), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g1" in 2 steps, want 1`}},
-		// A step named for another group, "own g10", is not g1's.
-		{"only a longer name", jobs(goSteps, own(0, func(s *ciStep) { s.Run = "bash hack/go-test.sh own g10" }), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g1" in 0 steps, want 1`}},
-		{"the go-own job runs every group again", jobs(goSteps, more(ownSteps, gated("bash hack/go-test.sh own")), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own", which runs the groups again`}},
-		{"the go job runs every group", jobs(more(goSteps, gated("bash hack/go-test.sh own")), ownSteps, crdSteps),
+		{"own with a pipe is still own", jobs(goSteps, own(0, func(s *ciStep) { s.Run = "bash hack/go-test.sh own 2>&1 | tee \"$log\"" }), crdSteps), nil},
+		{"own with a redirect is still own", jobs(goSteps, own(0, func(s *ciStep) { s.Run = "bash hack/go-test.sh own > out.log" }), crdSteps), nil},
+		{"no own step", jobs(goSteps, nil, crdSteps), []string{noOwn}},
+		{"two own steps", jobs(goSteps, more(ownSteps, gated("bash hack/go-test.sh own")), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh own" in 2 steps, want 1`}},
+		// The old shape, a step for each group: no step runs "own", and each group's step would run its group
+		// twice beside the lanes.
+		{"only per-group steps", jobs(goSteps, []ciStep{gated("bash hack/go-test.sh own g1"), gated("bash hack/go-test.sh own g2")}, crdSteps),
+			[]string{noOwn,
+				`CI's go-own job runs "bash hack/go-test.sh own g1" in 1 steps, but its step "bash hack/go-test.sh own" already runs every group in lanes: it would run twice`,
+				`CI's go-own job runs "bash hack/go-test.sh own g2" in 1 steps, but its step "bash hack/go-test.sh own" already runs every group in lanes: it would run twice`}},
+		{"own and a per-group step", jobs(goSteps, more(ownSteps, gated("bash hack/go-test.sh own g1")), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh own g1" in 1 steps, but its step "bash hack/go-test.sh own" already runs every group in lanes: it would run twice`}},
+		// A step named for another group, "own g10", is no step of g1's, and it is not "own" either.
+		{"only a longer group name", jobs(goSteps, own(0, func(s *ciStep) { s.Run = "bash hack/go-test.sh own g10" }), crdSteps), []string{noOwn}},
+		{"a command that only starts like own", jobs(goSteps, own(0, func(s *ciStep) { s.Run = "bash hack/go-test.sh owner" }), crdSteps), []string{noOwn}},
+		{"the go job runs the groups", jobs(more(goSteps, gated("bash hack/go-test.sh own")), ownSteps, crdSteps),
 			[]string{`CI's go job runs "bash hack/go-test.sh own", which runs the groups again`}},
+		{"the go job runs everything", jobs(more(goSteps, gated("bash hack/go-test.sh all")), ownSteps, crdSteps),
+			[]string{`CI's go job runs "bash hack/go-test.sh all", which runs the groups again`}},
+		{"the go-own job runs everything", jobs(goSteps, more(ownSteps, gated("bash hack/go-test.sh all")), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh all", which runs the groups again`}},
 		{"no packages' run", jobs(goSteps[:1], ownSteps, crdSteps), []string{`CI's go job runs "bash hack/go-test.sh packages" in 0 steps, want 1`}},
 		{"the crd job does not run check.sh", jobs(goSteps, ownSteps, []ciStep{{Run: "go test ./..."}}), []string{`CI's crd job runs "bash hack/check.sh" in 0 steps, want 1`}},
 		// A part in the other job runs twice.
@@ -88,17 +102,15 @@ func TestCIProblemsFindsAPartThatCIDoesNotRunOnce(t *testing.T) {
 			[]string{`CI's go job runs "bash hack/go-test.sh own g1" in 1 steps, which belong to the go-own job: it would run twice`}},
 		{"the packages also run in the go-own job", jobs(goSteps, more(ownSteps, ciStep{Run: "bash hack/go-test.sh packages"}), crdSteps),
 			[]string{`CI's go-own job runs "bash hack/go-test.sh packages" in 1 steps, which belongs to the go job: it would run twice`}},
-		{"a group moved back to the go job, with no step in go-own", jobs(more(goSteps, gated("bash hack/go-test.sh own g2")), ownSteps[:1], crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g2" in 0 steps, want 1`, `CI's go job runs "bash hack/go-test.sh own g2" in 1 steps, which belong to the go-own job: it would run twice`}},
 		// Steps and jobs that can be skipped, or pass when they fail.
-		{"a group step under if: false", jobs(goSteps, own(1, func(s *ciStep) { s.If = false }), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g2" under if: false, which can skip it; want no if: or ` + verifiedGate}},
-		{"a group step only on pushes", jobs(goSteps, own(0, func(s *ciStep) { s.If = "github.event_name == 'push'" }), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g1" under if: github.event_name == 'push', which can skip it; want no if: or ` + verifiedGate}},
-		{"a group step that continues on error", jobs(goSteps, own(0, func(s *ciStep) { s.ContinueOnError = true }), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g1" with continue-on-error: true, which passes the job when it fails`}},
-		{"a group step that continues on an expression", jobs(goSteps, own(1, func(s *ciStep) { s.ContinueOnError = "${{ github.event_name == 'pull_request' }}" }), crdSteps),
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g2" with continue-on-error: ${{ github.event_name == 'pull_request' }}, which passes the job when it fails`}},
+		{"the own step under if: false", jobs(goSteps, own(0, func(s *ciStep) { s.If = false }), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh own" under if: false, which can skip it; want no if: or ` + verifiedGate}},
+		{"the own step only on pushes", jobs(goSteps, own(0, func(s *ciStep) { s.If = "github.event_name == 'push'" }), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh own" under if: github.event_name == 'push', which can skip it; want no if: or ` + verifiedGate}},
+		{"the own step that continues on error", jobs(goSteps, own(0, func(s *ciStep) { s.ContinueOnError = true }), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh own" with continue-on-error: true, which passes the job when it fails`}},
+		{"the own step that continues on an expression", jobs(goSteps, own(0, func(s *ciStep) { s.ContinueOnError = "${{ github.event_name == 'pull_request' }}" }), crdSteps),
+			[]string{`CI's go-own job runs "bash hack/go-test.sh own" with continue-on-error: ${{ github.event_name == 'pull_request' }}, which passes the job when it fails`}},
 		{"the packages' step continues on error", jobs(packages(1, func(s *ciStep) { s.ContinueOnError = true }), ownSteps, crdSteps),
 			[]string{`CI's go job runs "bash hack/go-test.sh packages" with continue-on-error: true, which passes the job when it fails`}},
 		{"check.sh under an if:", jobs(goSteps, ownSteps, []ciStep{{Run: crdSteps[0].Run, If: "github.ref == 'refs/heads/main'"}}),
@@ -113,9 +125,8 @@ func TestCIProblemsFindsAPartThatCIDoesNotRunOnce(t *testing.T) {
 			[]string{"CI's crd job has continue-on-error: true, which passes it when a part fails"}},
 		// An explicit continue-on-error: false is the default, and allowed.
 		{"continue-on-error: false", jobs(goSteps, own(0, func(s *ciStep) { s.ContinueOnError = false }), crdSteps), nil},
-		// No go-own job at all: every group is missing.
-		{"no go-own job", map[string]ciJob{"go": {Steps: goSteps}, "crd": {Steps: crdSteps}},
-			[]string{`CI's go-own job runs "bash hack/go-test.sh own g1" in 0 steps, want 1`, `CI's go-own job runs "bash hack/go-test.sh own g2" in 0 steps, want 1`}},
+		// No go-own job at all: the own step is missing.
+		{"no go-own job", map[string]ciJob{"go": {Steps: goSteps}, "crd": {Steps: crdSteps}}, []string{noOwn}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := ciProblems(c.jobs, []string{"g1", "g2"}); !reflect.DeepEqual(got, c.want) {
