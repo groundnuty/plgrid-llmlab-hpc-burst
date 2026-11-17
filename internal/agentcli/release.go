@@ -41,15 +41,77 @@ func (rt *cli) cmdRelease(ctx context.Context, args []string, stdin io.Reader, s
 	if code != exitOK {
 		return code
 	}
-	groups, code := findAllocations(ctx, cl.c, ns, names, selector, stderr)
-	if code != exitOK {
-		return code
+	// A retry of a keyed release by names recovers the Operations it made before it looks for the Allocations: one
+	// whose Operation has finished has no Allocation left, and only an Allocation that no keyed Operation covers must
+	// still exist.
+	var reqs []opRequest
+	if o.key != "" && len(names) > 0 {
+		var err error
+		if reqs, names, err = recoverKeyed(ctx, cl, ns, o.key, names); err != nil {
+			return failf(stderr, exitFail, "%v", err)
+		}
 	}
-	reqs, code := rt.releaseRequests(o, groups, selector, stderr)
-	if code != exitOK {
-		return code
+	if len(names) > 0 || selector != "" {
+		groups, code := findAllocations(ctx, cl.c, ns, names, selector, stderr)
+		if code != exitOK {
+			return code
+		}
+		fresh, code := rt.releaseRequests(o, groups, selector, stderr)
+		if code != exitOK {
+			return code
+		}
+		reqs = append(reqs, fresh...)
 	}
 	return rt.createFlow(ctx, o, reqs, stdin, stdout, stderr)
+}
+
+// recoverKeyed finds the Release Operations that an earlier call of the same command made under the key: the
+// caller's own, named K-<8 hex of the SHA-256 of their ModelDeployment's name>, whose Allocations are all among
+// names. Each comes back as the request that created it, so that the create finds it and the command continues on
+// it. An Operation that holds an Allocation the command does not name is another request, and is not recovered: the
+// name its group would take is then taken, and the create is refused. rest is the names that no recovered
+// Operation covers, which must still exist.
+func recoverKeyed(ctx context.Context, cl *caller, ns, key string, names []string) (recovered []opRequest, rest []string, err error) {
+	var ops v1alpha1.OperationList
+	if err := cl.c.List(ctx, &ops, client.InNamespace(ns)); err != nil {
+		return nil, nil, fmt.Errorf("list Operations: %w", err)
+	}
+	named := map[string]bool{}
+	for _, n := range names {
+		named[n] = true
+	}
+	covered := map[string]bool{}
+	for i := range ops.Items {
+		op := &ops.Items[i]
+		r := op.Spec.Release
+		if op.Spec.Action != v1alpha1.OperationActionRelease || r == nil || len(r.Allocations) == 0 || op.Spec.Owner != cl.user ||
+			op.Name != derivedKey(key, op.Spec.ModelDeploymentRef.Name) || !allIn(r.Allocations, named) {
+			continue
+		}
+		for _, a := range r.Allocations {
+			covered[a] = true
+		}
+		recovered = append(recovered, opRequest{name: op.Name, spec: v1alpha1.OperationSpec{
+			Action: op.Spec.Action, ModelDeploymentRef: op.Spec.ModelDeploymentRef, Release: r.DeepCopy(),
+		}})
+	}
+	sort.Slice(recovered, func(i, j int) bool { return recovered[i].name < recovered[j].name })
+	for _, n := range dedupe(names) {
+		if !covered[n] {
+			rest = append(rest, n)
+		}
+	}
+	return recovered, rest, nil
+}
+
+// allIn reports whether every name is in the set.
+func allIn(names []string, set map[string]bool) bool {
+	for _, n := range names {
+		if !set[n] {
+			return false
+		}
+	}
+	return true
 }
 
 // allocationGroup is the Allocations of one ModelDeployment, by name.

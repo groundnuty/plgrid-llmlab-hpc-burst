@@ -221,3 +221,72 @@ func TestReleaseRetryAfterOneDeploymentIsGone(t *testing.T) {
 		t.Errorf("the retry's writes %v, want its one refused create", got)
 	}
 }
+
+// The retry of a keyed release by names after one deployment's Operation has finished and its Allocation is
+// gone (Astra's review of 716): the identical command recovers the Operations it made before it looks for the
+// Allocations, and only an Allocation no keyed Operation covers must still exist. a1 is of m1 and a2 of m2.
+func TestReleaseRetryByNamesAfterOneAllocationIsGone(t *testing.T) {
+	w := newWorld(t, []client.Object{alloc("a1", "m1", nil), alloc("a2", "m2", nil)})
+	w.onPause = func() {
+		for _, n := range w.operations() {
+			if w.operation(n).Status.Plan == nil {
+				w.planFor(n, simplePlan(planAB))
+			}
+		}
+	}
+	if code := w.run("", "release", "a1", "a2", "--key", "k"); code != exitOK {
+		t.Fatalf("first call: exit %d, stderr %q", code, w.errs.String())
+	}
+	// m2's Operation is confirmed, approved and executed: Done, with its Allocation released.
+	done := w.operation("k-29c1b289")
+	done.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planAB}
+	if err := w.store.Update(context.Background(), done); err != nil {
+		t.Fatal(err)
+	}
+	done = w.operation("k-29c1b289")
+	done.Status.Phase = v1alpha1.OperationPhaseDone
+	if err := w.store.Status().Update(context.Background(), done); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.Delete(context.Background(), &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Name: "a2", Namespace: testNS}}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(w.writes())
+
+	if code := w.run("", "release", "a1", "a2", "--key", "k"); code != exitOK {
+		t.Fatalf("retry: exit %d, stderr %q", code, w.errs.String())
+	}
+	if got := w.operations(); len(got) != 2 {
+		t.Errorf("Operations after the retry %v, want the same two", got)
+	}
+	contains(t, "stderr of the retry", w.errs.String(), "Operation k-ca0df2c9 exists with the same request", "Operation k-29c1b289 exists with the same request")
+	contains(t, "stdout of the retry", w.out.String(), "operation: k-ca0df2c9", "operation: k-29c1b289", "phase: Done")
+	for _, wr := range w.writes()[before:] {
+		if wr != "create *v1alpha1.Operation" {
+			t.Errorf("the retry wrote %q", wr)
+		}
+	}
+}
+
+// A smaller request under the same key is a different request: the Operation of the key holds more
+// Allocations than the command names, so it is not recovered, and the key's name is taken.
+func TestReleaseRetryNamingFewerAllocationsIsADifferentRequest(t *testing.T) {
+	w := newWorld(t, []client.Object{alloc("a1", "m1", nil), alloc("a3", "m1", nil)})
+	w.controller("k-ca0df2c9", simplePlan(planAB), "")
+	if code := w.run("", "release", "a1", "a3", "--key", "k"); code != exitOK {
+		t.Fatalf("first call: exit %d, stderr %q", code, w.errs.String())
+	}
+	if code := w.run("", "release", "a1", "--key", "k"); code != exitFail {
+		t.Fatalf("a smaller request under the key: exit %d, want 1", code)
+	}
+	contains(t, "stderr", w.errs.String(), "Operation k-ca0df2c9 exists with a different request")
+	if got := w.operations(); len(got) != 1 {
+		t.Errorf("Operations %v, want the one", got)
+	}
+	// Another identity's Operation of that name is not recovered either: it is not the caller's request.
+	w.user = userB
+	if code := w.run("", "release", "a1", "a3", "--key", "k"); code != exitFail {
+		t.Fatalf("another owner under the key: exit %d, want 1", code)
+	}
+	contains(t, "stderr", w.errs.String(), "exists with a different request")
+}
