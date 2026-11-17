@@ -223,3 +223,68 @@ func TestTheExtrasBoundIsPerProvider(t *testing.T) {
 		}
 	})
 }
+
+// TestTheSameSecondTieIsStable: the primary and PR 4's extra are made in one pass, so in one second, both pending on one
+// Provider. The selection orders equals by the earlier job start, then the older creation time, then the UID (select.go),
+// so the chosen one is the one with the LOWER UID, and stays so pass after pass; when the HIGHER-UID one's job starts first
+// it is the more advanced and becomes the chosen one. The expected side is read off the two Instances' UIDs, never from
+// the selection. The roles of the scripts are the Allocations' names (the provider submits in that order), so the script
+// for the higher-UID Instance is placed by its Allocation's place in that order. The chosen Instance is read through the
+// pass's own selection (primaries), the one step 8 would replace.
+func TestTheSameSecondTieIsStable(t *testing.T) {
+	chosenUID := func(h *rkRig) string {
+		h.t.Helper()
+		ch := h.passOf(hoMD).primaries()
+		if len(ch) != 1 {
+			h.t.Fatalf("%d chosen primaries, want 1", len(ch))
+		}
+		return string(ch[0].UID)
+	}
+	setup := func(t *testing.T, hiWait time.Duration) (h *rkRig, lo, hi string) {
+		t.Helper()
+		h = newRkRig(t, false)
+		h.create(rkMD(nil))
+		h.tick(10 * time.Second) // 08:00:10: the primary and the extra are made, in one second
+		ins := h.instances(hoMD)
+		if len(ins) != 2 || !ins[0].CreationTimestamp.Equal(&ins[1].CreationTimestamp) {
+			t.Fatalf("%d Instances made in the pass at 08:00:10 (created %v), want two in one second", len(ins), ins[0].CreationTimestamp)
+		}
+		loI, hiI := ins[0], ins[1]
+		if loI.UID > hiI.UID {
+			loI, hiI = hiI, loI
+		}
+		// the provider submits the Allocations in the order of their names, so the first by name takes the first script
+		long := pfake.Script{QueueWait: 3 * time.Hour}
+		hiScript := pfake.Script{QueueWait: hiWait}
+		if hiI.Spec.AllocationRef.Name < loI.Spec.AllocationRef.Name {
+			h.batch.Enqueue(hiScript, long)
+		} else {
+			h.batch.Enqueue(long, hiScript)
+		}
+		h.tick(10 * time.Second) // 08:00:20: both jobs are submitted
+		return h, string(loI.UID), string(hiI.UID)
+	}
+	t.Run("both pend: the lower UID is chosen at every pass", func(t *testing.T) {
+		h, lo, _ := setup(t, 3*time.Hour)
+		for i := range 10 {
+			h.tick(10 * time.Second)
+			if got := chosenUID(h); got != lo {
+				t.Fatalf("pass %d at %s: the chosen primary has UID %s, want the lower one, %s", i+1, h.clock.Now().Format(time.TimeOnly), got, lo)
+			}
+		}
+	})
+	t.Run("the higher UID's job starts first: it becomes the chosen one", func(t *testing.T) {
+		// The higher-UID Instance waits 5 min from its submission at 08:00:20, so its job starts at 08:05:20; the other
+		// pends 3 h. Before 08:05:20 the lower UID is chosen; once the job has started, the higher.
+		h, lo, hi := setup(t, 5*time.Minute)
+		h.stepTo(rkAt(0, 5, 10), 10*time.Second, func() {
+			if got := chosenUID(h); got != lo {
+				t.Fatalf("at %s the chosen primary has UID %s, want the lower one, %s, while both pend", h.clock.Now().Format(time.TimeOnly), got, lo)
+			}
+		})
+		h.stepTo(rkAt(0, 6, 0), 10*time.Second, nil)
+		if got := chosenUID(h); got != hi {
+			t.Fatalf("at 00:06 the chosen primary has UID %s, want the higher one, %s: its job started first", got, hi)
+		}
+	})
+}
