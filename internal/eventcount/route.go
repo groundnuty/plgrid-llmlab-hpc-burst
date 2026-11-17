@@ -72,8 +72,9 @@ type route struct {
 	// (the science agent's ruling on #697, 17 Nov 2026).
 	dead bool
 	// retire orders the final recorder call of a raise against retirement: raiseJob's emit holds it for
-	// reading across its dead check and the recorder call, and markDead takes it for writing. It is taken
-	// before mu, and never inside the recorder call's own path.
+	// reading across its checks and the recorder call, and markDead and revive take it for writing. Lock
+	// order, with the Counter's lifecycle mutex: Counter.lc, then retire, then mu (see Counter.lc). Nothing
+	// under the read side takes lc.
 	retire sync.RWMutex
 
 	gate // the loss gate (gate.go)
@@ -86,7 +87,10 @@ type route struct {
 }
 
 func (r *route) attach(s routeSpec) {
-	r.revive() // a recorder built for a label that was retired is a new manager of it
+	r.counter.lifecycle(func() {
+		r.revive()                                       // a recorder built for a label that was retired is a new manager of it
+		r.counter.unlogged.WithLabelValues(r.controller) // the series starts at 0
+	})
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.spec = s

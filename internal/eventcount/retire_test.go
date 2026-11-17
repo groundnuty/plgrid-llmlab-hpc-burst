@@ -5,6 +5,7 @@ package eventcount
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,8 +60,8 @@ func TestAnEventLostInTheMiddleOfForgetLeavesNoSeries(t *testing.T) {
 	r.counter.forgetMid = func() {
 		clk.set(base.Add(101 * time.Second)) // the event's retries run out now
 		within(t, 20*time.Second, "the event to be lost", func() bool {
-			_, exists := r.counter.Unlogged(ctl) // a live route counts it
-			return exists || strings.Contains(r.logs.String(), "stopped for good")
+			v, _ := r.counter.Unlogged(ctl) // a live route counts it; the series stood at 0 before, so 0 is no sign of it
+			return v >= 1 || strings.Contains(r.logs.String(), "stopped for good")
 		})
 	}
 	r.counter.Forget(ctl, notLoggedSeries)
@@ -79,18 +80,17 @@ func TestAForgetBetweenARaisesDeadCheckAndItsEmitLeavesNoSeries(t *testing.T) {
 	clk := &fakeClock{t: base}
 	ctl := ControllerProvider("p1")
 	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
-	retired := make(chan struct{}) // Forget has retired the route
-	finished := make(chan struct{})
-	r.counter.forgetMid = func() { close(retired) }
+	finished := make(chan struct{}) // Forget has retired the route and deleted the series
 	r.pub.emitHook = func() {
 		go func() {
 			r.counter.Forget(ctl, notLoggedSeries)
 			close(finished)
 		}()
-		// Without retirement waiting for the emit, Forget retires at once. With it, Forget waits, so give it
+		// Without retirement waiting for the emit, Forget finishes at once, deletion included, before the emit
+		// counts: the series the emit then creates is the bug. With it, Forget waits for the emit, so give it
 		// a second to show it does not.
 		select {
-		case <-retired:
+		case <-finished:
 		case <-time.After(time.Second):
 		}
 	}
@@ -201,4 +201,109 @@ func TestAZeroAfterTheLabelsForgetRevivesItsRoute(t *testing.T) {
 	if strings.Contains(r.logs.String(), "stopped for good") {
 		t.Errorf("a revived manager's loss was treated as a stopped controller's: %q", r.logs.String())
 	}
+}
+
+// A registration that arrives while the last Forget waits for an emit in flight is not retired with it: the
+// Forget and the Zero are each one transition, in the order they took the lifecycle lock, so the label ends live,
+// and the new manager's losses count and raise (the second delta review of #697, 17 Nov 2026).
+func TestARegistrationDuringARetirementThatWaitsForAnEmitIsNotRetired(t *testing.T) {
+	clk := &fakeClock{t: base}
+	ctl := ControllerProvider("p1")
+	setA, setB := seriesSetA(), seriesSetB()
+	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, setA)
+	inner2 := &recInner{}
+	rec2 := Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
+	inEmit, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	r.pub.emitHook = func() { // the first raise holds inside its recorder call until the test lets it go
+		once.Do(func() { close(inEmit) })
+		<-release
+	}
+	r.raise(crashUID, "reg-a", "JobStarted")
+	clk.set(base.Add(101 * time.Second)) // the event is lost, and its first loss starts a raise
+	select {
+	case <-inEmit:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the raise did not reach its recorder call")
+	}
+	forgot, zeroed := make(chan struct{}), make(chan struct{})
+	go func() { r.counter.Forget(ctl, setA); close(forgot) }() // the last registration: it waits for the emit
+	within(t, 20*time.Second, "the Forget to take its registration out", func() bool { return !r.counter.registered(ctl, setA) })
+	go func() { r.counter.Zero(ctl, setB); close(zeroed) }() // the new manager registers meanwhile
+	select {
+	case <-zeroed: // nothing orders it behind the Forget
+	case <-time.After(time.Second): // it waits its turn
+	}
+	close(release)
+	for _, ch := range []chan struct{}{forgot, zeroed} {
+		select {
+		case <-ch:
+		case <-time.After(20 * time.Second):
+			t.Fatal("Forget or Zero did not finish: a deadlock between the lifecycle lock and an emit")
+		}
+	}
+	if rt := r.peekRoute(ctl); rt == nil || rt.isDead() {
+		t.Fatal("the label's route is dead though a manager registered: the retirement that waited for the emit took the registration with it")
+	}
+	// The route's raises go through the latest manager's recorder, the new one's, and the first raise's EventsNotLogged
+	// went through it too: only what comes after counts.
+	before := len(inner2.byReason(ReasonEventsNotLogged))
+	rec2.EventfID("reg-b", alloc(crashUID), nil, provider.EventKindOrdinary, "JobEnded", "ended", "%s", "a note")
+	clk.set(base.Add(202 * time.Second))
+	within(t, 20*time.Second, "the new manager's loss to be counted", func() bool { v, _ := r.counter.Unlogged(ctl); return v >= 1 })
+	within(t, 20*time.Second, "the new manager's EventsNotLogged", func() bool { return len(inner2.byReason(ReasonEventsNotLogged)) == before+1 })
+}
+
+// A registration in the middle of a Forget keeps what it created: the Zero waits for the Forget to finish, so the
+// Forget's deletion, which knew only the registrations before it, cannot take the series the Zero made, nor the
+// unlogged counter that the new manager's loss then counts into.
+func TestARegistrationInTheMiddleOfAForgetKeepsTheSeriesItCreated(t *testing.T) {
+	clk := &fakeClock{t: base}
+	ctl := ControllerProvider("p1")
+	setA, setB := seriesSetA(), seriesSetB()
+	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, setA)
+	inner2 := &recInner{}
+	rec2 := Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
+	zeroed := make(chan struct{})
+	r.counter.forgetMid = func() { // the Forget has decided it was the last, and retired the route
+		go func() { r.counter.Zero(ctl, setB); close(zeroed) }()
+		select {
+		case <-zeroed: // nothing ordered it behind the Forget
+		case <-time.After(time.Second): // it waits its turn
+		}
+	}
+	r.counter.Forget(ctl, setA)
+	select {
+	case <-zeroed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Zero did not finish after the Forget")
+	}
+	if n := raisedSeries(r.counter, ctl, ReasonEventsNotLogged); n != 1 {
+		t.Errorf("%d EventsNotLogged series after the Zero, want the one the new manager created: the Forget deleted it", n)
+	}
+	if n := raisedSeries(r.counter, ctl, "JobEnded"); n != 1 {
+		t.Errorf("%d JobEnded series after the Zero, want the new manager's own", n)
+	}
+	rec2.EventfID("mid-b", alloc(crashUID), nil, provider.EventKindOrdinary, "JobEnded", "ended", "%s", "a note")
+	clk.set(base.Add(101 * time.Second))
+	within(t, 20*time.Second, "the new manager's loss to be counted", func() bool { v, _ := r.counter.Unlogged(ctl); return v >= 1 })
+	within(t, 20*time.Second, "the new manager's EventsNotLogged", func() bool { return len(inner2.byReason(ReasonEventsNotLogged)) == 1 })
+}
+
+func seriesSetA() []Series {
+	return []Series{{Reason: "JobStarted", Action: "start", Type: provider.EventKindOrdinary}, {Reason: ReasonEventsNotLogged, Action: ActionDegraded, Type: provider.EventKindWarning}}
+}
+
+func seriesSetB() []Series {
+	return []Series{{Reason: "JobEnded", Action: "end", Type: provider.EventKindOrdinary}, {Reason: ReasonEventsNotLogged, Action: ActionDegraded, Type: provider.EventKindWarning}}
+}
+
+// registered is whether the series set is one of the label's registrations.
+func (c *Counter) registered(controller string, series []Series) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.regs[controller][seriesKey(series)]
+	return ok
 }

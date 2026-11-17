@@ -88,6 +88,18 @@ type Counter struct {
 
 	// onForget are run when a controller's series are forgotten: the publisher drops the controller's
 	// route and its loss gate then, since its manager has stopped for good.
+	// lc is the lifecycle mutex. Zero, Forget and a recorder's attach (route.attach) each hold it for the whole
+	// of one transition: the registration, the retirement or revival of the label's route, and the explicit
+	// creation and deletion of its series. A registration and a retirement are therefore never interleaved.
+	//
+	// LOCK ORDER: lc, then a route's retirement lock (route.retire), then its r.mu. Forget and Zero take the
+	// retirement lock for writing while they hold lc: that is how retirement waits for a raise that is handing
+	// EventsNotLogged to the recorder. So nothing that runs under the retirement lock's read side, the
+	// recorder call and everything it reaches (the wrapper's count, route.publish, route.lost), may take lc; the
+	// hot paths count through prometheus's own locks only. mu below is a leaf: it guards the maps, and no hook
+	// is run under it.
+	lc sync.Mutex
+
 	mu       sync.Mutex
 	onForget map[string][]func()
 	// onZero are run when a controller's series are zeroed, a new registration of the label: the publisher
@@ -176,6 +188,8 @@ func (c *Counter) Unlogged(controller string) (value float64, exists bool) {
 //
 // The series set is also the registration of the manager that asks for it: see Forget.
 func (c *Counter) Zero(controller string, series []Series) {
+	c.lc.Lock()
+	defer c.lc.Unlock()
 	for _, s := range series {
 		c.vec.WithLabelValues(controller, s.Reason, s.Action, s.Type)
 	}
@@ -187,13 +201,20 @@ func (c *Counter) Zero(controller string, series []Series) {
 		c.regs[controller] = map[string][]Series{}
 	}
 	c.regs[controller][seriesKey(series)] = append([]Series(nil), series...)
-	hooks := c.onZero[controller]
+	hooks := append([]func(){}, c.onZero[controller]...)
 	c.mu.Unlock()
 	// A new registration means the label is live again: a route that a Forget retired is revived, and its
 	// unlogged series comes back at 0.
 	for _, f := range hooks {
 		f()
 	}
+}
+
+// lifecycle runs f as one lifecycle transition (see lc).
+func (c *Counter) lifecycle(f func()) {
+	c.lc.Lock()
+	defer c.lc.Unlock()
+	f()
 }
 
 // seriesKey names a series set: its entries sorted, so the set a manager zeroes is the set it forgets.
@@ -221,6 +242,8 @@ func seriesKey(series []Series) string {
 // that is still queued, or whose EventsNotLogged is being raised, can bring a series back once it is deleted
 // (the delta reviews of #697, 17 Nov 2026).
 func (c *Counter) Forget(controller string, series []Series) {
+	c.lc.Lock()
+	defer c.lc.Unlock()
 	c.mu.Lock()
 	delete(c.regs[controller], seriesKey(series))
 	live := len(c.regs[controller]) > 0
@@ -233,11 +256,11 @@ func (c *Counter) Forget(controller string, series []Series) {
 	var hooks []func()
 	if !live {
 		delete(c.regs, controller)
-		hooks = c.onForget[controller]
+		hooks = append([]func(){}, c.onForget[controller]...)
 	}
 	c.mu.Unlock()
 	for _, f := range hooks {
-		f()
+		f() // retire the route: this waits for a raise that is handing its event to the recorder
 	}
 	if c.forgetMid != nil {
 		c.forgetMid()
@@ -248,13 +271,7 @@ func (c *Counter) Forget(controller string, series []Series) {
 		}
 	}
 	if !live {
-		// A manager that registered while the label was being retired keeps the series it just zeroed.
-		c.mu.Lock()
-		reregistered := len(c.regs[controller]) > 0
-		c.mu.Unlock()
-		if !reregistered {
-			c.unlogged.DeleteLabelValues(controller)
-		}
+		c.unlogged.DeleteLabelValues(controller)
 	}
 }
 
@@ -374,7 +391,6 @@ func Events(inner events.EventRecorder, c *Counter, controller string, opts ...O
 			panic("eventcount: a recorder wrapped with a log needs the scheme and the reporting controller")
 		}
 		r.rt = o.log.Publisher.routeFor(controller, c)
-		c.unlogged.WithLabelValues(controller) // the series starts at 0
 		r.rt.attach(routeSpec{scheme: o.log.Scheme, reporting: o.log.ReportingController, lease: o.log.Lease, rec: r})
 	}
 	return r
