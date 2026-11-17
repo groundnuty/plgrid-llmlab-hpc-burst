@@ -162,7 +162,7 @@ Problems this addresses, in general terms:
 
 ### Two controllers
 
-- **The Provider's controller** is the only component that calls a platform. Each Provider has its own controller-runtime manager, with its own leader `Lease`, `provider-<name>`, in the namespace `hpcburst-system`, which the launcher creates (HBEP-11). It writes under the field manager `hpcburst-provider` (Provider status), in beta an Operation's start estimate included (Core operations, `Estimate`).
+- **The Provider's controller** is the only component that calls a platform. Each Provider has its own controller-runtime manager, with its own leader `Lease`, `provider-<name>`, in the namespace `hpcburst-system`, which the launcher creates (HBEP-11). It writes under the field manager `hpcburst-provider` (Provider status), and in beta an Operation's start estimates under its own per-Provider manager, `hpcburst-provider-<provider>` (Core operations, `Estimate`).
 - **For a Slurm Provider** that manager runs crossplane-runtime's managed reconciler over the Allocations whose `providerConfigRef` names the Provider. The management policies exclude Update, so a submitted job is never edited. Its external client maps onto the core operations as follows, and HBEP-7's open question 11 gives the full protocol:
   - **Connect:** the profile reader. A failure sets a condition on the Provider and makes no call.
   - **Observe:** find by tag; adopt a job when none is recorded; settle (cancel every held job with the tag except the recorded one, then lift the recorded job's hold once); read the recorded job back; report Lost after `lostGrace`; report a requeue as Failed.
