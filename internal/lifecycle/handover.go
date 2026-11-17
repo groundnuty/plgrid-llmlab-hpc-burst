@@ -75,18 +75,16 @@ func (p *pass) capacity() error {
 			break
 		}
 	}
-	if p.holdsSelection() {
-		// An Executing Operation's committed targets are acted on by the Operations step, before this one. The controller's
-		// own selection is never called here, beside any Operation: it could pick another victim than the one that was
-		// approved, or one the Operation did not commit to (HBEP-7, step 7).
-		// No extra is made beside an Executing Operation either: the Operation holds the deployment's count, and an
-		// extra would add an Allocation the plan did not count (k616's merge of #664 into #708).
-		return nil
-	}
 	// Each Provider where the loop made a new Allocation gets its extra, after every missing primary it could place
 	// (extra.go). An extra no check admits is silent, so it never reaches noProvider() above.
 	if err := p.createExtras(placed); err != nil {
 		return err
+	}
+	if p.holdsSelection() {
+		// An Executing Operation's committed targets are acted on by the Operations step, before this one. The controller's
+		// own selection is never called here, beside any Operation: it could pick another victim than the one that was
+		// approved, or one the Operation did not commit to (HBEP-7, step 7).
+		return nil
 	}
 	// The chosen primaries are read again: the loop above made Instances, which the selection counts. The surplus,
 	// ready or not, is taken every pass, not only when the count is lowered (scaleDownTargets).
