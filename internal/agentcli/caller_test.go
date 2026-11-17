@@ -13,8 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
@@ -89,7 +91,7 @@ func TestLoadCallerNeedsAnExplicitKubeconfig(t *testing.T) {
 	t.Setenv("KUBECONFIG", "") // the process variable; the CLI reads only what it is handed
 
 	var stderr bytes.Buffer
-	_, err := loadCaller(context.Background(), "", "", &stderr)
+	_, err := loadCaller(context.Background(), "", Env{}, &stderr)
 	var u usageError
 	if !errors.As(err, &u) {
 		t.Fatalf("no kubeconfig: %v, want a usage error", err)
@@ -112,7 +114,7 @@ func TestLoadCallerFlagBeforeVariable(t *testing.T) {
 	envPath := kubeconfigFor(t, dir, "env", envSrv.URL, "")
 
 	var stderr bytes.Buffer
-	c, err := loadCaller(context.Background(), flagPath, envPath, &stderr)
+	c, err := loadCaller(context.Background(), flagPath, Env{Kubeconfig: envPath}, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +132,7 @@ func TestLoadCallerFlagBeforeVariable(t *testing.T) {
 	}
 
 	// The variable alone, and a context with no namespace: default.
-	c, err = loadCaller(context.Background(), "", envPath, &stderr)
+	c, err = loadCaller(context.Background(), "", Env{Kubeconfig: envPath}, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +163,7 @@ func TestLoadCallerIdentities(t *testing.T) {
 			srv := newAPIServer(t, r.user, r.groups)
 			path := kubeconfigFor(t, t.TempDir(), "kc", srv.URL, "")
 			var stderr bytes.Buffer
-			c, err := loadCaller(context.Background(), path, "", &stderr)
+			c, err := loadCaller(context.Background(), path, Env{}, &stderr)
 			if r.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), r.wantErr) {
 					t.Fatalf("error %v, want one holding %q", err, r.wantErr)
@@ -193,7 +195,7 @@ func TestLoadCallerRefusesWhatItCannotUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, path := range map[string]string{"an empty file": empty, "a missing file": filepath.Join(dir, "absent")} {
-		_, err := loadCaller(context.Background(), path, "", &bytes.Buffer{})
+		_, err := loadCaller(context.Background(), path, Env{}, &bytes.Buffer{})
 		if err == nil {
 			t.Errorf("%s: no error", name)
 			continue
@@ -202,7 +204,7 @@ func TestLoadCallerRefusesWhatItCannotUse(t *testing.T) {
 			t.Errorf("%s: %v: the in-cluster configuration was tried", name, err)
 		}
 	}
-	_, err := loadCaller(context.Background(), "", "/a/kubeconfig:/another", &bytes.Buffer{})
+	_, err := loadCaller(context.Background(), "", Env{Kubeconfig: "/a/kubeconfig:/another"}, &bytes.Buffer{})
 	var u usageError
 	if !errors.As(err, &u) || !strings.Contains(err.Error(), "more than one file") {
 		t.Errorf("a KUBECONFIG list: %v, want a usage error", err)
@@ -365,7 +367,7 @@ func TestAKubeconfigErrorNeverPrintsACredential(t *testing.T) {
 
 // loadFor is loadCaller on one kubeconfig file, with no variable and nothing to say on stderr.
 func loadFor(path string) (*caller, error) {
-	return loadCaller(context.Background(), path, "", &bytes.Buffer{})
+	return loadCaller(context.Background(), path, Env{}, &bytes.Buffer{})
 }
 
 // tokenServer answers SelfSubjectReview with the user that owns the bearer token of the request, and records
@@ -468,3 +470,43 @@ func TestARelativeCredentialPathWithNoDirectoryToResolveAgainstIsRefused(t *test
 		t.Error("a relative tokenFile was accepted with no kubeconfig directory to resolve it against")
 	}
 }
+
+// WrapTransport is a test seam: nil leaves the configuration's transport as it is, and a wrapper sees the
+// commands' requests, the SelfSubjectReview among them.
+func TestWrapTransportIsNilInProductionAndSeesEveryRequestInATest(t *testing.T) {
+	rc := &rest.Config{Host: "http://127.0.0.1:1"}
+	wrapTransport(rc, nil)
+	if rc.WrapTransport != nil {
+		t.Error("a nil WrapTransport changed the configuration's transport")
+	}
+
+	srv := newAPIServer(t, userA, groupsOfAgent)
+	path := kubeconfigFor(t, t.TempDir(), "kc", srv.URL, "")
+	var seen atomic.Int32
+	wrap := func(rt http.RoundTripper) http.RoundTripper {
+		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			seen.Add(1)
+			return rt.RoundTrip(r)
+		})
+	}
+	if _, err := loadCaller(context.Background(), path, Env{WrapTransport: wrap}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := seen.Load(); n != 1 {
+		t.Errorf("the wrapper saw %d requests, want the one SelfSubjectReview", n)
+	}
+	if got := srv.seen(); len(got) != 1 {
+		t.Errorf("the API server got %v, want the one SelfSubjectReview through the wrapper", got)
+	}
+	seen.Store(0)
+	if _, err := loadCaller(context.Background(), path, Env{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := seen.Load(); n != 0 {
+		t.Errorf("a call without the seam went through the wrapper %d times", n)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

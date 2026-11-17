@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -61,10 +62,10 @@ type caller struct {
 // loader falls back to the in-cluster configuration when a file is empty. One SelfSubjectReview then says
 // who the caller is. A controller's ServiceAccount is refused there, not by path; any identity outside
 // the agents' group is allowed with a note on stderr, since the person acts with the admin kubeconfig.
-func loadCaller(ctx context.Context, flagPath, envPath string, stderr io.Writer) (*caller, error) {
+func loadCaller(ctx context.Context, flagPath string, env Env, stderr io.Writer) (*caller, error) {
 	path := flagPath
 	if path == "" {
-		path = envPath
+		path = env.Kubeconfig
 	}
 	if path == "" {
 		return nil, usageError{errNoKubeconfig}
@@ -89,6 +90,7 @@ func loadCaller(ctx context.Context, flagPath, envPath string, stderr io.Writer)
 		return nil, kubeconfigUnusable(path)
 	}
 	rc.Timeout, rc.UserAgent = requestTimeout, "hpcburst"
+	wrapTransport(rc, env.WrapTransport)
 	user, groups, err := whoAmI(ctx, rc)
 	if err != nil {
 		return nil, err
@@ -133,6 +135,14 @@ func kubeconfigFault(path string, err error) error {
 // fits together. Like kubeconfigFault it never prints the error of client-go.
 func kubeconfigUnusable(path string) error {
 	return fmt.Errorf("the kubeconfig %s is not usable: its current context, cluster or user is missing or invalid (what is wrong with it is not shown, because the file holds credentials)", path)
+}
+
+// wrapTransport puts the test seam of Env on the configuration, ahead of both the SelfSubjectReview and the
+// client of the commands, which are made from it. With no wrapper it changes nothing.
+func wrapTransport(rc *rest.Config, wrap func(http.RoundTripper) http.RoundTripper) {
+	if wrap != nil {
+		rc.Wrap(wrap)
+	}
 }
 
 // whoAmI asks the API server who the configuration's credential is: one SelfSubjectReview.

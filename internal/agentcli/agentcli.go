@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 )
 
@@ -39,11 +40,17 @@ const usage = `usage: hpcburst scale <md> --instances N [flags]
 // places where a launcher's kubeconfigs and the default kubeconfig live; nothing here reads them, and
 // nothing may (a test plants a kubeconfig in each and runs every command to show it). IsTerminal says
 // whether the commands may ask a question: true only when stdin and stdout are both terminals.
+//
+// WrapTransport is a test seam with no production caller: when it is set, every request the commands make
+// goes through the round tripper it returns. The end-to-end tests use it to act between a command's two
+// calls to the API server. It has no flag and no environment variable, so nothing outside a test can set
+// it; nil, which is what hpcburst passes, leaves the transport as the kubeconfig makes it.
 type Env struct {
-	Kubeconfig   string
-	Home         string
-	XDGStateHome string
-	IsTerminal   func() bool
+	Kubeconfig    string
+	Home          string
+	XDGStateHome  string
+	IsTerminal    func() bool
+	WrapTransport func(http.RoundTripper) http.RoundTripper
 }
 
 func (e Env) terminal() bool { return e.IsTerminal != nil && e.IsTerminal() }
@@ -67,7 +74,7 @@ const pollInterval = 500 * time.Millisecond
 func Run(ctx context.Context, args []string, env Env, stdin io.Reader, stdout, stderr io.Writer) int {
 	rt := &cli{env: env, now: time.Now, pause: sleep, poll: pollInterval, newName: generatedName}
 	rt.connect = func(ctx context.Context, kubeconfig string, stderr io.Writer) (*caller, error) {
-		return loadCaller(ctx, kubeconfig, env.Kubeconfig, stderr)
+		return loadCaller(ctx, kubeconfig, env, stderr)
 	}
 	return rt.run(ctx, args, stdin, stdout, stderr)
 }
