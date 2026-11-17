@@ -37,10 +37,12 @@ const warmUpFailureText = "the engine answered 500"
 //   - the start-up outcome is a failure (outcomes.go: an Instance that ends before ready because its
 //     qualification or warm-up failed is a failure), carrying the reason QualificationFailed and no gate verdict,
 //     the class's counts 1 failure, 1 qualification failure of 1 outcome;
-//   - the Allocation is released at once, with the failure's reason as its cause (HBEP-7, Release: "An Allocation
-//     whose Instance failed serves nothing, so it is released at once"; failNoted ends the Instance with release
-//     set, and deleteAllocation writes the cause first, endCause: "Instance <name> failed: <reason>"). It is not
-//     kept under its retention policy, which an Allocation left empty by an ordinary end follows.
+//   - the Allocation is released at once, in the very pass that ends the Instance (read with no further Step: a
+//     release left to the next pass's tombstone, which deletes with the same cause, must fail the row), with the
+//     failure's reason as its cause (HBEP-7, Release: "An Allocation whose Instance failed serves nothing, so it
+//     is released at once"; failNoted ends the Instance with release set, and deleteAllocation writes the cause
+//     first, endCause: "Instance <name> failed: <reason>"). It is not kept under its retention policy, which an
+//     Allocation left empty by an ordinary end follows.
 func TestAWorkersFailedWarmUpBeforeTheFirstReadyFailsTheInstance(t *testing.T) {
 	log := newCauseLog()
 	rg := newRig(t, withInterceptors(log.funcs()))
@@ -78,6 +80,17 @@ func TestAWorkersFailedWarmUpBeforeTheFirstReadyFailsTheInstance(t *testing.T) {
 
 	startUntil(rg, "md", 20*time.Minute, "the Instance ended", func() bool { return ended(rg.instance(name)) })
 	got := rg.instance(name)
+
+	// The release (HBEP-7, Release): at once, so it is read here, with no Step and no wait after the pass that ended
+	// the Instance, and nothing below steps before the outcome's wait. end() deletes the Allocation in that pass. A
+	// wait would let a release the ending pass skipped pass anyway: the next pass's tombstone deletes the Allocation
+	// of a failed Instance with the same cause (instances.go). The cause is the failure's reason, which the store
+	// held when the delete was made.
+	if cause, deleted := log.deletedWith(allocName); !deleted {
+		t.Errorf("the Allocation was not deleted in the pass that ended the Instance, want it released at once: a delete made by a later pass is not at once")
+	} else if want := "Instance " + name + " failed: QualificationFailed"; cause != want {
+		t.Errorf("the Allocation was deleted with the cause %q in the store, want it written first: %s", cause, want)
+	}
 
 	// What ended it.
 	if got.Status.EndReason != v1alpha1.ReasonQualificationFailed || got.Status.ReadyTime != nil {
@@ -120,13 +133,6 @@ func TestAWorkersFailedWarmUpBeforeTheFirstReadyFailsTheInstance(t *testing.T) {
 	}
 	if events != 1 {
 		t.Errorf("the Instance recorded %d QualificationFailed events, want 1", events)
-	}
-
-	// The release (HBEP-7, Release): at once, with the failure's reason as its cause, which the store held when the
-	// delete was made.
-	startUntil(rg, "md", 5*time.Minute, "the Allocation deleted", func() bool { _, ok := log.deletedWith(allocName); return ok })
-	if cause, _ := log.deletedWith(allocName); cause != "Instance "+name+" failed: QualificationFailed" {
-		t.Errorf("the Allocation was deleted with the cause %q in the store, want it written first: Instance %s failed: QualificationFailed", cause, name)
 	}
 
 	// The start-up outcome (outcomes.go): a failure, kept for its Allocation. The classifier's table says it, and
