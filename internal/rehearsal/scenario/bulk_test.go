@@ -8,9 +8,10 @@ package scenario_test
 //
 // Each mode runs twice, one stack after the other: first without the bulk path, the run's own
 // control, then with it. The science agent's ruling S4 on #448, as revised after the third hosted run
-// (comment 6828152670; judgeS4): the run is valid when its control stalls the streams to a gap p99 of
-// at least 85 ms, and it passes when the bulk-on p99 is 75 ms or less and at least 30 ms below its own
-// control. A control under 85 ms makes the run INVALID, never a pass; both figures and the link's
+// (comment 6828152670) and again on #701 (judgeS4): the run is valid when its control stalls the streams
+// to a gap p99 of at least 85 ms, and it passes when the bulk-on p99 is 75 ms or less and at least 30%
+// below its own control (a relative margin since #701: a fixed 30 ms failed a 33% cut by 0.56 ms on a
+// noisy runner). A control under 85 ms makes the run INVALID, never a pass; both figures and the link's
 // achieved rate are always logged.
 //
 // What would make this prove nothing, and how it's ruled out:
@@ -58,7 +59,7 @@ const (
 	bulkReplyBytes  = 64 << 20
 	s4ControlMinP99 = 85 * time.Millisecond // a control below this makes the run invalid (S4, revised)
 	s4PassMaxP99    = 75 * time.Millisecond // a bulk-on p99 above this fails (S4)
-	s4PassMinMargin = 30 * time.Millisecond // a bulk-on p99 less than this below its control fails (S4, revised)
+	s4PassMinCutPct = 30                    // a bulk-on p99 less than this percent below its control fails (S4, revised on #701)
 )
 
 // bulkRun is one stack's measurement.
@@ -122,9 +123,12 @@ const (
 	s4Pass
 )
 
-// judgeS4 judges one run by S4 as revised (#448, comment 6828152670): valid when the control's gap
-// p99 is at least s4ControlMinP99; then a pass when the bulk-on p99 is at most s4PassMaxP99 and at
-// least s4PassMinMargin below the control, and a fail otherwise. It says why, with both figures.
+// judgeS4 judges one run by S4 as revised (#448, comment 6828152670; #701): valid when the control's gap
+// p99 is at least s4ControlMinP99; then a pass when the bulk-on p99 is at most s4PassMaxP99 and at least
+// s4PassMinCutPct percent below the control, that is bulk <= 70% of control, and a fail otherwise. The
+// margin is relative since `@hpc-burst-science-agent`'s ruling on #701, 17 Nov 2026 (a fixed 30 ms missed a
+// 33% cut by 0.56 ms on a noisy runner), and the run is not repeated on a near miss. It says why, with both
+// figures, and for a missed margin the cut as a percentage.
 func judgeS4(control, bulk time.Duration) (s4Verdict, string) {
 	figures := fmt.Sprintf("gap p99 %s without the bulk path, %s with it, %s apart", control, bulk, control-bulk)
 	switch {
@@ -132,8 +136,13 @@ func judgeS4(control, bulk time.Duration) (s4Verdict, string) {
 		return s4Invalid, fmt.Sprintf("%s: the control is under %s, so this run can't show a stall to remove", figures, s4ControlMinP99)
 	case bulk > s4PassMaxP99:
 		return s4Fail, fmt.Sprintf("%s: the bulk path's is above %s", figures, s4PassMaxP99)
-	case control-bulk < s4PassMinMargin:
-		return s4Fail, fmt.Sprintf("%s: less than %s apart", figures, s4PassMinMargin)
+	case int64(control-bulk)*100 < int64(control)*s4PassMinCutPct:
+		// Integer arithmetic, so the boundary (a cut of exactly 30%) is exact; the control is at least
+		// s4ControlMinP99 here, so it is not zero. The cut prints truncated to a tenth of a percent, so
+		// a printed 30.0% or more is never a fail.
+		cut := float64(int64(control-bulk)*1000/int64(control)) / 10
+		limit := control * (100 - s4PassMinCutPct) / 100
+		return s4Fail, fmt.Sprintf("%s: the bulk path's is %.1f%% below the control's, under the %d%% it must be (at most %s)", figures, cut, s4PassMinCutPct, limit)
 	}
 	return s4Pass, figures
 }
