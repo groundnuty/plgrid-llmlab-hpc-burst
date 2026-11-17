@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -73,6 +75,9 @@ func loadCaller(ctx context.Context, flagPath, envPath string, stderr io.Writer)
 	cfg, err := clientcmd.LoadFromFile(path)
 	if err != nil {
 		return nil, kubeconfigFault(path, err)
+	}
+	if err := resolveCredentialPaths(cfg, path); err != nil {
+		return nil, kubeconfigUnusable(path)
 	}
 	cc := clientcmd.NewDefaultClientConfig(*cfg, &clientcmd.ConfigOverrides{})
 	rc, err := cc.ClientConfig()
@@ -154,4 +159,38 @@ func scheme() (*runtime.Scheme, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// resolveCredentialPaths makes every file that a kubeconfig names, a CA, a client certificate or key, a token
+// file, an absolute path against the kubeconfig's own directory. client-go's loading rules do that, and
+// LoadFromFile alone does not: the relative path would then be read from the process's working directory, so a
+// stray file there could make the command act as another identity. A reference that is still relative after the
+// resolution is refused, so the working directory is never read.
+func resolveCredentialPaths(cfg *clientcmdapi.Config, path string) error {
+	for _, c := range cfg.Clusters {
+		if c.LocationOfOrigin == "" {
+			c.LocationOfOrigin = path
+		}
+	}
+	for _, a := range cfg.AuthInfos {
+		if a.LocationOfOrigin == "" {
+			a.LocationOfOrigin = path
+		}
+	}
+	if err := clientcmd.ResolveLocalPaths(cfg); err != nil {
+		return err
+	}
+	var refs []*string
+	for _, c := range cfg.Clusters {
+		refs = append(refs, clientcmd.GetClusterFileReferences(c)...)
+	}
+	for _, a := range cfg.AuthInfos {
+		refs = append(refs, clientcmd.GetAuthInfoFileReferences(a)...)
+	}
+	for _, ref := range refs {
+		if *ref != "" && !filepath.IsAbs(*ref) {
+			return errors.New("a credential file is named by a path that cannot be resolved")
+		}
+	}
+	return nil
 }

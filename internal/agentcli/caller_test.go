@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // apiServer is a stand-in API server that answers SelfSubjectReview for one identity and records every
@@ -306,4 +308,105 @@ func TestAKubeconfigErrorNeverPrintsACredential(t *testing.T) {
 // loadFor is loadCaller on one kubeconfig file, with no variable and nothing to say on stderr.
 func loadFor(path string) (*caller, error) {
 	return loadCaller(context.Background(), path, "", &bytes.Buffer{})
+}
+
+// tokenServer answers SelfSubjectReview with the user that owns the bearer token of the request, and records
+// the tokens it saw. A request with another token is Unauthorized.
+type tokenServer struct {
+	*httptest.Server
+	mu   sync.Mutex
+	seen []string
+}
+
+func newTokenServer(t *testing.T, users map[string]string) *tokenServer {
+	t.Helper()
+	s := &tokenServer{}
+	// TLS, because client-go reads a kubeconfig's credentials only when the transport is secure.
+	s.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		s.mu.Lock()
+		s.seen = append(s.seen, tok)
+		s.mu.Unlock()
+		user, ok := users[tok]
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview",
+			"status": map[string]any{"userInfo": map[string]any{"username": user, "groups": groupsOfAgent}},
+		})
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// A relative credential path in a kubeconfig is relative to the kubeconfig's own directory, never to the
+// process's. For dir/config with tokenFile: token, the token is dir/token, agent A's; a ./token in the
+// working directory, which is another identity's, must not be read.
+func TestARelativeCredentialPathIsResolvedAgainstTheKubeconfigsDirectory(t *testing.T) {
+	const tokA, tokB = "tok-invented-agent-a", "tok-invented-other"
+	srv := newTokenServer(t, map[string]string{tokA: userA, tokB: userB})
+	dir, cwd := t.TempDir(), t.TempDir()
+	for path, tok := range map[string]string{filepath.Join(dir, "token"): tokA, filepath.Join(cwd, "token"): tokB} {
+		if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := fmt.Sprintf("apiVersion: v1\nkind: Config\nclusters: [{name: c, cluster: {server: %q, insecure-skip-tls-verify: true}}]\nusers: [{name: u, user: {tokenFile: token}}]\n"+
+		"contexts: [{name: x, context: {cluster: c, user: u}}]\ncurrent-context: x\n", srv.URL)
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	c, err := loadFor(filepath.Join(dir, "config"))
+	if err != nil {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		t.Fatalf("%v (the API server saw the tokens %q)", err, srv.seen)
+	}
+	if c.user != userA {
+		t.Errorf("the command acts as %q, want %q: the token came from the working directory, not from the kubeconfig's", c.user, userA)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.seen) != 1 || srv.seen[0] != tokA {
+		t.Errorf("the API server saw the tokens %q, want only the kubeconfig directory's", srv.seen)
+	}
+}
+
+// A reference that is still relative after the resolution is refused, so the working directory is never read.
+func TestARelativeCredentialPathThatCannotBeResolvedIsRefused(t *testing.T) {
+	cfg := clientcmdapi.NewConfig()
+	cfg.AuthInfos["u"] = &clientcmdapi.AuthInfo{TokenFile: "token"} // no LocationOfOrigin: the loader did not set it
+	if err := resolveCredentialPaths(cfg, "/agent/config"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.AuthInfos["u"].TokenFile; got != "/agent/token" {
+		t.Errorf("tokenFile %q, want it resolved against the kubeconfig's directory: /agent/token", got)
+	}
+	// Every kind of reference is resolved the same way.
+	cfg = clientcmdapi.NewConfig()
+	cfg.Clusters["c"] = &clientcmdapi.Cluster{CertificateAuthority: "ca.crt"}
+	cfg.AuthInfos["u"] = &clientcmdapi.AuthInfo{ClientCertificate: "tls.crt", ClientKey: "tls.key", TokenFile: "sub/token"}
+	if err := resolveCredentialPaths(cfg, "/agent/config"); err != nil {
+		t.Fatal(err)
+	}
+	for got, want := range map[string]string{cfg.Clusters["c"].CertificateAuthority: "/agent/ca.crt", cfg.AuthInfos["u"].ClientCertificate: "/agent/tls.crt",
+		cfg.AuthInfos["u"].ClientKey: "/agent/tls.key", cfg.AuthInfos["u"].TokenFile: "/agent/sub/token"} {
+		if got != want {
+			t.Errorf("resolved to %q, want %q", got, want)
+		}
+	}
+}
+
+// With no file to resolve against, a relative reference is refused, never left for the working directory.
+func TestARelativeCredentialPathWithNoDirectoryToResolveAgainstIsRefused(t *testing.T) {
+	cfg := clientcmdapi.NewConfig()
+	cfg.AuthInfos["u"] = &clientcmdapi.AuthInfo{TokenFile: "token"}
+	if err := resolveCredentialPaths(cfg, ""); err == nil {
+		t.Error("a relative tokenFile was accepted with no kubeconfig directory to resolve it against")
+	}
 }
