@@ -138,6 +138,7 @@ func (p *pass) loadOperations() error {
 // returned joined.
 func (p *pass) operations() error {
 	if err := p.loadOperations(); err != nil {
+		p.opsHold = true // an Operation may be committed and its spec unwritten: nothing is created in a pass that cannot tell
 		return err
 	}
 	env := &opEnv{p: p}
@@ -145,6 +146,9 @@ func (p *pass) operations() error {
 	for _, op := range p.ops {
 		if err := p.operation(op, env); err != nil {
 			errs = append(errs, fmt.Errorf("Operation %s: %w", op.Name, err))
+		}
+		if err := p.releaseOperationFinalizer(op); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

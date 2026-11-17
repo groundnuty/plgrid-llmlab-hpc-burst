@@ -138,10 +138,17 @@ func keptWarmStarted(a *v1alpha1.Allocation) bool {
 // markCleared reports whether a marked Allocation's mark goes now. Two conditions, each read from the cluster's state:
 //   - an Instance is placed on it (a replacement, an added Instance, a repurpose): a live Instance that the marking Operation did not
 //     commit to, or any live Instance when that Operation is gone;
-//   - it hosts a live Instance that is not ending while no committed, unfinished Operation targets it, which is the serving pair of a
-//     Scale above zero once the Operation has finished. Under an End or a Scale to zero the spec ends that Instance, so the mark stays.
+//   - it hosts a live Instance that the spec keeps, with its deployment not in shutdown (HBEP-7, Reconcile loop, step 4) and no
+//     committed, unfinished Operation targeting it, which is the serving pair of a Scale above zero once the Operation has finished.
+//     Under an End or a Scale to zero the spec ends that Instance, so the mark stays.
 //
-// Once the mark is gone, the Allocation follows its retention policy as any other does (HBEP-10, The report, Kept warm).
+// An Operation whose approved plan releases a marked Allocation clears its mark at its commit (markBeforeActing). Once the mark is
+// gone, the Allocation follows its retention policy as any other does (HBEP-10, The report, Kept warm).
+//
+// Two stated limits, which no design here closes: a mark is cleared when an Instance is placed on its Allocation, so a later shutdown
+// of that Instance follows retention as for any serving Allocation, and an agent that extends a deployment's end time, which needs no
+// approval, can have the controller reuse a kept-warm Allocation and release it at the new end time; and where the profile sets no
+// maxIdle a marked, started Allocation idles until its hard end, which the report names.
 func (p *pass) markCleared(a *v1alpha1.Allocation) bool {
 	live := p.liveOn(a.Name)
 	if len(live) == 0 {
@@ -160,14 +167,25 @@ func (p *pass) markCleared(a *v1alpha1.Allocation) bool {
 			return true // placed after the mark
 		}
 	}
-	if p.targetedByUnfinishedOperation(a) {
+	if p.targetedByUnfinishedOperation(a) || p.md == nil || p.shutdown {
 		return false
 	}
 	for _, in := range live {
-		if in.Status.Phase != v1alpha1.InstanceDraining && in.DeletionTimestamp.IsZero() {
+		if in.Status.Phase != v1alpha1.InstanceDraining && in.DeletionTimestamp.IsZero() && p.keptBySpec(in) {
 			if _, began := drainBegan(in); !began {
-				return true // it serves on, and no Operation ends it
+				return true // it serves on, the spec keeps it, and no Operation ends it
 			}
+		}
+	}
+	return false
+}
+
+// keptBySpec reports whether the spec keeps the Instance: it is one of the primaries the desired count chooses, or a member or
+// replacement of one's hedge. A surplus Instance is one the controller's own scale-down will take.
+func (p *pass) keptBySpec(in *v1alpha1.Instance) bool {
+	for _, c := range p.primaries() {
+		if c.Name == in.Name || hedgeKey(c) == hedgeKey(in) {
+			return true
 		}
 	}
 	return false

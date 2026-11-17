@@ -246,7 +246,7 @@ func (p *pass) run() error {
 	// The rest of the pass works from what it wrote, never from the object read at the start, and a spec that could
 	// not be written holds back every creation of this pass.
 	md = p.md
-	if md != nil && md.Spec.Source.Served != nil && !p.shutdown && !p.opsHold {
+	if md != nil && md.Spec.Source.Served != nil && !p.shutdown && !p.opsHold && !p.creationHeld() {
 		if err := p.capacity(); err != nil {
 			return errors.Join(instErr, err)
 		}

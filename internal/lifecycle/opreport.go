@@ -6,6 +6,7 @@ package lifecycle
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -194,7 +195,7 @@ func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, 
 			// The Operation never releases a job it sees started: the approval was to cancel a queued one. It carried the mark since
 			// before the first act (markBeforeActing), so the outcome records what the Operation did, and a later clearing of the mark
 			// does not change it (HBEP-10, The report, Kept warm).
-			return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and it was kept warm, marked before the Operation acted. Only the profile's maxIdle, its hard end, a failure's release, a person's delete while no finalizer holds, or a new approved Release releases a marked, started Allocation, until an Instance is placed on it or, under a Scale above zero, its Instance serves on once the Operation has finished, and the mark is cleared. A maxIdle the profile sets still applies, unpriced", true, nil
+			return reasonJobStartedSinceCommit, eventNote(keptWarmMessage + p.keptWarmNote(op, a)), true, nil
 		}
 		if acted && releasingEffect(t.Effect) {
 			// An Instance that is a committed target and has failed for good stays live, so this Allocation is never empty.
@@ -207,6 +208,27 @@ func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, 
 		}
 	}
 	return "", "", false, nil
+}
+
+// keptWarmMessage is what the report says of a committed CancelPending Allocation target whose job started since the commit: what the
+// Operation did, which a later clearing of the mark does not change (HBEP-10, The report, Kept warm).
+const keptWarmMessage = "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and it was kept warm, marked before the Operation acted. Only the profile's maxIdle, its hard end, a failure's release, a person's delete while no finalizer holds, or an approved Release releases a marked, started Allocation, until an Instance is placed on it or, under a Scale above zero, its Instance serves on once the Operation has finished, and the mark is cleared."
+
+// keptWarmNote names the marked, started Allocation's hard end where the profile sets no maxIdle, so its requester can repurpose it or
+// plan a Release: it idles until its hard end, past its keep date, its idle limit and the deployment's end. A Scale above zero keeps
+// the pair serving, so it says nothing of idling.
+func (p *pass) keptWarmNote(op *v1alpha1.Operation, a *v1alpha1.Allocation) string {
+	if scaleAboveZero(op) {
+		return ""
+	}
+	if pv := p.pvOf(a.Labels); pv != nil && pv.profile != nil && pv.settings.maxIdle != nil {
+		return fmt.Sprintf(" The profile's maxIdle, %s, still applies, unpriced.", *pv.settings.maxIdle)
+	}
+	end := "not known yet"
+	if h := a.Status.AtProvider.HardEnd; h != nil {
+		end = h.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf(" The profile sets no maxIdle: it idles until its hard end, %s, past its keep date, its idle limit and the deployment's end, unless an approved Release frees it. Repurpose it or plan a Release.", end)
 }
 
 // lastReadyMessage says why a committed Instance was not drained.

@@ -30,6 +30,15 @@ const (
 	// rule, so a person's later direct delete, which has no finalizer of this
 	// kind, still releases it (HBEP-10, The report, as amended by #698).
 	FinalizerKeptWarm = Group + "/held-by-kept-warm"
+
+	// FinalizerOperationUnfinished is on an Operation that is committed and not
+	// finished. The lifecycle controller adds it at the Operation's commit and
+	// removes it once the Operation is finished, so a person's delete of an
+	// unfinished Operation waits, and its committed targets and the count it has
+	// to give back are not lost (HBEP-10, The report, Kept warm). It is a
+	// metadata update of the Operation object (the update verb on operations,
+	// not operations/status).
+	FinalizerOperationUnfinished = Group + "/operation-unfinished"
 )
 
 // Label keys under the group's prefix (HBEP-11, API, Labels).

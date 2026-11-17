@@ -157,6 +157,12 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 	// Synced=False it carried before its delete says nothing about the delete).
 	deleting := p.deletingBeforeThePass(op)
 	specOK := true
+	// A committed Operation is kept until it finishes: its finalizer is on it from the commit, so a person's delete of it waits and
+	// its committed targets and the count it has to give back are not lost (HBEP-10, The report, Kept warm).
+	if err := p.keepOperationUntilFinished(op); err != nil {
+		p.opsHold = true
+		return err
+	}
 	// Marked before acting: every committed CancelPending Allocation target carries the kept-warm mark before the spec is written
 	// and before any act, so a job that starts after the commit is never one the Operation could release by another rule. Until
 	// every mark has landed nothing else happens: the Operation stays Executing, nothing is created, and the next pass retries
@@ -416,13 +422,14 @@ func (p *pass) holdDeletionForKeptWarm(md *v1alpha1.ModelDeployment) error {
 }
 
 // markBeforeActing writes the kept-warm mark on every committed Allocation target approved only as a queued cancel (CancelPending)
-// that does not carry this Operation's mark, and returns the errors of the writes that failed. It runs first in every pass of an
-// executing Operation, before the spec write and before any act, and nothing else happens in a pass in which a mark did not land
-// (executing). An Allocation that is gone is skipped: there is nothing to protect.
+// that does not carry this Operation's mark, and clears the mark of every Allocation the approved plan releases as started or kept,
+// since that release is now priced and approved; it returns the errors of the writes that failed. It runs first in every pass of a
+// committed, unfinished Operation, before the spec write and before any act, and nothing else happens in a pass in which a write did
+// not land (executing). A target whose Allocation is gone needs no mark.
 func (p *pass) markBeforeActing(op *v1alpha1.Operation) error {
 	var errs []error
 	for _, t := range op.Status.Committed {
-		if t.Kind != v1alpha1.TargetKindAllocation || t.Effect != v1alpha1.PlanEffectCancelPending {
+		if t.Kind != v1alpha1.TargetKindAllocation || !releasingEffect(t.Effect) {
 			continue
 		}
 		a, err := p.committedAllocation(t)
@@ -433,11 +440,70 @@ func (p *pass) markBeforeActing(op *v1alpha1.Operation) error {
 		if a == nil || !a.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if err := p.keepWarm(op, a); err != nil {
-			errs = append(errs, err)
+		if t.Effect == v1alpha1.PlanEffectCancelPending {
+			if err := p.keepWarm(op, a); err != nil {
+				errs = append(errs, err)
+			}
+		} else if keptWarm(a) {
+			if err := p.clearKeptWarm(a); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// keepOperationUntilFinished adds FinalizerOperationUnfinished to a committed Operation that does not carry it: a metadata update of
+// the Operation object (the update verb on operations, not on operations/status). An Operation that is being deleted already cannot
+// take a new finalizer, and is left as it is.
+func (p *pass) keepOperationUntilFinished(op *v1alpha1.Operation) error {
+	if controllerutil.ContainsFinalizer(op, v1alpha1.FinalizerOperationUnfinished) || !op.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	next := op.DeepCopy()
+	controllerutil.AddFinalizer(next, v1alpha1.FinalizerOperationUnfinished)
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+		return fmt.Errorf("add the finalizer to Operation %s: %w", op.Name, err)
+	}
+	*op = *next
+	return nil
+}
+
+// releaseOperationFinalizer removes FinalizerOperationUnfinished from an Operation that is finished (or ended without a commit): a
+// delete of it, waiting for it, then completes. It runs for every Operation of the pass, so a removal that failed, or a restart
+// between the finish and the removal, is made by a later pass.
+func (p *pass) releaseOperationFinalizer(op *v1alpha1.Operation) error {
+	if !controllerutil.ContainsFinalizer(op, v1alpha1.FinalizerOperationUnfinished) {
+		return nil
+	}
+	switch op.Status.Phase {
+	case v1alpha1.OperationPhaseDone, v1alpha1.OperationPhaseStale, v1alpha1.OperationPhaseRefused:
+	default:
+		if !finishedOperation(op) {
+			return nil
+		}
+	}
+	next := op.DeepCopy()
+	controllerutil.RemoveFinalizer(next, v1alpha1.FinalizerOperationUnfinished)
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("remove the finalizer from Operation %s: %w", op.Name, err)
+	}
+	return nil
+}
+
+// creationHeld reports whether the controller creates no Allocation and no Instance in this pass (HBEP-7, Reconcile loop, steps 7 and
+// 8): from an Operation's commit until its spec write lands, nothing unmarked may appear for its deployment. It reads the Operation's
+// state, and an unknown commit holds too.
+func (p *pass) creationHeld() bool {
+	if p.commitUnknown {
+		return true
+	}
+	for _, op := range p.ops {
+		if isExecuting(op) && !apimeta.IsStatusConditionTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) {
+			return true
+		}
+	}
+	return false
 }
 
 // endWithDelete reports whether the Operation is an End with delete.
@@ -602,9 +668,10 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		if p.releasePending(a) {
 			return nil // a failure owes this release: its own path makes it, with its cause
 		}
-		// A STATED LIMIT, which no design here closes (HBEP-10, The report, Kept warm): a job that starts at the very instant this
-		// cancel is sent is released started and unpriced, since the scheduler applies the cancel to a job whatever its state. Closing
-		// it needs a cancel that is applied only to a pending job (HBEP-4, a proposed question).
+		// A STATED LIMIT, which no design here closes (HBEP-10, The report, Kept warm): a job that starts after its Provider last read
+		// the queue (30 s by default), or while a refused cancel is being retried, is released started and unpriced by this cancel,
+		// whether the Operation's or retention's release of a pending Allocation. Closing it needs a cancel that the scheduler applies
+		// only to a pending job (HBEP-4, a proposed question).
 		return p.deleteAllocation(a, v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID))
 	}
 	return nil
@@ -699,10 +766,11 @@ func (p *pass) giveBackDue(op *v1alpha1.Operation) (units int, due bool) {
 	return units, units > 0
 }
 
-// giveBack raises spec.instances by the untaken units and records it (HBEP-10, The report, as amended by #698). With N the
-// plan's count and U the units, it writes N + U, absolute, with the resourceVersion read, ONLY while spec.instances is still N,
-// the value the Operation wrote; a count a person set stands, with nothing given back. A restart that finds N + U written and no
-// record writes the record alone. The Operation finishes only after the record lands (report).
+// giveBack raises spec.instances by the untaken units and records it (HBEP-10, The report, as amended by #698 and #707). With N the
+// plan's count and U the units, it writes N + U, absolute, with the resourceVersion read, while spec.instances is still N, the
+// value the Operation wrote; if a person raised it to V above N it writes the larger of V and N + U; a count a person lowered below N
+// stands, with nothing given back. A restart that finds the count written and no record writes the record alone. The Operation
+// finishes only after the record lands (report).
 func (p *pass) giveBack(op *v1alpha1.Operation, units int) error {
 	n, u := op.Spec.Scale.Instances, int32(units)
 	rec := &v1alpha1.CountGivenBack{Units: u}
@@ -717,12 +785,21 @@ func (p *pass) giveBack(op *v1alpha1.Operation, units int) error {
 		v := n + u
 		rec.Instances = &v
 		message = fmt.Sprintf("%d untaken units: spec.instances is %d again, the plan's %d plus them", units, n+u, n)
-	case cur == n+u:
-		v := cur
-		rec.Instances = &v
-		message = fmt.Sprintf("%d untaken units: spec.instances is %d again, the plan's %d plus them", units, cur, n)
+	case cur > n:
+		// A person raised it to V above N, which needs no approval: the larger of V and N + U is written, so a raise never takes back
+		// the untaken units. V at or above N + U already holds them, and nothing is written.
+		want := max(cur, n+u)
+		if want != cur {
+			next := p.md.DeepCopy()
+			next.Spec.Instances = want
+			if err := p.writeSpec(next, fmt.Sprintf("give back %d untaken units, set spec.instances to %d", units, want)); err != nil {
+				return err
+			}
+		}
+		rec.Instances = &want
+		message = fmt.Sprintf("%d untaken units: spec.instances is %d, the larger of the %d a person raised it to and the plan's %d plus them", units, want, cur, n)
 	default:
-		message = fmt.Sprintf("%d untaken units, and nothing given back: a person set spec.instances to %d; it stands", units, cur)
+		message = fmt.Sprintf("%d untaken units, and nothing given back: a person lowered spec.instances to %d, below the plan's %d; it stands", units, cur, n)
 	}
 	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 		s.CountGivenBack = rec
