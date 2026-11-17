@@ -106,6 +106,7 @@ func (r *route) lost(why, reason, id string, err error, closes *raiseJob) {
 	if why == lostQueue {
 		r.runFull = true
 	}
+	r.fullOpen.Store(r.losing && r.runFull)
 	var job *raiseJob
 	rode := false // this loss's raise is a job already waiting
 	if j := r.loss; j != nil && !j.started {
@@ -149,14 +150,46 @@ func (r *route) logged(it *item) {
 		r.closingStoredLocked(it.closes)
 	}
 	// pending counts the event just stored, which is still in flight.
-	if r.losing && (!r.runFull || (pending-1)*2 < r.p.o.QueueSize) {
-		r.losing = false
-		r.owed.add(span{gen: r.gen, since: r.runStart, count: r.runCount})
+	if r.losing && (!r.runFull || r.belowHalf(pending)) {
+		r.endRunLocked()
 	}
 	var job *raiseJob
 	if !r.losing {
 		job = r.closingJobLocked(now)
 	}
+	r.mu.Unlock()
+	if job != nil {
+		r.p.notify.push(job)
+	}
+}
+
+// belowHalf reports whether the publisher's queue, pending events including the one just stored and still in
+// flight, is below half its size: the low-water mark that ends a queue-full run.
+func (r *route) belowHalf(pending int) bool { return (pending-1)*2 < r.p.o.QueueSize }
+
+// endRunLocked ends the open run: its span is owed to a closing.
+func (r *route) endRunLocked() {
+	r.losing = false
+	r.fullOpen.Store(false)
+	r.owed.add(span{gen: r.gen, since: r.runStart, count: r.runCount})
+}
+
+// queueDrained ends this route's queue-full run, if it holds one, because ANOTHER route's publish succeeded with
+// the shared queue below half its size: the run's cause is the queue the routes share, and it has drained, so the
+// run need not wait for this route to publish (the science agent's ruling on #697, 17 Nov 2026). The closing the
+// ended run owes is raised as usual.
+func (r *route) queueDrained(pending int) {
+	if !r.fullOpen.Load() { // the cheap test: no lock for a route that holds no queue-full run
+		return
+	}
+	now := r.p.now()
+	r.mu.Lock()
+	if r.dead || !r.losing || !r.runFull || !r.belowHalf(pending) {
+		r.mu.Unlock()
+		return
+	}
+	r.endRunLocked()
+	job := r.closingJobLocked(now)
 	r.mu.Unlock()
 	if job != nil {
 		r.p.notify.push(job)
@@ -288,6 +321,7 @@ func (r *route) revive() {
 	r.dead = false
 	r.epoch++
 	r.gate = gate{gen: r.gen}
+	r.fullOpen.Store(false)
 	r.warnedAt = time.Time{}
 	r.counter.unlogged.WithLabelValues(r.controller)
 }

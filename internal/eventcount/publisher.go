@@ -257,6 +257,7 @@ func (p *Publisher) deliver(it *item) {
 		switch {
 		case err == nil:
 			it.r.logged(it)
+			p.sweepFullRuns(it.r)
 			return
 		case full:
 			it.r.lost(lostFull, it.reason, it.id, err, it.closes)
@@ -269,6 +270,28 @@ func (p *Publisher) deliver(it *item) {
 		case <-time.After(wait):
 		case <-p.ctx.Done():
 		}
+	}
+}
+
+// sweepFullRuns ends the queue-full run of every route but stored's that holds one, when the queue the routes
+// share is below half its size: stored's own route has just taken its own path (route.logged). The routes are
+// copied under the publisher's lock and visited after it is released, each under its own lock, so the order
+// of the two locks is never inverted.
+func (p *Publisher) sweepFullRuns(stored *route) {
+	pending := p.Pending() // counts the event just stored, which is still in flight
+	if (pending-1)*2 >= p.o.QueueSize {
+		return
+	}
+	p.mu.Lock()
+	routes := make([]*route, 0, len(p.routes))
+	for _, r := range p.routes {
+		if r != stored {
+			routes = append(routes, r)
+		}
+	}
+	p.mu.Unlock()
+	for _, r := range routes {
+		r.queueDrained(pending)
 	}
 }
 
