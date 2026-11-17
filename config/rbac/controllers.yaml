@@ -1,6 +1,7 @@
 # The controllers' own identities (HBEP-10, Audit; HBEP-11, Single-user host; issue #660, PR A): a
-# ServiceAccount, a ClusterRole and a ClusterRoleBinding for each of the three processes that call the
-# API server, so that the audit log tells a controller's write from a person's.
+# ServiceAccount, a ClusterRole and its ClusterRoleBinding, and a Role and its RoleBinding in hpcburst-system
+# for the Lease, for each of the three processes that call the API server, so that the audit log tells a
+# controller's write from a person's.
 #
 #   hpcburst-lifecycle  the lifecycle controller's manager (the lifecycle and verification controllers,
 #                       the observers, the metrics collectors, the agent API's Allocation lookup, the
@@ -11,7 +12,7 @@
 #   hpcburst-front      hpcburst-front --kubeconfig. The relay keeper and the durable log build no API client.
 #
 # hpcburst up installs every object here on every start (after k3s is ready, before the supervisor), and
-# resets each to this file: a role's rules, a binding's subjects (a binding whose roleRef differs is deleted
+# resets each to this file: a role's rules (ClusterRole or Role), a binding's subjects (a binding whose roleRef differs is deleted
 # and made again, since roleRef cannot change). It then issues one token per ServiceAccount, written into
 # <state>/identities/system/<name>.kubeconfig. hpcburst upgrade does the same before it starts the
 # supervisor again. This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
@@ -27,9 +28,14 @@
 #     LIST on its own. So a kind that is only ever read from the cache has no `get` below.
 #   - Both Kubernetes event recorders write only CREATE and PATCH (client-go tools/record and tools/events),
 #     the first into core/v1 events, the second into events.k8s.io events.
-#   - A leader-election Lease lock is GET, CREATE and UPDATE (client-go resourcelock leaselock.go).
+#   - A leader-election Lease lock is GET, CREATE and UPDATE (client-go resourcelock leaselock.go). Every
+#     controller's Lease lives in hpcburst-system only, so the Lease verbs are a Role and a RoleBinding in that
+#     namespace for each identity (below the ClusterRoles), never a ClusterRole's: a controller's Lease write in
+#     any other namespace is Forbidden. Events stay in the ClusterRoles, since a deployment, and so the events
+#     about it, can be in any namespace.
 # Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
-# would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it); deletes of
+# would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it, and were it set,
+# the Forbidden would surface as a reconcile error, not silently); deletes of
 # Operations (HBEP-10's 7-day removal, not wired yet: its PR adds the verb); impersonation, RBAC, CRDs,
 # admission objects, namespaces, nodes, tokens.
 apiVersion: v1
@@ -90,11 +96,6 @@ rules:
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]
     verbs: ["get", "list", "watch", "create"]
-  # The lifecycle Lease (leader election), and the reads of it and of the front's by the observer, the gap
-  # emitter and the tunnel state's events.
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "create", "update"]
   # The typed events (events.k8s.io) of the lifecycle controller, the observers and the tunnel state.
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
@@ -132,10 +133,6 @@ rules:
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]
     verbs: ["get", "create"]
-  # The Provider's own Lease, provider-<name> (leader election), and the gap emitter's read of it.
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "create", "update"]
   # The legacy events (core/v1) of crossplane-runtime's recorder, and the typed ones (events.k8s.io).
   - apiGroups: [""]
     resources: ["events"]
@@ -157,10 +154,6 @@ rules:
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]
     verbs: ["list"]
-  # The front's own Lease, its heartbeat.
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "create", "update"]
   - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
@@ -198,6 +191,82 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
+  name: hpcburst-front
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-front
+    namespace: hpcburst-system
+---
+# The Lease verbs, in hpcburst-system alone. hpcburst-lifecycle: the lifecycle Lease (leader election) and its
+# reads of it and of the front's, by the observer, the gap emitter and the tunnel state's events.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hpcburst-lifecycle
+  namespace: hpcburst-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+# hpcburst-provider: its Provider's Lease, provider-<name> (leader election), and the gap emitter's read of it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hpcburst-provider
+  namespace: hpcburst-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+# hpcburst-front: its own Lease, its heartbeat.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hpcburst-front
+  namespace: hpcburst-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hpcburst-lifecycle
+  namespace: hpcburst-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hpcburst-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-lifecycle
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hpcburst-provider
+  namespace: hpcburst-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hpcburst-provider
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-provider
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hpcburst-front
+  namespace: hpcburst-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
   name: hpcburst-front
 subjects:
   - kind: ServiceAccount

@@ -698,7 +698,7 @@ An **Operation** is created with `spec.owner` set to the creator's own user name
 
 ### The controllers' own identities
 
-The processes that call the API server on the host, other than the launcher, each run as an identity of their own, so that the API server's audit log tells a controller's write from a person's ([HBEP-10](../hbep/0010-agent-primitives/README.md), Audit; [HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host). Each is a ServiceAccount in the namespace `hpcburst-system`, with a ClusterRole and a ClusterRoleBinding of the same name, all from `config/rbac/controllers.yaml`:
+The processes that call the API server on the host, other than the launcher, each run as an identity of their own, so that the API server's audit log tells a controller's write from a person's ([HBEP-10](../hbep/0010-agent-primitives/README.md), Audit; [HBEP-11](../hbep/0011-kubernetes-control-plane/README.md), Single-user host). Each is a ServiceAccount in the namespace `hpcburst-system`, with a ClusterRole and a ClusterRoleBinding of the same name, and a Role and RoleBinding of that name in `hpcburst-system` for its Lease, all from `config/rbac/controllers.yaml`:
 
 | Identity | Process | Its kubeconfig |
 |---|---|---|
@@ -712,7 +712,7 @@ The relay keeper and the durable log build no API client. The launcher keeps the
 - **`down` leaves the files.** The next `up` issues new tokens to the same paths, with later expiries. A supervisor that restarts a crashed child reuses the files it has.
 - **No rotation.** Nothing renews a token while the host runs. `hpcburst status` lists each identity with its expiry and prints a WARNING when 30 days or fewer are left; `hpcburst down` and `hpcburst up` issue new ones.
 - **The stated risk** ([#660](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/660), the science agent's ruling S1; the owner's stance that security is light): a controller's token that leaks stays valid until it expires, up to a year. An unbound token cannot be revoked other than by deleting its ServiceAccount from `hpcburst-system`, which ends that identity until the next `up` makes it again. The files are readable by the host's user only, and no token is ever logged, printed or put on a command line.
-- **What each role grants** is exactly what its component calls, enumerated from the code and proved by running the real controllers' suites under these identities (the controller's harness, CI's `launcher-k3s`): a verb that is missing shows as a Forbidden. No role has a wildcard, a Secret, a delete other than the lifecycle controller's own of Instances and Allocations, or any RBAC, CRD, admission or token object. A change to a controller that adds an API call extends its role in the same change.
+- **What each role grants** is exactly what its component calls, enumerated from the code and proved by running the real controllers' suites under these identities (the controller's harness, CI's `launcher-k3s`): a verb that is missing shows as a Forbidden. Every controller's Lease lives in `hpcburst-system` alone, so the Lease verbs are the namespaced Role's: a Lease write in any other namespace is Forbidden. No role has a wildcard, a Secret, a delete other than the lifecycle controller's own of Instances and Allocations, or any RBAC, CRD, admission or token object. A change to a controller that adds an API call extends its role in the same change.
 
 ### Where the accounting records are
 

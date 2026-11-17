@@ -84,7 +84,6 @@ var wantControllerRules = map[string][]string{
 		"hpcburst.groundnuty.github.io modeldeployments/status operations/status: update",
 		"hpcburst.groundnuty.github.io providers/status: patch",
 		"apps controllerrevisions: get list watch create",
-		"coordination.k8s.io leases: get create update",
 		"events.k8s.io events: create patch",
 	},
 	"hpcburst-provider": {
@@ -94,17 +93,19 @@ var wantControllerRules = map[string][]string{
 		"hpcburst.groundnuty.github.io allocations/status: update patch",
 		"hpcburst.groundnuty.github.io providers/status: update",
 		"apps controllerrevisions: get create",
-		"coordination.k8s.io leases: get create update",
 		"core events: create patch",
 		"events.k8s.io events: create patch",
 	},
 	"hpcburst-front": {
 		"hpcburst.groundnuty.github.io modeldeployments instances providers platformprofiles: list watch",
 		"apps controllerrevisions: list",
-		"coordination.k8s.io leases: get create update",
 		"events.k8s.io events: create patch",
 	},
 }
+
+// wantLeaseVerbs is each identity's Role in hpcburst-system, by hand: every controller's leader Lease (or, for the
+// front, its heartbeat Lease) lives in hpcburst-system alone, and a Lock is GET, CREATE and UPDATE.
+var wantLeaseVerbs = []string{"coordination.k8s.io leases create", "coordination.k8s.io leases get", "coordination.k8s.io leases update"}
 
 // triples expands a role's rules into "group resource verb" strings.
 func rulesOf(t testing.TB, role *unstructured.Unstructured) []string {
@@ -163,6 +164,12 @@ func TestControllerRolesGrantExactlyTheEnumeration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, role := range m.roles {
+		// The Lease verbs are a Role of hpcburst-system, never a ClusterRole's: a Lease write anywhere else is Forbidden.
+		if got := rulesOf(t, role); !slices.Equal(got, wantLeaseVerbs) || role.GetNamespace() != "hpcburst-system" {
+			t.Errorf("the Role %s of %s grants %q, want %q in hpcburst-system", role.GetName(), role.GetNamespace(), got, wantLeaseVerbs)
+		}
+	}
+	for _, role := range m.clusterRoles {
 		name := role.GetName()
 		got, want := rulesOf(t, role), wantTriples(name)
 		if !slices.Equal(got, want) {
@@ -172,6 +179,9 @@ func TestControllerRolesGrantExactlyTheEnumeration(t *testing.T) {
 			f := strings.Fields(tr)
 			if len(f) == 2 { // the core group is the empty string
 				f = append([]string{""}, f...)
+			}
+			if f[1] == "leases" {
+				t.Errorf("the ClusterRole %s grants %q: the Lease verbs are the Role of hpcburst-system", name, tr)
 			}
 			if f[0] == "*" || f[1] == "*" || f[2] == "*" {
 				t.Errorf("the ClusterRole %s holds a wildcard: %q", name, tr)
@@ -260,6 +270,36 @@ func TestControllerManifestIsRefusedWhenItsShapeIsWrong(t *testing.T) {
 			_ = unstructured.SetNestedField(find(o, "ClusterRoleBinding", "hpcburst-front").Object, "hpcburst-lifecycle", "roleRef", "name")
 			return o
 		}, "role"},
+		{"a Role that grants more than leases", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			setRule(find(o, "Role", "hpcburst-front"), "resources", []any{"leases", "pods"})
+			return o
+		}, "leases alone"},
+		{"a Role of another API group", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			setRule(find(o, "Role", "hpcburst-provider"), "apiGroups", []any{"apps"})
+			return o
+		}, "Lease verbs"},
+		{"a Role with a wildcard verb", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			setRule(find(o, "Role", "hpcburst-lifecycle"), "verbs", []any{"*"})
+			return o
+		}, "wildcard"},
+		{"a Role in another namespace", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			find(o, "Role", "hpcburst-front").SetNamespace("default")
+			return o
+		}, "unexpected Role"},
+		{"a RoleBinding to a ClusterRole", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			_ = unstructured.SetNestedField(find(o, "RoleBinding", "hpcburst-front").Object, "ClusterRole", "roleRef", "kind")
+			return o
+		}, "role ClusterRole"},
+		{"a RoleBinding to another subject", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			b := find(o, "RoleBinding", "hpcburst-front")
+			_ = unstructured.SetNestedSlice(b.Object, []any{map[string]any{"kind": "Group", "name": "system:authenticated"}}, "subjects")
+			return o
+		}, "subject"},
+		{"a ClusterRole missing", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
+			return slices.DeleteFunc(o, func(x *unstructured.Unstructured) bool {
+				return x.GetKind() == "ClusterRole" && x.GetName() == "hpcburst-front"
+			})
+		}, "ClusterRoles"},
 		{"a ServiceAccount missing", func(o []*unstructured.Unstructured) []*unstructured.Unstructured {
 			return slices.DeleteFunc(o, func(x *unstructured.Unstructured) bool {
 				return x.GetKind() == "ServiceAccount" && x.GetName() == "hpcburst-front"

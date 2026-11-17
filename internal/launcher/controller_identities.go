@@ -32,9 +32,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -87,18 +92,23 @@ func ControllerKubeconfig(stateDir, name string) string {
 	return layout{stateDir}.controllerKubeconfig(name)
 }
 
-// controllerManifest is the decoded config/rbac/controllers.yaml, in apply order.
+// controllerManifest is the decoded config/rbac/controllers.yaml, in apply order: the ServiceAccounts, the
+// ClusterRoles, the Roles of hpcburst-system (the Lease verbs), then the bindings of both.
 type controllerManifest struct {
-	accounts []*unstructured.Unstructured
-	roles    []*unstructured.Unstructured
-	bindings []*unstructured.Unstructured
+	accounts        []*unstructured.Unstructured
+	clusterRoles    []*unstructured.Unstructured
+	roles           []*unstructured.Unstructured
+	clusterBindings []*unstructured.Unstructured
+	bindings        []*unstructured.Unstructured
 }
 
-// all returns the objects in apply order: the ServiceAccounts, the roles, then the bindings.
+// all returns the objects in apply order.
 func (m *controllerManifest) all() []*unstructured.Unstructured {
-	out := slices.Clone(m.accounts)
-	out = append(out, m.roles...)
-	return append(out, m.bindings...)
+	var out []*unstructured.Unstructured
+	for _, l := range [][]*unstructured.Unstructured{m.accounts, m.clusterRoles, m.roles, m.clusterBindings, m.bindings} {
+		out = append(out, l...)
+	}
+	return out
 }
 
 // controllerObjects decodes the embedded manifest and checks its shape (controllerManifestOf).
@@ -111,22 +121,28 @@ func controllerObjects() (*controllerManifest, error) {
 }
 
 // controllerManifestOf sorts decoded objects into a controllerManifest. It refuses anything but the three
-// ServiceAccounts of hpcburst-system, the three ClusterRoles and the three ClusterRoleBindings, each once;
-// a binding that names more than its one ServiceAccount, a role with an aggregationRule and a rule with a
-// wildcard in its groups, resources or verbs. A change to the file that the launcher does not understand
-// stops here and not at a start, and a role cannot grow a wildcard in silence.
+// ServiceAccounts of hpcburst-system, the three ClusterRoles and ClusterRoleBindings, and the three Roles and
+// RoleBindings of hpcburst-system, each once; a binding that names more than its one ServiceAccount or a
+// role of another name, a role with an aggregationRule, a Role that grants anything but the Lease verbs, and
+// a rule with a wildcard in its groups, resources or verbs. A change to the file that the launcher does not
+// understand stops here and not at a start, and a role cannot grow a wildcard in silence.
 func controllerManifestOf(objs []*unstructured.Unstructured) (*controllerManifest, error) {
 	m := &controllerManifest{}
 	for _, o := range objs {
+		inSystem := o.GetNamespace() == v1alpha1.ControllerNamespace
 		switch {
-		case o.GetKind() == "ServiceAccount" && o.GetAPIVersion() == "v1" && o.GetNamespace() == v1alpha1.ControllerNamespace:
+		case o.GetKind() == "ServiceAccount" && o.GetAPIVersion() == "v1" && inSystem:
 			m.accounts = append(m.accounts, o)
-		case o.GetKind() == "ClusterRole" && o.GetAPIVersion() == "rbac.authorization.k8s.io/v1":
+		case o.GetKind() == "ClusterRole" && o.GetAPIVersion() == "rbac.authorization.k8s.io/v1" && o.GetNamespace() == "":
+			m.clusterRoles = append(m.clusterRoles, o)
+		case o.GetKind() == "ClusterRoleBinding" && o.GetAPIVersion() == "rbac.authorization.k8s.io/v1" && o.GetNamespace() == "":
+			m.clusterBindings = append(m.clusterBindings, o)
+		case o.GetKind() == "Role" && o.GetAPIVersion() == "rbac.authorization.k8s.io/v1" && inSystem:
 			m.roles = append(m.roles, o)
-		case o.GetKind() == "ClusterRoleBinding" && o.GetAPIVersion() == "rbac.authorization.k8s.io/v1":
+		case o.GetKind() == "RoleBinding" && o.GetAPIVersion() == "rbac.authorization.k8s.io/v1" && inSystem:
 			m.bindings = append(m.bindings, o)
 		default:
-			return nil, fmt.Errorf("the controllers manifest holds an unexpected %s %s, want the ServiceAccounts, ClusterRoles and ClusterRoleBindings %v (the ServiceAccounts in %s)",
+			return nil, fmt.Errorf("the controllers manifest holds an unexpected %s %s, want the ServiceAccounts, ClusterRoles, ClusterRoleBindings, Roles and RoleBindings %v (the namespaced ones in %s)",
 				o.GetKind(), o.GetName(), ControllerIdentityNames(), v1alpha1.ControllerNamespace)
 		}
 	}
@@ -139,18 +155,19 @@ func controllerManifestOf(objs []*unstructured.Unstructured) (*controllerManifes
 		slices.Sort(n)
 		return n
 	}
-	for what, got := range map[string][]string{"ServiceAccounts": names(m.accounts), "ClusterRoles": names(m.roles), "ClusterRoleBindings": names(m.bindings)} {
+	for what, got := range map[string][]string{"ServiceAccounts": names(m.accounts), "ClusterRoles": names(m.clusterRoles), "ClusterRoleBindings": names(m.clusterBindings),
+		"Roles": names(m.roles), "RoleBindings": names(m.bindings)} {
 		if !slices.Equal(got, want) {
 			return nil, fmt.Errorf("the controllers manifest holds the %s %v, want %v, each once", what, got, want)
 		}
 	}
-	for _, r := range m.roles {
+	for _, r := range append(slices.Clone(m.clusterRoles), m.roles...) {
 		if _, ok := r.Object["aggregationRule"]; ok {
-			return nil, fmt.Errorf("the ClusterRole %s has an aggregationRule, which lets a controller rewrite its rules", r.GetName())
+			return nil, fmt.Errorf("the %s %s has an aggregationRule, which lets a controller rewrite its rules", r.GetKind(), r.GetName())
 		}
 		rules, _, err := unstructured.NestedSlice(r.Object, "rules")
 		if err != nil || len(rules) == 0 {
-			return nil, fmt.Errorf("the ClusterRole %s has no rules, or they are not a list (%v)", r.GetName(), err)
+			return nil, fmt.Errorf("the %s %s has no rules, or they are not a list (%v)", r.GetKind(), r.GetName(), err)
 		}
 		for i, rule := range rules {
 			rm, _ := rule.(map[string]any)
@@ -158,31 +175,43 @@ func controllerManifestOf(objs []*unstructured.Unstructured) (*controllerManifes
 				vals, _ := rm[key].([]any)
 				for _, v := range vals {
 					if s, _ := v.(string); s == "*" {
-						return nil, fmt.Errorf("the ClusterRole %s has a wildcard in %s of its rule %d: each role grants exactly what its component calls", r.GetName(), key, i+1)
+						return nil, fmt.Errorf("the %s %s has a wildcard in %s of its rule %d: each role grants exactly what its component calls", r.GetKind(), r.GetName(), key, i+1)
 					}
+				}
+			}
+			// The namespaced Role is the Lease verbs and nothing else: what a controller does in
+			// hpcburst-system alone.
+			if r.GetKind() == "Role" {
+				if g, _ := rm["apiGroups"].([]any); len(g) != 1 || g[0] != "coordination.k8s.io" {
+					return nil, fmt.Errorf("the Role %s grants %v in %s, want the Lease verbs of coordination.k8s.io alone", r.GetName(), rm["apiGroups"], v1alpha1.ControllerNamespace)
+				}
+				if res, _ := rm["resources"].([]any); len(res) != 1 || res[0] != "leases" {
+					return nil, fmt.Errorf("the Role %s grants %v in %s, want leases alone", r.GetName(), rm["resources"], v1alpha1.ControllerNamespace)
 				}
 			}
 		}
 	}
-	for _, b := range m.bindings {
+	for _, b := range append(slices.Clone(m.clusterBindings), m.bindings...) {
 		subjects, _, _ := unstructured.NestedSlice(b.Object, "subjects")
 		if len(subjects) != 1 {
-			return nil, fmt.Errorf("the ClusterRoleBinding %s has %d subjects, want only its own ServiceAccount", b.GetName(), len(subjects))
+			return nil, fmt.Errorf("the %s %s has %d subjects, want only its own ServiceAccount", b.GetKind(), b.GetName(), len(subjects))
 		}
 		sm, _ := subjects[0].(map[string]any)
 		if sm["kind"] != "ServiceAccount" || sm["name"] != b.GetName() || sm["namespace"] != v1alpha1.ControllerNamespace {
-			return nil, fmt.Errorf("the ClusterRoleBinding %s names the subject %v, want the ServiceAccount %s of %s", b.GetName(), sm, b.GetName(), v1alpha1.ControllerNamespace)
+			return nil, fmt.Errorf("the %s %s names the subject %v, want the ServiceAccount %s of %s", b.GetKind(), b.GetName(), sm, b.GetName(), v1alpha1.ControllerNamespace)
 		}
-		if ref, _, _ := unstructured.NestedString(b.Object, "roleRef", "name"); ref != b.GetName() {
-			return nil, fmt.Errorf("the ClusterRoleBinding %s names the role %q, want the role of its own name", b.GetName(), ref)
+		ref, _, _ := unstructured.NestedString(b.Object, "roleRef", "name")
+		refKind, _, _ := unstructured.NestedString(b.Object, "roleRef", "kind")
+		if ref != b.GetName() || refKind+"Binding" != b.GetKind() {
+			return nil, fmt.Errorf("the %s %s names the role %s %q, want the %s of its own name", b.GetKind(), b.GetName(), refKind, ref, strings.TrimSuffix(b.GetKind(), "Binding"))
 		}
 	}
 	return m, nil
 }
 
-// InstallControllerRBAC makes the three ServiceAccounts, roles and bindings exist and be the manifest's,
+// InstallControllerRBAC makes the three ServiceAccounts, the roles and the bindings exist and be the manifest's,
 // with server-side apply, so repeating it is safe. The roles and bindings that exist already are set to
-// the manifest's rules and subjects first (resetAgentObjects), so what was added by hand does not survive
+// the manifest's rules and subjects first (resetControllerObjects), so what was added by hand does not survive
 // a start. The namespace hpcburst-system must exist (ensureControllerNamespace).
 func InstallControllerRBAC(ctx context.Context, cfg *rest.Config, log io.Writer) error {
 	m, err := controllerObjects()
@@ -193,7 +222,7 @@ func InstallControllerRBAC(ctx context.Context, cfg *rest.Config, log io.Writer)
 	if err != nil {
 		return err
 	}
-	if err := resetAgentObjects(ctx, dyn, &agentManifest{roles: m.roles, bindings: m.bindings}, log); err != nil {
+	if err := resetControllerObjects(ctx, dyn, m, log); err != nil {
 		return err
 	}
 	for _, o := range m.all() {
@@ -201,6 +230,53 @@ func InstallControllerRBAC(ctx context.Context, cfg *rest.Config, log io.Writer)
 			return err
 		}
 		logf(log, "applied %s %s", o.GetKind(), o.GetName())
+	}
+	return nil
+}
+
+var (
+	roleGVR        = schemaGVR("rbac.authorization.k8s.io", "v1", "roles")
+	roleBindingGVR = schemaGVR("rbac.authorization.k8s.io", "v1", "rolebindings")
+)
+
+// resetControllerObjects sets each role and binding that exists to the manifest's, before the apply, as the
+// agents' are (resetAgentObjects): a role keeps exactly the manifest's rules and no aggregationRule; a binding
+// keeps exactly the manifest's subjects, and one whose roleRef differs is deleted, for roleRef cannot change,
+// and the apply makes it again. The Roles and RoleBindings are namespaced; the others are not.
+func resetControllerObjects(ctx context.Context, dyn dynamic.Interface, m *controllerManifest, log io.Writer) error {
+	for _, want := range m.clusterRoles {
+		if err := resetFields(ctx, dyn, clusterRoleGVR, want, "rules", "aggregationRule"); err != nil {
+			return err
+		}
+	}
+	for _, want := range m.roles {
+		if err := resetFields(ctx, dyn, roleGVR, want, "rules", "aggregationRule"); err != nil {
+			return err
+		}
+	}
+	for gvr, wants := range map[schema.GroupVersionResource][]*unstructured.Unstructured{clusterRoleBindingGVR: m.clusterBindings, roleBindingGVR: m.bindings} {
+		for _, want := range wants {
+			res := resourceOf(dyn, gvr, want)
+			cur, err := res.Get(ctx, want.GetName(), metav1.GetOptions{})
+			switch {
+			case apierrors.IsNotFound(err):
+				continue // the apply creates it
+			case err != nil:
+				return fmt.Errorf("read the %s %s: %w", want.GetKind(), want.GetName(), err)
+			}
+			if !sameField(cur, want, "roleRef") {
+				uid := cur.GetUID()
+				err := res.Delete(ctx, want.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+				if err != nil && !apierrors.IsNotFound(err) {
+					return fmt.Errorf("delete the %s %s, whose roleRef differs from the manifest's: %w", want.GetKind(), want.GetName(), err)
+				}
+				logf(log, "deleted %s %s: its roleRef differs from the manifest's, and a roleRef cannot change", want.GetKind(), want.GetName())
+				continue
+			}
+			if err := resetFields(ctx, dyn, gvr, want, "subjects"); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

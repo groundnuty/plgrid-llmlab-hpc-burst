@@ -31,6 +31,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -277,6 +278,30 @@ func TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan(t *testing.T) {
 	}
 	if err := frontC.Create(ctx, &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "rbac-row-provider"}}); !apierrors.IsForbidden(err) {
 		t.Errorf("hpcburst-front creating a Provider: %v, want Forbidden", err)
+	}
+
+	// A Lease write in ANOTHER namespace: every controller's Lease verbs are a Role of hpcburst-system, so the same
+	// create in default, and an update of a Lease that exists there, are Forbidden; the control is the create
+	// in hpcburst-system, which each identity is allowed.
+	existing := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: "rbac-row-existing", Namespace: "default"}}
+	if err := api.client.Create(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]client.Client{"hpcburst-lifecycle": lifecycleC, "hpcburst-provider": providerC, "hpcburst-front": frontC} {
+		elsewhere := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: "rbac-row-" + name, Namespace: "default"}}
+		if err := c.Create(ctx, elsewhere); !apierrors.IsForbidden(err) {
+			t.Errorf("%s creating a Lease in default: %v, want Forbidden", name, err)
+		}
+		if err := c.Update(ctx, existing.DeepCopy()); !apierrors.IsForbidden(err) {
+			t.Errorf("%s updating a Lease in default: %v, want Forbidden", name, err)
+		}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(existing), &coordinationv1.Lease{}); !apierrors.IsForbidden(err) {
+			t.Errorf("%s reading a Lease in default: %v, want Forbidden", name, err)
+		}
+		own := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: "rbac-row-" + name, Namespace: v1alpha1.ControllerNamespace}}
+		if err := c.Create(ctx, own); err != nil {
+			t.Errorf("%s creating a Lease in hpcburst-system, where its Role grants it: %v", name, err)
+		}
 	}
 
 	// The control: the lifecycle identity, whose role grants delete, deletes it. A refusal above that came from a
