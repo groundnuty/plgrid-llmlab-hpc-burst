@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/testenv/crdinstall"
 )
@@ -48,7 +49,11 @@ func scheme() *runtime.Scheme {
 	return s
 }
 
-func TestMain(m *testing.M) { os.Exit(run(m)) }
+func TestMain(m *testing.M) {
+	code := run(m)
+	nodetest.Cleanup() // the controller binary the log rows built, unless HPCBURST_CONTROLLER_BIN named one
+	os.Exit(code)
+}
 
 // portBase is this package's testenv port block; api/v1alpha1/e2e takes the
 // default, 29200, and go test runs packages in parallel.
