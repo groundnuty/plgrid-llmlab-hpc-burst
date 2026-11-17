@@ -37,6 +37,13 @@ func raisedSeries(c *Counter, controller, reason string) int {
 	return n
 }
 
+// peekRoute is the controller's route, if the publisher holds one, without making one or reviving a retired one.
+func (r *rig) peekRoute(controller string) *route {
+	r.pub.mu.Lock()
+	defer r.pub.mu.Unlock()
+	return r.pub.routes[routeKey{controller: controller, counter: r.counter}]
+}
+
 // notLoggedSeries is the series Forget is told to delete for EventsNotLogged.
 var notLoggedSeries = []Series{{Reason: ReasonEventsNotLogged, Action: ActionDegraded, Type: provider.EventKindWarning}}
 
@@ -145,5 +152,53 @@ func TestAForgetOfOneManagerOfALabelLeavesTheOthersRouteAlone(t *testing.T) {
 	within(t, 20*time.Second, "the late loss to be refused", func() bool { return strings.Contains(r.logs.String(), "stopped for good") })
 	if _, exists := r.counter.Unlogged(ctl); exists {
 		t.Error("a late loss after the last Forget brought the series back")
+	}
+}
+
+// A manager that is started again after a failure runs its Setup, and so Zero, again for the same series set
+// with no Forget between. That is one registration, not two: the one Forget of the Provider, when it is
+// deleted, retires the route and deletes the series.
+func TestAManagerSetUpAgainAfterAFailureIsOneRegistration(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	set := []Series{{Reason: "JobStarted", Action: "start", Type: provider.EventKindOrdinary}}
+	r := newRig(t, ctl, true, bigCaps, nil, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, set) // the manager's Setup
+	r.counter.Zero(ctl, set) // the manager failed and was built again
+	r.counter.Forget(ctl, set)
+	if v, exists := r.counter.Unlogged(ctl); exists {
+		t.Errorf("the deleted Provider's unlogged series survives its Forget, at %v: a rebuilt manager was counted twice", v)
+	}
+	if rt := r.peekRoute(ctl); rt != nil && !rt.isDead() {
+		t.Error("the deleted Provider's route survives its Forget: a rebuilt manager was counted twice")
+	}
+}
+
+// A manager that has attached its recorder but not yet reached the Zero at the end of its Setup, when the other
+// kind's manager of the label is forgotten: the route is retired then, and the Zero revives it, with its series
+// at 0 and a gate that starts afresh. The new manager's losses count and raise, as they would had the Forget come
+// a moment later (the delta review of #697, 17 Nov 2026).
+func TestAZeroAfterTheLabelsForgetRevivesItsRoute(t *testing.T) {
+	clk := &fakeClock{t: base}
+	ctl := ControllerProvider("p1")
+	batch := []Series{{Reason: "JobStarted", Action: "start", Type: provider.EventKindOrdinary}}
+	managed := []Series{{Reason: "JobEnded", Action: "end", Type: provider.EventKindOrdinary}}
+	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, batch)
+	inner2 := &recInner{}
+	rec2 := Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
+	r.counter.Forget(ctl, batch) // the batch manager is dropped before the managed one has zeroed its series
+	if _, exists := r.counter.Unlogged(ctl); exists {
+		t.Fatal("the Forget left the unlogged series, though no other manager had registered yet")
+	}
+	r.counter.Zero(ctl, managed) // the managed manager's Setup ends
+	if v, exists := r.counter.Unlogged(ctl); !exists || v != 0 {
+		t.Fatalf("the unlogged series after the Zero is %v (exists %v), want 0", v, exists)
+	}
+	rec2.EventfID("revive-a", alloc(crashUID), nil, provider.EventKindOrdinary, "JobEnded", "ended", "%s", "a note")
+	clk.set(base.Add(101 * time.Second))
+	within(t, 20*time.Second, "the revived route to count the loss", func() bool { v, _ := r.counter.Unlogged(ctl); return v >= 1 })
+	within(t, 20*time.Second, "the revived route to raise EventsNotLogged", func() bool { return len(inner2.byReason(ReasonEventsNotLogged)) == 1 })
+	if strings.Contains(r.logs.String(), "stopped for good") {
+		t.Errorf("a revived manager's loss was treated as a stopped controller's: %q", r.logs.String())
 	}
 }

@@ -86,6 +86,7 @@ type route struct {
 }
 
 func (r *route) attach(s routeSpec) {
+	r.revive() // a recorder built for a label that was retired is a new manager of it
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.spec = s

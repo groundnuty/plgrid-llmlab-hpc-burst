@@ -263,6 +263,26 @@ func (r *route) isDead() bool {
 	return r.dead
 }
 
+// revive undoes markDead: a new manager of the label has registered, so the label is live again. The gate starts
+// afresh (its jobs and spans belonged to the manager that stopped), and the unlogged series comes back at 0.
+// Like markDead it takes the retirement lock for writing, so it waits for a raise in flight.
+func (r *route) revive() {
+	if !r.isDead() {
+		return // the usual case: no write lock for a live route
+	}
+	r.retire.Lock()
+	defer r.retire.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.dead {
+		return
+	}
+	r.dead = false
+	r.gate = gate{gen: r.gen}
+	r.warnedAt = time.Time{}
+	r.counter.unlogged.WithLabelValues(r.controller)
+}
+
 // markDead ends the route: its controller's manager has stopped for good. It waits for a raise that is
 // handing its EventsNotLogged to the recorder, and after it no raise does (raiseJob.emit).
 func (r *route) markDead() {

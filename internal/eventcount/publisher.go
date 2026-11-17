@@ -367,16 +367,20 @@ func (p *Publisher) Shutdown(ctx context.Context) {
 // wrapper of one controller shares one loss gate: the lifecycle controller's recorders, the
 // manager's and the tunnel-state reader's, raise one EventsNotLogged between them.
 func (p *Publisher) routeFor(controller string, counter *Counter) *route {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	k := routeKey{controller: controller, counter: counter}
-	if r, ok := p.routes[k]; ok {
-		return r
+	p.mu.Lock()
+	r, ok := p.routes[k]
+	if !ok {
+		r = &route{p: p, controller: controller, counter: counter}
+		p.routes[k] = r
 	}
-	r := &route{p: p, controller: controller, counter: counter}
-	p.routes[k] = r
-	// The controller's manager stopped for good (its series are forgotten): its gate goes with it.
-	counter.forgetHook(controller, func() { p.Unregister(controller, counter) })
+	p.mu.Unlock()
+	if !ok {
+		// The last manager of the label stopped for good (its series are forgotten): the route is retired
+		// with it. A new registration of the label, a Zero or a recorder built for it, revives it.
+		counter.forgetHook(controller, func() { p.Unregister(controller, counter) })
+		counter.zeroHook(controller, r.revive)
+	}
 	return r
 }
 
@@ -401,16 +405,15 @@ func (p *Publisher) Wrapped(controller string) int {
 	return n
 }
 
-// Unregister drops a controller's route and its loss gate: the last manager of its label has stopped for
-// good (Counter.Forget decides that). The next wrapper of the controller starts a new one.
+// Unregister retires a controller's route: the last manager of its label has stopped for good
+// (Counter.Forget decides that). Events of the controller still queued keep their route, which is dead now:
+// they publish, and their late losses are one log line each, uncounted (route.lost). The route stays with
+// the publisher, so that the next manager of the label, a recorder built or a Zero, revives it.
 func (p *Publisher) Unregister(controller string, counter *Counter) {
 	k := routeKey{controller: controller, counter: counter}
 	p.mu.Lock()
 	r := p.routes[k]
-	delete(p.routes, k)
 	p.mu.Unlock()
-	// Events of the controller still queued keep their route, which is dead now: they publish, and their
-	// late losses are one log line each, uncounted (route.lost).
 	if r != nil {
 		r.markDead()
 	}

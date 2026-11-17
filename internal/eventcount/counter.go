@@ -90,10 +90,17 @@ type Counter struct {
 	// route and its loss gate then, since its manager has stopped for good.
 	mu       sync.Mutex
 	onForget map[string][]func()
+	// onZero are run when a controller's series are zeroed, a new registration of the label: the publisher
+	// revives the label's route then, if a Forget retired it.
+	onZero map[string][]func()
 	// regs are the managers of each controller label that have set their series up and not yet had them
 	// forgotten: a registration per series set, the one a manager's Setup passes to Zero and its Dropped hook
 	// to Forget. Two managers of one label can run at once, as when a Provider changes kind, and the label's
-	// route and unlogged series live as long as either does.
+	// route and unlogged series live as long as either does. A registration is a member of a set, not a
+	// count, on two facts about the supervisors (internal/providerctl/supervisor.go): a manager that fails is
+	// set up again, and so zeroed again, with no Forget between, so a count would never return to 0; and one
+	// Supervisor never has two managers of one name, its pass stopping a dropped manager and calling Dropped
+	// before it starts any (TestSupervisorNeverRunsTwoManagersOfOneNameAtOnce pins that order).
 	regs map[string]map[string][]Series
 
 	// forgetMid, when set (tests only), is called by Forget between retiring the controller's route and
@@ -109,6 +116,16 @@ func (c *Counter) forgetHook(controller string, f func()) {
 		c.onForget = map[string][]func(){}
 	}
 	c.onForget[controller] = append(c.onForget[controller], f)
+}
+
+// zeroHook registers f to run when the controller's series are zeroed.
+func (c *Counter) zeroHook(controller string, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.onZero == nil {
+		c.onZero = map[string][]func(){}
+	}
+	c.onZero[controller] = append(c.onZero[controller], f)
 }
 
 // New returns a Counter with no series.
@@ -163,7 +180,6 @@ func (c *Counter) Zero(controller string, series []Series) {
 		c.vec.WithLabelValues(controller, s.Reason, s.Action, s.Type)
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.regs == nil {
 		c.regs = map[string]map[string][]Series{}
 	}
@@ -171,6 +187,13 @@ func (c *Counter) Zero(controller string, series []Series) {
 		c.regs[controller] = map[string][]Series{}
 	}
 	c.regs[controller][seriesKey(series)] = append([]Series(nil), series...)
+	hooks := c.onZero[controller]
+	c.mu.Unlock()
+	// A new registration means the label is live again: a route that a Forget retired is revived, and its
+	// unlogged series comes back at 0.
+	for _, f := range hooks {
+		f()
+	}
 }
 
 // seriesKey names a series set: its entries sorted, so the set a manager zeroes is the set it forgets.
@@ -211,7 +234,6 @@ func (c *Counter) Forget(controller string, series []Series) {
 	if !live {
 		delete(c.regs, controller)
 		hooks = c.onForget[controller]
-		delete(c.onForget, controller)
 	}
 	c.mu.Unlock()
 	for _, f := range hooks {
@@ -226,7 +248,13 @@ func (c *Counter) Forget(controller string, series []Series) {
 		}
 	}
 	if !live {
-		c.unlogged.DeleteLabelValues(controller)
+		// A manager that registered while the label was being retired keeps the series it just zeroed.
+		c.mu.Lock()
+		reregistered := len(c.regs[controller]) > 0
+		c.mu.Unlock()
+		if !reregistered {
+			c.unlogged.DeleteLabelValues(controller)
+		}
 	}
 }
 
