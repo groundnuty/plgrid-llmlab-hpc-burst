@@ -335,3 +335,19 @@ func (c *Counter) registered(controller string, series []Series) bool {
 	_, ok := c.regs[controller][seriesKey(series)]
 	return ok
 }
+
+// A Zero makes the label's unlogged series stand at 0 when its route is live, not only when it revives it: a
+// registration that finds the series absent, as when an attach landed between a retirement and the deletes,
+// leaves it absent until the first loss otherwise, and an absent series reads as a log that never failed.
+func TestAZeroCreatesTheUnloggedSeriesOfALiveRoute(t *testing.T) {
+	ctl := ControllerProvider("p1")
+	r := newRig(t, ctl, true, bigCaps, nil, leaseFor("provider-p1"))
+	if v, exists := r.counter.Unlogged(ctl); !exists || v != 0 {
+		t.Fatalf("precondition: the unlogged series is %v (exists %v) once a recorder with the log is built", v, exists)
+	}
+	r.counter.unlogged.DeleteLabelValues(ctl) // the state an interleaving could leave: a live route and no series
+	r.counter.Zero(ctl, seriesSetA())
+	if v, exists := r.counter.Unlogged(ctl); !exists || v != 0 {
+		t.Errorf("the unlogged series after the Zero is %v (exists %v), want 0 and existing", v, exists)
+	}
+}

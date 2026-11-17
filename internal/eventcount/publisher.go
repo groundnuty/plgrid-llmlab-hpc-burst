@@ -383,7 +383,10 @@ func (p *Publisher) routeFor(controller string, counter *Counter) *route {
 		// The last manager of the label stopped for good (its series are forgotten): the route is retired
 		// with it. A new registration of the label, a Zero or a recorder built for it, revives it.
 		counter.forgetHook(controller, func() { p.Unregister(controller, counter) })
-		counter.zeroHook(controller, r.revive)
+		counter.zeroHook(controller, func() {
+			r.revive()
+			counter.unlogged.WithLabelValues(controller) // a manager of the label is registered: the series stands at 0, if no loss has counted into it
+		})
 	}
 	return r
 }
