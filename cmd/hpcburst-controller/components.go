@@ -86,6 +86,10 @@ type deps struct {
 	// controller-runtime v0.23.1 from an address, with no listener to hand over
 	// (HBEP-15 pins the version), so they do not go through listen.
 	listen func(addr string) (net.Listener, error)
+	// eventPublisher builds the process's publisher to the durable log from the flags; nil means
+	// newEventPublisher. A test of the wiring gives one that keeps the publisher, to ask which recorders
+	// were built with it.
+	eventPublisher func(flags) (*eventcount.Publisher, error)
 }
 
 // listeners binds through deps.listen and remembers each listener it bound, so

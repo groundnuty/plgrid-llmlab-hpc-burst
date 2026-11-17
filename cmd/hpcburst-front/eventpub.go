@@ -12,8 +12,11 @@ import (
 	"os"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -46,4 +49,22 @@ func stopEventPublisher(p *eventcount.Publisher) {
 	ctx, cancel := context.WithTimeout(context.Background(), eventPublisherGrace)
 	defer cancel()
 	p.Shutdown(ctx)
+}
+
+// newRecorder builds the front's event recorder (beta; HBEP-8, The durable log, Who writes). With a token file
+// its typed events also go to the log's HB_EVENTS stream through a publisher of its own, a second client beside
+// the usage forwarder's, and the front raises EventsNotLogged regarding its own Lease when the log cannot take
+// one; without one it is the recorder it was. The returned stop flushes the recorder, then gives the publisher
+// its grace.
+func newRecorder(cs kubernetes.Interface, tokenFile string, host agentapi.Host) (front.KubeRecorder, func(), error) {
+	pub, err := newEventPublisher(tokenFile, host)
+	if err != nil {
+		return front.KubeRecorder{}, nil, err
+	}
+	rec, stop, err := front.NewKubeRecorderWithLog(cs, pub)
+	if err != nil {
+		stopEventPublisher(pub)
+		return front.KubeRecorder{}, nil, err
+	}
+	return rec, func() { stop(); stopEventPublisher(pub) }, nil
 }

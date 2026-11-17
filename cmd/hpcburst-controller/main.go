@@ -263,7 +263,11 @@ func run(ctx context.Context, f flags, d deps) error {
 	// The durable log's publisher, with --event-log-token-file: the typed events of the lifecycle
 	// controller, the tunnel-state reader and every Provider manager go to the log too (beta; HBEP-8,
 	// The durable log, Who writes). Without the flag nothing publishes and there is no publisher.
-	logPub, err := newEventPublisher(f)
+	newPublisher := d.eventPublisher
+	if newPublisher == nil {
+		newPublisher = newEventPublisher
+	}
+	logPub, err := newPublisher(f)
 	if err != nil {
 		return err
 	}
