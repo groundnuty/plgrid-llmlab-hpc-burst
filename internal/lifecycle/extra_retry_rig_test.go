@@ -262,3 +262,55 @@ func TestACutShortExtrasRetryIsHeldToTheCaps(t *testing.T) {
 		t.Fatalf("md-b Degraded = %s/%s %q, want no SubmitLimitReached", d.Status, d.Reason, d.Message)
 	}
 }
+
+// TestACutShortPrimarysRetryWaitsForASlotAndIsNoExtra: an Instance with no Allocation is the extra only when the deployment's
+// units that HAVE an Allocation already number its desired count (shortageOf). A deployment's only Instance, a primary whose
+// Allocation's create was cut short, is a missing primary by that measure (shortage 1), so its retry is not the extra's: refused for
+// the limit alone it WAITS for a slot, Degraded SubmitLimitReached, and is never ended. Counted by the selection's choice instead
+// (it would be chosen as the primary: shortage 0) it would be taken for an extra and ended by the extra's checks. Limit 3.
+// md-a (k = 1, end time 14:00) makes its primary and extra: 2 listed (1 + 0 + 1 + 0 = 2 <= 3). md-z (k = 0), created at
+// 08:00:20, has its primary's Allocation create cut short; the controller restarts and md-c (k = 0), created then, takes the third
+// slot at 08:00:30 (md-c sorts before md-z, so its pass comes first). md-z's retry: 3 listed >= 3, refused for the limit alone:
+// it waits. Expected at 08:01:10: md-z's Instance not ended, no Allocation of md-z, Degraded SubmitLimitReached. md-c is then scaled
+// to zero, its pending Allocation is released, and md-z's retry makes its Allocation: 1 by 08:02:30.
+func TestACutShortPrimarysRetryWaitsForASlotAndIsNoExtra(t *testing.T) {
+	log := newCauseLog()
+	cut := &allocCutter{}
+	rg := newRig(t, append(limitOpts(3), withInterceptors(cut.funcs(log.funcs())))...)
+	rg.batch.Enqueue(pending10h(6)...)
+	rg.create(extraMD("md-a"))
+	tick10(rg) // 08:00:10: md-a's primary and extra
+	cut.arm("md-z", 0)
+	rg.create(mdSpec("md-z"))
+	rg.clock.Advance(10 * time.Second) // 08:00:20
+	stepTolerantAll(rg)
+	if cut.failures() != 1 || len(rg.instances("md-z")) != 1 || len(rg.allocations("md-z")) != 0 {
+		t.Fatalf("md-z: %d cut creates, %d Instances, %d Allocations, want 1, 1 and 0: its primary's Instance exists without its Allocation", cut.failures(), len(rg.instances("md-z")), len(rg.allocations("md-z")))
+	}
+	zName := rg.instances("md-z")[0].Name
+	cut.disarm()
+	rg.restartController()
+	rg.create(mdSpec("md-c"))
+	for range 5 { // 08:00:30 to 08:01:10
+		tick10(rg)
+	}
+	if n := len(rg.allocations("md-c")); n != 1 {
+		t.Fatalf("md-c has %d Allocations, want 1: it takes the third slot, the row proves nothing otherwise", n)
+	}
+	if got := instOrNil(rg, zName); got == nil || ended(got) {
+		t.Fatalf("md-z's Instance %v at 08:01:10, want it pending and waiting: a primary is not the extra, whatever the selection's tie says", got)
+	}
+	if n := len(rg.allocations("md-z")); n != 0 {
+		t.Fatalf("md-z has %d Allocations, want none: the Provider is at its limit", n)
+	}
+	if d := rg.condition("md-z", v1alpha1.ConditionDegraded); d.Reason != v1alpha1.ReasonSubmitLimitReached {
+		t.Fatalf("md-z Degraded = %s/%s %q, want SubmitLimitReached: its primary waits for a slot", d.Status, d.Reason, d.Message)
+	}
+	rg.mutateMD("md-c", func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 0 })
+	for range 12 { // to 08:03:10
+		tick10(rg)
+	}
+	if n := len(rg.allocations("md-z")); n != 1 {
+		t.Fatalf("md-z has %d Allocations at 08:03:10, want its primary's, made in the slot md-c's release freed", n)
+	}
+}
