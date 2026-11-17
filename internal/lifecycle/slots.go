@@ -84,11 +84,15 @@ const listTimeout = 30 * time.Second
 // lock, always after slotTable.mu is released: when a missing primary's
 // reservation is refused for the submit limit alone, slotAsk.onLimit is
 // called with the reads just made, under the same Provider's lock and a
-// listTimeout of its own, and patches the one annotationYieldTo mark on a
-// pending extra's Instance (any deployment's) by a merge patch; a pass
+// listTimeout of its own. It reads, through the uncached Reader and no other
+// lock, the marks that name the asking deployment (one List of the Instances
+// by the yield-mark label, across every Provider, and one Get of each mark's
+// Allocation), and patches the annotationYieldTo mark and the label on a
+// pending extra's Instance (any deployment's) by one merge patch. A pass
 // clearing the marks that name its deployment does the same through
-// slotTable.underLock. Nothing else is taken or read by them, and no other
-// Provider's lock, so the order above holds.
+// slotTable.underLock, one Provider's lock at a time (the marks of each
+// Provider under that Provider's own lock, never two held together). Nothing
+// else is taken or read by them, so the order above holds.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
@@ -257,6 +261,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if limitRefused && q.onLimit != nil {
 		cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
 		defer cancel()
+		rd.total = ans.count
 		if err := q.onLimit(cctx, rd); err != nil {
 			return slotAnswer{}, err
 		}
@@ -414,8 +419,8 @@ type slotReads struct {
 	// pendingSurplus are the surplus Instances of every deployment on the Provider whose Allocation holds a slot and
 	// whose job has not started, newest first (D8's views; read for the yield, with the reserved slots).
 	pendingSurplus []*v1alpha1.Instance
-	// yieldMarks are the Instances on the Provider that carry a yield mark while their Allocation still holds a slot.
-	yieldMarks []*v1alpha1.Instance
+	// total is the count that refused the reservation (listed + expected + reserved), set before onLimit is called.
+	total int
 }
 
 // readBounded makes the count's reads under one context bounded by the table's
@@ -429,7 +434,7 @@ func (t *slotTable) readBounded(ctx context.Context, r client.Reader, provider s
 		return slotReads{}, err
 	}
 	if withReserved {
-		if rd.reserved, rd.pendingSurplus, rd.yieldMarks, err = readReserved(ctx, r, provider, profile, rd.allocs); err != nil {
+		if rd.reserved, rd.pendingSurplus, err = readReserved(ctx, r, provider, profile, rd.allocs); err != nil {
 			return slotReads{}, err
 		}
 	}

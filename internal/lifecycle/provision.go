@@ -494,7 +494,16 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	}
 	// It takes the reserved slot of its predecessor's chain, and a no-overlap successor its own, which is held
 	// for it while its Allocation waits for the slot its predecessor frees (slots_reserved.go).
-	ok, holds, err := p.reserveSlotFor(pv, name, holder, p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor])), nil, false)
+	// An Instance with no Allocation that is a primary, not a successor, replacement or hedge member, is a missing primary
+	// as the submit step sees one: its refusal for the submit limit alone makes a pending extra yield (yield.go), as at
+	// its creation (#708, finding 3). The deployment's units that have an Allocation decide it (shortageOf), never the
+	// selection's tie. A refused replacement does not yield (#713).
+	takers := p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor]))
+	var onLimit func(context.Context, slotReads) error
+	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() > 0 {
+		onLimit = p.yieldOnLimit(pv)
+	}
+	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, nil, false, 0, onLimit)
 	if err != nil {
 		return err
 	}
