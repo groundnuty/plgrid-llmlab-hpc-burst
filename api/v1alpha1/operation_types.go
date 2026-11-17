@@ -228,6 +228,65 @@ type OperationStatus struct {
 	//
 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+
+	// Estimates are the Provider controllers' advisory start estimates for the
+	// plan's targets: Slurm's estimate for the same job submitted now (HBEP-10,
+	// The release cost; HBEP-4, Core operations, Estimate). Only a Provider's
+	// controller writes them, by server-side apply, one entry per Provider, plan
+	// ID and submission shape, each Provider under its own field manager
+	// (FieldManagerProviderEstimate). The lifecycle controller carries them over
+	// untouched and never reads them into a plan, so an estimate never changes
+	// the plan's id (`@hpc-burst-science-agent`, 17 Nov 2026, #661). An entry
+	// names the plan it was made for: a new plan's entries sit beside the old
+	// plan's, and a reader shows only the current plan's. A target with none
+	// reads as pending until 60 s after the plan's observedAt, then as unknown;
+	// an estimate that failed is an entry whose start is unknown, with its reason.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=provider
+	// +listMapKey=planID
+	// +listMapKey=shape
+	// +kubebuilder:validation:MaxItems=32
+	Estimates []OperationEstimate `json:"estimates,omitempty"`
+}
+
+// OperationEstimate is one Provider's estimate for the plan's targets of one
+// submission shape (HBEP-10, The release cost).
+type OperationEstimate struct {
+	// Provider is the Provider whose controller made the estimate.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Provider string `json:"provider"`
+
+	// PlanID is status.plan.id as read when the estimate was asked for.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	PlanID string `json:"planID"`
+
+	// Shape is opaque: 16 hex characters of SHA-256 over the canonical form of
+	// the submission parameters the estimate ran with (partition, QOS, GPUs,
+	// CPUs, memory, time limit, constraints and account, never the tag, the
+	// hold or the script). Clients compare it and never parse it. Targets of one
+	// shape share one estimate.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Shape string `json:"shape"`
+
+	// Targets are the UIDs of the plan's targets the estimate covers.
+	//
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=64
+	Targets []string `json:"targets"`
+
+	// Start is the estimate, or unknown with its reason, and the time it was
+	// read in observedAt. It is always advisory.
+	Start TimeFigure `json:"start"`
 }
 
 // OperationPlan is the plan of an Operation (HBEP-10, The plan).
@@ -460,8 +519,10 @@ type ReleaseCost struct {
 	QueueWaits *QueueWaitsFigure `json:"queueWaits,omitempty"`
 
 	// EstimateNow is Slurm's estimate for the same job submitted now. It is
-	// advisory, and unknown until the estimate operation exists (HBEP-10, The
-	// release cost; Graduation, beta step 4).
+	// advisory. It is superseded by status.estimates, which the Provider's
+	// controller fills in: the lifecycle controller writes it as unknown and
+	// nothing reads a time from it (HBEP-10, The release cost;
+	// `@hpc-burst-science-agent`, 17 Nov 2026, #661).
 	//
 	// +optional
 	EstimateNow *TimeFigure `json:"estimateNow,omitempty"`

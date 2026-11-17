@@ -812,6 +812,15 @@ spec:
                 - message: 'stagingDir must not contain a ''..'' segment: agent.json
                     refuses one (agentapi.AgentConfig)'
                   rule: '!self.split(''/'').exists(s, s == ''..'')'
+              startEstimateTime:
+                description: |-
+                  StartEstimateTime says how Estimate reads sbatch --test-only's start (HBEP-4, Core operations, Estimate;
+                  Platform profile schema): epoch-seconds runs it with SLURM_TIME_FORMAT=%s and reads epoch seconds, set where
+                  a probe decided it; absent means undecided, and Estimate is unknown with that reason
+                  (`@hpc-burst-science-agent`, 17 Nov 2026, #661).
+                enum:
+                - epoch-seconds
+                type: string
               timeZone:
                 description: |-
                   TimeZone is the IANA name of the time zone in which the scheduler prints
