@@ -180,6 +180,7 @@ type OperationConfirm struct {
 // Provider's controller fills in (HBEP-11, Controllers, Field managers). Status
 // needs no CRD rule: an agent has no write to the status subresource, and a
 // create's status is dropped.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.countGivenBack) || has(self.countGivenBack)",message="status.countGivenBack is set once: it cannot be removed (HBEP-10, The report)"
 type OperationStatus struct {
 	// Phase is where the Operation is (HBEP-10, Operations, Phases).
 	//
@@ -229,6 +230,35 @@ type OperationStatus struct {
 	//
 	// +optional
 	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+
+	// CountGivenBack is a Scale's record of the count it gave back for its
+	// untaken units (HBEP-10, The report, as amended by #698). It is set ONLY
+	// when some unit is untaken: a Scale with no untaken unit never sets it, and
+	// does not wait for it. When set, the Operation finishes only after it is
+	// written. Written once by the lifecycle controller.
+	//
+	// +optional
+	CountGivenBack *CountGivenBack `json:"countGivenBack,omitempty"`
+}
+
+// CountGivenBack records a give-back (HBEP-10, The report, as amended by #698).
+//
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="status.countGivenBack is set once: it cannot be changed (HBEP-10, The report)"
+type CountGivenBack struct {
+	// Units is U, the untaken units: each the capacity of one primary (its
+	// Instance and Allocation, its hedge's members, and its pending
+	// replacement).
+	//
+	// +kubebuilder:validation:Minimum=1
+	Units int32 `json:"units"`
+
+	// Instances is the spec.instances written: the plan's count plus Units,
+	// absolute. It is absent when a person had set another count, which stands,
+	// so nothing was given back.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Instances *int32 `json:"instances,omitempty"`
 }
 
 // OperationPlan is the plan of an Operation (HBEP-10, The plan).

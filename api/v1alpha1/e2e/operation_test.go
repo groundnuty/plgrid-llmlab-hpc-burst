@@ -532,6 +532,58 @@ func TestOperationStatusSentWithACreateIsDropped(t *testing.T) {
 	}
 }
 
+// A Scale's record of the count it gave back is set once (HBEP-10, The report, as amended by #698). Two rules say so: the
+// struct's transition rule, operations:$.status.countGivenBack#0, that a set record is not changed, and the parent's,
+// operations:$.status#0, that it is not removed, since a transition rule on the field does not fire when the field is gone.
+// A first write is accepted, with and without a count written, and the same value again is accepted.
+func TestOperationCountGivenBackIsSetOnce(t *testing.T) {
+	ns := newNamespace(t)
+	op := newOperation(ns, uniq("op"))
+	must(t, c.Create(bg(), op), "create Operation")
+	two, three := int32(2), int32(3)
+	write := func(edit func(*v1alpha1.OperationStatus)) error {
+		got := &v1alpha1.Operation{}
+		must(t, c.Get(bg(), objKey(op), got), "get Operation")
+		edit(&got.Status)
+		return c.Status().Update(bg(), got)
+	}
+	if err := write(func(s *v1alpha1.OperationStatus) {
+		s.CountGivenBack = &v1alpha1.CountGivenBack{Units: 1, Instances: &two}
+	}); err != nil {
+		t.Fatalf("a first record is refused: %v", err)
+	}
+	if err := write(func(s *v1alpha1.OperationStatus) { s.Phase = v1alpha1.OperationPhaseExecuting }); err != nil {
+		t.Errorf("an update that leaves the record as it is: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*v1alpha1.OperationStatus)
+		want string
+	}{
+		{"a changed count of units", func(s *v1alpha1.OperationStatus) { s.CountGivenBack.Units = 2 }, "status.countGivenBack is set once: it cannot be changed"},
+		{"a changed count written", func(s *v1alpha1.OperationStatus) { s.CountGivenBack.Instances = &three }, "status.countGivenBack is set once: it cannot be changed"},
+		{"a removed count written", func(s *v1alpha1.OperationStatus) { s.CountGivenBack.Instances = nil }, "status.countGivenBack is set once: it cannot be changed"},
+		{"a removed record", func(s *v1alpha1.OperationStatus) { s.CountGivenBack = nil }, "status.countGivenBack is set once: it cannot be removed"},
+	} {
+		t.Run("refuse "+tc.name, func(t *testing.T) { requireRefused(t, write(tc.edit), tc.want) })
+	}
+	other := newOperation(ns, uniq("op"))
+	must(t, c.Create(bg(), other), "create another Operation")
+	got := &v1alpha1.Operation{}
+	must(t, c.Get(bg(), objKey(other), got), "get Operation")
+	got.Status.CountGivenBack = &v1alpha1.CountGivenBack{Units: 1} // a person's count stands: units, no count written
+	must(t, c.Status().Update(bg(), got), "a first record with no count written")
+	zero := int32(0)
+	third := newOperation(ns, uniq("op"))
+	must(t, c.Create(bg(), third), "create a third Operation")
+	for _, bad := range []*v1alpha1.CountGivenBack{{Units: 0}, {Units: 1, Instances: &zero}} {
+		g := &v1alpha1.Operation{}
+		must(t, c.Get(bg(), objKey(third), g), "get Operation")
+		g.Status.CountGivenBack = bad
+		requireRefused(t, c.Status().Update(bg(), g), "status.countGivenBack")
+	}
+}
+
 // The status subresource takes a full plan: one target per effect, every figure
 // of a release cost, the committed list and the report. A figure that is not
 // known is stored as its reason, with no value.

@@ -124,6 +124,8 @@ operations:$.spec.release#0|^TestOperationSpecIsImmutable$
 operations:$.spec.release#1|^TestReleaseNamesAllocationsOrASelector$
 operations:$.spec.release#2|^TestReleaseSelectorIsNotEmpty$
 operations:$.spec.scale#0|^TestOperationSpecIsImmutable$
+operations:$.status#0|^TestOperationCountGivenBackIsSetOnce$
+operations:$.status.countGivenBack#0|^TestOperationCountGivenBackIsSetOnce$
 platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec#1|^TestPartitionQOSIsListed$
 platformprofiles:$.spec#2|^TestExpectedPerformanceKeyIsUnique$
