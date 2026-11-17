@@ -5,6 +5,9 @@ package lifecycle
 // audit log holds its content by then (HBEP-10, Audit). A small controller of its own, keyed by Operation: the pass of a
 // ModelDeployment stops requeueing once its Operations are finished, and an Operation of a deleted deployment would
 // never be reached by it.
+//
+// It is NOT wired into the manager yet: the audit log is still Metadata-only, so a removal would lose the Operation's plan
+// and report. #660 wires it (addOperationTTL) with the audit policy (HBEP-10, The report, as amended by #665, #666 and #668).
 
 import (
 	"context"

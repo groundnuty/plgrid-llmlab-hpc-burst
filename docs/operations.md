@@ -677,7 +677,7 @@ An **Operation** is created with `spec.owner` set to the creator's own user name
 An agent's **Operation** is committed only if the state it was planned against is still the state the controller reads when the last approval is in. The controller recomputes the plan once, after the last approval and before it writes anything. A different plan ID turns the Operation `Stale`: a pending Allocation started, another Instance became ready, a policy that applies was edited, or an earlier Operation on the same ModelDeployment changed the state. The controller raises a `degraded` event `PlanStale` regarding the Operation, and its note says what differed.
 
 - **Means:** nothing was done to the ModelDeployment, its Instances or its Allocations. The Operation is finished (`status.finishedAt` is set) and `Stale` is final: its Approvals no longer count, and an Approval added afterwards changes nothing.
-- **You:** plan again. Create a new Operation for the same change, read its new plan, confirm it and have it approved again. A finished Operation is removed 7 days after it finished.
+- **You:** plan again. Create a new Operation for the same change, read its new plan, confirm it and have it approved again. A finished Operation is not removed yet: it will be removed 7 days after it finished, once the audit log holds its content ([HBEP-10](../hbep/0010-agent-primitives/README.md), Removal).
 
 ### A partly failed Operation
 
@@ -686,13 +686,13 @@ An approved **Operation** acts on the targets it committed to, one by one, and r
 - **Means:** the other targets were done, and the failed one is retried with backoff: it is never a single refusal. The target's `reason` and `message` carry the Provider's own (for a cancel that failed, `ReconcileError` and Slurm's text, cut to 1,024 bytes).
 - **You:** read the Allocation named by the failed target, `hbk describe allocation <allocation>`: its `Synced` condition says what the Provider could not do, and the job's state is in `status.atProvider`. Fix that, such as the login node's reach to the scheduler. The Operation goes on by itself: the target is retried until it is `Done`, and the Operation is `Done` with it.
 
-A failure that no retry can fix is **final**, and is never retried ([HBEP-10](../hbep/0010-agent-primitives/README.md), The report, as amended by #665 and #666). The target is `Failed` with one of these reasons, and the Operation is `PartlyFailed` and finished (`status.finishedAt` is set, so it no longer holds the deployment's one-at-a-time slot, and it is removed 7 days later) once every target is `Done` or final:
+A failure that no retry can fix is **final**, and is never retried ([HBEP-10](../hbep/0010-agent-primitives/README.md), The report, as amended by #665, #666 and #668). The target is `Failed` with one of these reasons, and the Operation is `PartlyFailed` and finished (`status.finishedAt` is set, so it no longer holds the deployment's one-at-a-time slot) once every target is `Done` or final. A final failure is recorded only by a pass that acts, and no later pass acts on that target again, nor releases its Allocation under the Operation's name:
 
 | Reason | Means | What happened |
 |---|---|---|
 | `JobStartedSinceCommit` | an Allocation approved for cancelling in the queue had its job start after the commit | not released: the approval was for a queued job, which is priced differently from a running one; its retention policy keeps or releases it |
 | `SpecChangedSinceCommit` | the deployment's spec changed after the commit so that what the Operation was approved for no longer holds: a Scale's `spec.instances` is above its count, an End's `spec.endTime` is not set or is later than now | nothing more was acted on; the targets already done stay done, and the spec is never written over |
-| `LastReadySinceCommit` | an Instance that a Scale was to cancel or end turned ready and is now the last ready one, or the Allocation it keeps from emptying | not drained: draining the last ready Instance needs an approval of its own |
+| `LastReadySinceCommit` | an Instance that a Scale to a count above zero was to cancel or end turned ready and is the last ready one when the Operation acts, or the Allocation it keeps from emptying | not drained: draining the last ready Instance needs an approval of its own. A Scale to zero is the shutdown, like an End, and drains every Instance |
 
 - **You:** read `status.targets` for the targets that failed, and plan again if the change is still wanted, from the deployment as it is now.
 

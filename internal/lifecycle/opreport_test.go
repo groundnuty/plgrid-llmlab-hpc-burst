@@ -196,7 +196,7 @@ func TestAFinalFailureStaysAndAStartedCancelIsNotDone(t *testing.T) {
 			}
 			p := f.pass()
 			p.r, p.ctx, p.now, p.mem = g.r, g.ctx, opAt, g.r.memory()
-			out, _, err := p.outcomes(g.op("op"), nil, nil, true)
+			out, err := p.outcomes(g.op("op"), nil, nil, true)
 			if err != nil {
 				t.Fatal(err)
 			}

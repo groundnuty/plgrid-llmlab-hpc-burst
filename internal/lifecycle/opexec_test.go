@@ -189,15 +189,18 @@ func TestAReleaseCauseIsTheOperationsOnlyForAReleasingCommittedTarget(t *testing
 		phase     v1alpha1.OperationPhase
 		queued    bool // the Allocation's job has not started
 		finished  bool
+		recorded  string // the reason of the target's recorded outcome, when it is Failed
 		wantOwnOp bool
 	}{
-		{"a committed ReleaseStarted", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, true},
-		{"a committed CancelPending of a job still queued", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhasePartlyFailed, true, false, true},
-		{"a committed CancelPending whose job started: it is not the Operation's release", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhaseExecuting, false, false, false},
-		{"a committed ReleaseKept", v1alpha1.PlanEffectReleaseKept, v1alpha1.OperationPhaseExecuting, false, false, true},
-		{"a committed Keep keeps retention's cause", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false, false, false},
-		{"an Operation that is Done counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseDone, false, false, false},
-		{"a PartlyFailed Operation with a finish time counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhasePartlyFailed, false, true, false},
+		{"a committed ReleaseStarted", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, "", true},
+		{"a committed CancelPending of a job still queued", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhasePartlyFailed, true, false, "", true},
+		{"a committed CancelPending whose job started: it is not the Operation's release", v1alpha1.PlanEffectCancelPending, v1alpha1.OperationPhaseExecuting, false, false, "", false},
+		{"a committed ReleaseKept", v1alpha1.PlanEffectReleaseKept, v1alpha1.OperationPhaseExecuting, false, false, "", true},
+		{"a committed Keep keeps retention's cause", v1alpha1.PlanEffectKeep, v1alpha1.OperationPhaseExecuting, false, false, "", false},
+		{"an Operation that is Done counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseDone, false, false, "", false},
+		{"a PartlyFailed Operation with a finish time counts for nothing", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhasePartlyFailed, false, true, "", false},
+		{"a committed ReleaseStarted recorded as failed for good (LastReadySinceCommit): not the Operation's release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, reasonLastReadySinceCommit, false},
+		{"a committed ReleaseStarted recorded as failed, but by a failure a retry can fix: still the Operation's release", v1alpha1.PlanEffectReleaseStarted, v1alpha1.OperationPhaseExecuting, false, false, reasonReleaseFailed, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpFixture(t, 1)
@@ -210,6 +213,9 @@ func TestAReleaseCauseIsTheOperationsOnlyForAReleasingCommittedTarget(t *testing
 			op.Status.Phase = tc.phase
 			if tc.finished {
 				op.Status.FinishedAt = opTime(opAt)
+			}
+			if tc.recorded != "" {
+				op.Status.Targets = []v1alpha1.TargetOutcome{{Kind: v1alpha1.TargetKindAllocation, Name: "alloc-k", UID: a.UID, State: v1alpha1.TargetStateFailed, Reason: tc.recorded}}
 			}
 			g := newOpRig(t, f, op)
 			g.syncVersions()

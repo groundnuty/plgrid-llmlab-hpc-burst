@@ -188,12 +188,22 @@ func newThreeWorld(t *testing.T) (w *execWorld, insts [3]string, allocs [3]strin
 // newExecWorld builds the world; P starts after pQueue. The lifecycle controller's client is a faultClient with no hook.
 func newExecWorld(t *testing.T, pQueue time.Duration, opts ...rigOption) *execWorld {
 	t.Helper()
+	return newExecWorldWith(t, pQueue, nil, opts...)
+}
+
+// newExecWorldWith is newExecWorld with the deployment edited before it is created: a retention policy is copied to an
+// Allocation when it is made, so a test that needs one on the world's Allocations sets it here.
+func newExecWorldWith(t *testing.T, pQueue time.Duration, edit func(*v1alpha1.ModelDeployment), opts ...rigOption) *execWorld {
+	t.Helper()
 	log := newCauseLog()
 	h := newHedgeRig(t, append([]rigOption{withInterceptors(log.funcs())}, opts...)...)
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: pQueue})
 	h.Step() // the Providers' first status: Ready
 	md := noOverAllocation(mdSpec(hoMD))
 	md.Spec.Instances = 2
+	if edit != nil {
+		edit(md)
+	}
 	h.create(md)
 	pol := globalPolicy(person)
 	h.create(&pol)
@@ -424,7 +434,12 @@ func (w *execWorld) playCrossplane() {
 // sentinel stays unconfirmed, and no check of the test reads it.
 func (w *execWorld) passRanAfterNow(md, sentinel string) {
 	w.t.Helper()
-	w.planOn(md, sentinel, endSpec(false))
+	op := opRigOp(sentinel, endSpec(false))
+	op.Spec.ModelDeploymentRef.Name = md
+	w.create(op)
+	w.stepsUntil(5*time.Minute, 10*time.Second, sentinel+" planned", func() bool {
+		return w.getOp(sentinel).Status.Phase == v1alpha1.OperationPhasePlanned
+	})
 	if got := w.getOp(sentinel); got.Spec.Confirm != nil || got.Status.Phase != v1alpha1.OperationPhasePlanned {
 		w.t.Fatalf("the sentinel %s is %q with confirm %v, want Planned and unconfirmed", sentinel, got.Status.Phase, got.Spec.Confirm)
 	}

@@ -44,6 +44,22 @@ func (w *execWorld) wantNoTargetActedOn(op string) *v1alpha1.Operation {
 	if n := w.batch.Count("scancel"); n != 0 {
 		w.t.Errorf("the fake Slurm saw %d scancel calls: nothing is released", n)
 	}
+	// OperationPartlyFailed is raised for an Operation a person's edit stopped, as for any other (HBEP-10, The report, as
+	// amended by #665, #666 and #668): once, regarding the Operation, naming the reason.
+	// An End whose own write failed first was PartlyFailed already, by a failure a retry can fix (WriteFailed): that started
+	// it, and the next announcement waits out the hour. Otherwise the Operation went straight to PartlyFailed and the one
+	// event names the reason.
+	evs := w.partlyFailedEvents(op)
+	named := false
+	for _, e := range evs {
+		named = named || strings.Contains(e.Message, reasonSpecChangedSinceCommit)
+		if e.Type != "failing" || !e.Warning {
+			w.t.Errorf("the OperationPartlyFailed event of %s is %+v, want a failing Warning", op, e)
+		}
+	}
+	if earlier := len(evs) > 0 && strings.Contains(evs[0].Message, reasonWriteFailed); len(evs) == 0 || (!named && !earlier) {
+		w.t.Errorf("the OperationPartlyFailed events of %s are %+v, want one naming %s (or, after a retried write failure that started PartlyFailed, that one)", op, evs, reasonSpecChangedSinceCommit)
+	}
 	return got
 }
 

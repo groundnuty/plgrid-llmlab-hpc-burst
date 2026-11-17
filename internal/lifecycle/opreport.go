@@ -62,7 +62,7 @@ func failureIsFinal(reason string) bool {
 
 // phaseOf is the ONE function that says what the outcomes of the committed targets make of the Operation, and whether it is
 // finished (HBEP-10, The report, as amended by #665 and #666): Done when every target is done; PartlyFailed and finished (finishedAt
-// is set, so the deployment is free for the next Operation and the Operation is removed 7 days later) when every target is
+// is set, so the deployment is free for the next Operation) when every target is
 // done or has failed for good; PartlyFailed and not finished while a failure that a retry can fix remains, which is
 // retried; and Executing while none has failed.
 func phaseOf(outcomes []v1alpha1.TargetOutcome) (phase v1alpha1.OperationPhase, finished bool) {
@@ -165,14 +165,17 @@ func (p *pass) deletingBeforeThePass(op *v1alpha1.Operation) map[types.UID]bool 
 // and not a running one, and is left to retention); a committed CancelPending or EndStarting Instance of a Scale that is
 // Ready now and would be the last ready one (not drained, since nobody approved that); and a releasing Allocation target that
 // such an Instance keeps from ever being empty. Once it is recorded in status it stays: the Allocation's later release by
-// retention is not the approved act.
-func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, prior *v1alpha1.TargetOutcome) (reason, message string, ok bool, err error) {
+// retention is not the approved act. A last-ready failure is recorded ONLY by a pass that acts (acted): on a pass whose spec
+// write failed or did not land, nothing was or could be drained, and the Instance that is the last ready one now may not be
+// the last one by the time the pass does act; recording it there would freeze a passing state as final (HBEP-10, The report,
+// as amended by #665, #666 and #668). What is recorded stays, and nothing acts on it again (recordedFinal).
+func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, prior *v1alpha1.TargetOutcome, acted bool) (reason, message string, ok bool, err error) {
 	if prior != nil && prior.State == v1alpha1.TargetStateFailed && failureIsFinal(prior.Reason) {
 		return prior.Reason, prior.Message, true, nil
 	}
 	switch t.Kind {
 	case v1alpha1.TargetKindInstance:
-		if p.lastReadyScaleTarget(op, t, p.instanceByUID(t.UID)) {
+		if acted && p.lastReadyScaleTarget(op, t, p.instanceByUID(t.UID)) {
 			return reasonLastReadySinceCommit, lastReadyMessage, true, nil
 		}
 	case v1alpha1.TargetKindAllocation:
@@ -183,7 +186,7 @@ func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, 
 		if startedSinceCommit(t, a) {
 			return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and its retention policy now keeps or releases it", true, nil
 		}
-		if releasingEffect(t.Effect) {
+		if acted && releasingEffect(t.Effect) {
 			// An Instance that is a committed target and has failed for good stays live, so this Allocation is never empty.
 			for _, c := range op.Status.Committed {
 				if c.Kind == v1alpha1.TargetKindInstance && p.instanceByUID(c.UID) != nil && p.instanceByUID(c.UID).Spec.AllocationRef.Name == a.Name &&
@@ -200,9 +203,9 @@ func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, 
 const lastReadyMessage = "it became ready after the Operation was committed and is now the last ready Instance, so draining it would be a drain of the last ready Instance, which the approval did not cover: the Operation did not drain it"
 
 // outcomes is the report: one entry per committed target, Done, Failed or NotStarted, with the time its state last changed
-// kept while it does not. failures lists the failed ones, a final failure (finalFailure) and one that is retried
-// (targetFailure) alike.
-func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, deleting map[types.UID]bool, specWritten bool) (out []v1alpha1.TargetOutcome, failures []string, err error) {
+// kept while it does not. A target fails by a final failure (finalFailure) or by one that is retried (targetFailure).
+// specWritten is whether the pass applied the spec and so acted: only then can a last-ready failure be recorded.
+func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, deleting map[types.UID]bool, specWritten bool) (out []v1alpha1.TargetOutcome, err error) {
 	prior := map[types.UID]v1alpha1.TargetOutcome{}
 	for _, o := range op.Status.Targets {
 		prior[o.UID] = o
@@ -215,31 +218,56 @@ func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, dele
 		}
 		// A final failure first: a target is never reported done when its approved act did not happen, so an Allocation that
 		// started and that retention then released is still the failure it was.
-		reason, msg, bad, err := p.finalFailure(op, t, was)
+		reason, msg, bad, err := p.finalFailure(op, t, was, specWritten)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if !bad {
 			done, err := p.targetDone(t, specWritten)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			if done {
 				o.State = v1alpha1.TargetStateDone
 			} else if reason, msg, bad, err = p.targetFailure(t, failed[t.UID], deleting); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 		}
 		if bad {
 			o.State, o.Reason, o.Message = v1alpha1.TargetStateFailed, reason, msg
-			failures = append(failures, fmt.Sprintf("%s %s (%s): %s", t.Kind, t.Name, reason, msg))
 		}
 		if was != nil && was.State == o.State {
 			o.LastTransitionTime = was.LastTransitionTime
 		}
 		out = append(out, o)
 	}
-	return out, failures, nil
+	return out, nil
+}
+
+// failureLines says each failed target of the report in a line: its kind, name, reason and message.
+func failureLines(out []v1alpha1.TargetOutcome) []string {
+	var lines []string
+	for _, o := range out {
+		if o.State == v1alpha1.TargetStateFailed {
+			lines = append(lines, fmt.Sprintf("%s %s (%s): %s", o.Kind, o.Name, o.Reason, o.Message))
+		}
+	}
+	return lines
+}
+
+// raisePartlyFailed raises the OperationPartlyFailed event of an Operation that is PartlyFailed: when it starts, then at
+// most once an hour while it lasts, whichever way it came to be (a retried failure, a final one, or a person's edit that
+// stopped it: failSpecChanged). The next phase that is not PartlyFailed clears it.
+func (p *pass) raisePartlyFailed(op *v1alpha1.Operation, phase v1alpha1.OperationPhase, out []v1alpha1.TargetOutcome) {
+	key := "partly-failed/" + string(op.UID)
+	if phase != v1alpha1.OperationPhasePartlyFailed {
+		p.mem.clear(key)
+		return
+	}
+	if p.mem.repeat(key, p.now) {
+		p.r.Recorder.Event(op, nil, eventFailing, v1alpha1.ReasonOperationPartlyFailed,
+			fmt.Sprintf("Operation %s/%s is partly failed: %s", op.Namespace, op.Name, strings.Join(failureLines(out), "; ")))
+	}
 }
 
 // report writes status.targets and the phase phaseOf gives: PartlyFailed while any target is Failed, finished (finishedAt set)
@@ -247,23 +275,16 @@ func (p *pass) outcomes(op *v1alpha1.Operation, failed map[types.UID]error, dele
 // an hour while it lasts; Executing again once none is Failed; and Done, with its finish time, once every target is done.
 // specWritten is whether the spec write has landed: an Operation is not Done before it has.
 func (p *pass) report(op *v1alpha1.Operation, failed map[types.UID]error, deleting map[types.UID]bool, specWritten bool) error {
-	targets, failures, err := p.outcomes(op, failed, deleting, specWritten)
+	targets, err := p.outcomes(op, failed, deleting, specWritten)
 	if err != nil {
 		return err
 	}
+	failures := failureLines(targets)
 	phase, finished := phaseOf(targets)
 	if phase == v1alpha1.OperationPhaseDone && !specWritten {
 		phase, finished = v1alpha1.OperationPhaseExecuting, false // a Scale whose targets are all done is not Done while its spec write has not landed
 	}
-	key := "partly-failed/" + string(op.UID)
-	if phase == v1alpha1.OperationPhasePartlyFailed {
-		if p.mem.repeat(key, p.now) {
-			p.r.Recorder.Event(op, nil, eventFailing, v1alpha1.ReasonOperationPartlyFailed,
-				fmt.Sprintf("Operation %s/%s is partly failed: %s", op.Namespace, op.Name, strings.Join(failures, "; ")))
-		}
-	} else {
-		p.mem.clear(key)
-	}
+	p.raisePartlyFailed(op, phase, targets)
 	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 		s.Targets = targets
 		s.Phase = phase

@@ -32,11 +32,30 @@ var errKilled = errors.New("the controller was killed")
 // the deployment's pass, whose error is returned.
 func (w *execWorld) stepKeepingErrors() error {
 	w.t.Helper()
-	if err := w.prov.Sync(w.ctx); err != nil {
+	err := w.prov.Sync(w.ctx)
+	if !w.syncHandled(rigProvider, err) {
 		w.t.Fatalf("provider sync: %v", err)
 	}
+	for _, x := range w.extra {
+		if err := x.prov.Sync(w.ctx); !w.syncHandled(x.name, err) {
+			w.t.Fatalf("provider %s sync: %v", x.name, err)
+		}
+	}
 	w.syncAgents()
-	_, err := w.r.Reconcile(w.ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: rigNS, Name: hoMD}})
+	_, err = w.r.Reconcile(w.ctx, ctrl.Request{NamespacedName: client.ObjectKey{Namespace: rigNS, Name: hoMD}})
+	// The world's other deployments, if a test made any, are passes that are not expected to fail.
+	var mds v1alpha1.ModelDeploymentList
+	if lerr := w.c.List(w.ctx, &mds); lerr != nil {
+		w.t.Fatal(lerr)
+	}
+	for _, md := range mds.Items {
+		if md.Name == hoMD {
+			continue
+		}
+		if _, rerr := w.r.Reconcile(w.ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&md)}); rerr != nil {
+			w.t.Fatalf("reconcile %s/%s: %v", md.Namespace, md.Name, rerr)
+		}
+	}
 	return err
 }
 

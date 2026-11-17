@@ -248,6 +248,7 @@ func (p *pass) failSpecChanged(op *v1alpha1.Operation) error {
 		out = append(out, o)
 	}
 	phase, finished := phaseOf(out)
+	p.raisePartlyFailed(op, phase, out) // an Operation a person's edit stopped is PartlyFailed like any other: the event is raised here too
 	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
 		s.Targets, s.Phase = out, phase
 		p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonDone,
@@ -262,10 +263,14 @@ func (p *pass) failSpecChanged(op *v1alpha1.Operation) error {
 // lastReadyScaleTarget reports whether the committed Instance target is one that a Scale committed as CancelPending or
 // EndStarting, that is Ready now, and would be the LAST ready one: no other Instance is Ready, not being deleted, not stale
 // and not itself a committed target, which is the planner's own staysReady. Draining it would be a DrainLastReady nobody
-// approved. An End drains every Ready Instance as the End itself, so it is not asked.
+// approved. An End drains every Ready Instance as the End itself, and so does a Scale to zero (the shutdown), so neither is
+// asked: the rule applies to a Scale to a count above zero alone (HBEP-10, The report, as amended by #665, #666 and #668).
 func (p *pass) lastReadyScaleTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, in *v1alpha1.Instance) bool {
 	if op.Spec.Action != v1alpha1.OperationActionScale || in == nil || in.Status.Phase != v1alpha1.InstanceReady {
 		return false
+	}
+	if op.Spec.Scale != nil && op.Spec.Scale.Instances == 0 {
+		return false // a Scale to zero is the shutdown, as an End is: every Instance is drained, and the approval took it to zero
 	}
 	if t.Effect != v1alpha1.PlanEffectCancelPending && t.Effect != v1alpha1.PlanEffectEndStarting {
 		return false
@@ -416,6 +421,9 @@ func releasingEffect(e v1alpha1.PlanEffect) bool {
 // controller's own scale-down makes (startDrain, end), and an Allocation is released by deleteAllocation, with the
 // cause deleteAllocation reads from the committed list (operationCause).
 func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) error {
+	if recordedFinal(op, t.UID) {
+		return nil // failed for good, and recorded: no later pass acts on it (HBEP-10, The report, as amended by #665, #666 and #668)
+	}
 	switch t.Kind {
 	case v1alpha1.TargetKindInstance:
 		in := p.instanceByUID(t.UID)
@@ -458,6 +466,19 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		return p.deleteAllocation(a, v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID))
 	}
 	return nil
+}
+
+// recordedFinal reports whether the Operation's report already records the target as failed for good (failureIsFinal): such a
+// target is never acted on by any later pass, and no later release of it carries the Operation's cause (HBEP-10, The
+// report, as amended by #665, #666 and #668). A final outcome is recorded only by a pass that acts (finalFailure), so
+// what is recorded was true at an act.
+func recordedFinal(op *v1alpha1.Operation, uid types.UID) bool {
+	for _, o := range op.Status.Targets {
+		if o.UID == uid && o.State == v1alpha1.TargetStateFailed && failureIsFinal(o.Reason) {
+			return true
+		}
+	}
+	return false
 }
 
 // startedSinceCommit reports whether a committed CancelPending target's job has started since the commit: it was queued
@@ -516,14 +537,16 @@ func (p *pass) committedAllocation(t v1alpha1.CommittedTarget) (*v1alpha1.Alloca
 
 // operationCause is the release cause of an Allocation that an Executing Operation committed to release: the
 // Operation's, whichever path of the pass deletes it (the Operation's own act, step 6's shutdown, retention).
-// Only a releasing effect counts. A Keep stays retention's: when retention releases it later, its cause is its own.
+// Only a releasing effect counts. A Keep stays retention's: when retention releases it later, its cause is its own. So does a
+// target recorded as failed for good (recordedFinal): the Operation did not release it, and a later release of it is
+// retention's or the shutdown's, never the Operation's.
 func (p *pass) operationCause(a *v1alpha1.Allocation) (string, bool) {
 	for _, op := range p.ops {
 		if !isExecuting(op) {
 			continue
 		}
 		for _, t := range op.Status.Committed {
-			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID && releasingEffect(t.Effect) && !startedSinceCommit(t, a) {
+			if t.Kind == v1alpha1.TargetKindAllocation && t.UID == a.UID && releasingEffect(t.Effect) && !startedSinceCommit(t, a) && !recordedFinal(op, t.UID) {
 				return v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID), true
 			}
 		}

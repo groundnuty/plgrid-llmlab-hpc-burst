@@ -38,6 +38,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 )
 
 // opsStandInPorts are #589's block: hpcburst up's 28460-28472, the front's client listener and its dial-home listener.
@@ -421,16 +422,75 @@ func TestStandInOperations(t *testing.T) {
 	// of those jobs is the end of the example.
 	var tags []string
 	for _, a := range s.allocationsOf(opsMDP) {
-		tags = append(tags, v1alpha1.JobTag(a.Namespace, a.Name, a.UID))
+		if a.DeletionTimestamp.IsZero() {
+			tags = append(tags, v1alpha1.JobTag(a.Namespace, a.Name, a.UID))
+		}
 	}
 	if len(tags) == 0 {
 		t.Fatal("the deployment on P has no Allocation to end")
 	}
+	// jobsOf is the fake Slurm's own record of the jobs under the tags, by tag.
+	jobsOf := func() map[string]string {
+		out := map[string]string{}
+		for _, j := range cl.Plat.Jobs() {
+			for _, tag := range tags {
+				if j.Name == tag {
+					out[tag] = j.State
+				}
+			}
+		}
+		return out
+	}
+	// Before the approval every job of the deployment RUNS: the End is then what ends them, and a job that had ended by its
+	// own time limit before it could not pass the check below.
+	stack.WaitState(t, 3*time.Minute, "every job of the deployment on P to be running before the End is approved", func() (bool, string) {
+		got := jobsOf()
+		for _, tag := range tags {
+			if got[tag] != fakeslurm.Running {
+				return false, fmt.Sprintf("jobs %v", got)
+			}
+		}
+		return true, ""
+	})
 	s.request(s.person, "end-p", opsMDP, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
 	s.confirm(s.person, "end-p")
 	s.waitOp("end-p", "AwaitingApproval", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseAwaitingApproval })
+	// Before the approval nothing is released: a sentinel (an End of the same deployment, only ever planned) reads Planned
+	// once a pass of its key has run after the End waits, and only then is the End read, still waiting, with nothing committed,
+	// no end time, every Allocation alive and every job running.
+	s.request(s.person, "sentinel-p", opsMDP, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd})
+	if op := s.op("end-p"); op.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval || len(op.Status.Committed) != 0 {
+		t.Fatalf("Operation end-p is %s with %d committed targets before the approval, want it waiting with none", opsDescribe(op), len(op.Status.Committed))
+	}
+	if md := s.deployment(opsMDP); md.Spec.EndTime != nil {
+		t.Errorf("the deployment on P has the end time %v before the End is approved", md.Spec.EndTime)
+	}
+	if live, _ := s.instancesOf(opsMDP); len(live) == 0 {
+		t.Error("the deployment on P has no live Instance before the End is approved")
+	}
+	for _, a := range s.allocationsOf(opsMDP) {
+		if !a.DeletionTimestamp.IsZero() {
+			t.Errorf("Allocation %s is being deleted before the End is approved", a.Name)
+		}
+	}
+	for tag, state := range jobsOf() {
+		if state != fakeslurm.Running {
+			t.Errorf("the job %s is %s before the End is approved, want RUNNING", tag, state)
+		}
+	}
 	s.approve(s.person, "end-p")
-	s.waitOp("end-p", "Done", func(o *v1alpha1.Operation) bool { return o.Status.Phase == v1alpha1.OperationPhaseDone })
+	// The End is Done once every target is. The Allocations are read while it runs: the release cause each carries, which is
+	// written before the delete, is the End's own proof that it, and not the end of a time limit, released the job.
+	causes := map[string]string{}
+	stack.WaitState(t, 10*time.Minute, "Operation end-p: Done", func() (bool, string) {
+		for _, a := range s.allocationsOf(opsMDP) {
+			if c := a.Annotations[v1alpha1.AnnotationReleaseCause]; c != "" {
+				causes[v1alpha1.JobTag(a.Namespace, a.Name, a.UID)] = c
+			}
+		}
+		op := s.op("end-p")
+		return op.Status.Phase == v1alpha1.OperationPhaseDone, opsDescribe(op)
+	})
 	end := s.op("end-p")
 	for _, o := range end.Status.Targets {
 		if o.State != v1alpha1.TargetStateDone {
@@ -444,31 +504,33 @@ func TestStandInOperations(t *testing.T) {
 		t.Errorf("the deployment on P still has %d live Instances after its End is Done", len(live))
 	}
 	// The fake Slurm's own record: every job of the deployment's Allocations has ended, none is left running or pending.
-	live := func() []string {
-		var out []string
-		for _, j := range cl.Plat.Jobs() {
-			for _, tag := range tags {
-				if j.Name == tag && (j.State == "RUNNING" || j.State == "PENDING" || j.State == "COMPLETING") {
-					out = append(out, fmt.Sprintf("%s %s", j.Name, j.State))
-				}
-			}
-		}
-		return out
-	}
 	stack.WaitState(t, 3*time.Minute, "the fake Slurm to show every job of the deployment on P ended", func() (bool, string) {
-		l := live()
-		return len(l) == 0, fmt.Sprintf("still live: %v", l)
-	})
-	jobs := 0
-	for _, j := range cl.Plat.Jobs() {
+		got := jobsOf()
 		for _, tag := range tags {
-			if j.Name == tag {
-				jobs++
+			if !fakeslurm.IsTerminal(got[tag]) {
+				return false, fmt.Sprintf("jobs %v", got)
 			}
 		}
-	}
-	if jobs == 0 {
-		t.Errorf("the fake Slurm holds no job under the tags of the deployment's Allocations %v: the check read nothing", tags)
+		return true, ""
+	})
+	// Each job ended because the End released it: the fake Slurm says CANCELLED (the Provider's finalizer cancelled it), or
+	// the release cause its Allocation carried names this End by namespace, name and UID. A job that ran out its time limit
+	// (TIMEOUT), or failed, is neither: it fails the check, whatever else holds.
+	got := jobsOf()
+	for _, tag := range tags {
+		state, seen := got[tag]
+		if !seen {
+			t.Errorf("the fake Slurm holds no job under the tag %s: the check read nothing", tag)
+			continue
+		}
+		ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(causes[tag])
+		byThisEnd := ok && ns == end.Namespace && name == end.Name && uid == end.UID
+		switch {
+		case state == fakeslurm.Timeout || state == fakeslurm.NodeFail || state == fakeslurm.Failed:
+			t.Errorf("the job %s ended %s: it ran out its time limit or failed, the End did not end it", tag, state)
+		case state != fakeslurm.Cancelled && !byThisEnd:
+			t.Errorf("the job %s ended %s, and its Allocation's release cause was %q: want CANCELLED or the cause of Operation %s/%s %s", tag, state, causes[tag], end.Namespace, end.Name, end.UID)
+		}
 	}
 	// The stack's own stop is down's, registered by StartHost; the cluster's clean-up kills what is left.
 }
