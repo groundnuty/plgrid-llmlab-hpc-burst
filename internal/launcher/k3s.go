@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -139,8 +140,35 @@ func prepareIsolation(l layout) error {
 			return err
 		}
 	}
+	// The audit log and its directory are owner only whatever an older release, a umask or a restore left (HBEP-10, Audit: the
+	// host's user alone reads it). MkdirAll leaves an existing directory's mode as it is, and the API server opens an existing
+	// log with its own mode, so both are set at every start, before k3s opens the file.
+	if err := os.Chmod(l.logDir(), 0o700); err != nil {
+		return err
+	}
+	if err := tightenAuditFiles(l); err != nil {
+		return err
+	}
 	// Rewritten on every start, so an edited policy never outlives a restart.
 	return writeFileAtomic(l.auditPolicy(), audit.Policy, 0o600)
+}
+
+// tightenAuditFiles sets every file of the audit log (audit.log, the rotated audit-<time>.log and its .gz) to mode 600. It touches
+// no other file of the log directory.
+func tightenAuditFiles(l layout) error {
+	files, err := filepath.Glob(filepath.Join(l.logDir(), "audit*.log*"))
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if fi, err := os.Lstat(f); err != nil || !fi.Mode().IsRegular() {
+			continue // a symbolic link or a directory is not the API server's file
+		}
+		if err := os.Chmod(f, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // launch starts k3s detached from the launcher (own session, no stdin, output to the log), and
