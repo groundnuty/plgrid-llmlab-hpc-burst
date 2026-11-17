@@ -146,6 +146,52 @@ func hoStart(rg *rig, step func()) *v1alpha1.Instance {
 	return &p
 }
 
+// hoStartK is hoStart for a deployment with PR 4's extra beside its missing primary (overAllocation 1) when extra is
+// set, and hoStart as it is when not. The pass at 08:00:10 makes the primary and the extra X together and both jobs
+// start at 08:00:20 with no wait, so both pass at 08:01:10; the selection chooses one of them by UID and it is ready
+// then, the other waits at its ranking point and is ranked out against it, measuring the same, in that pass or the
+// next. The primary is the ready one. It checks the facts hoStart does.
+func hoStartK(rg *rig, step func(), extra bool) *v1alpha1.Instance {
+	rg.t.Helper()
+	if !extra {
+		return hoStart(rg, step)
+	}
+	if step == nil {
+		step = rg.Step
+	}
+	md := mdSpec(hoMD)
+	md.Spec.OverAllocation = ptrTo(int32(1))
+	rg.create(md)
+	for range 7 {
+		rg.clock.Advance(10 * time.Second)
+		step()
+	}
+	var ready []v1alpha1.Instance
+	for _, in := range rg.instances(hoMD) {
+		if in.Status.Phase == v1alpha1.InstanceReady {
+			ready = append(ready, in)
+		}
+	}
+	if len(rg.instances(hoMD)) != 2 || len(ready) != 1 {
+		rg.t.Fatalf("%d Instances and %d ready at 08:01:10, want the primary and the extra, one of them ready", len(rg.instances(hoMD)), len(ready))
+	}
+	p := ready[0]
+	switch {
+	case p.Status.ReadyTime == nil || !p.Status.ReadyTime.Time.Equal(hoT(8, 1, 10)):
+		rg.t.Fatalf("the primary should be ready at 08:01:10, got %v", p.Status.ReadyTime)
+	case p.Status.LeaseEnd == nil || !p.Status.LeaseEnd.Time.Equal(hoT(12, 0, 20)):
+		rg.t.Fatalf("the primary's leaseEnd should be 12:00:20, got %v", p.Status.LeaseEnd)
+	}
+	return &p
+}
+
+// hoBoth runs a row twice, with no extra and with PR 4's extra beside the primary (hoStartK).
+func hoBoth(t *testing.T, row func(t *testing.T, extra bool)) {
+	t.Helper()
+	t.Run("k 0", func(t *testing.T) { row(t, false) })
+	t.Run("k 1, with the extra", func(t *testing.T) { row(t, true) })
+}
+
 // hoRepl returns the Instances that name pred as their predecessor.
 func hoRepl(rg *rig, pred string) []v1alpha1.Instance {
 	var out []v1alpha1.Instance
@@ -258,25 +304,27 @@ func TestHandoverReplacementCreatedAtItsPlannedTime(t *testing.T) {
 // the next step, 09:19:40, and it is ready 50 s later, 09:20:30: 29m50s before
 // the drain start, about the 30 min margin.
 func TestHandoverShortQueueReplacementReadyAboutTheMarginBeforeDrain(t *testing.T) {
-	rg := newRig(t, withMaxTime(4*time.Hour))
-	p := hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
-	hoStepTo(rg, hoT(9, 20, 40), 10*time.Second, nil)
-	r := hoRepl(rg, p.Name)
-	if len(r) != 1 {
-		t.Fatalf("want one replacement, got %d", len(r))
-	}
-	hoWantTime(t, "replacement creation", &r[0].CreationTimestamp, hoT(9, 19, 30))
-	a, _ := rg.allocation(r[0].Spec.AllocationRef.Name)
-	if a == nil {
-		t.Fatal("the replacement has no Allocation")
-	}
-	hoWantTime(t, "replacement's job start", a.Status.AtProvider.StartTime, hoT(9, 19, 40))
-	hoWantTime(t, "replacement ready", r[0].Status.ReadyTime, hoT(9, 20, 30))
-	lead := hoT(9, 50, 20).Sub(r[0].Status.ReadyTime.Time)
-	if margin := 30 * time.Minute; lead > margin || lead < margin-time.Minute {
-		t.Fatalf("replacement ready %s before the drain start, want about the %s margin", lead, margin)
-	}
+	hoBoth(t, func(t *testing.T, extra bool) {
+		rg := newRig(t, withMaxTime(4*time.Hour))
+		p := hoStartK(rg, nil, extra)
+		hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
+		hoStepTo(rg, hoT(9, 20, 40), 10*time.Second, nil)
+		r := hoRepl(rg, p.Name)
+		if len(r) != 1 {
+			t.Fatalf("want one replacement, got %d", len(r))
+		}
+		hoWantTime(t, "replacement creation", &r[0].CreationTimestamp, hoT(9, 19, 30))
+		a, _ := rg.allocation(r[0].Spec.AllocationRef.Name)
+		if a == nil {
+			t.Fatal("the replacement has no Allocation")
+		}
+		hoWantTime(t, "replacement's job start", a.Status.AtProvider.StartTime, hoT(9, 19, 40))
+		hoWantTime(t, "replacement ready", r[0].Status.ReadyTime, hoT(9, 20, 30))
+		lead := hoT(9, 50, 20).Sub(r[0].Status.ReadyTime.Time)
+		if margin := 30 * time.Minute; lead > margin || lead < margin-time.Minute {
+			t.Fatalf("replacement ready %s before the drain start, want about the %s margin", lead, margin)
+		}
+	})
 }
 
 // TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned covers:
@@ -288,52 +336,54 @@ func TestHandoverShortQueueReplacementReadyAboutTheMarginBeforeDrain(t *testing.
 // waits are the two jobs' 0 s, start-to-ready 50 s again (R1's, 09:19:40 to
 // 09:20:30), so R2 is planned at 11:09:40 - (0 + 50 s + 30 min) = 10:38:50.
 func TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned(t *testing.T) {
-	rg := newRig(t, withMaxTime(4*time.Hour))
-	p := hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
-	hoStepTo(rg, hoT(9, 20, 40), 10*time.Second, nil)
-	hoStepTo(rg, hoT(9, 50, 10), time.Minute, func() {
+	hoBoth(t, func(t *testing.T, extra bool) {
+		rg := newRig(t, withMaxTime(4*time.Hour))
+		p := hoStartK(rg, nil, extra)
+		hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)
+		hoStepTo(rg, hoT(9, 20, 40), 10*time.Second, nil)
+		hoStepTo(rg, hoT(9, 50, 10), time.Minute, func() {
+			hoAtMostOneReplacement(rg)
+			if n := rg.readyCount(hoMD); n != 2 || hoPhase(rg, p.Name) != v1alpha1.InstanceReady {
+				t.Fatalf("at %s: %d ready, primary %s: both must serve until the drain start", rg.clock.Now().Format(time.TimeOnly), n, hoPhase(rg, p.Name))
+			}
+		})
+		r1 := hoRepl(rg, p.Name)[0]
+		if r1.Spec.DeploymentID != p.Spec.DeploymentID {
+			t.Fatalf("replacement ID %s, primary ID %s: same class, same ID", r1.Spec.DeploymentID, p.Spec.DeploymentID)
+		}
+		// At its drain start, 09:50:20, the primary drains; it ends on the first
+		// report taken after the drain began, the agent's at 09:50:30, which shows
+		// no request running (a report from before the drain never ends it).
+		hoStepTo(rg, hoT(9, 50, 20), 10*time.Second, nil)
+		if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
+			t.Fatalf("at 09:50:20 the primary is %s, want draining", ph)
+		}
+		hoStepTo(rg, hoT(9, 50, 30), 10*time.Second, nil)
+		if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
+			t.Fatalf("at 09:50:30 the primary is %s/%s, want ended/Drained", got.Status.Phase, got.Status.EndReason)
+		}
+		if n, c := len(rg.rec.Find("replaced", "HandedOver")), len(rg.rec.Find("degraded", "CapacityDropped")); n != 1 || c != 0 {
+			t.Fatalf("HandedOver events %d (want 1), CapacityDropped events %d (want 0)", n, c)
+		}
+		if n := rg.readyCount(hoMD); n != 1 || len(hoRepl(rg, r1.Name)) != 0 {
+			t.Fatalf("ready %d, R1's replacements %d: want R1 serving and no R2 yet", n, len(hoRepl(rg, r1.Name)))
+		}
+		hoWantTime(t, "R1 leaseEnd", rg.instance(r1.Name).Status.LeaseEnd, hoT(13, 19, 40))
+		if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "50s" {
+			t.Fatalf("start-to-ready should be 50s, got %+v", s)
+		}
+		hoStepTo(rg, hoT(10, 38, 40), time.Minute, func() {
+			if n := len(hoRepl(rg, r1.Name)); n != 0 {
+				t.Fatalf("at %s: R2 exists before its planned time 10:38:50", rg.clock.Now().Format(time.TimeOnly))
+			}
+		})
+		hoStepTo(rg, hoT(10, 38, 50), 10*time.Second, nil)
+		r2 := hoRepl(rg, r1.Name)
+		if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(hoT(10, 38, 50)) || r2[0].Spec.DeploymentID != r1.Spec.DeploymentID {
+			t.Fatalf("R1's replacements %+v, want one created at 10:38:50 with R1's ID", r2)
+		}
 		hoAtMostOneReplacement(rg)
-		if n := rg.readyCount(hoMD); n != 2 || hoPhase(rg, p.Name) != v1alpha1.InstanceReady {
-			t.Fatalf("at %s: %d ready, primary %s: both must serve until the drain start", rg.clock.Now().Format(time.TimeOnly), n, hoPhase(rg, p.Name))
-		}
 	})
-	r1 := hoRepl(rg, p.Name)[0]
-	if r1.Spec.DeploymentID != p.Spec.DeploymentID {
-		t.Fatalf("replacement ID %s, primary ID %s: same class, same ID", r1.Spec.DeploymentID, p.Spec.DeploymentID)
-	}
-	// At its drain start, 09:50:20, the primary drains; it ends on the first
-	// report taken after the drain began, the agent's at 09:50:30, which shows
-	// no request running (a report from before the drain never ends it).
-	hoStepTo(rg, hoT(9, 50, 20), 10*time.Second, nil)
-	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
-		t.Fatalf("at 09:50:20 the primary is %s, want draining", ph)
-	}
-	hoStepTo(rg, hoT(9, 50, 30), 10*time.Second, nil)
-	if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
-		t.Fatalf("at 09:50:30 the primary is %s/%s, want ended/Drained", got.Status.Phase, got.Status.EndReason)
-	}
-	if n, c := len(rg.rec.Find("replaced", "HandedOver")), len(rg.rec.Find("degraded", "CapacityDropped")); n != 1 || c != 0 {
-		t.Fatalf("HandedOver events %d (want 1), CapacityDropped events %d (want 0)", n, c)
-	}
-	if n := rg.readyCount(hoMD); n != 1 || len(hoRepl(rg, r1.Name)) != 0 {
-		t.Fatalf("ready %d, R1's replacements %d: want R1 serving and no R2 yet", n, len(hoRepl(rg, r1.Name)))
-	}
-	hoWantTime(t, "R1 leaseEnd", rg.instance(r1.Name).Status.LeaseEnd, hoT(13, 19, 40))
-	if s := rg.md(hoMD).Status.StartToReady; len(s) != 1 || s[0].Duration != "50s" {
-		t.Fatalf("start-to-ready should be 50s, got %+v", s)
-	}
-	hoStepTo(rg, hoT(10, 38, 40), time.Minute, func() {
-		if n := len(hoRepl(rg, r1.Name)); n != 0 {
-			t.Fatalf("at %s: R2 exists before its planned time 10:38:50", rg.clock.Now().Format(time.TimeOnly))
-		}
-	})
-	hoStepTo(rg, hoT(10, 38, 50), 10*time.Second, nil)
-	r2 := hoRepl(rg, r1.Name)
-	if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(hoT(10, 38, 50)) || r2[0].Spec.DeploymentID != r1.Spec.DeploymentID {
-		t.Fatalf("R1's replacements %+v, want one created at 10:38:50 with R1's ID", r2)
-	}
-	hoAtMostOneReplacement(rg)
 }
 
 // TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart covers: the
@@ -430,82 +480,90 @@ func TestHandoverFailedReplacementPredecessorServesUntilItsDrainStart(t *testing
 // 14:09:40 - (3 h + 50 s + 30 min) = 10:38:50, is before R1's start and R2 is
 // created when R1's Allocation starts, 12:19:40.
 func TestHandoverLateReplacementDegradesThenTakesOver(t *testing.T) {
-	rg := newRig(t, withMaxTime(4*time.Hour))
-	rg.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 3 * time.Hour})
-	p := hoStart(rg, nil)
-	notLate := func() {
-		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status == metav1.ConditionTrue {
-			t.Fatalf("at %s Degraded = %s/%s before the lateness deadline 09:49:30", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason)
+	hoBoth(t, func(t *testing.T, extra bool) {
+		rg := newRig(t, withMaxTime(4*time.Hour))
+		// The jobs take the scripts in the order they are submitted: with the extra, X's takes the second.
+		scripts := []pfake.Script{{}, {QueueWait: 3 * time.Hour}}
+		jobs := 2
+		if extra {
+			scripts, jobs = []pfake.Script{{}, {}, {QueueWait: 3 * time.Hour}}, 3
 		}
-	}
-	hoStepTo(rg, hoT(9, 19, 20), time.Minute, notLate)
-	hoStepTo(rg, hoT(9, 19, 40), 10*time.Second, notLate)
-	hoStepTo(rg, hoT(9, 49, 20), time.Minute, notLate)
-	hoStepTo(rg, hoT(9, 49, 30), 10*time.Second, nil)
-	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonReplacementLate {
-		t.Fatalf("at 09:49:30 Degraded = %s/%s, want True/ReplacementLate", c.Status, c.Reason)
-	}
-	hoStepTo(rg, hoT(9, 50, 10), 10*time.Second, nil)
-	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceReady {
-		t.Fatalf("at 09:50:10 the primary is %s, want ready", ph)
-	}
-	// Draining from 09:50:20, on time; ended on the first report after it.
-	hoStepTo(rg, hoT(9, 50, 20), 10*time.Second, nil)
-	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
-		t.Fatalf("at 09:50:20 the primary is %s, want draining on time", ph)
-	}
-	hoStepTo(rg, hoT(9, 50, 30), 10*time.Second, nil)
-	if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
-		t.Fatalf("at 09:50:30 the primary is %s/%s, want drained", got.Status.Phase, got.Status.EndReason)
-	}
-	if c, n := rg.condition(hoMD, v1alpha1.ConditionDegraded), len(rg.rec.Find("degraded", "CapacityDropped")); c.Reason != v1alpha1.ReasonCapacityDropped || n != 1 {
-		t.Fatalf("Degraded reason %s and %d CapacityDropped events, want CapacityDropped and 1", c.Reason, n)
-	}
-	r1 := hoRepl(rg, p.Name)[0]
-	// R1's job is eligible when the provider first syncs after R1's
-	// Allocation is created at 09:19:30 (hold mode lifts the hold in that
-	// pass, 09:19:40) and starts 3 h later, 12:19:40; the loop reads the start
-	// and checks it against that.
-	var r1Start time.Time
-	hoStepTo(rg, hoT(12, 30, 0), 10*time.Second, func() {
-		a, ok := rg.allocation(r1.Spec.AllocationRef.Name)
-		if r1Start.IsZero() && ok && a.Status.AtProvider.StartTime != nil {
-			r1Start = a.Status.AtProvider.StartTime.Time
-			if a.Status.AtProvider.SubmitTime == nil || a.Status.AtProvider.StartTime.Sub(a.Status.AtProvider.SubmitTime.Time) < 3*time.Hour {
-				t.Fatalf("R1's job started %s after its submission, want at least the scripted 3 h", a.Status.AtProvider.StartTime.Sub(a.Status.AtProvider.SubmitTime.Time))
+		rg.batch.Enqueue(scripts...)
+		p := hoStartK(rg, nil, extra)
+		notLate := func() {
+			if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status == metav1.ConditionTrue {
+				t.Fatalf("at %s Degraded = %s/%s before the lateness deadline 09:49:30", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason)
 			}
 		}
+		hoStepTo(rg, hoT(9, 19, 20), time.Minute, notLate)
+		hoStepTo(rg, hoT(9, 19, 40), 10*time.Second, notLate)
+		hoStepTo(rg, hoT(9, 49, 20), time.Minute, notLate)
+		hoStepTo(rg, hoT(9, 49, 30), 10*time.Second, nil)
+		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue || c.Reason != v1alpha1.ReasonReplacementLate {
+			t.Fatalf("at 09:49:30 Degraded = %s/%s, want True/ReplacementLate", c.Status, c.Reason)
+		}
+		hoStepTo(rg, hoT(9, 50, 10), 10*time.Second, nil)
+		if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceReady {
+			t.Fatalf("at 09:50:10 the primary is %s, want ready", ph)
+		}
+		// Draining from 09:50:20, on time; ended on the first report after it.
+		hoStepTo(rg, hoT(9, 50, 20), 10*time.Second, nil)
+		if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining {
+			t.Fatalf("at 09:50:20 the primary is %s, want draining on time", ph)
+		}
+		hoStepTo(rg, hoT(9, 50, 30), 10*time.Second, nil)
+		if got := rg.instance(p.Name); got.Status.Phase != v1alpha1.InstanceEnded || got.Status.EndReason != v1alpha1.ReasonDrained {
+			t.Fatalf("at 09:50:30 the primary is %s/%s, want drained", got.Status.Phase, got.Status.EndReason)
+		}
+		if c, n := rg.condition(hoMD, v1alpha1.ConditionDegraded), len(rg.rec.Find("degraded", "CapacityDropped")); c.Reason != v1alpha1.ReasonCapacityDropped || n != 1 {
+			t.Fatalf("Degraded reason %s and %d CapacityDropped events, want CapacityDropped and 1", c.Reason, n)
+		}
+		r1 := hoRepl(rg, p.Name)[0]
+		// R1's job is eligible when the provider first syncs after R1's
+		// Allocation is created at 09:19:30 (hold mode lifts the hold in that
+		// pass, 09:19:40) and starts 3 h later, 12:19:40; the loop reads the start
+		// and checks it against that.
+		var r1Start time.Time
+		hoStepTo(rg, hoT(12, 30, 0), 10*time.Second, func() {
+			a, ok := rg.allocation(r1.Spec.AllocationRef.Name)
+			if r1Start.IsZero() && ok && a.Status.AtProvider.StartTime != nil {
+				r1Start = a.Status.AtProvider.StartTime.Time
+				if a.Status.AtProvider.SubmitTime == nil || a.Status.AtProvider.StartTime.Sub(a.Status.AtProvider.SubmitTime.Time) < 3*time.Hour {
+					t.Fatalf("R1's job started %s after its submission, want at least the scripted 3 h", a.Status.AtProvider.StartTime.Sub(a.Status.AtProvider.SubmitTime.Time))
+				}
+			}
+			if r1Start.IsZero() {
+				if n, s := rg.readyCount(hoMD), rg.submissions(); n != 0 || s != jobs {
+					t.Fatalf("at %s: %d ready, %d sbatch calls, want 0 and %d while R1 queues", rg.clock.Now().Format(time.TimeOnly), n, s, jobs)
+				}
+				if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue {
+					t.Fatalf("at %s the deployment is not degraded while capacity is down", rg.clock.Now().Format(time.TimeOnly))
+				}
+			}
+		})
 		if r1Start.IsZero() {
-			if n, s := rg.readyCount(hoMD), rg.submissions(); n != 0 || s != 2 {
-				t.Fatalf("at %s: %d ready, %d sbatch calls, want 0 and 2 while R1 queues", rg.clock.Now().Format(time.TimeOnly), n, s)
-			}
-			if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionTrue {
-				t.Fatalf("at %s the deployment is not degraded while capacity is down", rg.clock.Now().Format(time.TimeOnly))
-			}
+			t.Fatal("R1's job never started")
+		}
+		if want := hoT(12, 19, 40); !r1Start.Equal(want) {
+			t.Fatalf("R1's job started at %s, want %s (submitted 09:19:40 + 3 h)", r1Start.Format(time.TimeOnly), want.Format(time.TimeOnly))
+		}
+		if got := rg.instance(r1.Name); got.Status.Phase != v1alpha1.InstanceReady || got.Status.ReadyTime == nil || got.Status.ReadyTime.Sub(r1Start) > time.Minute {
+			t.Fatalf("R1 is %s (ready at %v), want ready within a minute of its start %s", got.Status.Phase, got.Status.ReadyTime, r1Start.Format(time.TimeOnly))
+		}
+		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
+			t.Fatalf("Degraded = %s/%s once R1 serves, want False", c.Status, c.Reason)
+		}
+		if n := len(rg.rec.Find("degraded", v1alpha1.ReasonReplacementLate)); n != 1 {
+			t.Fatalf("ReplacementLate events = %d, want one", n)
+		}
+		// R1's replacement: the Provider's largest wait is now R1's own (over 3 h),
+		// so the plan, R1's drain start minus (3 h + start-to-ready + 30 min),
+		// falls before R1's start and is held to it.
+		r2 := hoRepl(rg, r1.Name)
+		if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(r1Start) {
+			t.Fatalf("R1's replacements %+v, want one created at R1's start %s", r2, r1Start.Format(time.TimeOnly))
 		}
 	})
-	if r1Start.IsZero() {
-		t.Fatal("R1's job never started")
-	}
-	if want := hoT(12, 19, 40); !r1Start.Equal(want) {
-		t.Fatalf("R1's job started at %s, want %s (submitted 09:19:40 + 3 h)", r1Start.Format(time.TimeOnly), want.Format(time.TimeOnly))
-	}
-	if got := rg.instance(r1.Name); got.Status.Phase != v1alpha1.InstanceReady || got.Status.ReadyTime == nil || got.Status.ReadyTime.Sub(r1Start) > time.Minute {
-		t.Fatalf("R1 is %s (ready at %v), want ready within a minute of its start %s", got.Status.Phase, got.Status.ReadyTime, r1Start.Format(time.TimeOnly))
-	}
-	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
-		t.Fatalf("Degraded = %s/%s once R1 serves, want False", c.Status, c.Reason)
-	}
-	if n := len(rg.rec.Find("degraded", v1alpha1.ReasonReplacementLate)); n != 1 {
-		t.Fatalf("ReplacementLate events = %d, want one", n)
-	}
-	// R1's replacement: the Provider's largest wait is now R1's own (over 3 h),
-	// so the plan, R1's drain start minus (3 h + start-to-ready + 30 min),
-	// falls before R1's start and is held to it.
-	r2 := hoRepl(rg, r1.Name)
-	if len(r2) != 1 || !r2[0].CreationTimestamp.Time.Equal(r1Start) {
-		t.Fatalf("R1's replacements %+v, want one created at R1's start %s", r2, r1Start.Format(time.TimeOnly))
-	}
 }
 
 // TestHandoverLeaseEndExtensionMovesDrainStart covers Lease end: every observe

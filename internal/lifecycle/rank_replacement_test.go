@@ -113,8 +113,11 @@ func TestAFailedPrimaryWithAReplacementLeavesTheWaitingExtraChosen(t *testing.T)
 		if in := h.mustInstance(p); in.Status.Phase != v1alpha1.InstanceEnded || in.Status.EndReason != v1alpha1.ReasonAllocationFailed {
 			t.Fatalf("P is %s, ended for %q at 00:38:00, want ended for AllocationFailed", in.Status.Phase, in.Status.EndReason)
 		}
-		if got := h.readyAt(x); !got.Equal(rkAt(0, 38, 0)) {
-			t.Fatalf("X ready at %v, want 00:38:00, in the pass that sees P gone", got)
+		// P and X are made in the same second, so a pass handles them in the order of their random names: X is ready in
+		// the pass that sees P gone, 00:38:00, when P is handled first, and in the next, 00:38:10, when X is.
+		h.tick(10 * time.Second)
+		if got := h.readyAt(x); !got.Equal(rkAt(0, 38, 0)) && !got.Equal(rkAt(0, 38, 10)) {
+			t.Fatalf("X ready at %v, want 00:38:00 or 00:38:10, in the pass that sees P gone or the next", got)
 		}
 	})
 }
@@ -218,7 +221,15 @@ func TestAWaitingCandidateIsNotFailedByStartTimeout(t *testing.T) {
 		if got := h.readyAt(p); got.Before(rkAt(1, 29, 0)) || got.After(rkAt(1, 31, 0)) {
 			t.Fatalf("P ready at %v, want about 01:30 (a rung-1 restart at 01:00:10, then 30 min)", got)
 		}
-		rkAssertRankedOut(t, h, x, "", h.readyAt(p))
+		// P and X are made in the same second, so the pass handles them in the order of their random names: X is ranked in
+		// the pass that makes P ready when P comes first, and in the next one when X does. Either way it is the end time.
+		ready := h.readyAt(p)
+		h.tick(10 * time.Second)
+		at := ready
+		if end := h.mustInstance(x).Status.EndTime; end != nil && end.Time.Equal(ready.Add(10*time.Second)) {
+			at = ready.Add(10 * time.Second)
+		}
+		rkAssertRankedOut(t, h, x, "", at)
 	})
 }
 
