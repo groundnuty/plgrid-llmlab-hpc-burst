@@ -29,11 +29,23 @@
 #     type-checked call graph, they reach no control plane, listener or port constant, as lifecycle-slow's
 #     do not. Taking them from that run, the package would have taken 357 s (235 s and 307 s in the other two)
 #     (a projection: CI's runs of this change are the measurement). It is a group of its own, not more rows in
-#     lifecycle-slow, because 3x of lifecycle-slow's sum of worsts with them would pass 850 s. The two tests of
-#     that package with parallel subtests (TestTheTwoJobGuardKeepsALongWaitToTwoAllocations and
-#     TestADeadStepLeavesTheDeploymentAtItsLastEnd) stay in the packages run: their own lines read 0.00 s,
-#     since go test does not count a parallel subtest's time in its parent, and they run alone at the end of
-#     the package for about 38-58 s, which is the next lever if the package grows again;
+#     lifecycle-slow, because 3x of lifecycle-slow's sum of worsts with them would pass 850 s;
+#   - lifecycle-slow3: six more of internal/lifecycle's fake-clock tests (issue #295, part B3). The first CI run
+#     of part B2's head measured the package's run at 432 s on a slow runner (202 s on a fast one, a 2.14x swing),
+#     above the 400 s that the worst of three had to meet, though the eight tests of lifecycle-slow2 were out of
+#     it. Its top-level lines add up to 378 s and the rest, 54 s, is the two tests that have parallel subtests
+#     (TestTheTwoJobGuardKeepsALongWaitToTwoAllocations and TestADeadStepLeavesTheDeploymentAtItsLastEnd): go
+#     test does not count a parallel subtest's time in its parent, so their own lines read 0.00 s, yet their
+#     eight subtests run side by side for 51-54 s at the package's end (206 s of subtest time over four cores).
+#     Those two and the four serial tests next by their own time in that run (20.3 s, 14.6 s, 13.8 s and 13.4 s
+#     there) leave the packages run, which would then have taken 316 s, below the 323 s that one reading must
+#     not pass (540 s over the 1.67x runner swing), with the 400 s of the worst of three well clear. Like
+#     lifecycle-slow's, the six run reconcile passes over a fake provider and a fake clock: read through the
+#     package's helpers with a type-checked call graph, they reach no control plane, listener or port
+#     constant, and the graph's only two hits are the ones that lifecycle-slow's own tests have (a process
+#     kill in internal/slurm/sshrun, which the graph reaches by matching an interface call of Close to that
+#     type's, not through any call the tests make). The group's parallel pair keeps its subtests parallel:
+#     a group runs its tests by -run, and -run matches the top-level name only;
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
@@ -92,6 +104,10 @@ cd "$root" || exit 1
 # (520 s) and livechecks-tree 126.9 s (390 s). The selection rule is in the bullets above, and the tests'
 # worst times are in the issue's record. Part B2's lifecycle-slow2 takes the sum of each test's worst over the
 # three go-job runs of PR #692's head (run attempts 1 to 3 of one run, 17 Nov 2026), 109.1 s, which gives 330 s.
+# Part B3's lifecycle-slow3 takes the times of the slow go-job run of part B2's head (432 s for the package,
+# 17 Nov 2026): 20.3 s, 14.6 s, 13.8 s and 13.4 s for the four serial tests and 53.9 s for the two parallel
+# ones, which is the part of the package's run that their top-level lines do not carry (432.2 s less the
+# 378.3 s of the top-level lines). That is 115.9 s, which gives 350 s.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
@@ -100,6 +116,7 @@ groups=(
   "lifecycle-apiserver|./internal/lifecycle|TestOperationsOnAControlPlaneWithTwoAgents TestMetricsKeeperModeThroughNewManager TestRecordedOutcomesPassTheAPIServersRules|130s"
   "lifecycle-slow|./internal/lifecycle|TestScaleDownWithASurplus TestARankedOutAllocationIsKeptUnderItsPolicy TestHandoverLateReplacementDegradesThenTakesOver TestHandoverReplacementCreatedAtItsPlannedTime TestAWaitingCandidateIsNotFailedByStartTimeout TestACandidateWithNoTunnelFailsAtItsDeadline TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear TestAWarmAllocationDoesNotCancelAPendingSurplus TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations TestAMarkedPeerThatRestartsNeverOutranks TestAReplacementHedgesByItsWaits|520s"
   "lifecycle-slow2|./internal/lifecycle|TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry TestRetentionNoneOutlivesHardEnd TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart TestMetricsNoProgressNeedsFreshKnownCounters TestNoOverlapModeBoundaries TestRetentionJobEndsAndLeavesListing TestTunnelDownAloneRestartsNothing TestMetricsDrainEndsOnAKnownZeroReadAfterTheDrainBegan|330s"
+  "lifecycle-slow3|./internal/lifecycle|TestVerifyRefusedGenerationConfigStopsClass TestReadyInstanceStaysReadyWhenTunnelDrops TestGateAMissTheFullRecordCantHoldSuspendsItsEntry TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases TestTheTwoJobGuardKeepsALongWaitToTwoAllocations TestADeadStepLeavesTheDeploymentAtItsLastEnd|350s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
