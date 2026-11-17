@@ -49,6 +49,10 @@ func confirmPlan(ctx context.Context, c client.Client, ns, name, planID string) 
 			return op, confirmedAlready, nil
 		case op.Spec.Confirm != nil:
 			return op, "", fmt.Errorf("Operation %s is %w (%s)", name, errConfirmedOther, op.Spec.Confirm.PlanID)
+		case op.Status.Phase != v1alpha1.OperationPhasePlanned:
+			// A plan that waits for its confirm is Planned. Refused keeps its plan, and Stale, Done and the rest are over or
+			// under way: confirming any of them would write a confirm that nothing reads, and report it as a success.
+			return op, "", fmt.Errorf("Operation %s is in phase %s%s: only a plan in phase Planned can be confirmed; nothing was confirmed", name, phaseOf(op), why(op))
 		}
 		op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planID}
 		switch err := c.Update(ctx, op); {
@@ -61,12 +65,20 @@ func confirmPlan(ctx context.Context, c client.Client, ns, name, planID string) 
 	return op, "", fmt.Errorf("Operation %s changed under %d confirms in a row; try again", name, maxConfirmTries)
 }
 
+// why is the Executable condition's message as a clause, or nothing.
+func why(op *v1alpha1.Operation) string {
+	if m := conditionMessage(op, v1alpha1.ConditionExecutable); m != "" {
+		return ": " + m
+	}
+	return ""
+}
+
 // cmdConfirm is hpcburst confirm <operation> --plan <id>.
 func (rt *cli) cmdConfirm(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs, o := newFlags("confirm", stderr, false)
 	var planID string
 	fs.StringVar(&planID, "plan", "", "the ID of the plan to confirm (required)")
-	fs.DurationVar(&o.timeout, "timeout", defaultTimeout, "how long to wait for the controller to move the Operation on")
+	fs.DurationVar(&o.timeout, "timeout", defaultTimeout, "how long to wait for the controller to record the confirm")
 	name, code, done := oneArg(fs, args, "Operation name")
 	if done {
 		return code
@@ -85,8 +97,12 @@ func (rt *cli) cmdConfirm(ctx context.Context, args []string, stdout, stderr io.
 	if outcome == confirmChanged {
 		return rt.reportChanged(stdout, stderr, op, planID, o.asJSON)
 	}
+	if outcome == confirmedAlready && (op.Status.Phase == v1alpha1.OperationPhaseRefused || op.Status.Phase == v1alpha1.OperationPhaseStale) {
+		return failf(stderr, exitFail, "Operation %s was confirmed with plan %s, and is in phase %s%s: it will not run", name, planID, phaseOf(op), why(op))
+	}
+	seen := true
 	if outcome == confirmedNow {
-		if op, err = rt.awaitPhaseAfterConfirm(ctx, cl.c, op, o.timeout); err != nil {
+		if op, seen, err = rt.awaitConfirmSeen(ctx, cl.c, op, o.timeout); err != nil {
 			return failf(stderr, exitFail, "%v", err)
 		}
 	}
@@ -99,7 +115,7 @@ func (rt *cli) cmdConfirm(ctx context.Context, args []string, stdout, stderr io.
 	} else {
 		fmt.Fprintf(stdout, "confirmed plan %s of %s\n", planID, name)
 	}
-	printWaiting(stdout, op, v)
+	printWaiting(stdout, op, v, seen)
 	return exitOK
 }
 

@@ -175,3 +175,37 @@ func TestApprovalsJSONGolden(t *testing.T) {
 	w.run("", "approvals")
 	contains(t, "stdout", w.out.String(), "no Operation waits for your approval")
 }
+
+// The final approver's Create lands, the reply is lost, the controller runs the Operation on, and the retry meets an Operation
+// that is no longer in AwaitingApproval: it finds its own Approval first, whatever the phase, and succeeds without a write. A
+// test that runs no controller between the two calls cannot see it.
+func TestApproveRetryAfterTheOperationMovedOn(t *testing.T) {
+	for _, phase := range []v1alpha1.OperationPhase{v1alpha1.OperationPhaseExecuting, v1alpha1.OperationPhaseDone, v1alpha1.OperationPhasePartlyFailed, v1alpha1.OperationPhaseAwaitingApproval} {
+		t.Run(string(phase), func(t *testing.T) {
+			op := waitingOnA("scale-m")
+			op.Status.Phase = phase
+			own := &v1alpha1.Approval{ObjectMeta: metav1.ObjectMeta{Name: "scale-m-711ca51436", Namespace: testNS},
+				Spec: v1alpha1.ApprovalSpec{Operation: v1alpha1.OperationReference{Name: "scale-m", UID: "uid-scale-m"}, PlanID: planAB,
+					Approver: v1alpha1.ApproverIdentity{Username: userA, Groups: groupsOfAgent}}}
+			w := newWorld(t, []client.Object{op, own})
+			if code := w.run("", "approve", "scale-m", "--plan", planAB); code != exitOK {
+				t.Fatalf("exit %d, want 0; stderr %q", code, w.errs.String())
+			}
+			contains(t, "stdout", w.out.String(), "already approved plan "+planAB)
+			if got := w.writes(); len(got) != 0 {
+				t.Errorf("writes %v, want none: the retry created an Approval", got)
+			}
+		})
+	}
+	// Another approver's Approval of that plan is not the caller's: the phase check still refuses.
+	op := waitingOnA("scale-m")
+	op.Status.Phase = v1alpha1.OperationPhaseExecuting
+	other := &v1alpha1.Approval{ObjectMeta: metav1.ObjectMeta{Name: "scale-m-other", Namespace: testNS},
+		Spec: v1alpha1.ApprovalSpec{Operation: v1alpha1.OperationReference{Name: "scale-m", UID: "uid-scale-m"}, PlanID: planAB,
+			Approver: v1alpha1.ApproverIdentity{Username: userB, Groups: groupsOfAgent}}}
+	w := newWorld(t, []client.Object{op, other})
+	if code := w.run("", "approve", "scale-m", "--plan", planAB); code != exitFail {
+		t.Errorf("an Operation in phase Executing with no Approval of the caller's: exit %d, want 1", code)
+	}
+	contains(t, "stderr", w.errs.String(), "only a plan in AwaitingApproval takes an approval")
+}
