@@ -77,8 +77,9 @@ func randomToken(t testing.TB) string {
 // One line is a group, its resources and the verbs they take.
 var wantControllerRules = map[string][]string{
 	"hpcburst-lifecycle": {
-		"hpcburst.groundnuty.github.io modeldeployments: get list watch patch",
-		"hpcburst.groundnuty.github.io providers platformprofiles operations approvals approvalpolicies: list watch",
+		"hpcburst.groundnuty.github.io modeldeployments: get list watch patch update delete",
+		"hpcburst.groundnuty.github.io operations: get list watch",
+		"hpcburst.groundnuty.github.io providers platformprofiles approvals approvalpolicies: list watch",
 		"hpcburst.groundnuty.github.io instances: get list watch create update delete",
 		"hpcburst.groundnuty.github.io instances/status: update",
 		"hpcburst.groundnuty.github.io allocations: get list watch create update delete",
@@ -227,8 +228,8 @@ func TestControllerRolesGrantExactlyTheEnumeration(t *testing.T) {
 				t.Errorf("the ClusterRole %s grants %q, which no controller reaches", name, tr)
 			case slices.Contains([]string{"deletecollection", "impersonate", "escalate", "bind"}, f[2]):
 				t.Errorf("the ClusterRole %s grants the verb of %q", name, tr)
-			case f[2] == "delete" && !(name == "hpcburst-lifecycle" && (f[1] == "instances" || f[1] == "allocations")):
-				t.Errorf("the ClusterRole %s grants %q: only the lifecycle controller deletes, and only an Instance or an Allocation", name, tr)
+			case f[2] == "delete" && !(name == "hpcburst-lifecycle" && (f[1] == "instances" || f[1] == "allocations" || f[1] == "modeldeployments")):
+				t.Errorf("the ClusterRole %s grants %q: only the lifecycle controller deletes, and only an Instance, an Allocation or a ModelDeployment (an End that deletes)", name, tr)
 			}
 		}
 	}

@@ -49,9 +49,9 @@
 #     Events stay in the ClusterRoles, since a deployment, and so the events about it, can be in any namespace.
 # Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
 # would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it, and were it set,
-# the Forbidden would surface as a reconcile error, not silently); deletes of
-# Operations (HBEP-10's 7-day removal, not wired yet: its PR adds the verb); impersonation, RBAC, CRDs,
-# admission objects, namespaces, nodes, tokens.
+# the Forbidden would surface as a reconcile error, not silently); the Operation's get and delete of the 7-day
+# removal (internal/lifecycle/opttl.go, which no manager wires yet: #660's PR B adds both verbs with its wiring);
+# impersonation, RBAC, CRDs, admission objects, namespaces, nodes, tokens.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -77,16 +77,24 @@ metadata:
 rules:
   # Its cache holds the nine kinds of internal/lifecycle's manager.go lifecycleWatches (and readiness): the
   # ModelDeployments it is For, and each kind it Watches. A cached read is a list and a watch. The API
-  # reader (Reconciler.Reader) adds a GET of a ModelDeployment (a pass), an Allocation (a hedge) and an
-  # Instance (the tunnel-state writer's fresh read).
+  # reader (Reconciler.Reader) adds a GET of a ModelDeployment (a pass), an Allocation (a hedge), an
+  # Instance (the tunnel-state writer's fresh read) and an Operation (opexec.go afterCommitError: the read
+  # that recovers a commit whose status write returned an error).
+  # An approved Operation writes the ModelDeployment (#664, #589 PR 5; opexec.go): UPDATE for a Scale's
+  # spec.instances and an End's spec.endTime (writeSpec) and for the kept-warm finalizer's add and removal
+  # (holdDeletionForKeptWarm, releaseKeptWarmFinalizer), DELETE for an End that deletes (deleteDeployment,
+  # with UID and resourceVersion preconditions).
   # The ModelDeployment's own owner-hash label, kept true to its owner annotation (#662, owner.go syncOwnerLabel): a
   # JSON merge PATCH of that one label key, every pass that finds it wrong. A refusal only joins the pass's error and
   # provisioning goes on, so nothing but a test that looks for the label shows a missing verb.
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["modeldeployments"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "list", "watch", "patch", "update", "delete"]
   - apiGroups: ["hpcburst.groundnuty.github.io"]
-    resources: ["providers", "platformprofiles", "operations", "approvals", "approvalpolicies"]
+    resources: ["operations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers", "platformprofiles", "approvals", "approvalpolicies"]
     verbs: ["list", "watch"]
   # Instances: created by provision.go, their metadata updated by setMeta, deleted when one ends. Their
   # status: setStatus, provision.go and the tunnel-state writer.
