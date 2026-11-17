@@ -70,8 +70,17 @@ func newEnv(t *testing.T, opts ...func(*clientfake.ClientBuilder) *clientfake.Cl
 		builder = opt(builder)
 	}
 	c := builder.Build()
-	return &env{t: t, clock: clock, batch: batch, c: c,
-		ctl: &Controller{Client: c, Provider: testProvider, Batch: batch, Clock: clock}}
+	e := &env{t: t, clock: clock, batch: batch, c: c}
+	e.ctl = e.newController()
+	return e
+}
+
+// newController is a Controller on the test's client, as a restart makes one.
+// It names a Provider's grant and account and its partition's billing unit, all
+// synthetic, so a record has the beta fields known unless a test says otherwise.
+func (e *env) newController() *Controller {
+	return &Controller{Client: e.c, Provider: testProvider, Batch: e.batch, Clock: e.clock,
+		Grant: "example-grant", Account: "example-account", BillingUnit: v1alpha1.BillingUnitGPUHour}
 }
 
 func (e *env) newAlloc(name, providerName string, mods ...func(*v1alpha1.Allocation)) *v1alpha1.Allocation {

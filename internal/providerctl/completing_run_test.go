@@ -146,6 +146,6 @@ func TestCompletingJobKeepsFinalizerFilesAndRecordPastMinJobAgeInRunMode(t *test
 	if _, err := os.Stat(allocDir); !os.IsNotExist(err) {
 		t.Errorf("the Allocation's directory is still there after the epilog: %v", err)
 	}
-	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":40,`+
+	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":40,`+acctBeta+
 		`"startTime":"2026-10-30T12:00:00Z","endTime":"2026-10-30T12:00:40Z","basis":"allocated"}`)
 }

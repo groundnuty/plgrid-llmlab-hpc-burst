@@ -228,8 +228,8 @@ func TestAJobCancelledBeforeItStartedLeavesAnUnknownStartInItsRecord(t *testing.
 			if !e.gone("alloc-a") {
 				t.Fatalf("the Allocation is still there; its job is %s", slurmJob(t, sl, id).State)
 			}
-			e.wantRecord("alloc-a", head+`,"endTime":"2026-10-30T12:00:30Z","basis":"allocated",`+
-				`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime"]}`)
+			e.wantRecord("alloc-a", head+`,`+acctNoCountsBeta+`"endTime":"2026-10-30T12:00:30Z","basis":"allocated",`+
+				`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime","allocatedBilling"]}`)
 		})
 	}
 }

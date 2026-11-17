@@ -213,7 +213,7 @@ func TestRecordOfAJobThatEndsOnItsOwn(t *testing.T) {
 			i32(8), i32(1), 1800, at(12, 35, 0), nil, -1},
 		{"time limit, never seen running, the queue listing is the source", Script{QueueWait: 5 * time.Minute},
 			[]time.Time{at(12, 0, 0)}, at(12, 35, 5),
-			nil, nil, 1800, at(12, 35, 0), []string{"allocatedCPUs", "allocatedGPUs"}, -1},
+			nil, nil, 1800, at(12, 35, 0), []string{"allocatedCPUs", "allocatedGPUs", "allocatedBilling"}, -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
@@ -267,7 +267,7 @@ func TestRecordOfAJobThatNeverStarted(t *testing.T) {
 				t.Fatal("Allocation survived its deletion")
 			}
 			e.wantRecord("a1", recWant{end: tp(at(12, 3, 0)), jobIDs: []string{"998"},
-				unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "startTime"}})
+				unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "startTime", "allocatedBilling"}})
 			if n := e.batch.Count("sacct-job"); n != 0 {
 				t.Errorf("sacct-job logged %d times for a job that never started, want 0", n)
 			}

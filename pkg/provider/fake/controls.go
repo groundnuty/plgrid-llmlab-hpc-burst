@@ -125,6 +125,22 @@ func (b *Batch) OmitElapsed(id string, omit bool) {
 	b.must(id).noElapsed = omit
 }
 
+// SetBilling sets the billing count accounting's record of the job shows once
+// the job has started (beta; HBEP-8, Provider accounting, Billing): the
+// scheduler's own count, set by hand; a nil n leaves the entry out, so the count
+// is unknown. Until it is called the count is the job's CPU count, as
+// internal/slurm/fakeslurm's sacct lists it.
+func (b *Batch) SetBilling(id string, n *int32) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	j := b.must(id)
+	j.billingSet, j.billing = true, nil
+	if n != nil {
+		v := *n
+		j.billing = &v
+	}
+}
+
 // FailReads makes FindByTag, Observe and Poll return err; nil clears it.
 func (b *Batch) FailReads(err error) {
 	b.mu.Lock()

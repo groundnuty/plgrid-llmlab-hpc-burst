@@ -380,3 +380,56 @@ func TestSacctOptionErrors(t *testing.T) {
 		}
 	}
 }
+
+// billingOf returns the count of the billing entry of one list of a record's
+// tres, and whether the list has one.
+func billingOf(t *testing.T, j map[string]any, which string) (float64, bool) {
+	t.Helper()
+	for _, e := range j["tres"].(map[string]any)[which].([]any) {
+		if m := e.(map[string]any); m["type"] == "billing" {
+			return m["count"].(float64), true
+		}
+	}
+	return 0, false
+}
+
+// SetBilling sets the job's billing entry by hand, a count that equals neither
+// its CPUs (16) nor its GPUs (2); nil leaves the entry out; the other jobs and
+// the default stay as they were, the CPU count.
+func TestSetBilling(t *testing.T) {
+	for _, version := range []string{"v0.0.42", "v0.0.40"} {
+		t.Run(version, func(t *testing.T) {
+			r := newRig(t, Config{DataParser: version})
+			set := r.sbatch("--job-name=set --time=60 --partition=p1 --account=acc --gres=gpu:2 --cpus-per-task=16")
+			omitted := r.sbatch("--job-name=omitted --time=60 --partition=p1 --account=acc --gres=gpu:2 --cpus-per-task=16")
+			untouched := r.sbatch("--job-name=untouched --time=60 --partition=p1 --account=acc --gres=gpu:2 --cpus-per-task=16")
+			three := int64(3)
+			if err := r.p.SetBilling(set, &three); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.p.SetBilling(omitted, nil); err != nil {
+				t.Fatal(err)
+			}
+			three = 99 // the caller's variable is not the stored one
+			for _, id := range []int{set, omitted, untouched} {
+				r.start(id)
+			}
+			for _, c := range []struct {
+				id   int
+				want float64
+				has  bool
+			}{{set, 3, true}, {omitted, 0, false}, {untouched, 16, true}} {
+				j := jobsOf(t, r.sacct("-X -D -j "+itoa(c.id)))[0]
+				for _, which := range []string{"allocated", "requested"} {
+					got, has := billingOf(t, j, which)
+					if has != c.has || got != c.want {
+						t.Errorf("job %d tres.%s billing = %v (present %v), want %v (present %v)", c.id, which, got, has, c.want, c.has)
+					}
+				}
+			}
+			if err := r.p.SetBilling(9999, nil); err == nil {
+				t.Error("SetBilling on an unknown job succeeded")
+			}
+		})
+	}
+}

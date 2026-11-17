@@ -137,7 +137,7 @@ func TestRecordOfAnUnseenNeverStartedJobIsWrittenAtOnce(t *testing.T) {
 		t.Fatal("the Allocation waited for a job that was never seen started")
 	}
 	e.wantRecord("a1", recWant{jobIDs: []string{"998"},
-		unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "startTime", "endTime"}})
+		unknown: []string{"allocatedCPUs", "allocatedGPUs", "elapsedSeconds", "startTime", "endTime", "allocatedBilling"}})
 }
 
 // An anchor that a live pass set while the job was missing counts: the grace may
