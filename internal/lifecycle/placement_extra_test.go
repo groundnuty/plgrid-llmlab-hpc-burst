@@ -85,12 +85,11 @@ func yieldOnTwo(t *testing.T) (*rig, *rigExtra) {
 }
 
 // TestAMissingPrimaryRefusedOnAForTheLimitIsSubmittedOnBAndNoExtraIsCancelled: md-c's primary is refused on A for the
-// submit limit alone at 08:00:50 (4 listed Allocations at the limit of 4), so the yield marks md-b's newest pending
-// extra, the Instance made at 08:00:30; and it is submitted on B, which has room, in the same pass. The mark is
-// cleared by md-c's next pass, since no missing primary of md-c is refused on A any more, before md-b's pass cancels
-// the extra: md-b's owner waits until md-c's status.lastReconcileTime is later than the mark's time, and md-c's pass at
-// 08:01:00 comes after md-b's in the same step. Through 08:11:00 no extra is cancelled: md-a and md-b keep two live
-// Instances and two Allocations each, no mark is left, and md-c has its one Instance, on B.
+// submit limit alone at 08:00:50 (4 listed Allocations at the limit of 4), and is submitted on B, which has room, in
+// the same pass. A missing primary that is placed is no shortage any more, so the yield protocol (yield.go; #708) keeps
+// no mark its refusal on A made: whether a mark was written at the refusal and cleared in the pass, or never, no
+// Instance of md-a or md-b carries one afterwards, and through 08:11:50 no extra is cancelled. md-a and md-b keep
+// two live Instances and two Allocations each, and md-c has its one Instance, on B.
 func TestAMissingPrimaryRefusedOnAForTheLimitIsSubmittedOnBAndNoExtraIsCancelled(t *testing.T) {
 	rg, _ := yieldOnTwo(t)
 	tick10(rg) // 08:00:50: md-c's primary is refused on A and placed on B
@@ -101,19 +100,16 @@ func TestAMissingPrimaryRefusedOnAForTheLimitIsSubmittedOnBAndNoExtraIsCancelled
 	if len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != ordB {
 		t.Fatalf("md-c has %d live Instances at 08:00:50 (%v), want its primary, on B", len(live), live)
 	}
-	if ms := marks(rg); len(ms) != 1 || deploymentOfInstance(ms[0]) != "md-b" {
-		t.Fatalf("the marks at 08:00:50 are %v, want one, on md-b's newest pending extra: A refused md-c's primary for the limit, and the yield fires at that refusal", markNames(ms))
-	}
-	for range 66 { // to 08:11:50
-		tick10(rg)
+	for range 67 { // to 08:11:50
 		for _, name := range []string{"md-a", "md-b"} {
 			if n := len(rg.liveInstances(name)); n != 2 {
 				t.Fatalf("at %s %s has %d live Instances, want its primary and extra: the extra was cancelled for a primary that was placed on B", rg.clock.Now().Format(time.TimeOnly), name, n)
 			}
 		}
-	}
-	if ms := marks(rg); len(ms) != 0 {
-		t.Fatalf("marks %v are left at 08:11:50, want none: md-c's later passes clear it", markNames(ms))
+		if ms := marks(rg); len(ms) != 0 {
+			t.Fatalf("at %s the marks %v are left, want none: md-c's primary was placed on B", rg.clock.Now().Format(time.TimeOnly), markNames(ms))
+		}
+		tick10(rg)
 	}
 	for _, name := range []string{"md-a", "md-b"} {
 		for _, a := range rg.allocations(name) {
