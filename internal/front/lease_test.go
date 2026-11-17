@@ -391,8 +391,10 @@ func TestUsageWriteFailedWaitsForTheLeaseAndFiresOnce(t *testing.T) {
 	_, beat := usageKeeper(t, h)
 	errWaitFor(t, "the one event once the Lease is held", func() bool { return len(usageEvents(h)) == 1 })
 	ev := usageEvents(h)[0]
-	if ev.Object != leaseDesc || !ev.Warning || !strings.Contains(ev.Message, "no space left") || !strings.Contains(ev.Message, "r2") {
-		t.Errorf("event %+v: want a warning regarding %s, naming the latest failure (request r2)", ev, leaseDesc)
+	// The note names the latest failure's request and a fixed cause of its kind, never the error's text
+	// (HBEP-8, No job ID, path or name in a note): boom is an error of no known kind.
+	if want := "usage records are not being written (request r2): a write or sync of the usage log failed; the error is in the front's log and in the usage member of its health report"; ev.Object != leaseDesc || !ev.Warning || ev.Message != want {
+		t.Errorf("event %+v: want a warning regarding %s with the note %q (the latest failure, request r2)", ev, leaseDesc, want)
 	}
 	beat()
 	beat()

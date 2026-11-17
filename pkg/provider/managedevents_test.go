@@ -234,7 +234,7 @@ func TestRepeatGateSkippedKeyIgnoresTheMeasuredValue(t *testing.T) {
 	}
 }
 
-// names25 is 25 distinct names that differ within the first 64 characters, so
+// names25 is 25 distinct names that differ within the first 128 characters, so
 // their notes differ too, each too long for the status.
 func names25() CatalogMerge {
 	var m CatalogMerge
@@ -246,14 +246,14 @@ func names25() CatalogMerge {
 }
 
 // wantSummary15 is the hand-written summary of names25 beyond its first ten:
-// "n10-" to "n24-". Each is shown as its first 64 characters and "...", quoted,
-// so 69 bytes, with ", " between them, after the 83 bytes of the head. 13 fit
-// in 1,024 bytes with the ellipsis (83 + 13*69 + 12*2 + 5 = 1,009; a 14th would
-// make 1,080), so "n10-" to "n22-" are named, and "n23-" and "n24-" are not.
+// "n10-" to "n24-". Each is shown as its first 128 characters and "...", quoted,
+// so 133 bytes, with ", " between them, after the 83 bytes of the head. 6 fit in
+// 1,024 bytes with the ellipsis (83 + 6*133 + 5*2 + 5 = 896; a 7th would make
+// 1,031), so "n10-" to "n15-" are named, and "n16-" to "n24-" are not.
 var wantSummary15 = func() string {
 	var named []string
-	for i := 10; i < 23; i++ {
-		named = append(named, fmt.Sprintf(`"n%02d-`, i)+strings.Repeat("n", 60)+`..."`)
+	for i := 10; i < 16; i++ {
+		named = append(named, fmt.Sprintf(`"n%02d-`, i)+strings.Repeat("n", 124)+`..."`)
 	}
 	return "15 more catalog entries skipped (at most 10 skipped entries are named in an hour): " + strings.Join(named, ", ") + ", …"
 }()
@@ -330,7 +330,7 @@ func TestRepeatGateSkipLimitHoldsAcrossRecoveries(t *testing.T) {
 	}
 	m.Skipped = names25().Skipped[:11]
 	evs = h.CatalogEvents(t0.Add(time.Minute), m)
-	if want := `1 more catalog entry skipped (at most 10 skipped entries are named in an hour): "n10-` + strings.Repeat("n", 60) + `..."`; len(evs) != 1 || evs[0].Note != want {
+	if want := `1 more catalog entry skipped (at most 10 skipped entries are named in an hour): "n10-` + strings.Repeat("n", 124) + `..."`; len(evs) != 1 || evs[0].Note != want {
 		t.Fatalf("an 11th entry: events = %+v, want one summary %q", evs, want)
 	}
 }

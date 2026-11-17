@@ -283,7 +283,7 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 		if lock, err = newGapLock(o.Config, leaderRenewDeadline); err != nil {
 			return nil, nil, fmt.Errorf("lifecycle: the lifecycle Lease's lock: %w", err)
 		}
-		lock.onObserve = o.onLeaseRead
+		lock.OnObserve = o.onLeaseRead
 		renewals = leaderlock.TrackRenewals(lock)
 		mopts.LeaderElectionResourceLockInterface = renewals
 	}

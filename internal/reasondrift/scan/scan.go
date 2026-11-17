@@ -18,6 +18,12 @@
 // import paths and struct tags) a sentinel suffix before type-checking, so the
 // value that reaches a recorder says in itself whether a literal fed it.
 //
+// A sink that takes its type from a package-level map of reasons to types (the
+// Provider controller's typed helper, #625) gets each reason's type from the
+// map's literal, which the scan reads from the source like internal/managed's
+// badAction, and has one Emit for each reason a call can raise. A map that a
+// call needs and the scan cannot read is an error.
+//
 // Events built by a constructor (the Provider controller's through
 // crossplane-runtime's event.Normal and event.Warning, the managed catalog
 // controller's through provider.NewManagedEvent) raise nothing where they are
@@ -80,8 +86,16 @@ type Options struct {
 
 // sink is a method that raises an event. The indexes count the declared
 // parameters, the receiver left out.
+//
+// A sink with an actionMap takes no type as an argument: it looks the type up
+// in a package-level map from reason to type, as the Provider controller's typed
+// helper does (HBEP-8, Allocation events (beta)). actionMap is that variable's
+// full name, the package directory, a dot and the variable, and action is not
+// used. The scan reads the map's literal from the source (readActionMaps), and
+// each reason that reaches the call has the type the map gives it.
 type sink struct {
 	reason, action, regarding int
+	actionMap                 string
 }
 
 // sinks maps a callee's full name, with {mod} for the module path, to its
@@ -94,6 +108,11 @@ var sinks = map[string]sink{
 	"({mod}/internal/front.Recorder).Event": {regarding: 0, action: 2, reason: 3},
 	// client-go's events.k8s.io recorder, called directly.
 	"(k8s.io/client-go/tools/internal/events.EventRecorder).Eventf": {regarding: 0, action: 4, reason: 3},
+	// The Provider controller's typed helper (internal/providerctl, events.go):
+	// the receiver is a pointer, which the full name spells (*{mod}/path.type).
+	"(*{mod}/internal/providerctl.external).typed": {regarding: 0, reason: 1, actionMap: "internal/providerctl.allocationEventType"},
+	// Its twin for an event that marks no transition (AdminHold, JobCompleting).
+	"(*{mod}/internal/providerctl.external).typedUnmarked": {regarding: 0, reason: 1, actionMap: "internal/providerctl.allocationEventType"},
 }
 
 // ctor is a function that builds an event and raises nothing: the event is
@@ -118,8 +137,10 @@ var eventRecorders = map[string]eventRecorder{
 	"(github.com/crossplane/crossplane-runtime/v2/pkg/event.Recorder).Event": {regarding: 0, event: 1},
 }
 
-// emitMethods are the method names that raise events.
-var emitMethods = map[string]bool{"Event": true, "Eventf": true, "AnnotatedEventf": true}
+// emitMethods are the method names that raise events. EventfID is the counting
+// wrapper's method for an event with an id (eventcount.IDRecorder): a call of it
+// is accepted only in a listed wrapper, as one of Eventf is.
+var emitMethods = map[string]bool{"Event": true, "Eventf": true, "AnnotatedEventf": true, "EventfID": true}
 
 // maxDepth bounds the walk from an argument to the constants behind it.
 const maxDepth = 12
@@ -192,18 +213,27 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		return nil, err
 	}
 
+	for _, w := range o.Wrappers {
+		if err := w.Validate(); err != nil {
+			return nil, err
+		}
+	}
+
 	prog, spkgs := buildSSA(pkgs)
 	s := &scanner{
 		mod: mod, root: o.Root, fset: prog.Fset, fns: functions(prog, spkgs),
 		wrappers: map[string]reasondrift.Wrapper{}, seenWrappers: map[string]bool{},
 		callers: map[*ssa.Function][]*ssa.CallCommon{}, escaped: map[*ssa.Function]bool{},
-		callees: map[*ssa.Function][]*ssa.Function{},
+		callees: map[*ssa.Function][]*ssa.Function{}, byDir: byDir, actionMaps: map[string]map[string]string{},
 	}
 	for _, w := range o.Wrappers {
 		s.wrappers[w.Func] = w
 	}
 	s.index()
 	s.collect(code)
+	if s.mapErr != nil {
+		return nil, s.mapErr
+	}
 	s.builders = o.Builders
 	if len(s.builders) == 0 {
 		s.builders = defaultBuilders
@@ -229,7 +259,8 @@ func Scan(o Options) (*reasondrift.Code, error) {
 		code.Wrappers = append(code.Wrappers, w)
 	}
 	sort.Strings(code.Wrappers)
-	sort.Slice(code.Emits, func(i, j int) bool { return code.Emits[i].Pos < code.Emits[j].Pos })
+	// Stable: one call site of a sink with a map has an Emit for each reason.
+	sort.SliceStable(code.Emits, func(i, j int) bool { return code.Emits[i].Pos < code.Emits[j].Pos })
 	sort.SliceStable(code.Problems, func(i, j int) bool {
 		a, b := code.Problems[i], code.Problems[j]
 		return a.Kind+a.Package+a.Func+a.Detail < b.Kind+b.Package+b.Func+b.Detail

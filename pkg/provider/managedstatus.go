@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -30,18 +31,31 @@ const (
 	EventCatalogTruncated = "CatalogTruncated"
 )
 
-// shortName is an entry's name as an event shows it, quoted: a name above 64
-// characters is shortened.
+// maxShownName is the most characters of a catalog entry's name that an event
+// shows (`@hpc-burst-science-agent`, 16 Nov 2026, on #640).
+const maxShownName = 128
+
+// shortName is an entry's name as an event shows it. The name is the gateway's
+// own text, and the note goes to the log that keeps it (HBEP-8, No job ID in a
+// note, as amended by #641), so its control characters are stripped first, a
+// newline among them, then a name above maxShownName characters is shortened
+// and ends with "...", and the result is quoted.
 func shortName(name string) string {
-	if utf8.RuneCountInString(name) > 64 {
-		name = string([]rune(name)[:64]) + "..."
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, name)
+	if utf8.RuneCountInString(name) > maxShownName {
+		name = string([]rune(name)[:maxShownName]) + "..."
 	}
 	return fmt.Sprintf("%q", name)
 }
 
 // SkippedNote is the note of an EventCatalogEntrySkipped event, before
-// NewManagedEvent cuts it to MaxEventNote. A name above 64 characters is
-// shortened.
+// NewManagedEvent cuts it to MaxEventNote. The name is shown as shortName shows
+// it: control characters stripped, at most maxShownName characters, quoted.
 func SkippedNote(s SkippedEntry) string {
 	return fmt.Sprintf("catalog entry %s skipped: %s", shortName(s.Name), s.Why)
 }

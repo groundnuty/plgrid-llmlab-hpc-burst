@@ -890,7 +890,7 @@ func keeperEndFailure(end wire.FinalEnd) relayFailure {
 	if end.Kind == wire.EndSuperseded {
 		cause = supersededInBeta
 	}
-	return relayFailure{uid: end.UID, jobID: end.JobID, msg: relayFailedMessage(end.Channel, cause), at: end.At}
+	return relayFailure{uid: end.UID, jobID: end.JobID, msg: relayFailedMessage(end.Channel, cause, end.JobID), at: end.At}
 }
 
 // ackEnd decides one final end: it writes the mark on the end's Allocation,

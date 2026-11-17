@@ -19,3 +19,9 @@ const (
 	// NotAReason is no Reason constant by its name, so the scan ignores it.
 	ConditionNotAReason = "NotAReason"
 )
+
+// Allocation stands for the real Allocation: what the Provider controller's
+// typed events regard.
+type Allocation struct{ Name string }
+
+func (a *Allocation) GetName() string { return a.Name }

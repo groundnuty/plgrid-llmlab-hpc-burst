@@ -128,7 +128,7 @@ func TestATimeLimitReadBackMismatchSetsSubmittedAsOther(t *testing.T) {
 	e.syncAt(at(12, 6, 0))
 	o := e.wantPhase("a1", v1alpha1.AllocationRunning) // the phase still mirrors the job
 	wantMT(t, "hardEnd", o.HardEnd, at(12, 25, 0))
-	const wantMessage = "job 998 was established with other settings than requested: timeLimit: requested 30m0s, got 20m0s"
+	const wantMessage = "the job was established with other settings than requested: timeLimit: requested 30m0s, got 20m0s"
 	e.wantCondition("a1", v1alpha1.ConditionSubmittedAsOther, corev1.ConditionTrue, "ReadBackMismatch", wantMessage)
 	if n := len(scancels(e.batch)); n != 0 {
 		t.Fatalf("%d scancel calls, want 0: a mismatch does not cancel", n)
@@ -158,7 +158,7 @@ func TestAJobAsRequestedSetsNoSubmittedAsOther(t *testing.T) {
 }
 
 func TestReadBackNamesEachDifferingFieldWithBothValues(t *testing.T) {
-	const prefix = "job 998 was established with other settings than requested: "
+	const prefix = "the job was established with other settings than requested: "
 	for _, tc := range []struct {
 		name string
 		edit func(*v1alpha1.BatchParameters)
@@ -213,7 +213,7 @@ func TestReadBackMismatchAndSubmissionResolvedCoexist(t *testing.T) {
 	e.syncAt(at(12, 12, 0)) // found by tag, adopted, read back
 	e.wantResolved("a1", corev1.ConditionTrue, v1alpha1.ReasonResolved, "attempt 1 resolved by job 998")
 	e.wantCondition("a1", v1alpha1.ConditionSubmittedAsOther, corev1.ConditionTrue, "ReadBackMismatch",
-		"job 998 was established with other settings than requested: timeLimit: requested 30m0s, got 20m0s")
+		"the job was established with other settings than requested: timeLimit: requested 30m0s, got 20m0s")
 }
 
 func TestRetentionModeIsMirroredFromTheSpec(t *testing.T) {

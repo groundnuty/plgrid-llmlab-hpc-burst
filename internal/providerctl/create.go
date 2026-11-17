@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -343,7 +344,7 @@ func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v
 		return nil
 	}
 	if wrote {
-		e.event(a, event.Normal("JobSubmitted", fmt.Sprintf("job %s submitted by attempt %d", id, claim.Attempt)))
+		e.typed(a, evJobSubmitted, strconv.Itoa(int(claim.Attempt)), e.submittedNote(a, claim), nil)
 	}
 	if !e.hold() || !wrote || meta.WasDeleted(a) {
 		return nil
@@ -366,6 +367,19 @@ func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v
 		e.s.o.Log.Info("cannot settle after the submission; the next observe will", "job", id, "error", err)
 	}
 	return nil
+}
+
+// submittedNote is JobSubmitted's note: the attempt, partition, QOS and time
+// limit, and whether the job is held (HBEP-8, Allocation events). It names no job
+// ID, account or grant.
+func (e *external) submittedNote(a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord) string {
+	qos := e.v.Settings.QOS
+	if qos == "" {
+		qos = "the association's default"
+	}
+	b := a.Spec.ForProvider.Batch
+	return fmt.Sprintf("the job was submitted by attempt %d to partition %s, QOS %s, time limit %s, held: %t",
+		claim.Attempt, b.Partition, qos, b.TimeLimit, e.hold())
 }
 
 // writeOwnOrRecorded records id as the job, and the attempt Done, unless a job
