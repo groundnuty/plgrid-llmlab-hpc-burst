@@ -18,6 +18,7 @@ import (
 // byte, without it (TestSupervisedSetCommandLine's "direct front" case is the same line, without it).
 func TestTheRouterReachesTheControllersCommandLine(t *testing.T) {
 	alpha := []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+		"--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig",
 		"--front-mode", "direct", "--front-addr", "front.example.test:8443"}
 	for _, c := range []struct {
 		router string

@@ -1,0 +1,205 @@
+# The controllers' own identities (HBEP-10, Audit; HBEP-11, Single-user host; issue #660, PR A): a
+# ServiceAccount, a ClusterRole and a ClusterRoleBinding for each of the three processes that call the
+# API server, so that the audit log tells a controller's write from a person's.
+#
+#   hpcburst-lifecycle  the lifecycle controller's manager (the lifecycle and verification controllers,
+#                       the observers, the metrics collectors, the agent API's Allocation lookup, the
+#                       frps plugin's feed and the tunnel-state writer), and the two Provider
+#                       supervisors' reads. hpcburst-controller --kubeconfig.
+#   hpcburst-provider   every Provider manager (providerctl, and the managed catalog's). hpcburst-controller
+#                       --provider-kubeconfig.
+#   hpcburst-front      hpcburst-front --kubeconfig. The relay keeper and the durable log build no API client.
+#
+# hpcburst up installs every object here on every start (after k3s is ready, before the supervisor), and
+# resets each to this file: a role's rules, a binding's subjects (a binding whose roleRef differs is deleted
+# and made again, since roleRef cannot change). It then issues one token per ServiceAccount, written into
+# <state>/identities/system/<name>.kubeconfig. hpcburst upgrade does the same before it starts the
+# supervisor again. This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/rbac/embed.go), so what up installs is this file.
+#
+# EACH ROLE GRANTS EXACTLY WHAT ITS COMPONENT CALLS (the science agent, 17 Nov 2026, #660: S2). It was
+# enumerated from the code, call site by call site, never from a test's list, and is proved by running the
+# real controllers' suites under these identities (cmd/hpcburst-controller's harness, CI's launcher-k3s).
+# A controller change that adds an API call extends its role in the same change. The rules of one resource
+# carry the reason in the comment above them. Three things that follow from how the clients are built:
+#   - A read through a manager's cached client (mgr.GetClient()) is a LIST and a WATCH of the kind: the
+#     informer's. A read through its API reader (mgr.GetAPIReader()) or a typed clientset is a GET or a
+#     LIST on its own. So a kind that is only ever read from the cache has no `get` below.
+#   - Both Kubernetes event recorders write only CREATE and PATCH (client-go tools/record and tools/events),
+#     the first into core/v1 events, the second into events.k8s.io events.
+#   - A leader-election Lease lock is GET, CREATE and UPDATE (client-go resourcelock leaselock.go).
+# Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
+# would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it); deletes of
+# Operations (HBEP-10's 7-day removal, not wired yet: its PR adds the verb); impersonation, RBAC, CRDs,
+# admission objects, namespaces, nodes, tokens.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpcburst-lifecycle
+  namespace: hpcburst-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpcburst-provider
+  namespace: hpcburst-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpcburst-front
+  namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-lifecycle
+rules:
+  # Its cache holds the nine kinds of internal/lifecycle's manager.go lifecycleWatches (and readiness): the
+  # ModelDeployments it is For, and each kind it Watches. A cached read is a list and a watch. The API
+  # reader (Reconciler.Reader) adds a GET of a ModelDeployment (a pass), an Allocation (a hedge) and an
+  # Instance (the tunnel-state writer's fresh read).
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers", "platformprofiles", "operations", "approvals", "approvalpolicies"]
+    verbs: ["list", "watch"]
+  # Instances: created by provision.go, their metadata updated by setMeta, deleted when one ends. Their
+  # status: setStatus, provision.go and the tunnel-state writer.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["instances"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["instances/status"]
+    verbs: ["update"]
+  # Allocations: created by provision.go, the release cause and the idle-since annotation updated, deleted by
+  # deleteAllocation (the only delete of an Allocation). No status: the Provider controller writes it.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["allocations"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments/status", "operations/status"]
+    verbs: ["update"]
+  # The DialHomeUnreachable condition of a Provider, by server-side apply (setDialHome): a PATCH.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers/status"]
+    verbs: ["patch"]
+  # The identity and verification records (ControllerRevisions): watched, read by the API reader, listed by
+  # label, created once.
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["get", "list", "watch", "create"]
+  # The lifecycle Lease (leader election), and the reads of it and of the front's by the observer, the gap
+  # emitter and the tunnel state's events.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  # The typed events (events.k8s.io) of the lifecycle controller, the observers and the tunnel state.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-provider
+rules:
+  # A Provider manager's cache holds the Allocations its controller is For, the Instances it indexes by
+  # allocationRef and lists to see a drain, and the Providers and PlatformProfiles its profile reader reads
+  # (a cached read is a list and a watch). Its API reader adds a GET of a fresh Allocation, of the Provider,
+  # and of the managed catalog's PlatformProfile.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["instances"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers", "platformprofiles"]
+    verbs: ["get", "list", "watch"]
+  # The Allocation's finalizer, tags, create-pending and critical annotations, and the release record: an
+  # UPDATE (crossplane-runtime's managed reconciler and providerctl's record.go). Its status: UPDATE by the
+  # reconciler, PATCH by the keeper's and the relay-failed writers. It never creates or deletes one.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["allocations"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["allocations/status"]
+    verbs: ["update", "patch"]
+  # The Provider's status: the status loop, the Ready write and the managed catalog's.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers/status"]
+    verbs: ["update"]
+  # The accounting record of a deleted Allocation and the managed catalog's identity records.
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["get", "create"]
+  # The Provider's own Lease, provider-<name> (leader election), and the gap emitter's read of it.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  # The legacy events (core/v1) of crossplane-runtime's recorder, and the typed ones (events.k8s.io).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-front
+rules:
+  # The four kinds its dynamic informers watch (internal/front/inventory watch.go): the router's inventory.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments", "instances", "providers", "platformprofiles"]
+    verbs: ["list", "watch"]
+  # The record fetch: the identity and verification records of a deployment, listed by label, uncached.
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["list"]
+  # The front's own Lease, its heartbeat.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-lifecycle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-lifecycle
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-provider
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-provider
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-provider
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-front
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-front
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-front
+    namespace: hpcburst-system

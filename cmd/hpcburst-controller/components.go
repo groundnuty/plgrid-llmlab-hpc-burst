@@ -353,7 +353,11 @@ func sshControlDir(host agentapi.Host) string {
 
 // wiring is what the components are built from.
 type wiring struct {
-	cfg         *rest.Config
+	cfg *rest.Config
+	// providerCfg is what the Provider managers connect with (HBEP-10, Audit; #660): the identity
+	// hpcburst-provider's, from --provider-kubeconfig. nil means cfg, the lifecycle manager's own, as when
+	// the binary is started by hand without the flag.
+	providerCfg *rest.Config
 	host        agentapi.Host
 	scheme      *runtime.Scheme
 	front       *providerctl.FrontSettings
@@ -412,7 +416,16 @@ type wiring struct {
 const providerGrace = 20 * time.Second
 
 func (w wiring) newProviderManager(provider string) (manager.Manager, error) {
-	return providerctl.NewProviderManager(w.cfg, w.scheme, provider, providerctl.ManagerOptions{GracefulShutdownTimeout: providerGrace})
+	return providerctl.NewProviderManager(w.providerConfig(), w.scheme, provider, providerctl.ManagerOptions{GracefulShutdownTimeout: providerGrace})
+}
+
+// providerConfig is what the Provider managers connect with: the identity hpcburst-provider's when the
+// launcher gave --provider-kubeconfig, else the lifecycle manager's own configuration (HBEP-10, Audit; #660).
+func (w wiring) providerConfig() *rest.Config {
+	if w.providerCfg != nil {
+		return w.providerCfg
+	}
+	return w.cfg
 }
 
 // setupBatch registers a batch Provider's controller with its manager. Its

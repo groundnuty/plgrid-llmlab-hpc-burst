@@ -1,8 +1,9 @@
 // Command fakecontroller stands in for hpcburst-controller in the launcher's tests. It accepts
-// exactly the flags of the controller's command line (--state-dir, --port-base and --health-addr,
-// all required, and optionally --front-mode with --front-addr, or --front-mode host-dialed alone, as
-// the real controller takes them), so a launcher that passes another
-// one, such as the earlier --kubeconfig, --credentials-dir or --agent-builds-dir, fails its start; records its argv and environment; serves GET /healthz on --health-addr; and exits on
+// exactly the flags of the controller's command line (--state-dir, --port-base, --health-addr,
+// --kubeconfig and --provider-kubeconfig, all required, and optionally --front-mode with --front-addr,
+// or --front-mode host-dialed alone, as the real controller takes them), so a launcher that passes
+// another one, such as the earlier --credentials-dir or --agent-builds-dir, or leaves out an identity's
+// kubeconfig (HBEP-10, Audit; #660), fails its start; records its argv and environment; serves GET /healthz on --health-addr; and exits on
 // SIGTERM. Its behaviour is steered through files in the directory $FAKECTRL_DIR (default: the
 // directory of this binary), so a test changes it while it runs:
 //
@@ -42,7 +43,7 @@
 //
 // Installed under the name hpcburst-front it stands in for the front instead (issue #64), and then
 // accepts exactly the front's command line as the launcher writes it: --config, --state-dir,
-// --port-base and --health-addr, all required, and optionally --mode. In that role a file usage in
+// --port-base, --health-addr and --kubeconfig, all required, and optionally --mode. In that role a file usage in
 // $FAKECTRL_DIR holds the usage state its /healthz reports in the front's usage member (HBEP-8:
 // "ok" or "failing"); without the file it reports "ok". It also answers the front's frps plugin at
 // agentapi.FrontFrpsPluginPath (POST, #371) with an acceptance, and with 503 while a file
@@ -124,8 +125,12 @@ func main() {
 	stateDir := fs.String("state-dir", "", "")
 	portBase := fs.Int("port-base", 0, "")
 	health := fs.String("health-addr", "", "")
+	// The identities' kubeconfigs, by path (HBEP-10, Audit; #660): the controller takes the lifecycle's and
+	// the Provider managers', the front its own. The fake never reads them; it fails a launcher that omits one.
+	kubeconfig := fs.String("kubeconfig", "", "")
+	providerKubeconfig := fs.String("provider-kubeconfig", "", "")
 	eventLogToken := fs.String("event-log-token-file", "", "") // the durable log's token file, in either role
-	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" || (asFront && *config == "") || !frontFlagsOK(fs) {
+	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" || *kubeconfig == "" || (asFront && (*config == "" || *providerKubeconfig != "")) || (!asFront && *providerKubeconfig == "") || !frontFlagsOK(fs) {
 		fmt.Fprintln(os.Stderr, "fakecontroller: bad command line:", os.Args[1:])
 		os.Exit(2)
 	}
