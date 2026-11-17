@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strconv"
 	"syscall"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/audit"
 )
 
 // launchSpec is everything one k3s start needs.
@@ -55,17 +57,6 @@ const niceBin = "/usr/bin/nice"
 // whatever happens to the path in between.
 const binFD = 3
 
-// auditPolicy has the API server log every request at the Metadata level (HBEP-11): who did what
-// to which object, and never a request or response body, so a Secret's content is never logged.
-const auditPolicy = `# Written by hpcburst at every start (HBEP-11): metadata only, never a request or response body.
-apiVersion: audit.k8s.io/v1
-kind: Policy
-omitStages:
-  - RequestReceived
-rules:
-  - level: Metadata
-`
-
 // env is the whole environment of the k3s process: nothing is inherited. It is what
 // "env -i NAME=VALUE ..." gives, set directly on the child so the launcher's PID is k3s's PID.
 // HOME, XDG_RUNTIME_DIR and KUBECONFIG are inside the state directory, so k3s never reads or
@@ -106,11 +97,12 @@ func (s launchSpec) k3sArgs() []string {
 		"--disable-helm-controller",
 		"--disable=coredns", "--disable=servicelb", "--disable=traefik",
 		"--disable=local-storage", "--disable=metrics-server", "--disable=runtimes",
-		// The audit log (HBEP-11), bounded: at most four files of 100 MB.
-		"--kube-apiserver-arg=audit-policy-file=" + s.l.auditPolicy(),
-		"--kube-apiserver-arg=audit-log-path=" + s.l.auditLog(),
-		"--kube-apiserver-arg=audit-log-maxsize=100",
-		"--kube-apiserver-arg=audit-log-maxbackup=3",
+	}
+	// The audit log (HBEP-10, Audit; HBEP-11): the embedded policy, files of 100 MB, and every rotated file kept
+	// (no limit on their number or age) and gzipped, for the grant. config/audit holds the flags, one source with
+	// internal/testenv's audit option.
+	for _, f := range audit.Flags(s.l.auditPolicy(), s.l.auditLog(), audit.DefaultMaxSizeMB) {
+		a = append(a, "--kube-apiserver-arg="+f)
 	}
 	if ttl := s.eventTTLValue(); ttl != "" {
 		// Events are kept seven days, not the API server's hour (HBEP-8, Retention). Every start builds
@@ -148,7 +140,7 @@ func prepareIsolation(l layout) error {
 		}
 	}
 	// Rewritten on every start, so an edited policy never outlives a restart.
-	return writeFileAtomic(l.auditPolicy(), []byte(auditPolicy), 0o600)
+	return writeFileAtomic(l.auditPolicy(), audit.Policy, 0o600)
 }
 
 // launch starts k3s detached from the launcher (own session, no stdin, output to the log), and

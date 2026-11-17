@@ -18,6 +18,7 @@ type auditEvent struct {
 		Username string `json:"username"`
 	} `json:"user"`
 	ObjectRef struct {
+		APIGroup  string `json:"apiGroup"`
 		Resource  string `json:"resource"`
 		Namespace string `json:"namespace"`
 		Name      string `json:"name"`
