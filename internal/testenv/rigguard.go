@@ -111,16 +111,23 @@ func OpenProc(id ProcID) (*Proc, error) {
 	// The start time is read while the pidfd is held: if the process had gone and the PID been reused
 	// before the pidfd was taken, the time is another's. One that exited after the pidfd was taken
 	// is still the process it was.
-	ticks, err := startTicks(id.PID)
+	ticks, err := readStartTicks(id.PID)
 	if err != nil || ticks != id.StartTicks {
 		p.Close()
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// A process that is reaped after /proc/<pid>/stat was opened answers the read with ESRCH, not
+		// ENOENT (#709): either way no process matches the identity any more.
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ESRCH) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("pid %d: %w", id.PID, ErrProcGone)
 	}
 	return p, nil
 }
+
+// readStartTicks is how OpenProc reads the start time. It is a variable so that a test can make the
+// read fail the way a process that exits after the pidfd was taken makes it fail, without a race
+// (#709); nothing else replaces it.
+var readStartTicks = startTicks
 
 // startTicks is the start time of the process, from /proc/<pid>/stat.
 func startTicks(pid int) (uint64, error) {
