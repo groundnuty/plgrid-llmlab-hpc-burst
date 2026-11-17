@@ -8,9 +8,6 @@ import (
 	"strings"
 	"time"
 
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/deploymentid"
 )
@@ -18,10 +15,9 @@ import (
 // The throughput gate's judgement (HBEP-7, Over-allocation and qualification
 // (beta), The throughput gate; HBEP-4, Expected performance). It judges the
 // warm-up's throughput of each worker against the entry of the Provider's
-// platform profile that matches the Instance, and records the verdict in the
-// Qualified condition's message and in status.gate. In this version it acts on
-// nothing: no restart, no failure and no release follows a miss, so an Instance
-// becomes ready exactly as it did before the gate judged.
+// platform profile that matches the Instance. This file is the pure part, the
+// key, the matching, the limits and the verdict; gate_act.go acts on it: a
+// first miss restarts the worker once, a second fails the Instance.
 
 const (
 	// gateAge is how long an entry gates from its date (HBEP-4, Ageing and
@@ -39,17 +35,23 @@ const (
 	gateMarker = "; throughput gate: "
 )
 
+// ranShape is the concurrent shape one worker's warm-up ran: the sessions
+// (requests at once), and the typical context and output in tokens.
+type ranShape struct{ sessions, context, output int32 }
+
 // instanceKey is the key an Instance is matched on (HBEP-7, The throughput
 // gate: its reference): its deployment ID in display form, its capacity flags
-// from the immutable launch, and the concurrent shape one worker runs: its
-// share of targetSessions, and the typical context and output.
-func instanceKey(in *v1alpha1.Instance, sh shapes) v1alpha1.ReferenceKey {
+// from the immutable launch, and the concurrent shape one worker ran. The shape
+// is what the warm-up ran (gate_shape.go), not the deployment's workload as it
+// is declared now: an edit during a warm-up must not key a measurement on a
+// shape it never ran, and a miss can release an Allocation.
+func instanceKey(in *v1alpha1.Instance, shape ranShape) v1alpha1.ReferenceKey {
 	return v1alpha1.ReferenceKey{
 		DeploymentID:  in.Spec.DeploymentID.Display(),
 		CapacityFlags: launchCapacityFlags(in.Spec.Launch),
-		Sessions:      workerSessions(sh.targetSessions, in),
-		ContextTokens: sh.typical,
-		OutputTokens:  sh.outputTypical,
+		Sessions:      shape.sessions,
+		ContextTokens: shape.context,
+		OutputTokens:  shape.output,
 	}
 }
 
@@ -245,23 +247,37 @@ func (l gateLimits) misses(m workerMeasure) bool { return m.tpot > l.tpot || m.t
 
 // gateVerdict is what the gate judged.
 type gateVerdict struct {
-	// status is GatePassed or GateRecordOnly, which status.gate records; empty
-	// for a would-miss, which leaves the verdict unset: the acting path (a
-	// later version's) owns it and must not inherit a final-looking Missed.
+	// status is the final verdict, GatePassed, GateSuspended or GateRecordOnly; empty for a miss, which the acting
+	// path (gate_act.go) decides on, so that no miss is recorded as a final-looking Missed.
 	status string
 	// date is the matched entry's date, empty when none matched.
 	date string
-	// text is the gate's part of the Qualified message.
+	// entry is the matched entry's key, with Passed, Suspended and a miss: what the run toward its suspension counts
+	// against, with the profile and the date (suspension.go).
+	entry *v1alpha1.ReferenceKey
+	// text is the gate's part of the Qualified message for a final verdict.
 	text string
+	// missed names the workers over a limit, in worker order, for a miss; detail then holds every worker's
+	// measurement and its limits.
+	missed []string
+	detail string
+	limits gateLimits
 }
 
 // judgeGate judges the workers' measurements, nil when they could not be read,
 // against the profile's matching entry, the clock being now. The key's sessions
-// are each worker's share.
-func judgeGate(profile *v1alpha1.PlatformProfile, key v1alpha1.ReferenceKey, ms []workerMeasure, now time.Time) gateVerdict {
+// are each worker's share. suspended says whether the matched entry, by its own
+// key and its date, is suspended for the deployment (suspension.go): one that is
+// records only.
+func judgeGate(profile *v1alpha1.PlatformProfile, key v1alpha1.ReferenceKey, ms []workerMeasure, now time.Time, suspended func(entry v1alpha1.ReferenceKey, date string) bool) gateVerdict {
 	ref := matchReference(profile, key, now)
 	if ref.entry == nil {
 		return recordOnly(ref.date, ref.why)
+	}
+	entry := ref.entry.ReferenceKey
+	if suspended != nil && suspended(entry, ref.date) {
+		return gateVerdict{status: v1alpha1.GateSuspended, date: ref.date, entry: &entry,
+			text: fmt.Sprintf("records only: the entry dated %s is suspended for this deployment, since two Allocations in a row missed it", ref.date)}
 	}
 	limits, err := limitsOf(ref.entry)
 	switch {
@@ -272,24 +288,26 @@ func judgeGate(profile *v1alpha1.PlatformProfile, key v1alpha1.ReferenceKey, ms 
 	}
 	var parts, missed []string
 	for _, m := range ms {
-		label := ""
-		if len(ms) > 1 {
-			label = m.worker + ": "
-		}
-		parts = append(parts, fmt.Sprintf("%stime per output token %s (limit %s), time to first token %s (limit %s)", label, m.tpot, limits.tpot, m.ttft, limits.ttft))
+		parts = append(parts, measurementText(m, limits, len(ms) > 1))
 		if limits.misses(m) {
 			missed = append(missed, m.worker)
 		}
 	}
 	detail := strings.Join(parts, "; ")
 	if len(missed) == 0 {
-		return gateVerdict{status: v1alpha1.GatePassed, date: ref.date, text: fmt.Sprintf("passed the entry dated %s: %s", ref.date, detail)}
+		return gateVerdict{status: v1alpha1.GatePassed, date: ref.date, entry: &entry, text: fmt.Sprintf("passed the entry dated %s: %s", ref.date, detail)}
 	}
-	who := "would miss"
-	if len(ms) > 1 {
-		who = strings.Join(missed, ", ") + " would miss"
+	return gateVerdict{date: ref.date, entry: &entry, missed: missed, detail: detail, limits: limits}
+}
+
+// measurementText is one worker's measurement and the limits it was judged against, as the gate's messages print
+// them; a worker's name labels it when the Instance has several.
+func measurementText(m workerMeasure, l gateLimits, labelled bool) string {
+	label := ""
+	if labelled {
+		label = m.worker + ": "
 	}
-	return gateVerdict{date: ref.date, text: fmt.Sprintf("%s the entry dated %s: %s; this version only records the verdict, so nothing restarts or fails", who, ref.date, detail)}
+	return fmt.Sprintf("%stime per output token %s (limit %s), time to first token %s (limit %s)", label, m.tpot, l.tpot, m.ttft, l.ttft)
 }
 
 func recordOnly(date, why string) gateVerdict {
@@ -311,37 +329,4 @@ func qualifiedMessage(in *v1alpha1.Instance, checks string) string {
 		return withGate(checks, fmt.Sprintf("judged on the first qualification (%s); later warm-ups are recorded only", g.Verdict))
 	}
 	return withGate(checks, "judged after warm-up")
-}
-
-// gateRecord judges the Instance's warm-up throughput, one per worker in
-// worker order, and returns the status change that records the verdict, to be
-// made in the write that records the warm-up; nil when the gate has already
-// given its verdict, so that no later warm-up is judged (HBEP-7, The throughput
-// gate: the first qualification only). A would-miss leaves the verdict unset,
-// so the next warm-up before a verdict is judged again. The change is
-// idempotent: the same measurement writes the same message and gate, which
-// setStatus skips.
-func (p *pass) gateRecord(in *v1alpha1.Instance, sh shapes, tps []*v1alpha1.Throughput) func(*v1alpha1.InstanceStatus) {
-	if g := in.Status.Gate; g != nil && g.Verdict != "" {
-		return nil
-	}
-	var profile *v1alpha1.PlatformProfile
-	if pv := p.pvOf(in.Labels); pv != nil {
-		profile = pv.profile
-	}
-	v := judgeGate(profile, instanceKey(in, sh), measuresOf(workerNames(in), tps), p.now)
-	now := metav1.NewTime(p.now)
-	return func(s *v1alpha1.InstanceStatus) {
-		if c := apimeta.FindStatusCondition(s.Conditions, v1alpha1.ConditionQualified); c != nil && c.Status == metav1.ConditionTrue {
-			cond(&s.Conditions, v1alpha1.ConditionQualified, metav1.ConditionTrue, v1alpha1.ReasonPassed, withGate(c.Message, v.text), in.Generation, now)
-		}
-		if v.status != "" {
-			g := v1alpha1.InstanceGate{}
-			if s.Gate != nil {
-				g = *s.Gate
-			}
-			g.Verdict, g.ReferenceDate = v.status, v.date
-			s.Gate = &g
-		}
-	}
 }
