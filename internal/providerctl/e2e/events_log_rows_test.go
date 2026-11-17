@@ -126,6 +126,7 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			t.Errorf("the log holds %s (%s on %s), which the emitter did not raise", m.ID, m.Data.Reason, m.Subject)
 		}
 	}
+	t.Logf("500 raised: %d in the stream; the counter reads %v, %v of it EventsNotLogged that ran out: %v accounted for", stored, lost, lost-lostEvents, float64(stored)+lostEvents)
 	if float64(stored)+lostEvents < 500 {
 		t.Errorf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least 500: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents)
 	}
