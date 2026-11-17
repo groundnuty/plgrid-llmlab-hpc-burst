@@ -22,16 +22,25 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/events"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// The port bases of the two tests: 29220-29232 and 29233-29245.
+// The port bases of the three tests: 29220-29232, 29233-29245 and, for the third, 28480-28492 of #625's block
+// (IMPL-COMMON), which the serial tests of the log use one at a time and have finished with by the time the
+// parallel ones run. The third's log is at 28516 and 28517, #625's pair for the publisher's tests.
 const (
 	ttlTestBase     = 29220
 	upgradeTestBase = 29233
+	ttlLogTestBase  = 28480
 )
 
 // guardRoot checks that the system k3s listens as it did when the test began, at the end of it.
@@ -218,5 +227,110 @@ func TestUpgradeAddsTheEventTTL(t *testing.T) {
 	}
 	if got, err := clientFor(t, sd).EventsV1().Events("default").Get(ctx, name, metav1.GetOptions{}); err != nil || got.UID != ev.UID {
 		t.Errorf("the Event created before the upgrade is not there after it: %v", err)
+	}
+}
+
+// TestAnEventOutlivesItsTTLInTheLog is HBEP-8's Retention row for the durable log (Test plan, Beta: "On a host
+// started with a short test event-ttl, an event the API no longer lists is still in the log"; issue #625, PR E2).
+// k3s starts as the launcher starts it, with a TTL of two minutes. An event is raised through the publisher
+// (eventcount.Events with the log's option) over client-go's events.k8s.io recorder, which writes it to the
+// API server, and the publisher stores it in HB_EVENTS in a log that is a real child, the controller binary's
+// eventlog subcommand (the shared rig, internal/eventlog/node/nodetest). The event is shown in the API and
+// in the log; then the API server expires it, and a fresh client shows it still in the log. A test that never
+// lets the TTL pass proves nothing, so this one waits for the API to drop it.
+//
+// The log is started by the rig, as the supervisor would start it, and not by up --event-log: these tests start
+// k3s in this process, with the unexported option that shortens the TTL, which the command line cannot set, and
+// run no supervisor. up --event-log on a real k3s, with the log under the supervisor, is cmd/hpcburst's
+// eventlog_k3s_test.go.
+//
+// It runs in CI's launcher-k3s job; it is not run on the development VM.
+func TestAnEventOutlivesItsTTLInTheLog(t *testing.T) {
+	t.Parallel()
+	bins := k3sBinDir(t)
+	guardRoot(t)
+	sd := filepath.Join(shortDir(t), "st")
+	if _, err := Up(context.Background(), UpOptions{StateDir: sd, BinDir: bins, PortBase: ttlLogTestBase, Nice: 10, ReadyTimeout: 3 * time.Minute,
+		Log: testLog{t}, eventTTL: "2m"}); err != nil {
+		t.Fatal(err)
+	}
+	downOnCleanup(t, sd)
+	cs := clientFor(t, sd)
+	ctx := context.Background()
+
+	// The object the event is about: a ConfigMap, which has a UID, in the default namespace.
+	cm, err := cs.CoreV1().ConfigMaps("default").Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "ttl-log-subject"}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create the ConfigMap the event is about: %v", err)
+	}
+
+	// The log, and a publisher to it.
+	d := nodetest.NewDir(t, nodetest.Ports{Client: 28516, Monitor: 28517}, eventlog.Caps{Events: 64 << 20, Usage: 1 << 20})
+	d.Start(t).Ready()
+	pub := eventcount.NewPublisher(eventcount.PublisherOptions{Addr: d.Ports.Addr(), Token: d.Token})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pub.Shutdown(ctx)
+	})
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	b := events.NewBroadcaster(&events.EventSinkImpl{Interface: cs.EventsV1()})
+	stop := make(chan struct{})
+	b.StartRecordingToSink(stop)
+	t.Cleanup(func() { close(stop); b.Shutdown() })
+	const manager, id, reason = "hpcburst.test/event-ttl-log", "ttl-log-event-1", "EventTTLLogProbe"
+	rec := eventcount.Events(b.NewRecorder(scheme, manager), eventcount.New(), eventcount.ControllerProvider("ttl-log"), pub.Option(scheme, manager, nil))
+	rec.EventfID(id, cm, nil, provider.EventKindOrdinary, reason, "ready", "raised through the publisher by the event TTL test")
+	raised := time.Now()
+
+	inAPI := func() bool {
+		list, err := cs.EventsV1().Events("default").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			t.Fatalf("list the Events: %v", err)
+		}
+		for _, e := range list.Items {
+			if e.Reason == reason && e.Regarding.UID == cm.UID {
+				return true
+			}
+		}
+		return false
+	}
+	inLog := func() bool {
+		for _, m := range d.ReadAll(t, eventlog.StreamEvents) {
+			if m.ID == id && m.Subject == "hb.ev.configmap."+string(cm.UID) {
+				return true
+			}
+		}
+		return false
+	}
+	waitFor := func(what string, d time.Duration, cond func() bool) {
+		t.Helper()
+		for end := time.Now().Add(d); !cond(); time.Sleep(2 * time.Second) {
+			if time.Now().After(end) {
+				t.Fatalf("timed out after %s waiting for %s", d, what)
+			}
+		}
+	}
+	waitFor("the event to be in the API", time.Minute, inAPI)
+	waitFor("the event to be in the log", time.Minute, inLog)
+
+	// The API server expires the event after its TTL, two minutes; the log keeps it.
+	deadline := raised.Add(2*time.Minute + 3*time.Minute)
+	for inAPI() {
+		if time.Now().After(deadline) {
+			t.Fatalf("the event is still in the API %s after it was raised, though k3s was started with event-ttl=2m", time.Since(raised).Round(time.Second))
+		}
+		time.Sleep(5 * time.Second)
+	}
+	if age := time.Since(raised).Round(time.Second); age < time.Minute {
+		t.Errorf("the event was gone from the API after %s, well before the TTL of 2m", age)
+	} else {
+		t.Logf("the event was gone from the API %s after it was raised, with a TTL of 2m", age)
+	}
+	if !inLog() {
+		t.Errorf("the event %s is not in the log after the API dropped it: the log must outlive the TTL", id)
 	}
 }
