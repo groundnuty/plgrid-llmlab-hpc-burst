@@ -104,9 +104,15 @@ func TestTheJobMapsTheBulkTestsOutcomesAsRuled(t *testing.T) {
 			vlog(clean, clean), false, "", "", 0, 0},
 		{"one mode INVALID, everything else clean: a warning with its figures, and the job passes",
 			vlog(modeOut{control: "PASS", bulk: "PASS", verdict: invalidAt("81.5ms", "51.5ms")}, clean), false, "", "direct: INVALID run", 1, 0},
+		// #701's run (docs-only PR #679's rehearsal-bulk run), as the test now writes its two modes: direct's control of 74.5 ms is INVALID with its
+		// bulk path under the bar, so it warns; host-dialed's 33.1% cut passes the relative margin (the old fixed 30 ms failed it at 29.44 ms apart).
+		{"#701's run: direct INVALID warns and host-dialed passes by the relative margin, so the job passes",
+			vlog(modeOut{control: "PASS", bulk: "PASS", verdict: invalidLine + "gap p99 74.519113ms without the bulk path, 54.191133ms with it, 20.32798ms apart: the control is under 85ms, so this run can't show a stall to remove"},
+				modeOut{control: "PASS", bulk: "PASS", verdict: s4PassLine + "gap p99 88.965084ms without the bulk path, 59.523306ms with it, 29.441778ms apart"}),
+			false, "", "direct: INVALID run, neither a pass nor a fail: gap p99 74.519113ms without the bulk path, 54.191133ms with it", 1, 0},
 		// The ruling's four failures.
 		{"1. an S4 FAIL",
-			vlog(clean, modeOut{control: "PASS", bulk: "PASS", verdict: s4FailLine + "gap p99 100ms without the bulk path, 80ms with it, 20ms apart: less than 30ms apart"}),
+			vlog(clean, modeOut{control: "PASS", bulk: "PASS", verdict: s4FailLine + "gap p99 100ms without the bulk path, 72ms with it, 28ms apart: the bulk path's is 28.0% below the control's, under the 30% it must be (at most 70ms)"}),
 			true, "host-dialed: S4 fails:", "", 0, 1},
 		{"2. a functional witness failing, beside an INVALID control's mode: the bulk counter",
 			vlog(modeOut{control: "PASS", bulk: "PASS", verdict: invalidAt("81ms", "50ms")},
