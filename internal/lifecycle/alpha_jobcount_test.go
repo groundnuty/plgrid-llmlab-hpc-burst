@@ -20,8 +20,8 @@ package lifecycle
 // a rig opens no port, starts no process and sets no environment variable. Go
 // resumes a top-level parallel test only once every sequential test has ended,
 // so the package's control planes, and the tests that swap newLeaseLock, are
-// gone by then. These are the package's only parallel tests: one that joins them
-// must keep all of this true.
+// gone by then. These and alpha_leaseend_test.go's are the package's only parallel
+// tests: one that joins them must keep all of this true.
 
 import (
 	"context"
