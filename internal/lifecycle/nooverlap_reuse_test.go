@@ -104,8 +104,10 @@ func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
 //
 // The timeline: the deployment first runs on the second Provider alone (its
 // partition allows 6 h) and is scaled to zero at 08:30, which keeps its
-// Allocation; at 09:00 it is scaled to one Instance and allowed on both
-// Providers. The first takes it: the job starts at 09:00:20 with a hard end of
+// Allocation; at 09:00 it is scaled to one Instance and allowed on the first
+// Provider alone (a missing primary goes to a warm Allocation before a new
+// submission, #604 PR 3), and on both once the primary is ready. The first
+// takes it: the job starts at 09:00:20 with a hard end of
 // 13:00:20 (the rig's 4 h), so the drain start is 10:50:20 and the
 // replacement's planned time 10:50:20 - (0 + 50 s + 30 min) = 10:19:30. The
 // warm Allocation's hard end, 14:00:20, leaves more than the 2h11m40s that a
@@ -130,11 +132,15 @@ func TestNoOverlapWarmAllocationOnAnotherProviderTakesTheReplacement(t *testing.
 	}
 
 	hoStepTo(rg, hoT(9, 0, 0), 5*time.Minute, nil)
+	// A alone first: a missing primary goes to a warm Allocation of its deployment before a new submission (HBEP-7,
+	// Provisioning, Where; #604 PR 3), so with B allowed, B's warm Allocation would take the primary and the row's
+	// replacement could not be the one that goes there. B is allowed once the primary is ready.
 	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) {
 		m.Spec.Instances = 1
-		m.Spec.Providers.Names = []string{rigProvider, "example-b"}
+		m.Spec.Providers.Names = []string{rigProvider}
 	})
 	rg.until(5*time.Minute, 10*time.Second, "the primary is ready", func() bool { return rg.readyCount(hoMD) == 1 })
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{rigProvider, "example-b"} })
 	live := rg.liveInstances(hoMD)
 	if len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != rigProvider {
 		t.Fatalf("live Instances %+v, want one, on %s", live, rigProvider)

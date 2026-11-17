@@ -157,7 +157,13 @@ func TestPlanningAnOperationOfEachActionHasNoSideEffect(t *testing.T) {
 	h.until(time.Minute, 10*time.Second, "M1's Allocation released and M2 ended", func() bool {
 		return h.released(m1Alloc) && ended(h.mustInstance(m2))
 	})
-	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
+	// On A alone: a missing primary goes to a warm Allocation of its deployment before a new submission (HBEP-7,
+	// Provisioning, Where; #604 PR 3), so with B allowed it would be placed on K and not pend on A, which the Operations'
+	// plans below read. K stays where it is, on B, and B is allowed again once P2 is made.
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) {
+		m.Spec.Instances = 2
+		m.Spec.Providers.Names = []string{rigProvider}
+	})
 	var p2 string
 	h.until(time.Minute, 10*time.Second, "P2 created", func() bool {
 		for _, in := range h.onProvider(hoMD, rigProvider) {
@@ -167,6 +173,7 @@ func TestPlanningAnOperationOfEachActionHasNoSideEffect(t *testing.T) {
 		}
 		return p2 != ""
 	})
+	h.mutateMD(hoMD, onBoth)
 	p2Alloc := h.mustInstance(p2).Spec.AllocationRef.Name
 	rAlloc := h.mustInstance(r).Spec.AllocationRef.Name
 	if a, ok := h.allocation(m2Alloc); !ok || a.Status.AtProvider.StartTime == nil || !a.DeletionTimestamp.IsZero() {

@@ -143,7 +143,7 @@ func (p *pass) targetOf(pv *providerView, o placeOpts, record bool) *placeTarget
 // waits. A replacement never waits past its start deadline, its ReplacementLate deadline (replacementDeadline): the
 // wait ends there, and at that deadline the deferral lapses and the placement goes on to a submission, since the
 // replacement is late and its predecessor's drain start is near. A missing primary has no start deadline, so
-// agentGrace alone bounds it (the science agent's ruling on #604 PR 3's plan, Q3, 16 Nov 2026).
+// agentGrace alone bounds it (the science agent's ruling on #604 PR 3's plan, Q3, 16 Nov 2026; HBEP-7 amendment #719).
 func (p *pass) deferralEnd(pred *v1alpha1.Instance, until time.Time) (time.Time, bool) {
 	if until.IsZero() {
 		return time.Time{}, false
@@ -174,6 +174,49 @@ func (p *pass) replacementDeadline(pred *v1alpha1.Instance) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return lateAt(ds, startToReady(p.md, pv.class)), true
+}
+
+// waitsBeforeOwnSubmit answers one question of the placement order: a replacement with a slot on its predecessor's
+// Provider, while a warm Allocation on ANOTHER Provider has not registered again after the controller's restart.
+// False: it submits on the predecessor's Provider at once. HBEP-7 gives that Provider first ("when it has a slot"),
+// and amendment #719 (as reworded, fee93eb9, 17 Nov 2026) holds only the new submissions that come AFTER the warm
+// Allocation's step in the order, so a replacement's own-Provider submission, which comes first, does not wait. True
+// is the literal reading the amendment dropped: wait for such an Allocation before any submission. It is kept as a
+// predicate, false (k616, 17 Nov 2026), so a different ruling is one edit.
+func (p *pass) waitsBeforeOwnSubmit() bool {
+	if p.r.waitsBeforeOwnSubmit != nil {
+		return p.r.waitsBeforeOwnSubmit()
+	}
+	return false
+}
+
+// waitsForWarmBefore reports whether the placement waits, before the replacement's submit step on its predecessor's
+// Provider, for an unregistered warm Allocation on a Provider of the steps that follow (waitsBeforeOwnSubmit), and
+// if so asks to run again when the wait ends and marks the placement deferred.
+func (p *pass) waitsForWarmBefore(pred *v1alpha1.Instance, st step, later []step, o placeOpts) bool {
+	if pred == nil || st.kind != stepSubmit || !p.waitsBeforeOwnSubmit() {
+		return false
+	}
+	if own := p.pvOf(pred.Labels); own == nil || own.name != st.pv.name {
+		return false
+	}
+	for _, l := range later {
+		if l.kind != stepWarm {
+			continue
+		}
+		t := p.targetOf(l.pv, o, false)
+		if t == nil {
+			continue
+		}
+		if warm, deferUntil := p.warmFor(l.pv, t.params, pred); warm == nil {
+			if until, ok := p.deferralEnd(pred, deferUntil); ok {
+				p.at(until)
+				p.deferred = true
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // placeOnWarm is a warm step: it places the Instance on the Provider's warm Allocation that warmFor picks. An

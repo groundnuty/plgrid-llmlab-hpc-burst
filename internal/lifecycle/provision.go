@@ -124,16 +124,20 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 	if o.extra {
 		o.quiet = true // see placeOpts.extra
 	}
-	for _, st := range p.placementOrder(pred, o) {
+	steps := p.placementOrder(pred, o)
+	for i, st := range steps {
 		t := p.targetOf(st.pv, o, st.kind == stepSubmit)
 		if t == nil {
 			continue
 		}
 		var res stepResult
 		var err error
-		if st.kind == stepWarm {
+		switch {
+		case st.kind == stepWarm:
 			res, err = p.placeOnWarm(st.pv, t, pred, o)
-		} else {
+		case p.waitsForWarmBefore(pred, st, steps[i+1:], o):
+			res = stepStopped
+		default:
 			res, err = p.submitOn(st.pv, t, pred, o)
 		}
 		if res != stepPassed || err != nil {

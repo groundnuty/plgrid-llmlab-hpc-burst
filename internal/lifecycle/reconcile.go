@@ -64,6 +64,9 @@ type Reconciler struct {
 	// hedgeFrozen, when set, says whether an executing Operation holds a hedge, so growHedges adds no member to it
 	// (HBEP-7, Hedging (beta), Operations). Nil reads false: #589's execution sets it from the committed targets.
 	hedgeFrozen func(hedgeGroup) bool
+	// waitsBeforeOwnSubmit, when set, answers placement's open question instead of the default (false): see
+	// pass.waitsBeforeOwnSubmit. Tests set it; the ruling that fixes the default sets it in the method instead.
+	waitsBeforeOwnSubmit func() bool
 }
 
 func (r *Reconciler) memory() *memory {
