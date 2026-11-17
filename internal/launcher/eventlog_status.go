@@ -97,8 +97,10 @@ func eventsFull(s StreamHealth) bool {
 	return s.Bytes+s.Bytes/s.Messages > uint64(s.MaxBytes)
 }
 
-// eventLogStreamsExist reports whether the log's monitoring port lists both streams: the log serves
-// from then on. /healthz alone answers once JetStream is up, a moment before the streams are made.
+// eventLogStreamsExist reports whether the log's monitoring port lists both streams. /healthz alone
+// answers once JetStream is up, a moment before the streams are made. It does not say that a client
+// can connect: nats-server lists the streams it restored before it opens the client port, so the start
+// barrier asks eventLogAcceptsClient (eventlog_ready.go), which adds a token connection.
 func eventLogStreamsExist(addr string) bool {
 	streams, err := readEventLogStreams(addr)
 	if err != nil {

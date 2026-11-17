@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -122,11 +123,22 @@ func logToken(t *testing.T, dir string) string {
 	return strings.TrimSpace(fileOf(agentapi.Host{StateDir: dir, PortBase: eventLogK3sBase}.EventLogTokenFile()))
 }
 
+// logClient connects to the running log with its token. It tries again every 10 ms until a
+// connection succeeds, for at most 30 s: status lists the streams while nats-server has restored them
+// but not yet opened its client port, so a single try right after a restart can be refused (issue
+// #669). A try that fails leaves nothing open (nats.Connect closes what it made).
 func logClient(t *testing.T, dir string) jetstream.JetStream {
 	t.Helper()
-	nc, err := nats.Connect("nats://"+agentapi.Host{PortBase: eventLogK3sBase}.EventLogAddr(), nats.Token(logToken(t, dir)), nats.MaxReconnects(0))
-	if err != nil {
-		t.Fatalf("connect to the event log: %v", err)
+	addr, token := agentapi.Host{PortBase: eventLogK3sBase}.EventLogAddr(), logToken(t, dir)
+	var nc *nats.Conn
+	err := errors.New("not tried")
+	for deadline := time.Now().Add(30 * time.Second); nc == nil && time.Now().Before(deadline); {
+		if nc, err = nats.Connect("nats://"+addr, nats.Token(token), nats.MaxReconnects(0)); err != nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if nc == nil {
+		t.Fatalf("connect to the event log at %s: still refused after 30 s: %v", addr, err)
 	}
 	t.Cleanup(nc.Close)
 	js, err := jetstream.New(nc)

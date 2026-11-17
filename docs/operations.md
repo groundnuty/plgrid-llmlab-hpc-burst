@@ -579,6 +579,20 @@ An Instance runs one engine worker with nothing in front of it, unless you ask f
 
   - The Envoy builds stay in `agent-builds/`, and `status` stops checking for them. A later `up` with the flag reuses them.
 
+### Hedging across Providers (beta)
+
+A ModelDeployment that allows two or more batch Providers hedges: when a missing primary or a replacement is predicted to start late on its Provider, from that Provider's observed queue waits, the controller submits one more Allocation for the same need on the next Provider in the deployment's order. The first of them to serve wins. Pending losers are cancelled at once, with no approval, and a loser whose job has started ends with `HedgeLost` and keeps its Allocation as warm capacity under the deployment's retention policy ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Hedging (beta)).
+
+- **It is on by default.** `spec.hedgeWidth`, the most Providers one hedge spans, is 2 unless you set it, so every deployment with two allowed Providers hedges.
+- **To turn it off,** set the width to 1:
+
+  ```
+  hbk patch modeldeployment <name> --type=merge -p '{"spec":{"hedgeWidth":1}}'
+  ```
+
+  Lowering the width applies to members added after it and cancels none, so it releases nothing that already runs.
+- **What to read.** While a hedge has no winner, `Progressing` names its Providers ("hedge <first member> spans Providers A, B"). Each loser raises a `replaced` event with reason `HedgeLost` regarding it, with the winner in `related`, and a cancelled loser's Allocation carries the release cause `Instance <loser> ended: hedge lost to <winner>, on Provider <Provider> (hedge <first member>)`. A hedge sets no `Degraded` reason of its own, and a Provider it passes over (not `Ready`, too short, its class paused, its per-user caps or submit slots full) sets none either.
+
 ### A controller restart
 
 The supervisor restarts the controller when it exits, so a restart needs nothing from you. `hpcburst status` counts it on the `supervised controller:` line, with the last exit's detail, code and time. While it starts, its readiness reads `starting`, then `not leading` until it is elected leader of the `lifecycle` `Lease`, which can take a `Lease` duration after the old process's last renewal, then `ready`.
