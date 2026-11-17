@@ -1,0 +1,90 @@
+# DO NOT MERGE: a throwaway that runs #664's end-to-end stand-in (internal/alpha TestStandInOperations,
+# #589 PR 5's AC 11) on a hosted runner, since the shared development VM must not run it. The setup is
+# the rehearsal job's from ci.yml: the pinned Go, k3s, frp and OpenSSH, and a systemd user scope that
+# stops everything the test started however it ends.
+name: standin-664
+on:
+  pull_request:
+    paths:
+      - .github/workflows/standin-664.yml
+permissions:
+  contents: read
+jobs:
+  standin:
+    name: standin-operations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      K3S_VERSIONS: '["1.36.5"]'
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Check the Go on PATH is the pinned toolchain
+        run: bash hack/fetch-go.sh --check "$RUNNER_TEMP/go-toolchain"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      - name: Fetch the pinned k3s binary
+        run: |
+          echo "HPCBURST_BIN_DIR=$RUNNER_TEMP/k3s-bin" >> "$GITHUB_ENV"
+          bash hack/fetch-k3s.sh "$RUNNER_TEMP/k3s-bin" ${{ join(fromJSON(env.K3S_VERSIONS), ' ') }}
+
+      - name: Fetch the pinned frp binaries
+        run: |
+          bash hack/fetch-frp.sh "$RUNNER_TEMP/frp"
+          echo "HPCBURST_FRP_DIR=$RUNNER_TEMP/frp" >> "$GITHUB_ENV"
+
+      - name: Provide OpenSSH's sshd for the login node
+        run: |
+          if ! test -x /usr/sbin/sshd; then
+            printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+            sudo chmod 755 /usr/sbin/policy-rc.d
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+            sudo rm -f /usr/sbin/policy-rc.d
+          fi
+          sudo systemctl disable --now ssh.socket ssh.service 2> /dev/null || true
+          /usr/sbin/sshd -V 2>&1 | head -1
+          echo "HPCBURST_SSHD=/usr/sbin/sshd" >> "$GITHUB_ENV"
+
+      - name: Start a systemd user manager for this user
+        run: |
+          if ! dpkg -s dbus-user-session > /dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q dbus-user-session
+          fi
+          sudo loginctl enable-linger "$(id -un)"
+          rt="/run/user/$(id -u)"
+          timeout 60 sh -c "until test -S '$rt/systemd/private' && test -S '$rt/bus'; do sleep 1; done"
+          echo "XDG_RUNTIME_DIR=$rt" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus" systemd-run --user --scope -q true
+
+      - name: Build the four binaries and the stand-in test
+        run: |
+          out="$RUNNER_TEMP/standin"
+          mkdir -p "$out"
+          go build -o "$out/" ./cmd/hpcburst ./cmd/hpcburst-controller ./cmd/hpcburst-front ./cmd/hb-agent
+          go test -c -o "$out/alpha.test" ./internal/alpha
+          echo "STANDIN_OUT=$out" >> "$GITHUB_ENV"
+
+      - name: Run TestStandInOperations in a systemd user scope
+        run: |
+          set -o pipefail
+          HPCBURST_ALPHA_STANDIN=1 HPCBURST_REHEARSAL_BIN="$STANDIN_OUT" HPCBURST_REQUIRE_FRP=1 HPCBURST_REQUIRE_SSHD=1 \
+            systemd-run --user --scope --collect -q --unit=standin-664 \
+            "$STANDIN_OUT/alpha.test" -test.v -test.timeout 40m -test.run '^TestStandInOperations$'
+
+      - name: Stop the scope if it outlived the test
+        if: always()
+        run: systemctl --user stop standin-664.scope 2> /dev/null || true
