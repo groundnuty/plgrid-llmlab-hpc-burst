@@ -142,25 +142,37 @@ func TestAGiveBackWhoseRecordDidNotLandIsRecordedAloneNotWrittenTwice(t *testing
 }
 
 // Under a Scale above zero a started-since-commit pair is not taken: P's Instance, committed CancelPending, and its Allocation both
-// fail JobStartedSinceCommit; the Instance keeps starting and serving, the Allocation is kept warm, and the count is given back.
+// fail JobStartedSinceCommit; the Instance keeps starting and serving, and the count is given back. P's Allocation is MARKED during the
+// Operation (before any act, so before the job started), and its mark is CLEARED once the Operation has finished and the pair serves on:
+// a serving pair is no kept-warm capacity, and when its Instance later ends it follows its retention policy as any other does.
 func TestAScaleDoesNotTakeAStartedSinceCommitPairAndGivesItsCountBack(t *testing.T) {
 	w := newExecWorld(t, time.Hour)
 	stop := w.failSpecWrites()
 	w.approveScale("scale", 1, 2)
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !keptWarm(a) {
+		t.Errorf("P's Allocation is %+v (found %v) after the commit, want it MARKED before any act", a, ok)
+	}
 	w.stepsUntil(90*time.Minute, 2*time.Minute, "P ready", func() bool { return w.instance(w.pending).Status.Phase == v1alpha1.InstanceReady })
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !keptWarm(a) {
+		t.Errorf("P's Allocation is %+v (found %v) while the Operation is unfinished, want it still marked: it is a target of an unfinished Operation", a, ok)
+	}
 	stop()
 	w.stepsUntil(5*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
+	w.passes(3, nil)
 	op := w.getOp("scale")
 	for _, name := range []string{w.pending, w.pendingAlloc} {
 		if o, ok := outcomeOf(op, name); !ok || o.State != v1alpha1.TargetStateFailed || o.Reason != reasonJobStartedSinceCommit {
 			t.Errorf("%s's outcome is %+v (%v), want Failed with %s", name, o, ok, reasonJobStartedSinceCommit)
 		}
 	}
+	if o, ok := outcomeOf(op, w.pendingAlloc); !ok || !strings.Contains(o.Message, "kept warm") {
+		t.Errorf("P's Allocation outcome is %+v (%v), want the words kept warm: the report is historical", o, ok)
+	}
 	if in := w.instance(w.pending); isDraining(in) || ended(in) || in.Status.Phase != v1alpha1.InstanceReady {
 		t.Errorf("P is %q: under a Scale above zero it is not taken, and serves", in.Status.Phase)
 	}
-	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationKeptWarm] == "" {
-		t.Errorf("P's Allocation is %+v (found %v), want it kept warm", a, ok)
+	if a, ok := w.allocation(w.pendingAlloc); !ok || !a.DeletionTimestamp.IsZero() || keptWarm(a) {
+		t.Errorf("P's Allocation is %+v (found %v), want it present with its mark CLEARED: the Operation has finished and the pair serves on", a, ok)
 	}
 	if rec := op.Status.CountGivenBack; rec == nil || rec.Units != 1 || rec.Instances == nil || *rec.Instances != 2 {
 		t.Errorf("the record is %+v, want 1 unit and 2 written", rec)

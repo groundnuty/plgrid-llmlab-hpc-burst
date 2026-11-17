@@ -161,22 +161,32 @@ func TestAFinalFailureStaysAndAStartedCancelIsNotDone(t *testing.T) {
 		name      string
 		started   bool
 		marked    bool // the kept-warm mark is on the Allocation (written by the act, before the record)
+		scale     bool // a Scale above zero, under which a started pair is not taken
+		liveOn    bool // a live Instance is placed on the Allocation: a pair that keeps serving, which is owed no mark
 		gone      bool
 		prior     []v1alpha1.TargetOutcome
 		effect    v1alpha1.PlanEffect
 		wantState v1alpha1.TargetState
 	}{
-		{"queued, not cancelled yet", false, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
-		{"gone: the Operation cancelled it queued", false, false, true, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateDone},
-		{"started since the commit and marked", true, true, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
-		{"started since the commit, not marked yet: not final until the mark is written", true, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
-		{"started, then released by retention: still the failure", true, true, true, []v1alpha1.TargetOutcome{record}, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
-		{"started with another effect is no failure", true, false, false, nil, v1alpha1.PlanEffectReleaseKept, v1alpha1.TargetStateNotStarted},
+		{"queued, not cancelled yet", false, false, false, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
+		{"gone: the Operation cancelled it queued", false, false, false, false, true, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateDone},
+		{"started since the commit and marked", true, true, false, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"started since the commit, its mark since cleared: the outcome is historical", true, false, false, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"started, then released by retention: still the failure", true, true, false, false, true, []v1alpha1.TargetOutcome{record}, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"started with another effect is no failure", true, false, false, false, false, nil, v1alpha1.PlanEffectReleaseKept, v1alpha1.TargetStateNotStarted},
+		{"under a Scale above zero a started pair that keeps serving is final too", true, true, true, true, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"under a Scale above zero a started Allocation with no Instance is final too", true, true, true, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateFailed},
+		{"under a Scale above zero a queued one is not final", false, true, true, false, false, nil, v1alpha1.PlanEffectCancelPending, v1alpha1.TargetStateNotStarted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpFixture(t, 1)
 			f.addInstance(instOpts{name: "r", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd)})
-			a := f.emptyAllocation("alloc-p", nil)
+			var a *v1alpha1.Allocation
+			if tc.liveOn {
+				_, a = f.addInstance(instOpts{name: "p", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd)})
+			} else {
+				a = f.emptyAllocation("alloc-p", nil)
+			}
 			a.Status.AtProvider.StartTime = nil
 			if tc.started {
 				a.Status.AtProvider.StartTime = opTime(opT0)
@@ -187,7 +197,11 @@ func TestAFinalFailureStaysAndAStartedCancelIsNotDone(t *testing.T) {
 			target := cancel
 			target.Effect = tc.effect
 			target.UID = a.UID
-			op := executingOp("op", scaleOp(1), []v1alpha1.CommittedTarget{target})
+			spec := endOp(false) // a started pair is kept warm by an End: marked, and final only once marked
+			if tc.scale {
+				spec = scaleOp(1)
+			}
+			op := executingOp("op", spec, []v1alpha1.CommittedTarget{target})
 			for i := range tc.prior {
 				tc.prior[i].UID = a.UID
 			}

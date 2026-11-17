@@ -58,14 +58,15 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsNotTakenAndItsJobIsNo
 	stop()
 	w.stepsUntil(5*time.Minute, 10*time.Second, "the Operation finished", func() bool { return w.getOp("scale").Status.FinishedAt != nil })
 
-	// P is not taken, and its started Allocation is kept warm.
+	// P is not taken, and its started Allocation stays: marked before any act, and its mark cleared once the Operation has finished and
+	// the pair serves on (a serving pair is no kept-warm capacity).
 	in := w.instance(w.pending)
 	if in.UID != pendingUID || isDraining(in) || ended(in) || in.Status.Phase != v1alpha1.InstanceReady {
 		t.Errorf("P's Instance is %q (draining %v): under a Scale above zero a started-since-commit Instance is not taken", in.Status.Phase, isDraining(in))
 	}
 	a, ok := w.allocation(w.pendingAlloc)
-	if !ok || a.UID != pendingAllocUID || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" || a.Annotations[v1alpha1.AnnotationKeptWarm] == "" {
-		t.Errorf("P's started Allocation is %+v (found %v): kept warm, and not released under the cancel approval", a, ok)
+	if !ok || a.UID != pendingAllocUID || !a.DeletionTimestamp.IsZero() || a.Annotations[v1alpha1.AnnotationReleaseCause] != "" || a.Annotations[v1alpha1.AnnotationKeptWarm] != "" {
+		t.Errorf("P's started Allocation is %+v (found %v): not released under the cancel approval, and its mark cleared: its Instance serves on it", a, ok)
 	}
 	if _, deleted := w.log.deletedWith(w.pendingAlloc); deleted {
 		t.Error("P's Allocation was deleted under the cancel approval")
