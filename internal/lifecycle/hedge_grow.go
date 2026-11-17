@@ -11,7 +11,8 @@ import (
 //
 // A hedge with no winner gets its next member once every member has reached its hedge time: its expected start
 // (its job's submission time, or now while it has none, plus its Provider's planning wait) when that is no later
-// than the hedge's start deadline, or now when it is later (the observed waits exceed the time left). The start
+// than the hedge's start deadline, but never before hedgeMinWait after its submission (or after now, while it has
+// none), or now when the expected start is later than the deadline (the observed waits exceed the time left). The start
 // deadline of a replacement hedge is its predecessor's ReplacementLate deadline; of a missing primary's, its first
 // member's creation plus handoverMargin. With no wait observed on a member's Provider, its expected start is the
 // deadline minus handoverMargin for a replacement and the deadline for a missing primary, so a missing primary
@@ -98,17 +99,28 @@ func (p *pass) hedgeTime(m *v1alpha1.Instance, deadline time.Time, margin time.D
 	return hedgeTimeOf(p.now, submit, waits, deadline, margin, replacement)
 }
 
+// hedgeMinWait is the least a member waits after its submission (after now, while it has none) before it is judged
+// late, when it is not predicted late (HBEP-7, Hedging (beta), A member's hedge time; the science agent's ruling on
+// #627's main merge, 17 Nov 2026). Without it a Provider whose observed waits are all near zero has a planning wait
+// near zero, so a member still pending one pass after its submission has outlived its prediction and gains a sibling
+// at once, and on two fast Providers both start: a started loser, which A rescue, not insurance rules out. Ten
+// minutes is under the default handoverMargin, so a missing primary still gets its second member within its margin.
+// A fixed value in beta; it becomes a profile setting only if beta's waits show a platform needs another.
+const hedgeMinWait = 10 * time.Minute
+
 // hedgeTimeOf is the hedge-time rule on its inputs: the expected start is the submission time, or now while there is
 // none, plus the planning wait (p90Wait); with no wait observed it is the deadline minus margin for a replacement
-// and the deadline for a missing primary. The hedge time is now when the expected start is after the deadline, and
-// the expected start otherwise: a member still pending then has outlived the prediction.
+// and the deadline for a missing primary. The hedge time is now when the expected start is after the deadline: the
+// member is predicted late, and the minimum wait does not apply to it. Otherwise it is the expected start, but never
+// before the submission time, or now while there is none, plus hedgeMinWait: a member still pending then has
+// outlived the prediction, and one that is merely starting normally isn't late.
 func hedgeTimeOf(now time.Time, submit *time.Time, waits []v1alpha1.QueueWait, deadline time.Time, margin time.Duration, replacement bool) time.Time {
+	base := now
+	if submit != nil {
+		base = *submit
+	}
 	var expected time.Time
 	if wait, ok := p90Wait(waits); ok {
-		base := now
-		if submit != nil {
-			base = *submit
-		}
 		expected = base.Add(wait)
 	} else if replacement {
 		expected = deadline.Add(-margin)
@@ -117,6 +129,9 @@ func hedgeTimeOf(now time.Time, submit *time.Time, waits []v1alpha1.QueueWait, d
 	}
 	if expected.After(deadline) {
 		return now // the observed waits exceed the time left: predicted late
+	}
+	if floor := base.Add(hedgeMinWait); expected.Before(floor) {
+		return floor
 	}
 	return expected
 }

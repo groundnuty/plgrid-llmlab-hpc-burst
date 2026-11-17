@@ -36,6 +36,16 @@ func setWaits(rg *rig, provider string, n int, w time.Duration) {
 	}
 }
 
+// observedWaits is how many queue waits a Provider's status holds.
+func observedWaits(rg *rig, provider string) int {
+	rg.t.Helper()
+	var prov v1alpha1.Provider
+	if err := rg.c.Get(rg.ctx, client.ObjectKey{Name: provider}, &prov); err != nil {
+		rg.t.Fatal(err)
+	}
+	return len(prov.Status.QueueWaits)
+}
+
 // membersOn returns the live members on prov of the hedge whose first member is first.
 func (rg *rig) membersOn(md, first, prov string) []v1alpha1.Instance {
 	var out []v1alpha1.Instance
@@ -64,10 +74,21 @@ func stepUntilClock(rg *rig, at time.Time, step time.Duration, each func()) {
 // 08:00:00, and runs its first pass: M1 is created on A at 08:00:00. It returns M1's name.
 func missingPrimary(t *testing.T, h *hedgeRig, w time.Duration, edit func(*v1alpha1.ModelDeployment)) string {
 	t.Helper()
+	n := 0
+	if w > 0 {
+		n = 20
+	}
+	return missingPrimaryOnWaits(t, h, n, w, edit)
+}
+
+// missingPrimaryOnWaits is missingPrimary with A's waits n of w each, none for n 0. Twenty waits of 0 s is a Provider
+// whose observed waits are all zero, which missingPrimary's w 0 is not: that Provider has observed none.
+func missingPrimaryOnWaits(t *testing.T, h *hedgeRig, n int, w time.Duration, edit func(*v1alpha1.ModelDeployment)) string {
+	t.Helper()
 	h.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
 	h.Step() // the Providers' first status: Ready
-	if w > 0 {
-		setWaits(h.rig, rigProvider, 20, w)
+	if n > 0 {
+		setWaits(h.rig, rigProvider, n, w)
 	}
 	md := mdSpec(hoMD)
 	onBoth(md)
@@ -123,6 +144,43 @@ func TestAMissingPrimaryHedgesByItsWaits(t *testing.T) {
 	}
 }
 
+// TestAMemberNotPredictedLateWaitsTheMinimumWait: the science agent's ruling on #627's main merge, 17 Nov 2026 (HBEP-7,
+// A member's hedge time): a member not predicted late isn't judged late before its submission plus 10 min
+// (hedgeMinWait). M1's deadline is its creation, 08:00:00, plus the 30 min margin, 08:30:00, and the rig submits its
+// Allocation at 08:00:10.
+//   - A's 20 waits all 0 s: M1's expected start is its submission, 08:00:10, and it is not predicted late. Without the
+//     minimum wait B's member came in the pass after the submission; with it M1's hedge time is 08:10:10, so B has no
+//     member at 08:00:20 (one pass after the submission), none at 08:10:00, and its member at 08:10:10.
+//   - A's waits 10 h: M1 is predicted late, its expected start is after its deadline, so B's member is made in its
+//     first pass, 08:00:00: the minimum wait doesn't delay it.
+func TestAMemberNotPredictedLateWaitsTheMinimumWait(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		wait time.Duration
+		at   time.Time // B's member's time; 08:00:00 is the first pass
+	}{
+		{"A's 20 waits all 0 s", 0, hoT(8, 10, 10)},
+		{"A's waits 10 h: predicted late", 10 * time.Hour, hoT(8, 0, 0)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHedgeRig(t)
+			m1 := missingPrimaryOnWaits(t, h, 20, c.wait, nil)
+			check := func() {
+				got := h.membersOn(hoMD, m1, hedgeB)
+				due := !h.clock.Now().Before(c.at)
+				if due != (len(got) == 1) {
+					t.Fatalf("at %s B has %d members of M1's hedge, want %v", h.clock.Now().Format(time.TimeOnly), len(got), due)
+				}
+			}
+			check()
+			stepUntilClock(h.rig, c.at.Add(-10*time.Second), 10*time.Second, check)
+			h.clock.Advance(10 * time.Second)
+			h.Step()
+			check()
+		})
+	}
+}
+
 // replacementStart starts P on A with a 12 h lease, as HBEP-7's hedging fixture has it: created at 08:00:00, its job
 // starting at 08:00:20, so its hard end is 20:00:20 and its drain start 17:50:20. A's second job, P's replacement R1,
 // pends for r1Wait. waitsAt is when A's waits (all w, none for w 0) are written: before R1's planned time.
@@ -149,8 +207,15 @@ func replacementStart(t *testing.T, h *hedgeRig, r1Wait time.Duration) string {
 //     hedge and P.
 //   - A's waits 2 h: R1 is planned at 17:50:20 minus (2 h + 50 s + 30 min), 15:19:30, and submitted at 15:19:40, so
 //     its expected start is 17:19:40: B's member comes then, none at 17:19:30.
-//   - no wait on A: R1 is made at P's start, and its expected start is the deadline minus the margin, 17:19:30: B's
-//     member comes then, none at 17:19:20.
+//   - no wait on A, none observed at all (P's own 0 s wait is cleared once it is recorded): R1 is made as soon as no
+//     wait is observed, and its expected start is the deadline minus the margin, 17:19:30, hours after its submission
+//     plus 10 min, so the minimum wait never moves it: B's member comes at 17:19:30, none at 17:19:20.
+//   - one 0 s wait on A (P's own, left in A's status): R1 is planned from it at 17:49:30 minus (0 + 50 s + 30 min) =
+//     17:19:30 and submitted at 17:19:40, so its expected start is its submission, and the minimum wait moves its hedge
+//     time to the submission plus 10 min: B's member comes at 17:29:40, none at 17:29:30. Before the minimum wait it
+//     came at R1's first pass, 17:19:30.
+//
+// Each row asserts how many waits A's status holds (20, 1 or 0), since "no wait" and "one 0 s wait" differ only there.
 func TestAReplacementHedgesByItsWaits(t *testing.T) {
 	t.Run("A's waits 10 h: a member in R1's pass", func(t *testing.T) {
 		h := newHedgeRig(t, withMaxTime(12*time.Hour))
@@ -176,19 +241,25 @@ func TestAReplacementHedgesByItsWaits(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		wait   time.Duration
+		seen   int // the waits A's status holds, asserted: 20 seeded, 1 P's own 0 s wait, 0 none
 		r1Wait time.Duration
 		at     time.Time // zero: never
+		fine   time.Time // zero: 30 s before at; where the 10 s steps begin
 	}{
-		{"A's waits 2 h", 2 * time.Hour, 10 * time.Hour, hoT(17, 19, 40)},
-		{"A's waits 2 h, R1 starts at 17:09:40", 2 * time.Hour, time.Hour*1 + 50*time.Minute, time.Time{}},
-		{"no wait on A", 0, 10 * time.Hour, hoT(17, 19, 30)},
+		{"A's waits 2 h", 2 * time.Hour, 20, 10 * time.Hour, hoT(17, 19, 40), time.Time{}},
+		{"A's waits 2 h, R1 starts at 17:09:40", 2 * time.Hour, 20, time.Hour*1 + 50*time.Minute, time.Time{}, time.Time{}},
+		{"no wait on A", 0, 0, 10 * time.Hour, hoT(17, 19, 30), time.Time{}},
+		{"one 0 s wait on A", 0, 1, 10 * time.Hour, hoT(17, 29, 40), hoT(17, 19, 0)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHedgeRig(t, withMaxTime(12*time.Hour))
 			p := replacementStart(t, h, c.r1Wait)
 			stepUntilClock(h.rig, hoT(8, 1, 10), 10*time.Second, nil) // P ready at 08:01:10
-			if c.wait > 0 {
+			switch {
+			case c.wait > 0:
 				setWaits(h.rig, rigProvider, 20, c.wait)
+			case c.seen == 0:
+				setWaits(h.rig, rigProvider, 0, 0) // P's own 0 s wait, recorded when its job started, is cleared
 			}
 			end := c.at
 			if end.IsZero() {
@@ -203,6 +274,9 @@ func TestAReplacementHedgesByItsWaits(t *testing.T) {
 				return ""
 			}
 			check := func() {
+				if got := observedWaits(h.rig, rigProvider); got != c.seen {
+					t.Fatalf("at %s A's status holds %d waits, want %d: the row is not the world it names", h.clock.Now().Format(time.TimeOnly), got, c.seen)
+				}
 				n := 0
 				if r := r1(); r != "" {
 					n = len(h.membersOn(hoMD, r, hedgeB))
@@ -215,7 +289,13 @@ func TestAReplacementHedgesByItsWaits(t *testing.T) {
 			// In 10 s steps around R1's planned time, 15:19:30, so it is made then and submitted at 15:19:40.
 			stepUntilClock(h.rig, hoT(15, 19, 20), 5*time.Minute, check)
 			stepUntilClock(h.rig, hoT(15, 20, 0), 10*time.Second, check)
-			stepUntilClock(h.rig, end.Add(-30*time.Second), 5*time.Minute, check)
+			// The 10 s steps near the member's time: 30 s before it, or from c.fine (R1's planned time is 17:19:30 in the
+			// last row, so its submission and its floor, 10 min on, are read at 10 s).
+			fine := end.Add(-30 * time.Second)
+			if !c.fine.IsZero() {
+				fine = c.fine
+			}
+			stepUntilClock(h.rig, fine, 5*time.Minute, check)
 			stepUntilClock(h.rig, end, 10*time.Second, check)
 			if c.wait == 2*time.Hour {
 				if r := r1(); r == "" {
@@ -223,6 +303,96 @@ func TestAReplacementHedgesByItsWaits(t *testing.T) {
 				} else if in := h.mustInstance(r); !in.CreationTimestamp.Time.Equal(hoT(15, 19, 30)) {
 					t.Fatalf("R1 was made at %s, want 15:19:30", in.CreationTimestamp.Format(time.TimeOnly))
 				}
+			}
+		})
+	}
+}
+
+// TestAReplacementWhosePredecessorIsGoneWaitsTheMinimumWait: a replacement hedge whose predecessor is gone has its start
+// deadline passed (startDeadline: now). So a member predicted late, its expected start after now, still hedges at once,
+// and one that isn't, with near-zero waits or none observed, is held to its submission plus 10 min (hedgeMinWait): the
+// science agent's ruling on #627, 17 Nov 2026, which says flooring it is intended. R1 is a real replacement of P, made
+// and submitted by the rig with A's waits as the row says. The pass is then read as it would be with P gone from its
+// Instances, and R1's hedge time is read as growHedges reads it (needOf, startDeadline, hedgeTime).
+//   - A's 20 waits all 0 s: R1 is planned at 17:19:30 and submitted at 17:19:40, so its expected start, 17:19:40, is not
+//     after the passed deadline (now, 17:19:50): its hedge time is 17:29:40, not now.
+//   - no wait observed on A: R1's expected start is the deadline minus the margin, long past, so its hedge time is its
+//     submission plus 10 min.
+//   - A's waits 10 h: R1's expected start, its submission plus 10 h, is after the passed deadline: its hedge time is now.
+func TestAReplacementWhosePredecessorIsGoneWaitsTheMinimumWait(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(h *hedgeRig) // from 08:00:10, with P made, until R1 is made and submitted
+		late  bool              // predicted late: the hedge time is now; else R1's submission plus 10 min
+	}{
+		{"A's 20 waits all 0 s", func(h *hedgeRig) {
+			stepUntilClock(h.rig, hoT(8, 1, 10), 10*time.Second, nil) // P ready
+			setWaits(h.rig, rigProvider, 20, 0)
+			stepUntilClock(h.rig, hoT(17, 19, 0), 5*time.Minute, nil)
+			stepUntilClock(h.rig, hoT(17, 19, 50), 10*time.Second, nil) // R1 made at 17:19:30, submitted at 17:19:40
+		}, false},
+		{"no wait observed on A", func(h *hedgeRig) {
+			stepUntilClock(h.rig, hoT(8, 1, 10), 10*time.Second, nil)
+			setWaits(h.rig, rigProvider, 0, 0) // P's own 0 s wait, recorded when its job started, is cleared
+			stepUntilClock(h.rig, hoT(8, 5, 0), 10*time.Second, nil)
+		}, false},
+		{"A's waits 10 h: predicted late", func(h *hedgeRig) {
+			setWaits(h.rig, rigProvider, 20, 10*time.Hour)
+			stepUntilClock(h.rig, hoT(8, 0, 40), 10*time.Second, nil) // 08:00:20: P's job starts and R1 is made
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHedgeRig(t, withMaxTime(12*time.Hour))
+			pName := replacementStart(t, h, 10*time.Hour)
+			c.setup(h)
+			var r1 string
+			for _, r := range hoRepl(h.rig, pName) {
+				if r.Labels[v1alpha1.LabelProvider] == rigProvider {
+					r1 = r.Name
+				}
+			}
+			if r1 == "" {
+				t.Fatalf("no replacement of P on A at %s", h.clock.Now().Format(time.TimeOnly))
+			}
+			a, ok := h.allocation(h.mustInstance(r1).Spec.AllocationRef.Name)
+			if !ok || a.Status.AtProvider.SubmitTime == nil {
+				t.Fatalf("R1's Allocation is not submitted at %s: %+v", h.clock.Now().Format(time.TimeOnly), a)
+			}
+			submit := a.Status.AtProvider.SubmitTime.Time
+			ps := h.passOf(hoMD)
+			if ps.instanceNamed(pName) == nil {
+				t.Fatalf("P is not among the pass's Instances before it is taken out")
+			}
+			var kept []*v1alpha1.Instance
+			for _, in := range ps.insts {
+				if in.Name != pName {
+					kept = append(kept, in)
+				}
+			}
+			ps.insts = kept // P gone
+			var need hedgeNeed
+			found := false
+			for _, g := range groupHedges(ps.insts, func(in *v1alpha1.Instance) bool { return countable(in) && !ps.stale[in.UID] }) {
+				if g.key == r1 {
+					need, found = ps.needOf(g), true
+				}
+			}
+			if !found {
+				t.Fatalf("no hedge of R1 %s in the pass", r1)
+			}
+			deadline, margin, replacement, ok := ps.startDeadline(need)
+			if !need.predGone || !ok || !replacement || !deadline.Equal(ps.now) {
+				t.Fatalf("with P gone R1's hedge reads predGone %v, ok %v, replacement %v, deadline %s: want gone, ok, a replacement, deadline now %s",
+					need.predGone, ok, replacement, deadline.Format(time.TimeOnly), ps.now.Format(time.TimeOnly))
+			}
+			got := ps.hedgeTime(need.first, deadline, margin, replacement)
+			want := submit.Add(10 * time.Minute)
+			if c.late {
+				want = ps.now
+			}
+			if !got.Equal(want) {
+				t.Errorf("R1's hedge time is %s, want %s (now %s, R1 submitted %s)", got.Format(time.TimeOnly), want.Format(time.TimeOnly),
+					ps.now.Format(time.TimeOnly), submit.Format(time.TimeOnly))
 			}
 		})
 	}

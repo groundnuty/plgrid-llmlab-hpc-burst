@@ -42,6 +42,13 @@ func TestTheHedgeTime(t *testing.T) {
 		{"waits 9 h 21 min: expected 09:21, after: now", day(0, 0), ptrTo(day(0, 0)), hedgeWaitsOf(20, 9*time.Hour+21*time.Minute), true, day(0, 0)},
 		// A replacement submitted at 06:50 with waits of 2 h: expected 08:50.
 		{"waits 2 h, submitted 06:50: 08:50", day(7, 20), ptrTo(day(6, 50)), hedgeWaitsOf(20, 2*time.Hour), true, day(8, 50)},
+		// The minimum wait (hedgeMinWait, 10 min; HBEP-7, A member's hedge time): a member not predicted late isn't
+		// judged late before its submission plus 10 min, whatever the waits say. Here the deadline is 09:20, far off.
+		{"20 waits of 0 s, submitted 06:50: 07:00, not 06:50", day(6, 55), ptrTo(day(6, 50)), hedgeWaitsOf(20, 0), true, day(7, 0)},
+		{"waits 9 min, submitted 06:50: expected 06:59, floored to 07:00", day(6, 55), ptrTo(day(6, 50)), hedgeWaitsOf(20, 9*time.Minute), true, day(7, 0)},
+		{"waits 10 min, submitted 06:50: expected 07:00, the floor itself", day(6, 55), ptrTo(day(6, 50)), hedgeWaitsOf(20, 10*time.Minute), true, day(7, 0)},
+		{"waits 11 min, submitted 06:50: expected 07:01, above the floor", day(6, 55), ptrTo(day(6, 50)), hedgeWaitsOf(20, 11*time.Minute), true, day(7, 1)},
+		{"20 waits of 0 s, not submitted, at 07:00: now plus 10 min, 07:10", day(7, 0), nil, hedgeWaitsOf(20, 0), true, day(7, 10)},
 		// No wait observed: the deadline minus the margin for a replacement.
 		{"no wait, a replacement: 08:50", day(0, 0), ptrTo(day(0, 0)), nil, true, day(8, 50)},
 		// Not submitted yet (Submitting): now plus the wait, moving with the clock.
@@ -66,6 +73,7 @@ func TestTheHedgeTime(t *testing.T) {
 	}{
 		{"waits 10 h: now, its first pass", day(0, 0), hedgeWaitsOf(20, 10*time.Hour), day(0, 0)},
 		{"waits 20 min: 00:20", day(0, 0), hedgeWaitsOf(20, 20*time.Minute), day(0, 20)},
+		{"20 waits of 0 s: now plus 10 min, 00:10, never its first pass", day(0, 0), hedgeWaitsOf(20, 0), day(0, 10)},
 		{"no wait: its deadline, 00:30, never its first pass", day(0, 0), nil, day(0, 30)},
 	} {
 		got := hedgeTimeOf(c.now, nil, c.waits, mdDeadline, margin, false)
