@@ -86,9 +86,9 @@ func newRealEnv(t *testing.T, clock *fake.Clock, sl *fakeslurm.Platform, c clien
 			Spec: v1alpha1.PlatformProfileSpec{ProviderKind: v1alpha1.PlatformBatch, HoldRelease: true, JSONDataParser: "v0.0.42",
 				InflightWindow: &window, StagingDir: "$SCRATCH/stage"},
 			Partition: v1alpha1.PartitionProfile{Name: gpuPart, AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "A100", CPUArch: testArch},
-				GPUsPerNode: &gpus, MaxTime: &maxTime},
+				GPUsPerNode: &gpus, MaxTime: &maxTime, BillingUnit: v1alpha1.BillingUnitGPUHour},
 		},
-		Settings: provider.Settings{Provider: providerName, Account: "account-" + user, Partition: gpuPart},
+		Settings: provider.Settings{Provider: providerName, Account: "account-" + user, Grant: "grant-" + user, Partition: gpuPart},
 	}}
 	e.credDir = t.TempDir()
 	builds := t.TempDir()

@@ -134,13 +134,19 @@ type tres struct {
 
 // tresList is the requested (or allocated) TRES of a job, in the order of S7's
 // capture: cpu, mem, node, billing, then the GPUs as a gres entry. The ids are
-// the base TRES ids of S7; gres/gpu gets the first custom id.
+// the base TRES ids of S7; gres/gpu gets the first custom id. The billing entry
+// is the CPU count unless Platform.SetBilling has set it (a count, or none).
 func tresList(j *job) []tres {
 	l := []tres{
 		{Type: "cpu", ID: 1, Count: int64(j.cpus)},
 		{Type: "mem", ID: 2, Count: j.memMiB},
 		{Type: "node", ID: 4, Count: int64(j.nodes)},
-		{Type: "billing", ID: 5, Count: int64(j.cpus)},
+	}
+	switch {
+	case !j.billingSet:
+		l = append(l, tres{Type: "billing", ID: 5, Count: int64(j.cpus)})
+	case j.billing != nil:
+		l = append(l, tres{Type: "billing", ID: 5, Count: *j.billing})
 	}
 	if j.gpus > 0 {
 		l = append(l, tres{Type: "gres", Name: "gpu", ID: 1001, Count: int64(j.gpus)})

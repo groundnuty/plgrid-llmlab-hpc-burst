@@ -73,10 +73,10 @@ func TestSetupInARealManager(t *testing.T) {
 		ProviderKind: v1alpha1.PlatformBatch, HoldRelease: true, JSONDataParser: "v0.0.42", InflightWindow: &window,
 		StagingDir: "$SCRATCH/stage",
 		Partitions: []v1alpha1.PartitionProfile{{Name: "example-gpu", AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "A100", CPUArch: "x86_64"},
-			GPUsPerNode: &gpus, MaxTime: &maxTime}},
+			GPUsPerNode: &gpus, MaxTime: &maxTime, BillingUnit: v1alpha1.BillingUnitGPUHour}},
 	}}
 	prov := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "setup-prov"}, Spec: v1alpha1.ProviderSpec{
-		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: "example-account",
+		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: "example-account", Grant: "example-grant",
 		AllowedPartitions: []string{"example-gpu"}, CredentialsRef: &v1alpha1.CredentialsReference{File: creds},
 	}}
 	// A generated name: the control plane runs the namespace controller, but
@@ -277,6 +277,12 @@ func TestSetupInARealManager(t *testing.T) {
 	if data.AllocatedCPUs == nil || *data.AllocatedCPUs != 8 || data.AllocatedGPUs == nil || *data.AllocatedGPUs != 1 ||
 		data.ElapsedSeconds == nil || *data.ElapsedSeconds < 0 || *data.ElapsedSeconds > 120 || data.StartTime == nil || data.EndTime == nil {
 		t.Errorf("record data %s: want 8 CPUs, 1 GPU, a few seconds elapsed, a start and an end", rec.Data.Raw)
+	}
+	// The beta fields: the fake Slurm lists billing as the CPU count (8); the
+	// unit is the partition's, and the grant and account are the Provider's.
+	if data.AllocatedBilling == nil || *data.AllocatedBilling != 8 || data.BillingUnit != v1alpha1.BillingUnitGPUHour ||
+		data.Grant != "example-grant" || data.Account != "example-account" {
+		t.Errorf("record data %s: want billing 8, unit gpu-hour, grant example-grant and account example-account", rec.Data.Raw)
 	}
 	if n := sl.Count("scancel"); n != 1 {
 		t.Errorf("%d scancel calls, want 1", n)

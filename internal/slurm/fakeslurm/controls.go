@@ -2,7 +2,7 @@ package fakeslurm
 
 // Ported from spikes/s4/fakeslurm/ctl.go (fakeslurmctl): the job controls a
 // test uses to move jobs, now methods on the Platform. New: the slots, the
-// phantom jobs, SetEstimate, SetTimeLimit, Job and Jobs.
+// phantom jobs, SetEstimate, SetTimeLimit, SetBilling, Job and Jobs.
 
 import (
 	"fmt"
@@ -239,6 +239,23 @@ func (p *Platform) SetTimeLimit(id, minutes int) error {
 	return p.withJob(id, func(j *job, _ time.Time) error {
 		j.timeLimit = minutes
 		p.rearmLimit(j.cur().run, minutes)
+		return nil
+	})
+}
+
+// SetBilling sets the billing entry of the job's tres lists, in sacct's replies
+// (requested and allocated alike): the scheduler's own count, which the real
+// one computes from the partition's billing weights and a test sets by hand.
+// A nil n leaves the entry out. Until it is called the entry is the CPU count,
+// as it always was.
+func (p *Platform) SetBilling(id int, n *int64) error {
+	return p.withJob(id, func(j *job, _ time.Time) error {
+		j.billingSet = true
+		j.billing = nil
+		if n != nil {
+			v := *n
+			j.billing = &v
+		}
 		return nil
 	})
 }

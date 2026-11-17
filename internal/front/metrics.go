@@ -12,6 +12,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage/forward"
 )
 
 // ttftBuckets are HBEP-8's buckets for the time to first token, in seconds
@@ -83,6 +84,46 @@ func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc, events *eventc
 		m.reg.MustRegister(&usageCollector{sink: sink, dir: dir, free: free})
 	}
 	return m
+}
+
+// enableUsageLog registers hpcburst_usage_skipped_total, the records passed over for their length,
+// and hpcburst_usage_unlogged_records, the usage records the sink has synced
+// that the durable log does not hold yet (HBEP-8, The durable log, When it is down): the last synced
+// counter less the last counter the log holds. Only a front that runs with the log calls it, so
+// without the log /metrics is as before. The series is absent, not 0, while the forwarder has not
+// yet read the log's last counter, and while the sink's position is unknown (it could not read the
+// files' last counter at its start and has synced nothing since): unknown is never 0 (HBEP-8,
+// Unknown samples). A nil forwarder
+// registers nothing.
+func (m *Metrics) enableUsageLog(f *forward.Forwarder) {
+	if m == nil || f == nil {
+		return
+	}
+	m.reg.MustRegister(&usageLogCollector{fwd: f})
+}
+
+var (
+	descUnlogged = prometheus.NewDesc("hpcburst_usage_unlogged_records", "Usage records the sink has synced that the durable log does not hold yet: the last synced counter less the last counter the log holds. Absent until the forwarder has read the log's last counter and the sink's position is known.", nil, nil)
+	descSkipped  = prometheus.NewDesc("hpcburst_usage_skipped_total", "Usage records the forwarder did not copy to the durable log because their line is longer than a message (files written before the front bounded the record's client text, HBEP-5, Usage records, #649, may hold one), each counted once. The files hold them. They are not lag, so they are not in hpcburst_usage_unlogged_records.", nil, nil)
+)
+
+// usageLogCollector exports the gauge and the skip counter from one read of the forwarder at each
+// scrape. The counter is a real zero until a record is passed over, so it is always exported.
+type usageLogCollector struct{ fwd *forward.Forwarder }
+
+// Describe implements prometheus.Collector.
+func (c *usageLogCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- descUnlogged
+	ch <- descSkipped
+}
+
+// Collect implements prometheus.Collector.
+func (c *usageLogCollector) Collect(ch chan<- prometheus.Metric) {
+	st := c.fwd.Stats()
+	if st.LoggedKnown && st.SyncedKnown {
+		ch <- prometheus.MustNewConstMetric(descUnlogged, prometheus.GaugeValue, float64(st.Unlogged))
+	}
+	ch <- prometheus.MustNewConstMetric(descSkipped, prometheus.CounterValue, float64(st.Skipped))
 }
 
 // enableBulk registers the bulk path's two series (HBEP-6, The bulk path, Metrics): requests sent

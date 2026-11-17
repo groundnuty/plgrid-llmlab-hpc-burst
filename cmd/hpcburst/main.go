@@ -8,6 +8,7 @@
 //	hpcburst restore --backup DIR  put a backup's store back (the host stopped): the only way down
 //	hpcburst down    [flags]   stop the recorded processes and confirm nothing listens
 //	hpcburst identity add|renew NAME [flags]   make an agent's identity, or give it a new token
+//	hpcburst accounting [flags] total the billed units of the accounting records and the live Allocations per grant
 //	hpcburst version           print the binary's release from its build information
 //
 // "hpcburst version" prints one line, "hpcburst <tag> <commit> <time>[ dirty]" (internal/version
@@ -47,7 +48,7 @@ const (
 	exitStopped   = 3
 	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|version> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|accounting|version> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -80,6 +81,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdGuard(ctx, args[1:], stdout, stderr)
 	case "identity":
 		return cmdIdentity(ctx, args[1:], stdout, stderr)
+	case "accounting":
+		return cmdAccounting(ctx, args[1:], stdout, stderr)
 	case "version":
 		return version.Command("hpcburst", args[1:], stdout, stderr)
 	case "supervise": // hidden: started by up

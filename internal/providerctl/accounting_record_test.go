@@ -64,6 +64,17 @@ func (e *realEnv) wantRecord(name, wantData string) *appsv1.ControllerRevision {
 	return r
 }
 
+// The beta fields (allocatedBilling, billingUnit, grant, account) as a record
+// of the default environment holds them, written out by hand: its fake Slurm
+// lists billing as the CPU count (8), and newRealEnv's profile and Provider give
+// the unit gpu-hour, grant "grant-user-a" and account "account-user-a" (synthetic
+// names). acctNoCountsBeta is the same without the billing count, for a record
+// whose counts are unknown.
+const (
+	acctBeta         = `"allocatedBilling":8,` + acctNoCountsBeta
+	acctNoCountsBeta = `"billingUnit":"gpu-hour","grant":"grant-user-a","account":"account-user-a",`
+)
+
 func jobTag(e *realEnv, name string) string {
 	a := e.get(name)
 	return v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
@@ -99,7 +110,7 @@ func TestAccountingRecordOfAJobThatEndedOnItsOwn(t *testing.T) {
 	head := head(e, "alloc-a", "1001")
 	e.del("alloc-a")
 	deleteUntilGone(e, sl, "alloc-a", id)
-	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":120,`+
+	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":120,`+acctBeta+
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:03:00Z","basis":"allocated"}`)
 }
 
@@ -133,7 +144,7 @@ func TestAccountingRecordOfAJobCancelledWhileRunning(t *testing.T) {
 			}
 			head := head(e, "alloc-a", "1001")
 			deleteUntilGone(e, sl, "alloc-a", id)
-			e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+
+			e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"elapsedSeconds":90,`+acctBeta+
 				`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:02:30Z","basis":"allocated"}`)
 		})
 	}
@@ -161,8 +172,8 @@ func TestAccountingRecordOfAJobThatNeverStarted(t *testing.T) {
 	if !e.gone("alloc-a") {
 		t.Fatalf("the Allocation is still there; its job is %s", slurmJob(t, sl, id).State)
 	}
-	e.wantRecord("alloc-a", head+`,"endTime":"2026-10-30T12:00:30Z","basis":"allocated",`+
-		`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime"]}`)
+	e.wantRecord("alloc-a", head+`,`+acctNoCountsBeta+`"endTime":"2026-10-30T12:00:30Z","basis":"allocated",`+
+		`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime","allocatedBilling"]}`)
 }
 
 // Accounting unavailable during the delete: the job ended and neither the
@@ -216,7 +227,7 @@ func TestAccountingRecordWaitsLostGraceForTheFinalRead(t *testing.T) {
 	if !e.gone("alloc-a") {
 		t.Fatal("the Allocation is still there after lostGrace")
 	}
-	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,"startTime":"2026-10-30T12:01:00Z","basis":"allocated",`+
+	e.wantRecord("alloc-a", head+`,"allocatedCPUs":8,"allocatedGPUs":1,`+acctBeta+`"startTime":"2026-10-30T12:01:00Z","basis":"allocated",`+
 		`"unknown":["elapsedSeconds","endTime"]}`)
 }
 
