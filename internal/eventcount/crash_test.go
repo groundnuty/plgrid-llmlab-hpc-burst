@@ -162,6 +162,10 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			if lost < 1 {
 				t.Fatalf("no event was lost with the log down past the retries (kill at %d)", kill)
 			}
+			// The counter also counts the EventsNotLogged that ran out against the dead log, each raised
+			// while the log was down and so lost: they are not among the 500, and subtracting them takes
+			// away the unit of slack they would give an event that was neither stored nor counted.
+			lostEvents := lost - float64(len(r.inner.byReason(ReasonEventsNotLogged)))
 			r.restart()
 			// The log is back: the next publish that it takes closes the run of losses with one
 			// EventsNotLogged, published like any event.
@@ -199,8 +203,8 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 				}
 			}
 			stored := kept - 1 // the after-return event
-			if float64(stored)+lost < crashEvents {
-				t.Fatalf("stream %d + counter %v = %v, want at least %d: an event is neither in the log nor counted", stored, lost, float64(stored)+lost, crashEvents)
+			if float64(stored)+lostEvents < crashEvents {
+				t.Fatalf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least %d: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents, crashEvents)
 			}
 			for _, m := range ms {
 				if uid, ok := uidOf[m.ID]; ok && m.Subject != "hb.ev.allocation."+uid {

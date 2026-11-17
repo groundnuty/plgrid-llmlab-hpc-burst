@@ -84,6 +84,11 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 	if lost < 1 {
 		t.Fatalf("no event was lost with the log down past the retries (kill at %d)", kill)
 	}
+	// The counter also counts the EventsNotLogged that ran out against the dead log: each was raised while the
+	// log was down, so each was lost, and none is among the 500. The raised-events counter holds how many were
+	// raised (exactly, by HBEP-8's rule); subtracting them takes away the unit of slack they would give an event
+	// that was neither stored nor counted.
+	lostEvents := lost - r.count(r.key(eventcount.ActionDegraded, eventcount.ReasonEventsNotLogged, provider.EventKindWarning))
 	r.startLogProc()
 	// The log is back: the next publish it takes closes the run of losses with one more EventsNotLogged.
 	trigger := r.newAlloc("trigger", "3h")
@@ -121,8 +126,8 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			t.Errorf("the log holds %s (%s on %s), which the emitter did not raise", m.ID, m.Data.Reason, m.Subject)
 		}
 	}
-	if float64(stored)+lost < 500 {
-		t.Errorf("stream %d + counter %v = %v, want at least 500: an event is neither in the log nor counted", stored, lost, float64(stored)+lost)
+	if float64(stored)+lostEvents < 500 {
+		t.Errorf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least 500: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents)
 	}
 	if closing != 1 {
 		t.Errorf("the log holds %d EventsNotLogged closing the run, want exactly one after the log's return", closing)
