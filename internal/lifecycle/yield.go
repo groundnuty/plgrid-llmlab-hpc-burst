@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -22,16 +23,21 @@ import (
 // submitted at all is serving capacity short; a pending extra costs only its queue age, and cancelling it is
 // over-allocation's own act, with no approval. A started extra is never cancelled for this.
 //
-// The deployment B whose primary is refused decides, at its slot reservation, under the Provider's lock (slotAsk.onLimit):
-// it marks the newest pending surplus Instance there that no other primary's mark names, by the annotation
+// The deployment B whose primary is refused decides, at its slot reservation, under the yield lock (slotTable.yieldMu) and the
+// Provider's lock (slotAsk.onLimit): it marks the newest pending surplus Instance there that no primary's mark names (any
+// deployment's; one whose Allocation is being deleted or that has none is never a candidate), by the annotation
 // annotationYieldTo, "<ns>/<B> <RFC3339 time of the marking pass>" and the label labelYieldMark, and the Instance watch
-// wakes the owner. B deletes nothing of another deployment's. It marks only while its shortage (shortageOf: the
-// primaries it lacks by Allocation presence, which counts a cut-short Instance as missing) exceeds its marks
-// outstanding on every Provider, and only when the cancel could admit it (the count that refused is no more than the
-// limit). The owner's own step 7 acts (settleYields, then scaleUnits): it re-reads B and cancels the Instance as
-// over-allocation's trim, with the release cause "yielded its submit slot to <B>", or clears the mark. B keeps its marks
-// honest (clearYieldMarks), on every Provider, including one it no longer lists: it clears the marks its pass no longer
-// supports, the oldest extras' first.
+// wakes the owner. B deletes nothing of another deployment's. It marks only while its shortage (shortageOf: the primaries it
+// lacks by Allocation presence, which counts a cut-short Instance as missing) exceeds its live marks on every Provider plus
+// the yields in flight for it (Allocations being deleted whose release cause names it), and only when the cancel could
+// admit it (the count that refused is no more than the limit).
+//
+// The owner's own step 7 decides what to do with a mark on its Instance (settleYields, then scaleDown): it clears a mark that
+// cannot hold (the job started, no longer surplus), and COMMITS the cancel of the rest (commitYield) under the yield lock and
+// the extra's Provider's lock, after an uncached re-check of the mark, of B and of the count, or clears the mark, or waits. The
+// cancel is over-allocation's trim, with the release cause "yielded its submit slot to <B>". B keeps its marks honest
+// (clearYieldMarks), on every Provider, including one it no longer lists: it clears the marks its pass no longer supports,
+// the oldest extras' first. Its clearing is no longer what keeps the cancel safe: the owner's commit is.
 //
 // What the owner reads, and why it is not B's Degraded: SubmitLimitReached is the ninth of degradedOrder, so
 // VerificationFailed, RestartLoop, SubmissionRejected, NoOverlapSlot and others mask it, and an owner that cleared
@@ -105,10 +111,6 @@ func shortageOf(sel selection, desired int) int {
 // shortage is shortageOf this pass's Instances and Allocations.
 func (p *pass) shortage() int { return shortageOf(p.selection(nil), p.desiredCount()) }
 
-// limitRefusal is what a pass saw when a missing primary was refused on a Provider for its submit limit alone: the
-// count that refused it (listed + expected + reserved) and the limit.
-type limitRefusal struct{ total, limit int }
-
 // yieldMarkOf is one of this deployment's marks: the Instance that carries it, its Provider and whether it is
 // still live (countable) or a cancelled extra whose Allocation is being deleted and still holds the slot.
 type yieldMarkOf struct {
@@ -161,25 +163,48 @@ func newestMarkFirst(ms []yieldMarkOf) {
 	})
 }
 
-// yieldOnLimit is the callback of a missing primary's reservation (slotAsk.onLimit), called under the Provider's
-// lock when the reservation is refused for the submit limit alone, by the submit step and by ensureAllocation's retry
-// of a cut-short primary: it records the refusal for this pass (the count that refused and the limit), and marks one
-// more pending extra on the Provider when
-//   - the cancel could admit this primary (Y3): the count that refused, which holds the marked extras still, is no
-//     more than the limit. Each slot one of this deployment's earlier marks frees is taken by another of its refused
-//     primaries, so its own marks net to zero, and this primary needs one more: it is never `mine` that is
-//     subtracted. Other deployments' marks free slots for them;
-//   - and this deployment's outstanding marks on EVERY Provider, plus those made earlier in this pass (deduplicated by
-//     UID, since the Reader may lag), are fewer than its shortage (Y1, Y2).
+// yieldReleaseWhy is the words of the release cause of an extra that yielded its slot to a deployment (ns/name).
+func yieldReleaseWhy(deployment string) string { return "yielded its submit slot to " + deployment }
+
+// inFlightFor counts the yields in flight for a deployment (C2): the Allocations, of any deployment on any Provider,
+// that are being DELETED and whose release cause says they yielded their submit slot to it. Their slots are coming to the
+// deployment's primaries, so they are never a reason to yield again, and they count against its shortage. It is one List
+// through the uncached Reader.
+func (p *pass) inFlightFor(ctx context.Context, deployment string) (int, error) {
+	var al v1alpha1.AllocationList
+	if err := p.r.Reader.List(ctx, &al); err != nil {
+		return 0, fmt.Errorf("list the Allocations being released for the yields in flight: %w", err)
+	}
+	n := 0
+	for i := range al.Items {
+		a := &al.Items[i]
+		if !a.DeletionTimestamp.IsZero() && strings.HasSuffix(a.Annotations[v1alpha1.AnnotationReleaseCause], yieldReleaseWhy(deployment)) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// yieldOnLimit is the callback of a missing primary's reservation (slotAsk.onLimit), called under yieldMu and the
+// Provider's lock when the reservation is refused for the submit limit alone, by the submit step and by
+// ensureAllocation's retry of a cut-short primary: it records the refusal for this pass, and marks one more pending
+// extra on the Provider when
+//   - the cancel could admit this primary (Y3): the count that refused, which holds the marked extras still, is no more
+//     than the limit. Each slot one of this deployment's earlier marks frees is taken by another of its refused
+//     primaries, so its own marks, and the yields in flight, net to zero, and this primary needs one more: never
+//     subtracted from the count. Other deployments' marks free slots for them;
+//   - and this deployment's live marks on EVERY Provider, plus those made earlier in this pass (deduplicated by UID, since
+//     the Reader may lag), plus the yields in flight for it (inFlightFor), are fewer than its shortage (Y1, Y2, C3).
 //
-// rd carries the pending surplus Instances of every deployment on the Provider, newest first (D8's views).
+// The candidate is the newest of rd's pending surplus Instances (every deployment's, on the Provider, whose Allocation holds
+// a slot, is not being deleted and has no job started) that carries no mark.
 func (p *pass) yieldOnLimit(pv *providerView) func(ctx context.Context, rd slotReads) error {
 	return func(ctx context.Context, rd slotReads) error {
 		limit := int(*pv.limits.MaxSubmitPerUser)
 		if p.limitRefused == nil {
-			p.limitRefused = map[string]limitRefusal{}
+			p.limitRefused = map[string]bool{}
 		}
-		p.limitRefused[pv.name] = limitRefusal{total: rd.total, limit: limit}
+		p.limitRefused[pv.name] = true
 		if rd.total > limit {
 			return nil // no cancel can admit this primary: the count would still be over the limit
 		}
@@ -187,14 +212,20 @@ func (p *pass) yieldOnLimit(pv *providerView) func(ctx context.Context, rd slotR
 		if err != nil {
 			return err
 		}
+		flying, err := p.inFlightFor(ctx, p.deploymentKeyOf())
+		if err != nil {
+			return err
+		}
 		count := map[types.UID]bool{}
 		for _, m := range marks {
-			count[m.in.UID] = true
+			if m.live {
+				count[m.in.UID] = true
+			}
 		}
 		for uid := range p.marked {
 			count[uid] = true
 		}
-		if len(count) >= p.shortage() {
+		if len(count)+flying >= p.shortage() {
 			p.at(p.now.Add(yieldRecheck)) // its marks are outstanding: the deployment is asked again
 			return nil
 		}
@@ -215,6 +246,17 @@ func (p *pass) yieldOnLimit(pv *providerView) func(ctx context.Context, rd slotR
 		}
 		return nil // no pending extra there to yield: the primary stays refused
 	}
+}
+
+// reserveYielding is reserveSlotWith for a missing primary, whose refusal for the limit alone may yield: it holds yieldMu
+// across the reservation (taken before the Provider's lock, which the reservation takes), so no cancel's decision runs
+// between the count that refused and the mark.
+func (p *pass) reserveYielding(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int, onLimit func(context.Context, slotReads) error) (ok, holds bool, err error) {
+	if onLimit != nil {
+		p.r.slots().yieldMu.Lock()
+		defer p.r.slots().yieldMu.Unlock()
+	}
+	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, alsoLeave, onLimit)
 }
 
 // patchYield sets (annotation and label) or, with "", clears (both) the mark on the Instance, by one merge patch.
@@ -239,58 +281,50 @@ func (p *pass) patchYield(ctx context.Context, in *v1alpha1.Instance, value stri
 	return nil
 }
 
-// clearYieldMarks is this deployment's own housekeeping, after its placements: it clears the marks naming it that this
-// pass's refusals no longer support, on EVERY Provider, including one it no longer lists (Y4). A mark goes when
-//   - this pass saw no limit-alone refusal on its Provider: the deployment placed, or is not trying (paused, gated,
-//     scaled down), or no longer lists the Provider. A refusal in ensureAllocation counts;
-//   - on a Provider where it was refused, it holds more marks than the cancels can admit: the live marks left there are
-//     the live ones less the count's excess over the limit (a cancelled extra's mark counts on both sides and is never
-//     cleared: its Allocation still holds the slot);
-//   - across all Providers, it holds more live marks than its shortage less the cancelled ones.
+// clearYieldMarks is this deployment's own housekeeping, after its placements, and no longer what keeps the cancel safe
+// (that is the owner's commit, commitYield): it clears the live marks naming it on EVERY Provider, including one it no
+// longer lists (Y4), when
+//   - this pass saw no limit-alone refusal on their Provider: the deployment placed, or is not trying (paused, gated,
+//     scaled down), or no longer lists it. A refusal in ensureAllocation counts;
+//   - it holds more live marks than its shortage less the yields in flight for it (C5): the OLDEST extras' go first, so the
+//     marks left are on the NEWEST pending extras.
 //
-// The marks cleared are the OLDEST extras', so the marks left are on the NEWEST pending extras. Each clear is made under
-// its mark's Provider's lock, like the marking, and re-reads the Instance there. It asks to run again while a mark of
-// its own stays.
+// A cancelled extra's mark is never cleared here: its Allocation, deleting, is a yield in flight. Each clear is made
+// under yieldMu and its mark's Provider's lock, re-reading the Instance there. It asks to run again while a mark of its
+// own stays.
 func (p *pass) clearYieldMarks() error {
 	marks, err := p.marksOfMine(p.ctx)
 	if err != nil {
 		return err
 	}
-	committed := 0
-	byProvider := map[string][]yieldMarkOf{}
+	var live []yieldMarkOf
 	for _, m := range marks {
 		if m.live {
-			byProvider[m.provider] = append(byProvider[m.provider], m)
-		} else {
-			committed++
+			live = append(live, m)
 		}
 	}
-	var keep []yieldMarkOf
-	for prov, ms := range byProvider {
-		newestMarkFirst(ms)
-		r, refused := p.limitRefused[prov]
-		n := 0
-		if refused {
-			n = min(max(len(ms)-max(r.total-r.limit, 0), 0), len(ms))
-		}
-		keep = append(keep, ms[:n]...)
-		if err := p.clearMarks(prov, ms[n:]); err != nil {
-			return err
+	if len(live) == 0 {
+		return nil
+	}
+	flying, err := p.inFlightFor(p.ctx, p.deploymentKeyOf())
+	if err != nil {
+		return err
+	}
+	var keep, drop []yieldMarkOf
+	for _, m := range live {
+		if p.limitRefused[m.provider] {
+			keep = append(keep, m)
+		} else {
+			drop = append(drop, m)
 		}
 	}
 	newestMarkFirst(keep)
-	room := max(p.shortage()-committed, 0)
-	if len(keep) > room {
-		byProv := map[string][]yieldMarkOf{}
-		for _, m := range keep[room:] {
-			byProv[m.provider] = append(byProv[m.provider], m)
-		}
-		for prov, ms := range byProv {
-			if err := p.clearMarks(prov, ms); err != nil {
-				return err
-			}
-		}
+	if room := max(p.shortage()-flying, 0); len(keep) > room {
+		drop = append(drop, keep[room:]...)
 		keep = keep[:room]
+	}
+	if err := p.clearMarks(drop); err != nil {
+		return err
 	}
 	if len(keep) > 0 {
 		p.at(p.now.Add(yieldRecheck))
@@ -298,45 +332,43 @@ func (p *pass) clearYieldMarks() error {
 	return nil
 }
 
-// clearMarks clears the marks on one Provider's Instances under that Provider's lock, re-reading each Instance there:
-// one that is no longer live, or no longer names this deployment, is left alone.
-func (p *pass) clearMarks(provider string, ms []yieldMarkOf) error {
+// clearMarks clears the marks, each under yieldMu and its Provider's lock, re-reading each Instance there: one that is no
+// longer live, or no longer names this deployment, is left alone.
+func (p *pass) clearMarks(ms []yieldMarkOf) error {
 	if len(ms) == 0 {
 		return nil
 	}
+	p.r.slots().yieldMu.Lock()
+	defer p.r.slots().yieldMu.Unlock()
 	me := p.deploymentKeyOf()
-	return p.r.slots().underLock(p.ctx, provider, func(ctx context.Context) error {
-		for _, m := range ms {
+	for _, m := range ms {
+		err := p.r.slots().underLock(p.ctx, m.provider, func(ctx context.Context) error {
 			var cur v1alpha1.Instance
 			switch err := p.r.Reader.Get(ctx, client.ObjectKeyFromObject(m.in), &cur); {
 			case apierrors.IsNotFound(err):
-				continue
+				return nil
 			case err != nil:
 				return fmt.Errorf("read Instance %s to clear its yield mark: %w", m.in.Name, err)
 			}
 			if yieldsTo(&cur) != me || !countable(&cur) {
-				continue
+				return nil
 			}
-			if err := p.patchYield(ctx, &cur, ""); err != nil {
-				return err
-			}
+			return p.patchYield(ctx, &cur, "")
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
-// settleYields is the owner's step 7 for the yield marks on its own Instances, before it cancels any
-// (scaleUnits reads p.yielding). For each pending surplus Instance that carries a mark:
-//   - its job started, it is no longer surplus, the mark is malformed, or the deployment it names is gone, being
-//     deleted, past its end time, scaled to zero, or has no shortage any more (shortageOf: it got a slot elsewhere): the
-//     mark is cleared and nothing is cancelled; a started extra is never cancelled for this;
-//   - the named deployment's status.lastReconcileTime is no later than the mark's time (no later pass of it has run
-//     since the mark: the marking pass writes its own time there), or its status.observedGeneration lags its
-//     metadata.generation (its spec changed since its last pass, a Provider dropped or a count lowered, and only its
-//     next pass re-evaluates the mark): WAIT, the mark stays, nothing is cancelled, and the pass asks to run again;
-//   - otherwise a later pass of the named deployment, at its current spec, was refused again for the limit alone and
-//     kept the mark (it clears the marks of a pass that was not): the Instance yields, and is cancelled as
-//     over-allocation's trim.
+// settleYields is the owner's step 7 for the yield marks on its own Instances, before it cancels any (scaleDown reads
+// p.yielding, and commits each candidate through commitYield). For each Instance that carries a mark:
+//   - one that is no longer live: a cancelled extra's tombstone keeps its mark while its Allocation is being deleted, as a
+//     yield in flight, and otherwise the mark is cleared;
+//   - a mark that is malformed, an Instance that is no longer surplus or is stale, or whose job started: the mark is
+//     cleared and nothing is cancelled (a started extra is never cancelled for this);
+//   - otherwise it is a CANDIDATE: the cancel is decided by commitYield, under the locks, from fresh reads.
 func (p *pass) settleYields() error {
 	p.yielding = nil
 	_, surplus := selectUnits(p.selection(nil), p.desiredCount())
@@ -352,9 +384,6 @@ func (p *pass) settleYields() error {
 			continue
 		}
 		if !countable(in) {
-			// A cancelled extra's tombstone keeps its mark while its Allocation is being deleted: that Allocation still
-			// holds the slot the named deployment's primary waits for, and the guard counts the mark (marksOfMine).
-			// Cleared here, a second extra would be marked for the same primary.
 			if a := p.allocOf(in); a != nil && !a.DeletionTimestamp.IsZero() {
 				continue
 			}
@@ -363,78 +392,192 @@ func (p *pass) settleYields() error {
 			}
 			continue
 		}
-		b, at, ok := parseYield(v)
+		b, _, ok := parseYield(v)
 		if !ok || !isSurplus[in] || p.stale[in.UID] || jobStarted(p.allocOf(in)) {
 			if err := p.patchYield(p.ctx, in, ""); err != nil {
 				return err
 			}
 			continue
 		}
-		st, err := p.needsSlot(b)
+		if p.yielding == nil {
+			p.yielding = map[types.UID]string{}
+		}
+		p.yielding[in.UID] = b
+	}
+	return nil
+}
+
+// yieldVerdict is what the owner's re-check decides about a candidate.
+type yieldVerdict int
+
+const (
+	yieldWait   yieldVerdict = iota // keep the mark, cancel nothing, ask to run again
+	yieldClear                      // clear the mark: the need is gone
+	yieldCancel                     // commit the cancel
+)
+
+// commitYield is the owner's COMMIT of a yielded extra's cancel (C4), in its own step 7 through the trim path. It takes
+// yieldMu, then the extra's Provider's lock, and re-reads everything uncached under them; it cancels only when
+//   - the named deployment B exists, is not being deleted, still serves and still allows this Provider;
+//   - B's status.lastReconcileTime is later than the mark's time, the mark is still there, and B's observedGeneration is
+//     its generation (B's spec is the one its last pass saw);
+//   - B's shortage exceeds the yields in flight for it (inFlightFor): the slots coming do not already meet it;
+//   - freeing this extra's slot admits a primary: the Provider's count, with this extra and the yields in flight still
+//     listed, is no more than the limit.
+//
+// B gone, not allowing the Provider, or its shortage no more than the yields in flight: the mark is CLEARED (and a release
+// cause written for the cancel and left by a restart is removed). Any other failure: WAIT. When it cancels it writes the
+// release cause "yielded its submit slot to B", deletes the Allocation and ends the Instance cleanly, under both locks;
+// the Instance's memory and finalizer follow after they are released.
+func (p *pass) commitYield(t scaleTarget, b string) error {
+	in := t.instance
+	pv := p.pvOf(in.Labels)
+	_, at, ok := parseYield(in.Annotations[annotationYieldTo])
+	if pv == nil || pv.profile == nil || pv.limits.MaxSubmitPerUser == nil || !ok {
+		return p.patchYield(p.ctx, in, "")
+	}
+	yl := &p.r.slots().yieldMu
+	yl.Lock()
+	defer yl.Unlock()
+	done := false
+	err := p.r.slots().underLockCounted(p.ctx, p.r.Reader, pv.name, &pv.profile.Spec, p.reserveTime(), func(ctx context.Context, total int) error {
+		cur, alloc, verdict, err := p.recheckYield(ctx, in, b, at, pv, total)
 		if err != nil {
 			return err
 		}
-		switch {
-		case !st.needs:
-			if err := p.patchYield(p.ctx, in, ""); err != nil {
-				return err
-			}
-		case st.last == nil || !st.last.After(at) || st.lags:
+		switch verdict {
+		case yieldWait:
 			p.at(p.now.Add(yieldRecheck))
-		default:
-			if p.yielding == nil {
-				p.yielding = map[types.UID]string{}
+			return nil
+		case yieldClear:
+			if cur == nil {
+				return nil
 			}
-			p.yielding[in.UID] = b
+			return p.clearYield(ctx, cur, alloc, b)
+		}
+		*in = *cur
+		if old := p.allocs[alloc.Name]; old != nil {
+			defer func() { *old = *alloc }() // the pass reads its Allocation as the commit leaves it: deleting
+		}
+		why := yieldReleaseWhy(b)
+		if gone, err := p.writeReleaseCause(alloc, releaseCause(endCause(in, v1alpha1.ReasonDrained, why))); err != nil || gone {
+			return err
+		}
+		if err := p.endStatus(in, v1alpha1.ReasonDrained, why); err != nil {
+			return err
+		}
+		if err := p.endRelease(in, alloc, v1alpha1.ReasonDrained, why, true); err != nil {
+			return err
+		}
+		done = true
+		return nil
+	})
+	if err != nil || !done {
+		return err
+	}
+	p.mem.clear(instanceHeartbeatKey(in))
+	return p.removeDrainFinalizer(in)
+}
+
+// recheckYield is commitYield's re-check, under both locks, from uncached reads. It returns the Instance and its Allocation
+// as it read them (nil when gone) and the verdict.
+func (p *pass) recheckYield(ctx context.Context, in *v1alpha1.Instance, b string, at time.Time, pv *providerView, total int) (*v1alpha1.Instance, *v1alpha1.Allocation, yieldVerdict, error) {
+	var cur v1alpha1.Instance
+	switch err := p.r.Reader.Get(ctx, client.ObjectKeyFromObject(in), &cur); {
+	case apierrors.IsNotFound(err):
+		return nil, nil, yieldClear, nil
+	case err != nil:
+		return nil, nil, 0, fmt.Errorf("read Instance %s to commit its yield: %w", in.Name, err)
+	}
+	if !countable(&cur) || cur.Annotations[annotationYieldTo] != in.Annotations[annotationYieldTo] {
+		return nil, nil, yieldClear, nil // the mark is gone or changed, or the Instance ended: nothing to cancel
+	}
+	var alloc v1alpha1.Allocation
+	switch err := p.r.Reader.Get(ctx, client.ObjectKey{Namespace: cur.Namespace, Name: cur.Spec.AllocationRef.Name}, &alloc); {
+	case apierrors.IsNotFound(err):
+		return &cur, nil, yieldClear, nil
+	case err != nil:
+		return nil, nil, 0, fmt.Errorf("read the Allocation of Instance %s to commit its yield: %w", in.Name, err)
+	}
+	if !alloc.DeletionTimestamp.IsZero() || jobStarted(&alloc) {
+		return &cur, &alloc, yieldClear, nil // a started extra is never cancelled for a yield
+	}
+	ns, name, _ := strings.Cut(b, "/")
+	var md v1alpha1.ModelDeployment
+	switch err := p.r.Reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &md); {
+	case apierrors.IsNotFound(err):
+		return &cur, &alloc, yieldClear, nil
+	case err != nil:
+		return nil, nil, 0, fmt.Errorf("read ModelDeployment %s to commit a yield: %w", b, err)
+	}
+	if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 ||
+		(md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time)) {
+		return &cur, &alloc, yieldClear, nil // gone, being deleted, scaled to zero or past its end time
+	}
+	var provs v1alpha1.ProviderList
+	if err := p.r.Reader.List(ctx, &provs); err != nil {
+		return nil, nil, 0, fmt.Errorf("list Providers to commit a yield: %w", err)
+	}
+	allowed, err := selectedProviderNames(md.Spec.Providers, provs.Items)
+	if err != nil || !slices.Contains(allowed, pv.name) {
+		return &cur, &alloc, yieldClear, nil // B no longer allows this Provider: it could not use the slot
+	}
+	short, err := p.shortageOfDeployment(ctx, &md)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	flying, err := p.inFlightFor(ctx, b)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if short <= flying {
+		return &cur, &alloc, yieldClear, nil // the slots already coming meet B's shortage
+	}
+	last := md.Status.LastReconcileTime
+	if last == nil || !last.After(at) || md.Status.ObservedGeneration != md.Generation {
+		return &cur, &alloc, yieldWait, nil // B has not passed again since the mark, at its current spec
+	}
+	if total > int(*pv.limits.MaxSubmitPerUser) {
+		return &cur, &alloc, yieldWait, nil // freeing this extra's slot would not admit a primary
+	}
+	return &cur, &alloc, yieldCancel, nil
+}
+
+// clearYield clears a mark that the owner's re-check found no longer needed, and the release cause that a cancel cut short by
+// a restart may have written on its Allocation.
+func (p *pass) clearYield(ctx context.Context, in *v1alpha1.Instance, alloc *v1alpha1.Allocation, b string) error {
+	if err := p.patchYield(ctx, in, ""); err != nil {
+		return err
+	}
+	if alloc != nil && alloc.DeletionTimestamp.IsZero() && strings.HasSuffix(alloc.Annotations[v1alpha1.AnnotationReleaseCause], yieldReleaseWhy(b)) {
+		next := alloc.DeepCopy()
+		delete(next.Annotations, v1alpha1.AnnotationReleaseCause)
+		if err := p.r.Client.Update(ctx, next, owner); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("clear the yield's release cause of Allocation %s: %w", alloc.Name, err)
 		}
 	}
 	return nil
 }
 
-// slotNeed is what the owner reads of the deployment a mark names.
-type slotNeed struct {
-	needs bool       // it still lacks a primary by Allocation presence (shortageOf), and exists, serves and is not ending
-	last  *time.Time // its status.lastReconcileTime
-	lags  bool       // its status.observedGeneration is not its metadata.generation: its next pass has yet to see its spec
-}
-
-// needsSlot reads the named deployment: whether it still lacks a primary (it exists, is not being deleted, is not past its
-// end time, and shortageOf its Instances and Allocations is above zero), its status.lastReconcileTime, and whether its
-// last pass saw its current spec.
-func (p *pass) needsSlot(deployment string) (slotNeed, error) {
-	ns, name, _ := strings.Cut(deployment, "/")
-	var md v1alpha1.ModelDeployment
-	switch err := p.r.Reader.Get(p.ctx, client.ObjectKey{Namespace: ns, Name: name}, &md); {
-	case apierrors.IsNotFound(err):
-		return slotNeed{}, nil
-	case err != nil:
-		return slotNeed{}, fmt.Errorf("read ModelDeployment %s for a yield mark: %w", deployment, err)
-	}
-	if !md.DeletionTimestamp.IsZero() || md.Spec.Source.Served == nil || md.Spec.Instances == 0 ||
-		(md.Spec.EndTime != nil && !p.now.Before(md.Spec.EndTime.Time)) {
-		return slotNeed{}, nil // gone, being deleted, scaled to zero or past its end time: its pass makes no primary
-	}
-	v := deploymentView{key: deployment, allocs: map[string]*v1alpha1.Allocation{}}
+// shortageOfDeployment is shortageOf the named deployment's own Instances and Allocations, read uncached: what the owner
+// re-reads of the deployment that asked (C4).
+func (p *pass) shortageOfDeployment(ctx context.Context, md *v1alpha1.ModelDeployment) (int, error) {
+	v := deploymentView{key: md.Namespace + "/" + md.Name, allocs: map[string]*v1alpha1.Allocation{}}
 	var il v1alpha1.InstanceList
-	if err := p.r.Reader.List(p.ctx, &il, client.InNamespace(ns), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(name)}); err != nil {
-		return slotNeed{}, fmt.Errorf("list Instances of %s for a yield mark: %w", deployment, err)
+	if err := p.r.Reader.List(ctx, &il, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
+		return 0, fmt.Errorf("list Instances of %s for a yield: %w", v.key, err)
 	}
 	for i := range il.Items {
 		v.insts = append(v.insts, &il.Items[i])
 	}
 	var al v1alpha1.AllocationList
-	if err := p.r.Reader.List(p.ctx, &al, client.InNamespace(ns), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(name)}); err != nil {
-		return slotNeed{}, fmt.Errorf("list Allocations of %s for a yield mark: %w", deployment, err)
+	if err := p.r.Reader.List(ctx, &al, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
+		return 0, fmt.Errorf("list Allocations of %s for a yield: %w", v.key, err)
 	}
 	for i := range al.Items {
 		v.allocs[al.Items[i].Name] = &al.Items[i]
 	}
-	need := slotNeed{needs: shortageOf(selectionOfView(&md, v), int(md.Spec.Instances)) > 0, lags: md.Status.ObservedGeneration != md.Generation}
-	if md.Status.LastReconcileTime != nil {
-		t := md.Status.LastReconcileTime.Time
-		need.last = &t
-	}
-	return need, nil
+	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances)), nil
 }
 
 // newestPending sorts the pending surplus Instances newest first, by creation time, then by name.
