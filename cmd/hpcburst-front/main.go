@@ -60,7 +60,7 @@ func run(args []string) error {
 	health := fs.String("health-addr", "", "loopback host:port for GET /healthz")
 	kubeconfig := fs.String("kubeconfig", "", "the control plane's kubeconfig (default: <state-dir>/kubeconfig)")
 	bulkPath := fs.Bool("bulk-path", false, "beta: the bulk path (HBEP-6): split the dial-home listener by TLS server name, and send each non-streamed request through the Instance's bulk transport while it is registered; the launcher passes it with up --bulk-path")
-	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it the front copies each synced usage record into the log's HB_USAGE stream; the usage files stay the record")
+	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it the front copies each synced usage record into the log's HB_USAGE stream, the usage files staying the record, and publishes its typed events to the log's HB_EVENTS stream as well as to the API, counted in hpcburst_events_unlogged_total when the log cannot take one")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
@@ -103,7 +103,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	rec, stopEvents, err := front.NewKubeRecorder(cs)
+	// The front's events, with the durable log's publisher when there is a token file (eventpub.go).
+	rec, stopEvents, err := newRecorder(cs, *eventLogTokenFile, agentapi.Host{StateDir: *stateDir, PortBase: *portBase})
 	if err != nil {
 		return err
 	}
@@ -114,8 +115,11 @@ func run(args []string) error {
 	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, records, rec, log, *health)
 	o.BulkPath = *bulkPath
 	o.EventLogTokenFile = *eventLogTokenFile
-	return front.Run(ctx, o)
+	return frontRun(ctx, o)
 }
+
+// frontRun is front.Run; a test of run replaces it to read what run hands the server (eventwire_test.go).
+var frontRun = front.Run
 
 // options are Run's inputs in production. They set no Transports, so Run
 // builds HBEP-6's Tunnel and its probe, and no PathEvents, so the probe's

@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/runtime"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -85,7 +86,7 @@ var _ tunnelCache = cache.Cache(nil)
 // With bulkPath (--bulk-path; beta, HBEP-6, The bulk path) it also serves the second frps's plugin
 // path on the same server and reads that frps's list (tunnel_bulk.go); without it nothing of that is
 // built, and the plugin server's handler is the first frps's alone.
-func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter, bulkPath bool) (manager.Runnable, error) {
+func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter, bulkPath bool, log *eventcount.Publisher) (manager.Runnable, error) {
 	reader, err := frpsplugin.NewHostReader(host)
 	if err != nil {
 		return nil, err
@@ -106,7 +107,12 @@ func addTunnel(mgr manager.Manager, host agentapi.Host, _ agentapi.Backend, list
 		reader: reader, trigger: trigger.C(), log: named("tunnel-state"),
 		// TunnelOrphaned is the lifecycle controller's event, from its own recorder (HBEP-8),
 		// counted in the copy's counter under the lifecycle controller's label.
-		rec:      lifecycle.KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), events, eventcount.ControllerLifecycle)},
+		// The same controller label, so with the durable log the two recorders share the lifecycle
+		// controller's loss gate (eventcount.Publisher).
+		rec: lifecycle.KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), events, eventcount.ControllerLifecycle,
+			log.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+				return mgr.GetScheme(), v1alpha1.FieldManagerLifecycle, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.LeaseLifecycle)
+			}))},
 		admitted: admitted,
 	}
 	var served http.Handler = handler
