@@ -51,7 +51,7 @@ func (e *opsEnv) applyEstimate(t *testing.T, op *v1alpha1.Operation, provider st
 	st, observed := metav1.NewTime(start), metav1.NewTime(opAt)
 	entry := v1alpha1.OperationEstimate{Provider: provider, PlanID: op.Status.Plan.ID, Shape: "aaaaaaaaaaaaaaaa", Targets: uids,
 		Start: v1alpha1.TimeFigure{Time: &st, ObservedAt: &observed, Advisory: true}}
-	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, op.UID, provider, []v1alpha1.OperationEstimate{entry})
+	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, provider, []v1alpha1.OperationEstimate{entry})
 	if err != nil {
 		t.Fatal(err)
 	}

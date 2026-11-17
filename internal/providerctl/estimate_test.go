@@ -104,8 +104,14 @@ func allocTarget(a *v1alpha1.Allocation) v1alpha1.PlanTarget {
 // newOperation creates a Release Operation planned now, with the plan's targets.
 func (e *estEnv) newOperation(name, planID string, phase v1alpha1.OperationPhase, targets ...v1alpha1.PlanTarget) *v1alpha1.Operation {
 	e.t.Helper()
+	return e.newOperationAs(name, types.UID("uid-op-"+name), planID, phase, targets...)
+}
+
+// newOperationAs is newOperation with the UID the API server would have given.
+func (e *estEnv) newOperationAs(name string, uid types.UID, planID string, phase v1alpha1.OperationPhase, targets ...v1alpha1.PlanTarget) *v1alpha1.Operation {
+	e.t.Helper()
 	op := &v1alpha1.Operation{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID("uid-op-" + name)},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: uid},
 		Spec: v1alpha1.OperationSpec{Action: v1alpha1.OperationActionRelease, ModelDeploymentRef: v1alpha1.ObjectReference{Name: "md"},
 			Owner: "example-owner"},
 		Status: v1alpha1.OperationStatus{Phase: phase, Plan: &v1alpha1.OperationPlan{
@@ -261,6 +267,46 @@ func TestTwoShapesAreTwoEstimatesAndEveryApplyCarriesBoth(t *testing.T) {
 	}
 	if got := e.stored("op-1"); len(got) != 2 || got[0].Shape == got[1].Shape {
 		t.Fatalf("entries %+v, want two of different shapes", got)
+	}
+}
+
+// A shape that already has its entry is not asked again while another shape of the plan is still due (an apply that
+// failed after the first shape, or a controller that restarted between the two): only the missing one is asked, and
+// the apply that follows carries both.
+func TestAShapeThatHasItsEntryIsNotAskedAgainWhileAnotherIsDue(t *testing.T) {
+	e := newEstEnv(t)
+	e.batch.SetEstimate(startE1)
+	a1 := e.newAlloc("alloc-1")
+	a2 := e.newAlloc("alloc-2", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.GPUs = 2 })
+	op := e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1), allocTarget(a2))
+	observed := metav1.NewTime(at(11, 59, 0))
+	earlier := v1alpha1.OperationEstimate{Provider: testProvider, PlanID: "plan-a", Shape: shapeOfTheStandardAllocation, Targets: []string{"uid-alloc-1"},
+		Start: v1alpha1.TimeFigure{Unknown: "an answer from before", ObservedAt: &observed, Advisory: true}}
+	var cur v1alpha1.Operation
+	if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(op), &cur); err != nil {
+		t.Fatal(err)
+	}
+	cur.Status.Estimates = []v1alpha1.OperationEstimate{earlier}
+	if err := e.c.Update(e.ctx, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.reconcileOp("op-1"); err != nil {
+		t.Fatal(err)
+	}
+	if reqs := e.batch.EstimateRequests(); len(reqs) != 1 || reqs[0].Params.GPUs != 2 {
+		t.Fatalf("asked %+v, want only the 2-GPU shape, whose entry is missing", reqs)
+	}
+	got := e.stored("op-1")
+	if len(got) != 2 {
+		t.Fatalf("entries %+v, want the earlier one and the new one", got)
+	}
+	for _, est := range got {
+		if est.Shape == shapeOfTheStandardAllocation && est.Start.Unknown != "an answer from before" {
+			t.Errorf("the earlier entry was asked for again: %+v", est.Start)
+		}
+	}
+	if last := e.log.last(); len(last) != 2 {
+		t.Errorf("the apply carried %d entries, want both: an apply carries all of the Provider's entries", len(last))
 	}
 }
 
@@ -588,6 +634,34 @@ func TestAnAnswerForAReplacedPlanIsNotWritten(t *testing.T) {
 	}
 	if got := e.stored("op-1"); len(got) != 1 || got[0].PlanID != "plan-b" {
 		t.Fatalf("entries %+v, want the new plan's one", got)
+	}
+}
+
+// An Operation deleted and created again under its name while the estimate ran, with the same plan ID, is another
+// Operation: the answer is not written onto it, since the API server checks no UID on an apply.
+func TestAnAnswerForARecreatedOperationIsNotWritten(t *testing.T) {
+	e := newEstEnv(t)
+	e.batch.SetEstimate(startE1)
+	hold := e.batch.HoldEstimates()
+	a1 := e.newAlloc("alloc-1")
+	op := e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1))
+	done := make(chan error, 1)
+	go func() { done <- e.reconcileOp("op-1") }()
+	<-hold.Blocked()
+	if err := e.c.Delete(e.ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	e.newOperationAs("op-1", "uid-op-1-again", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1))
+	hold.Release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := e.log.count(); n != 0 {
+		t.Fatalf("%d applies for an Operation that was deleted and created again, want none", n)
+	}
+	// The next pass is for the new Operation, and asks for it.
+	if err := e.reconcileOp("op-1"); err != nil || e.log.count() != 1 {
+		t.Fatalf("the next pass: error %v, %d applies, want the new Operation's estimate", err, e.log.count())
 	}
 }
 

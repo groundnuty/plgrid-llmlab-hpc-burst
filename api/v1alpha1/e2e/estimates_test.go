@@ -14,7 +14,6 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -40,7 +39,7 @@ func estEntry(provider, plan, shape string, target string, start *metav1.Time, u
 // the manager of that Provider.
 func applyEstimates(t *testing.T, op *v1alpha1.Operation, manager, provider string, entries ...v1alpha1.OperationEstimate) {
 	t.Helper()
-	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, op.UID, provider, entries)
+	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, provider, entries)
 	must(t, err, "build the estimate apply")
 	must(t, c.Status().Apply(bg(), client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(manager), client.ForceOwnership),
 		"apply estimates as "+manager)
@@ -181,21 +180,6 @@ func TestANewPlansApplyReplacesOnlyItsOwnProvidersOldEntries(t *testing.T) {
 		"athena-a/"+estPlanNew+"/"+estShapeA, "helios-a/"+estPlanNew+"/"+estShapeA)
 }
 
-// The apply names the Operation's UID: an Operation deleted and created again
-// under the same name is not written with the first one's estimates.
-func TestEstimateApplyRefusesAnotherOperationsUID(t *testing.T) {
-	op := newEstimateOperation(t)
-	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, types.UID("00000000-0000-0000-0000-000000000000"), "athena-a",
-		[]v1alpha1.OperationEstimate{estEntry("athena-a", estPlan, estShapeA, "uid-1", nil, "a reason")})
-	must(t, err, "build the estimate apply")
-	err = c.Status().Apply(bg(), client.ApplyConfigurationFromUnstructured(u),
-		client.FieldOwner(v1alpha1.FieldManagerProviderEstimate("athena-a")), client.ForceOwnership)
-	if err == nil {
-		t.Fatal("an apply naming another UID was accepted")
-	}
-	wantKeys(t, op, "after the refused apply")
-}
-
 // The schema bounds: 32 entries in all, 256 targets of at most 64 characters per
 // entry, and a list map keyed by Provider, plan and shape, so the same key twice
 // in one apply is refused.
@@ -207,12 +191,12 @@ func TestEstimateSchemaBounds(t *testing.T) {
 	for i := range 33 {
 		many = append(many, estEntry("athena-a", estPlan, "shape"+string(rune('a'+i%26))+string(rune('a'+i/26)), "uid-1", nil, "a reason"))
 	}
-	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, op.UID, "athena-a", many)
+	u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, "athena-a", many)
 	must(t, err, "build")
 	if err := c.Status().Apply(bg(), client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(manager), client.ForceOwnership); err == nil {
 		t.Error("33 entries were accepted, want at most 32")
 	}
-	u, err = v1alpha1.EstimateApply(op.Namespace, op.Name, op.UID, "athena-a", many[:32])
+	u, err = v1alpha1.EstimateApply(op.Namespace, op.Name, "athena-a", many[:32])
 	must(t, err, "build")
 	if err := c.Status().Apply(bg(), client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(manager), client.ForceOwnership); err != nil {
 		t.Errorf("32 entries were refused: %v", err)
@@ -225,7 +209,7 @@ func TestEstimateSchemaBounds(t *testing.T) {
 	}
 	long := estEntry("athena-a", estPlanNew, estShapeB, strings.Repeat("u", 65), nil, "a reason")
 	for name, e := range map[string]v1alpha1.OperationEstimate{"257 targets": wide, "a 65-character target": long} {
-		u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, op.UID, "athena-a", []v1alpha1.OperationEstimate{e})
+		u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, "athena-a", []v1alpha1.OperationEstimate{e})
 		must(t, err, "build")
 		if err := c.Status().Apply(bg(), client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(manager), client.ForceOwnership); err == nil {
 			t.Errorf("%s were accepted", name)

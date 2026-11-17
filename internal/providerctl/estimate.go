@@ -25,6 +25,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -119,7 +120,7 @@ func setupEstimates(mgr manager.Manager, c *Controller) error {
 	}
 	kube := mgr.GetClient()
 	e.apply = func(ctx context.Context, op *v1alpha1.Operation, entries []v1alpha1.OperationEstimate) error {
-		u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, op.UID, name, entries)
+		u, err := v1alpha1.EstimateApply(op.Namespace, op.Name, name, entries)
 		if err != nil {
 			return err
 		}
@@ -230,7 +231,7 @@ func (e *estimator) Reconcile(ctx context.Context, req reconcile.Request) (recon
 		return reconcile.Result{}, err
 	}
 	for _, g := range groups {
-		if err := e.estimateGroup(ctx, req, plan.ID, g, platform); err != nil {
+		if err := e.estimateGroup(ctx, req, op.UID, plan.ID, g, platform); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
@@ -301,9 +302,12 @@ func (e *estimator) allocationOf(ctx context.Context, ns string, t v1alpha1.Plan
 }
 
 // estimateGroup asks the estimate of one shape, unless the plan already has it
-// or it is running, and applies this Provider's entries with the answer.
-func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, planID string, g group, platform Platform) error {
-	fresh, err := e.freshPlan(ctx, req, planID)
+// or it is running, and applies this Provider's entries with the answer. The API
+// server checks no UID on an apply, so an Operation deleted and created again
+// under the name meanwhile is told by its UID, which both reads must show as the
+// one this pass started with.
+func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, uid types.UID, planID string, g group, platform Platform) error {
+	fresh, err := e.freshPlan(ctx, req, uid, planID)
 	if err != nil || fresh == nil {
 		return err
 	}
@@ -326,7 +330,7 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, pl
 
 	// The Operation again: the answer is written only onto the plan it was asked for, and with every
 	// entry of this Provider's for that plan, since an apply removes the entries it leaves out.
-	fresh, err = e.freshPlan(ctx, req, planID)
+	fresh, err = e.freshPlan(ctx, req, uid, planID)
 	if err != nil || fresh == nil {
 		return err
 	}
@@ -335,8 +339,8 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, pl
 }
 
 // freshPlan reads the Operation from the API server and returns it when it is
-// still askable on the plan with this ID, else nil.
-func (e *estimator) freshPlan(ctx context.Context, req reconcile.Request, planID string) (*v1alpha1.Operation, error) {
+// still the Operation with this UID and askable on the plan with this ID, else nil.
+func (e *estimator) freshPlan(ctx context.Context, req reconcile.Request, uid types.UID, planID string) (*v1alpha1.Operation, error) {
 	var op v1alpha1.Operation
 	if err := e.api.Get(ctx, req.NamespacedName, &op); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -344,7 +348,7 @@ func (e *estimator) freshPlan(ctx context.Context, req reconcile.Request, planID
 		}
 		return nil, err
 	}
-	if plan := e.askable(&op); plan == nil || plan.ID != planID {
+	if plan := e.askable(&op); op.UID != uid || plan == nil || plan.ID != planID {
 		return nil, nil
 	}
 	return &op, nil

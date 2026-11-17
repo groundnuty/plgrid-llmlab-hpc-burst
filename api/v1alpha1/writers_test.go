@@ -8,7 +8,6 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 func dur(s string) *Duration { d := Duration(s); return &d }
@@ -136,15 +135,14 @@ func TestEstimateApply(t *testing.T) {
 		Provider: "athena-a", PlanID: "0123456789abcdef", Shape: "aaaaaaaaaaaaaaaa", Targets: []string{"uid-3"},
 		Start: TimeFigure{Unknown: "the estimate command gave no start", ObservedAt: &observed, Advisory: true},
 	}
-	u, err := EstimateApply("ns", "op-1", "uid-op", "athena-a", []OperationEstimate{known, failed})
+	u, err := EstimateApply("ns", "op-1", "athena-a", []OperationEstimate{known, failed})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.GetAPIVersion() != "hpcburst.groundnuty.github.io/v1alpha1" || u.GetKind() != "Operation" || u.GetName() != "op-1" ||
-		u.GetNamespace() != "ns" || string(u.GetUID()) != "uid-op" {
-		t.Errorf("object = %s %s %s/%s uid %s", u.GetAPIVersion(), u.GetKind(), u.GetNamespace(), u.GetName(), u.GetUID())
+	if u.GetAPIVersion() != "hpcburst.groundnuty.github.io/v1alpha1" || u.GetKind() != "Operation" || u.GetName() != "op-1" || u.GetNamespace() != "ns" {
+		t.Errorf("object = %s %s %s/%s", u.GetAPIVersion(), u.GetKind(), u.GetNamespace(), u.GetName())
 	}
-	if len(u.Object) != 4 || len(u.Object["metadata"].(map[string]any)) != 3 || len(u.Object["status"].(map[string]any)) != 1 {
+	if len(u.Object) != 4 || len(u.Object["metadata"].(map[string]any)) != 2 || len(u.Object["status"].(map[string]any)) != 1 {
 		t.Errorf("the apply carries more than the identity and the estimates: %v", u.Object)
 	}
 	list, _, _ := unstructured.NestedSlice(u.Object, "status", "estimates")
@@ -187,22 +185,21 @@ func TestEstimateApply(t *testing.T) {
 	noShape := known
 	noShape.Shape = ""
 	for name, tc := range map[string]struct {
-		ns, op, uid, prov string
-		entries           []OperationEstimate
+		ns, op, prov string
+		entries      []OperationEstimate
 	}{
-		"no entries (an apply of none would remove them all)": {"ns", "op-1", "uid-op", "athena-a", nil},
-		"a time and a reason":         {"ns", "op-1", "uid-op", "athena-a", []OperationEstimate{both}},
-		"neither a time nor a reason": {"ns", "op-1", "uid-op", "athena-a", []OperationEstimate{neither}},
-		"another Provider's entry":    {"ns", "op-1", "uid-op", "athena-a", []OperationEstimate{known, other}},
-		"no targets":                  {"ns", "op-1", "uid-op", "athena-a", []OperationEstimate{noTargets}},
-		"no plan ID":                  {"ns", "op-1", "uid-op", "athena-a", []OperationEstimate{noPlan}},
-		"no shape":                    {"ns", "op-1", "uid-op", "athena-a", []OperationEstimate{noShape}},
-		"no UID":                      {"ns", "op-1", "", "athena-a", []OperationEstimate{known}},
-		"no name":                     {"ns", "", "uid-op", "athena-a", []OperationEstimate{known}},
-		"no namespace":                {"", "op-1", "uid-op", "athena-a", []OperationEstimate{known}},
-		"no Provider":                 {"ns", "op-1", "uid-op", "", []OperationEstimate{known}},
+		"no entries (an apply of none would remove them all)": {"ns", "op-1", "athena-a", nil},
+		"a time and a reason":         {"ns", "op-1", "athena-a", []OperationEstimate{both}},
+		"neither a time nor a reason": {"ns", "op-1", "athena-a", []OperationEstimate{neither}},
+		"another Provider's entry":    {"ns", "op-1", "athena-a", []OperationEstimate{known, other}},
+		"no targets":                  {"ns", "op-1", "athena-a", []OperationEstimate{noTargets}},
+		"no plan ID":                  {"ns", "op-1", "athena-a", []OperationEstimate{noPlan}},
+		"no shape":                    {"ns", "op-1", "athena-a", []OperationEstimate{noShape}},
+		"no name":                     {"ns", "", "athena-a", []OperationEstimate{known}},
+		"no namespace":                {"", "op-1", "athena-a", []OperationEstimate{known}},
+		"no Provider":                 {"ns", "op-1", "", []OperationEstimate{known}},
 	} {
-		if _, err := EstimateApply(tc.ns, tc.op, types.UID(tc.uid), tc.prov, tc.entries); err == nil || !strings.Contains(err.Error(), "estimate apply") {
+		if _, err := EstimateApply(tc.ns, tc.op, tc.prov, tc.entries); err == nil || !strings.Contains(err.Error(), "estimate apply") {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}

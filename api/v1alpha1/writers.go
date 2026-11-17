@@ -10,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 // Field managers (docs/development.md, Single writer). Every write names its
@@ -43,9 +42,8 @@ func FieldManagerProviderEstimate(provider string) string {
 
 // EstimateApply returns the server-side apply object with which a Provider's
 // controller writes its estimates onto an Operation's status. It holds the
-// Operation's identity (the UID is a precondition: an Operation deleted and
-// created again under the name is not written) and entries, and nothing else,
-// so the apply owns only those list entries (status.estimates is a map list
+// Operation's name and namespace and the entries, and nothing else, so the apply
+// owns only those list entries (status.estimates is a map list
 // keyed by provider, planID and shape). Apply it to the status subresource
 // under FieldManagerProviderEstimate(provider), with forced ownership:
 //
@@ -59,12 +57,10 @@ func FieldManagerProviderEstimate(provider string) string {
 // Each entry must name provider, hold a plan ID, a shape and at least one
 // target, and carry either a time or the reason it is unknown, never both and
 // never neither; its figure is always advisory, whatever the caller set.
-func EstimateApply(namespace, name string, uid types.UID, provider string, entries []OperationEstimate) (*unstructured.Unstructured, error) {
+func EstimateApply(namespace, name, provider string, entries []OperationEstimate) (*unstructured.Unstructured, error) {
 	switch {
 	case namespace == "" || name == "":
 		return nil, fmt.Errorf("estimate apply: no Operation name")
-	case uid == "":
-		return nil, fmt.Errorf("estimate apply: no Operation UID")
 	case provider == "":
 		return nil, fmt.Errorf("estimate apply: no Provider name")
 	case len(entries) == 0:
@@ -99,7 +95,7 @@ func EstimateApply(namespace, name string, uid types.UID, provider string, entri
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": GroupVersion.String(),
 		"kind":       "Operation",
-		"metadata":   map[string]any{"name": name, "namespace": namespace, "uid": string(uid)},
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
 		"status":     map[string]any{"estimates": list},
 	}}, nil
 }
