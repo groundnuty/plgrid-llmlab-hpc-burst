@@ -119,6 +119,10 @@ func opRigOp(name string, spec v1alpha1.OperationSpec) *v1alpha1.Operation {
 
 func TestPlanningAnOperationOfEachActionHasNoSideEffect(t *testing.T) {
 	h := newHedgeRig(t)
+	// This test checks planning's side effects in a hand-seeded world (R, M1, the seeded M2, P2), so it pins hedging's
+	// growth off. With growth on, a hedge member of its own wins (it is placed on a kept started Allocation and is
+	// ready at once) and the seeded P2 is cancelled before the Operations are made. #627's own tests cover growth.
+	h.r.hedgeFrozen = func(hedgeGroup) bool { return true }
 	// A: R starts at once; M1 and P2 pend behind 10 h. B: the member M2 starts at once and its engine is slow, so
 	// its Instance stays starting.
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour}, pfake.Script{QueueWait: 10 * time.Hour})
