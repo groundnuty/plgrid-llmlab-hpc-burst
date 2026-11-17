@@ -294,7 +294,11 @@ func gapPassed(insts []*v1alpha1.Instance, keep func(*v1alpha1.Instance) bool) m
 
 // gapOf reports whether in carries a gap, and which (gapCarriers): a primary
 // that drained in the mode and is out of service, or a stamped successor that
-// has not been ready, either not passed on to a successor of its own.
+// has not been ready, either not passed on to a successor of its own. A
+// successor that lost its hedge (HedgeLost) carries none: a member of its hedge
+// served, which ends the gap (HBEP-7, Hedging (beta), No-overlap mode; #611's
+// review), so neither step 7 makes a successor of it nor is a slot reserved for
+// one, though its kept Allocation keeps it listed.
 func gapOf(in *v1alpha1.Instance, passed map[string]bool) (gapCarrier, bool) {
 	if passed[in.Namespace+"/"+in.Name] {
 		return gapCarrier{}, false
@@ -306,7 +310,7 @@ func gapOf(in *v1alpha1.Instance, passed map[string]bool) (gapCarrier, bool) {
 		return gapCarrier{}, false
 	}
 	why, drained := in.Annotations[annotationNoOverlapSuccessor], in.Annotations[annotationNoOverlapGap]
-	if why != "" && drained != "" && in.Status.ReadyTime == nil {
+	if why != "" && drained != "" && in.Status.ReadyTime == nil && in.Status.EndReason != v1alpha1.ReasonHedgeLost {
 		return gapCarrier{in: in, drained: drained, why: why}, true
 	}
 	return gapCarrier{}, false

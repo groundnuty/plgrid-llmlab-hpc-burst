@@ -207,6 +207,9 @@ func queuedPathRecordsNoWait(t *testing.T, refusals int) {
 	const mdB = "md-b"
 	b := mdSpec(mdB)
 	b.Spec.Providers.Names = []string{rigProvider, "example-second"}
+	// hedgeWidth 1: the row plans B's replacement from the waits of B's own primary on the first Provider; with
+	// hedging on, a member on the second Provider could serve first and take the primary's place.
+	b.Spec.HedgeWidth = ptrTo(int32(1))
 	rg.addProvider("example-second", "gpu-long", 4*time.Hour, nil, nil)
 	rg.create(b)
 	rg.until(10*time.Minute, 10*time.Second, "B's primary is ready", func() bool { return rg.readyCount(mdB) == 1 })

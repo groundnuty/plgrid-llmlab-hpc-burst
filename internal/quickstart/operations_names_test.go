@@ -90,6 +90,7 @@ var guideNames = map[string]string{
 	"AllocationEndedEarly": v1alpha1.ReasonAllocationEndedEarly,
 	"Requeued":             v1alpha1.ReasonRequeued,
 	"Drained":              v1alpha1.ReasonDrained,
+	"HedgeLost":            v1alpha1.ReasonHedgeLost,
 
 	// Allocation phases, conditions and reasons (HBEP-4, Core operations, Phases).
 	"Submitting":         string(v1alpha1.AllocationSubmitting),

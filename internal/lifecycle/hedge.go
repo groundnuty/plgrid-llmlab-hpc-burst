@@ -6,6 +6,9 @@ import (
 	"sort"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
@@ -198,6 +201,13 @@ func (p *pass) resolveHedges() error {
 		if a := p.allocOf(w); a == nil || !a.DeletionTimestamp.IsZero() {
 			continue
 		}
+		// The winner's Allocation is read again before any loser ends: one deleted since the pass's own read (by an
+		// operator, or its Provider's controller) resolves nothing, and the next pass sees the winner end and the
+		// hedge go on (HBEP-7, Hedging (beta); #604 plan §10, path 2).
+		if serving, err := p.allocationStillServes(w); err != nil || !serving {
+			errs = append(errs, err)
+			continue
+		}
 		for _, l := range g.members {
 			if l != w {
 				errs = append(errs, p.loseHedge(g.key, l, w))
@@ -205,6 +215,20 @@ func (p *pass) resolveHedges() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// allocationStillServes re-reads the Instance's Allocation: false when it is gone, being deleted, or no longer
+// Running.
+func (p *pass) allocationStillServes(in *v1alpha1.Instance) (bool, error) {
+	var a v1alpha1.Allocation
+	err := p.r.Reader.Get(p.ctx, client.ObjectKey{Namespace: in.Namespace, Name: in.Spec.AllocationRef.Name}, &a)
+	switch {
+	case apierrors.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("read the Allocation of hedge winner %s: %w", in.Name, err)
+	}
+	return a.DeletionTimestamp.IsZero() && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning, nil
 }
 
 // loseHedge takes one loser out of its resolved hedge (HBEP-7, Hedging (beta)): a pending one is cancelled, its

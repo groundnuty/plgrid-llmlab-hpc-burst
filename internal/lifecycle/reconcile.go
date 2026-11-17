@@ -61,6 +61,9 @@ type Reconciler struct {
 	// expectations every worker shares (slots.go).
 	slotsOnce sync.Once
 	slotTab   *slotTable
+	// hedgeFrozen, when set, says whether an executing Operation holds a hedge, so growHedges adds no member to it
+	// (HBEP-7, Hedging (beta), Operations). Nil reads false: #589's execution sets it from the committed targets.
+	hedgeFrozen func(hedgeGroup) bool
 }
 
 func (r *Reconciler) memory() *memory {
@@ -217,6 +220,9 @@ func (p *pass) run() error {
 		if err := p.replacements(); err != nil {
 			return errors.Join(instErr, err, errors.Join(p.overlapErrs...))
 		}
+		// A hedge with no winner gets its next member when the hedge rule says (step 8, in beta; hedge_grow.go).
+		// Its failure joins the pass's error, so retention and the status write still run.
+		instErr = errors.Join(instErr, p.growHedges())
 		// A failed no-overlap check waits for the next pass without holding
 		// back retention and the status write.
 		instErr = errors.Join(instErr, errors.Join(p.overlapErrs...))

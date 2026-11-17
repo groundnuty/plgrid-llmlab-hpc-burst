@@ -59,6 +59,15 @@ func newHedgeRig(t *testing.T, opts ...rigOption) *hedgeRig {
 // onBoth is an edit that lets the deployment use A and then B.
 func onBoth(md *v1alpha1.ModelDeployment) { md.Spec.Providers.Names = []string{rigProvider, hedgeB} }
 
+// seededOnly is onBoth with hedgeWidth 1: growth adds no member (hedge_grow.go), so a hedge is exactly the members
+// a test seeds. The tests of a hedge as a unit (counting, resolution, scale-down) use it, so what they check never
+// depends on when growth would add a member; growth is tested on its own (hedge_grow_rig_test.go). A hedge wider
+// than hedgeWidth is a state the API allows: a lowered width cancels no member.
+func seededOnly(md *v1alpha1.ModelDeployment) {
+	onBoth(md)
+	md.Spec.HedgeWidth = ptrTo(int32(1))
+}
+
 // passOf builds a pass of the deployment as Reconcile does, up to its plan: read, observed, prepared.
 func (rg *rig) passOf(md string) *pass {
 	rg.t.Helper()
@@ -149,7 +158,7 @@ func TestAHedgeCountsOnce(t *testing.T) {
 	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
 	h.Step() // the Providers' first status: Ready
 	md := mdSpec(hoMD)
-	onBoth(md)
+	seededOnly(md)
 	h.create(md)
 	h.Step()
 	firsts := h.onProvider(hoMD, rigProvider)
@@ -198,7 +207,7 @@ func TestAHedgeGoesWholeInAScaleDown(t *testing.T) {
 			}
 			h.Step()
 			md := mdSpec(hoMD)
-			onBoth(md)
+			seededOnly(md)
 			md.Spec.Instances = 2
 			h.create(md)
 			// The first primary R gets ready on A; the second, M1, is created on A too and pends.
@@ -264,7 +273,7 @@ func replacementHedge(t *testing.T, h *hedgeRig, b pfake.Script) (string, string
 	t.Helper()
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
 	h.b.batch.Enqueue(b)
-	reservedStart(h.rig, hoMD, onBoth)
+	reservedStart(h.rig, hoMD, seededOnly)
 	p := h.instances(hoMD)[0]
 	hoStepTo(h.rig, hoT(9, 19, 40), 5*time.Minute, nil)
 	reps := hoRepl(h.rig, p.Name)
@@ -341,7 +350,7 @@ func TestAStartedLoserIsKept(t *testing.T) {
 			h := newHedgeRig(t)
 			h.batch.Enqueue(pfake.Script{}, pfake.Script{})
 			reservedStart(h.rig, hoMD, func(md *v1alpha1.ModelDeployment) {
-				onBoth(md)
+				seededOnly(md)
 				if c.edit != nil {
 					c.edit(md)
 				}
@@ -398,7 +407,7 @@ func TestALosersEndIsNoFailure(t *testing.T) {
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{}, pfake.Script{})
 	h.Step()
 	md := mdSpec(hoMD)
-	onBoth(md)
+	seededOnly(md)
 	md.Spec.Instances = 3
 	h.create(md)
 	h.rig.engine = func(alloc string) afake.Engine {
@@ -452,18 +461,23 @@ func TestALosersEndIsNoFailure(t *testing.T) {
 
 // TestAWinnerWhoseAllocationGoesResolvesNothing: a hedge's member that reads ready, but whose Allocation is being
 // deleted in the same pass, resolves nothing, so no loser ends beside a winner that no longer serves. The same pass
-// with the Allocation in place ends the loser.
+// with the Allocation in place, Running, ends the loser. M2's job runs on B, its engine slowed so it stays starting,
+// and its ready phase is forged in the pass's memory.
 func TestAWinnerWhoseAllocationGoesResolvesNothing(t *testing.T) {
 	h := newHedgeRig(t)
 	h.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
-	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
 	h.Step()
 	md := mdSpec(hoMD)
-	onBoth(md)
+	seededOnly(md)
 	h.create(md)
 	h.Step()
 	m1 := h.onProvider(hoMD, rigProvider)[0].Name
 	m2 := h.seedHedgeMember(hoMD, m1, "", hedgeB)
+	h.slow[h.mustInstance(m2).Spec.AllocationRef.Name] = true
+	h.until(time.Minute, 10*time.Second, "M2's job running", func() bool {
+		a, ok := h.allocation(h.mustInstance(m2).Spec.AllocationRef.Name)
+		return ok && a.Status.AtProvider.Phase == v1alpha1.AllocationRunning
+	})
 	for _, goes := range []bool{true, false} {
 		p := h.passOf(hoMD)
 		var w *v1alpha1.Instance
@@ -499,7 +513,7 @@ func TestAReadyLoserDrainsAndEndsHedgeLost(t *testing.T) {
 	h := newHedgeRig(t)
 	h.Step()
 	md := mdSpec(hoMD)
-	onBoth(md)
+	seededOnly(md)
 	h.create(md)
 	h.Step()
 	m1 := h.onProvider(hoMD, rigProvider)[0].Name
@@ -536,7 +550,7 @@ func TestAFailedMemberLeavesTheHedge(t *testing.T) {
 	fail := 30 * time.Second
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{FailAfter: &fail})
 	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Minute})
-	reservedStart(h.rig, hoMD, onBoth)
+	reservedStart(h.rig, hoMD, seededOnly)
 	p := h.instances(hoMD)[0]
 	hoStepTo(h.rig, hoT(9, 19, 40), 5*time.Minute, nil)
 	reps := hoRepl(h.rig, p.Name)
