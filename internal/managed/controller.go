@@ -13,6 +13,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -191,12 +192,23 @@ func (c *Controller) SetupWithManager(mgr manager.Manager) error {
 // deletes them when the supervisor drops the Provider. It panics on a nil
 // counter.
 func Setup(events *eventcount.Counter) func(mgr manager.Manager, provider string) error {
+	return SetupWithLog(events, nil)
+}
+
+// SetupWithLog is Setup for a process that runs the durable log (beta; HBEP-8, The durable log): the
+// manager's typed events, the catalog controller's and its ObservationGap, are published to it as well,
+// and the manager raises EventsNotLogged regarding its own provider-<name> Lease when the log cannot
+// take one. A nil publisher is Setup.
+func SetupWithLog(events *eventcount.Counter, log *eventcount.Publisher) func(mgr manager.Manager, provider string) error {
 	if events == nil {
 		panic("managed: Setup with no raised-events counter")
 	}
 	return func(mgr manager.Manager, provider string) error {
 		controller := eventcount.ControllerProvider(provider)
-		rec := eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller)
+		rec := eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerProvider), events, controller,
+			log.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+				return mgr.GetScheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(mgr.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(provider))
+			}))
 		c, err := New(Options{
 			Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Provider: provider,
 			Recorder: rec,

@@ -242,7 +242,7 @@ func startWiringEvery(t *testing.T, bulkPath bool, period time.Duration, objs ..
 	sc := newStubCache()
 	sc.open()
 	mgr := &fakeMgr{cache: fakeCache{stub: sc}, cl: w.cl, rec: w.events}
-	plugin, err := addTunnel(mgr, host, nil, heldAddrs.take, eventcount.New(), bulkPath)
+	plugin, err := addTunnel(mgr, host, nil, heldAddrs.take, eventcount.New(), bulkPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

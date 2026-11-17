@@ -114,8 +114,10 @@ type flags struct {
 	instanceRouter string
 	// eventLogTokenFile is --event-log-token-file (beta; HBEP-8, The durable log; #625): the durable
 	// log's token, <state-dir>/eventlog/token, which the launcher passes only while it runs the log.
-	// The address is derived from --port-base (agentapi.Host.EventLogAddr). It is accepted and kept
-	// here and nothing reads it yet: the event publisher that connects with it is #625's PR E2.
+	// The address is derived from --port-base (agentapi.Host.EventLogAddr). With it the lifecycle
+	// controller, its tunnel-state reader and every Provider manager publish their typed events to the
+	// log's HB_EVENTS stream as well as to the API (eventcount.Publisher, #625's PR E2); without it
+	// nothing publishes.
 	eventLogTokenFile string
 }
 
@@ -135,7 +137,7 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.relayKeeperSocket, "relay-keeper-socket", "", "the relay keeper's Unix socket, in host-dialed mode only (beta): the keeper holds the relays; unset, the controller does (alpha)")
 	fs.BoolVar(&f.bulkPath, "bulk-path", false, "the launcher runs the second frps for the bulk path (beta): serve its plugin path, read its proxy list and stage the second certificate; direct and host-dialed mode only")
 	fs.StringVar(&f.instanceRouter, "instance-router", "", "the router each new Instance runs in front of its worker (beta): envoy; unset, none (alpha)")
-	fs.StringVar(&f.eventLogTokenFile, "event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. Accepted and stored, and not used yet: the publisher that connects to the log is a later change")
+	fs.StringVar(&f.eventLogTokenFile, "event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it every typed event this controller raises, its Provider managers' included, is also published to the log's HB_EVENTS stream, counted in hpcburst_events_unlogged_total when the log cannot take it; without it nothing publishes")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -228,8 +230,9 @@ func checkCredentialsDir(dir string) error {
 // counts into through its recorder (HBEP-8, Raised events).
 //
 // bulkPath is --bulk-path: addTunnel then serves the second frps's plugin path and reads its list too
-// (tunnel_bulk.go).
-var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter, bulkPath bool) (manager.Runnable, error){addTunnel}
+// (tunnel_bulk.go). log is the process's publisher to the durable log, nil without
+// --event-log-token-file.
+var extraRunnables = []func(mgr manager.Manager, host agentapi.Host, backend agentapi.Backend, listen func(addr string) (net.Listener, error), events *eventcount.Counter, bulkPath bool, log *eventcount.Publisher) (manager.Runnable, error){addTunnel}
 
 func run(ctx context.Context, f flags, d deps) error {
 	// The agent endpoint and frps's plugin are bound through ls (components.go),
@@ -271,6 +274,19 @@ func run(ctx context.Context, f flags, d deps) error {
 	// events).
 	events := eventcount.New()
 	opts.Events = events
+	// The durable log's publisher, with --event-log-token-file: the typed events of the lifecycle
+	// controller, the tunnel-state reader and every Provider manager go to the log too (beta; HBEP-8,
+	// The durable log, Who writes). Without the flag nothing publishes and there is no publisher.
+	newPublisher := d.eventPublisher
+	if newPublisher == nil {
+		newPublisher = newEventPublisher
+	}
+	logPub, err := newPublisher(f)
+	if err != nil {
+		return err
+	}
+	defer stopEventPublisher(logPub)
+	opts.EventLog = logPub
 	if opts.HubEndpoint != "" {
 		if err := agentapi.CheckHubEndpoint(opts.HubEndpoint); err != nil {
 			return fmt.Errorf("%s: %w", hubEndpointEnv, err)
@@ -280,13 +296,13 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, providerCfg: providerCfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, events: events, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w := wiring{cfg: cfg, providerCfg: providerCfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, events: events, eventLog: logPub, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	w.keeperSocket = f.relayKeeperSocket
 	if err := mount(mgr, w, backend); err != nil {
 		return err
 	}
 	for _, add := range extraRunnables {
-		r, err := add(mgr, f.host, backend, ls.Listen, events, f.bulkPath)
+		r, err := add(mgr, f.host, backend, ls.Listen, events, f.bulkPath, logPub)
 		if err != nil {
 			return err
 		}
