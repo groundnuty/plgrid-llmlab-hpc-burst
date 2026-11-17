@@ -108,9 +108,10 @@ func memberStage(in *v1alpha1.Instance, a *v1alpha1.Allocation) int {
 	return 0
 }
 
-// jobStarted reports whether the Allocation's job has started, as the Provider last read it.
+// jobStarted reports whether the Allocation's job has started, as the Provider last read it: a start time, or a Running phase, which
+// is a started job whether or not its start time is set yet (the Provider can report one without the other).
 func jobStarted(a *v1alpha1.Allocation) bool {
-	return a != nil && a.Status.AtProvider.StartTime != nil
+	return a != nil && (a.Status.AtProvider.StartTime != nil || a.Status.AtProvider.Phase == v1alpha1.AllocationRunning)
 }
 
 // hedgeRepresentative is the member that stands for the hedge where one Instance is read: the most advanced
