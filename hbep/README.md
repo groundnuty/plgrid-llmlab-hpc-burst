@@ -4,7 +4,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 
 | HBEP | Title | Status | Stage |
 |---|---|---|---|
-| [1](0001-process/README.md) | Enhancement proposal process | implementable | none |
+| [1](0001-process/README.md) | Enhancement proposal process | implemented | none |
 | [2](0002-scope-and-user-story/README.md) | Scope and user story | provisional | none |
 | [3](0003-resource-model-and-naming/README.md) | Resource model and naming | implementable | none |
 | [4](0004-provider-interface/README.md) | Provider interface and profiles | implementable | none |

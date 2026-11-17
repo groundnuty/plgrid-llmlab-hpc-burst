@@ -58,7 +58,10 @@
 // the binary is the durable log, as hpcburst-controller's subcommand is: it runs the real log
 // (node.Run) with the subcommand's flags and exit codes, and records eventlog-starts. A steering file
 // eventlog-idle (a number) makes that role run no log at all: it records its start and waits for
-// SIGTERM, so a test can stand its own listeners on the log's two ports. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
+// SIGTERM, so a test can stand its own listeners on the log's two ports. A steering file
+// eventlog-hold-from (a number N) holds the Nth start and each later one before it runs the log: it
+// writes eventlog-held-<pid> and waits for SIGTERM (exit 0) or for the steering file to be removed
+// (the log then runs as configured), so a test reads status while a fresh attempt runs (#680). With "relaykeeper" as its first argument the binary is the relay keeper instead, as
 // hpcburst-controller's subcommand is: it runs the real keeper (relaykeeper.Run) with the
 // subcommand's flags, --state-dir and --port-base, so the launcher's tests supervise a real keeper,
 // with its state file, process lock and socket. In that role it records argv-<pid>.json too, and
@@ -498,6 +501,16 @@ func recordText(path, text string) {
 	_ = os.WriteFile(path, []byte(text+"\n"), 0o644)
 }
 
+// eventlogStarts is how many starts the eventlog role has recorded in eventlog-starts, this one
+// included: the supervisor starts the log one process at a time, so the count is this start's number.
+func eventlogStarts(dir string) int {
+	b, err := os.ReadFile(filepath.Join(dir, "eventlog-starts"))
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(b), "\n")
+}
+
 // eventlogMain is the eventlog role: hpcburst-controller eventlog's flags, and the real log
 // (node.Run) until SIGTERM, with the subcommand's exit codes (2 a bad command line, 3 a refusal, 1 any
 // other failure). It records its start in eventlog-starts, as <pid> <nanoseconds>, and its argv.
@@ -524,6 +537,24 @@ func eventlogMain(args []string) int {
 	if _, idle := steeredInt(dir, "eventlog-idle"); idle {
 		<-ctx.Done() // no log: the test's own listeners stand in for it
 		return 0
+	}
+	if from, hold := steeredInt(dir, "eventlog-hold-from"); hold && eventlogStarts(dir) >= from {
+		// The Nth start and each later one is held before it runs the log: a fresh attempt that is
+		// running and holds no health address yet, while the refusal of an earlier start is on disk (the
+		// state #680's status read must name). The marker is the test's observable: it says this
+		// process is held now. The hold ends when the steering file is removed (the log then runs as
+		// configured) or on SIGTERM (a clean stop, exit 0).
+		record(filepath.Join(dir, fmt.Sprintf("eventlog-held-%d", os.Getpid())), "held")
+		for {
+			select {
+			case <-ctx.Done():
+				return 0
+			case <-time.After(5 * time.Millisecond):
+			}
+			if _, still := steeredInt(dir, "eventlog-hold-from"); !still {
+				break
+			}
+		}
 	}
 	err := node.Run(ctx, node.Options{ConfigPath: *conf, CapsPath: *caps, Stdout: os.Stdout, Stderr: os.Stderr})
 	var refused *node.RefusedError

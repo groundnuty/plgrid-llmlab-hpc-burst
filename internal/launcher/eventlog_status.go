@@ -7,7 +7,7 @@ package launcher
 //   - "degraded: event log not started: ..." while its start gate is closed (the caps do not fit the
 //     disk): the exit code stays 0, and the entry's record names why;
 //   - "unhealthy" when it exits refusing its settings, naming them (the refusal it wrote before it
-//     exited);
+//     exited), in its backoff and through each restart attempt, until it is healthy (#680);
 //   - "degraded: event log full" when HB_EVENTS has no room left, with the remedy: the events stream
 //     then refuses every new event and keeps every old one;
 //   - otherwise healthy, with each stream's bytes and messages.
@@ -147,8 +147,26 @@ func gatedEventLogHealth(e EntryRecord) EntryHealth {
 	return eh
 }
 
-// eventLogRefusalProblem is the problem status reports for a log that is not running and left a
-// refusal: it names the settings, one line each, joined. "" when there is none.
+// eventLogRefusalShown reports whether status adds the refusal's reason to the log's entry: while
+// the log is not running, and while its last exit was a refusal (eventlog.ExitRefused) and the
+// current process has not answered /healthz, which covers each restart attempt of a log in a crash
+// loop (#680): a fresh process that does not hold its health address yet would otherwise leave
+// only that generic line, and a person would not see the setting to fix. The exit stays on the
+// entry's record after the log recovers, so "healthy" is what ends it, read from this look's own
+// /healthz answer (eh.HealthzOK), not from the refusal file, which the log removes only a moment
+// after its /healthz answers (node.Run).
+func eventLogRefusalShown(e EntryRecord, eh EntryHealth) bool {
+	if !eh.Running {
+		return true
+	}
+	refused := e.LastExit != nil && e.LastExit.Code == eventlog.ExitRefused
+	healthy := eh.HealthzOK != nil && *eh.HealthzOK
+	return refused && !healthy
+}
+
+// eventLogRefusalProblem is the problem status reports for a log that left a refusal and is not
+// healthy (eventLogRefusalShown): it names the settings, one line each, joined. "" when there is
+// none.
 func eventLogRefusalProblem(l layout) string {
 	text := readEventLogRefusal(l)
 	if text == "" {
