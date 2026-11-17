@@ -134,6 +134,15 @@ func submitWords(s submission) []string {
 	return w
 }
 
+// estimateJobName is the one job name an estimate runs under, in --job-name and in the paths that carry a tag. It is never a
+// live Allocation's tag: a --test-only call can leave an accounting record on a platform, and FindByTag reads accounting by job
+// name, so a phantom job under a live tag would be found as that Allocation's. No tag can equal it: a tag is hb-<n>-<h>, always
+// starting with "hb-" (v1alpha1.JobTag), and this name does not. It is fixed, not a suffix of the tag, which could push a long
+// tag past the profile's job-name length rule (a tag is already up to JobTagLength, 56, characters; this name is 17). No profile
+// sets a jobName.pattern today, and a platform that did would have its probe decide how the estimate reads there (HBEP-4,
+// Estimate). The name does not affect when Slurm would start the job.
+const estimateJobName = "hpcburst-estimate"
+
 // estimateEnvWord is the one environment assignment of an estimate's line: it
 // makes sbatch print the start as epoch seconds (HBEP-4, Core operations,
 // Estimate). A Command carries no environment, so it is the line's own prefix.

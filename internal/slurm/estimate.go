@@ -54,6 +54,7 @@ func (b *Batch) Estimate(ctx context.Context, req provider.SubmitRequest) (provi
 	if err != nil {
 		return provider.EstimateResult{}, err
 	}
+	s.tag = estimateJobName // the tag was checked above; the line never carries it (estimateJobName)
 	ctx, cancel := context.WithTimeout(ctx, provider.EstimateTimeout)
 	defer cancel()
 	paths, err := b.Paths(ctx)

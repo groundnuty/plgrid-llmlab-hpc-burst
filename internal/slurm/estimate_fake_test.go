@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -254,19 +255,64 @@ func TestEstimateLineIsSubmitsWithoutHold(t *testing.T) {
 		}
 	}
 	wantHead := []string{
-		"env", "SLURM_TIME_FORMAT=%s", "sbatch", "--test-only", "--parsable", "--job-name=hb-example-0123456789ab", "--no-requeue",
+		"env", "SLURM_TIME_FORMAT=%s", "sbatch", "--test-only", "--parsable", "--job-name=hpcburst-estimate", "--no-requeue",
 		"--partition=example-gpu", "--account=SEEDACCT", "--time=30", "--nodes=1", "--gres=gpu:1", "--cpus-per-task=8", "--mem=16384M",
 	}
 	if len(got) != len(wantHead)+3 || !slices.Equal(got[:len(wantHead)], wantHead) {
 		t.Fatalf("the estimate's words\n got  %q\n want %q followed by --output, --error and --wrap", got, wantHead)
 	}
-	for i, prefix := range []string{"--output=" + fakeScratch + "/stage/", "--error=" + fakeScratch + "/stage/", "--wrap="} {
+	for i, prefix := range []string{"--output=" + fakeScratch + "/stage/alloc/hpcburst-estimate/", "--error=" + fakeScratch + "/stage/alloc/hpcburst-estimate/", "--wrap="} {
 		if !strings.HasPrefix(got[len(wantHead)+i], prefix) {
 			t.Errorf("word %d is %q, want it to start with %q", len(wantHead)+i, got[len(wantHead)+i], prefix)
 		}
 	}
 	if slices.Contains(got, "--hold") {
 		t.Fatal("the estimate carries --hold")
+	}
+}
+
+// A --test-only call can leave an accounting record on a platform, and FindByTag reads accounting by job NAME (sacct --name=<tag>):
+// the estimate line therefore never carries a live Allocation's tag, in --job-name or anywhere else, but one fixed name that no tag
+// can equal. A tag is hb-<name cut to 40 characters>-<12 hex characters of a SHA-256> (v1alpha1.JobTag), so it always starts with
+// "hb-"; the fixed name does not. The name does not affect when the job would start.
+func TestEstimateLineNeverCarriesTheLiveTag(t *testing.T) {
+	const wantName = "hpcburst-estimate"
+	for _, tag := range []string{
+		"hb-example-0123456789ab",
+		"hb-" + strings.Repeat("x", 40) + "-0123456789ab", // the longest form
+		"hb-estimate-0123456789ab",                        // a tag whose name is "estimate"
+		v1alpha1.JobTag("example-ns", "alloc-a", "uid-a"),
+	} {
+		r := newEstimateRig(t, true)
+		r.plat.SetTestOnlyRaw("1796017690")
+		req := estimateRequest()
+		req.Tag = tag
+		if _, err := r.batch.Estimate(context.Background(), req); err != nil {
+			t.Fatalf("Estimate (tag %s): %v", tag, err)
+		}
+		var words []string
+		for _, c := range r.plat.Calls() {
+			if c.TestOnly() {
+				words = c.Words
+			}
+		}
+		if !slices.Contains(words, "--job-name="+wantName) {
+			t.Errorf("tag %s: the estimate's words %q lack --job-name=%s", tag, words, wantName)
+		}
+		for _, w := range words {
+			if strings.Contains(w, tag) {
+				t.Errorf("tag %s: the estimate's word %q carries the live tag", tag, w)
+			}
+		}
+	}
+	// The fixed name cannot be a tag: every tag starts with hb-, which this name does not.
+	if strings.HasPrefix(wantName, "hb-") {
+		t.Errorf("%s is of the tag form", wantName)
+	}
+	for _, in := range [][3]string{{"ns", "", "u"}, {"ns", "a", "u"}, {"", "estimate", ""}} {
+		if tag := v1alpha1.JobTag(in[0], in[1], types.UID(in[2])); tag == wantName || !strings.HasPrefix(tag, "hb-") {
+			t.Errorf("JobTag%v = %q: the tag form the fixed name relies on does not hold", in, tag)
+		}
 	}
 }
 
