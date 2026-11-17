@@ -305,15 +305,20 @@ func TestTheSpecIsWrittenOnlyWhileTheGenerationIsThePlans(t *testing.T) {
 		endTime       *time.Time
 		wantInstances int32
 		wantEnd       *time.Time
+		// stopped: the committed effect does not hold, so nothing is acted on and the Operation is finished.
+		stopped bool
 	}{
-		{"Scale, nobody has touched the spec: written", scaleOp(1), 3, 3, nil, 1, nil},
-		{"Scale, this Operation's own write landed (generation 4, count 1): nothing to write", scaleOp(1), 4, 1, nil, 1, nil},
-		{"Scale, a person raised it after the plan (generation 4, count 2): not written over", scaleOp(1), 4, 2, nil, 2, nil},
-		{"Scale, our write landed and a person raised it (generation 5): not written over", scaleOp(1), 5, 2, nil, 2, nil},
-		{"Scale, a person edited something else after the plan (generation 4, count 3): not written", scaleOp(1), 4, 3, nil, 3, nil},
-		{"End, nobody has touched the spec: the end time is now", endOp(false), 3, 1, nil, 1, tp(opAt)},
-		{"End, our write landed (generation 4, end time now): nothing to write", endOp(false), 4, 1, tp(opAt), 1, tp(opAt)},
-		{"End, a person moved the end time later (generation 4): not written over", endOp(false), 4, 1, &later, 1, &later},
+		{"Scale, nobody has touched the spec: written", scaleOp(1), 3, 3, nil, 1, nil, false},
+		{"Scale, this Operation's own write landed (generation 4, count 1): the effect holds, nothing to write", scaleOp(1), 4, 1, nil, 1, nil, false},
+		{"Scale, a person raised it after the plan (generation 4, count 2): the effect does not hold", scaleOp(1), 4, 2, nil, 2, nil, true},
+		{"Scale, our write landed and a person raised it (generation 5): the effect does not hold", scaleOp(1), 5, 2, nil, 2, nil, true},
+		{"Scale, a person edited something else after the plan (generation 4, count 3): not written, the effect does not hold", scaleOp(1), 4, 3, nil, 3, nil, true},
+		{"Scale, a person lowered it below N (generation 4, count 0): the effect holds", scaleOp(1), 4, 0, nil, 0, nil, false},
+		{"End, nobody has touched the spec: the end time is now", endOp(false), 3, 1, nil, 1, tp(opAt), false},
+		{"End, our write landed (generation 4, end time now): the effect holds, nothing to write", endOp(false), 4, 1, tp(opAt), 1, tp(opAt), false},
+		{"End, a person moved the end time later (generation 4): the effect does not hold", endOp(false), 4, 1, &later, 1, &later, true},
+		{"End, a person cleared the end time (generation 4): the effect does not hold", endOp(false), 4, 1, nil, 1, nil, true},
+		{"End, a person set an earlier end time (generation 4): the effect holds", endOp(false), 4, 1, tp(opAt.Add(-time.Minute)), 1, tp(opAt.Add(-time.Minute)), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpFixture(t, tc.instances)
@@ -321,7 +326,8 @@ func TestTheSpecIsWrittenOnlyWhileTheGenerationIsThePlans(t *testing.T) {
 			if tc.endTime != nil {
 				f.md.Spec.EndTime = opTime(*tc.endTime)
 			}
-			op := executingOp("op", tc.op, nil)
+			f.addInstance(instOpts{name: "r", phase: v1alpha1.InstanceReady, started: true, hardEnd: tp(opHardEnd)})
+			op := executingOp("op", tc.op, []v1alpha1.CommittedTarget{committedOf(v1alpha1.TargetKindInstance, "r", v1alpha1.PlanEffectDrainInstance)})
 			g := newOpRig(t, f, op)
 			g.step(opAt)
 			var md v1alpha1.ModelDeployment
@@ -337,9 +343,57 @@ func TestTheSpecIsWrittenOnlyWhileTheGenerationIsThePlans(t *testing.T) {
 			case tc.wantEnd != nil && (md.Spec.EndTime == nil || !md.Spec.EndTime.Time.Equal(*tc.wantEnd)):
 				t.Errorf("the end time is %v, want %v", md.Spec.EndTime, tc.wantEnd)
 			}
-			if got := g.op("op"); !isTrue(got.Status.Conditions, v1alpha1.ConditionSpecWritten) {
+			got := g.op("op")
+			if tc.stopped {
+				if got.Status.Phase != v1alpha1.OperationPhasePartlyFailed || got.Status.FinishedAt == nil || len(got.Status.Targets) != 1 ||
+					got.Status.Targets[0].Reason != reasonSpecChangedSinceCommit || isTrue(got.Status.Conditions, v1alpha1.ConditionSpecWritten) {
+					t.Errorf("a spec whose effect does not hold: phase %q, finishedAt %v, outcomes %+v, SpecWritten %v: want PartlyFailed and finished, Failed with %s, no record",
+						got.Status.Phase, got.Status.FinishedAt, got.Status.Targets, isTrue(got.Status.Conditions, v1alpha1.ConditionSpecWritten), reasonSpecChangedSinceCommit)
+				}
+			} else if !isTrue(got.Status.Conditions, v1alpha1.ConditionSpecWritten) {
 				t.Errorf("SpecWritten is not recorded: %+v", got.Status.Conditions)
 			}
 		})
+	}
+}
+
+// specEffectHolds, by value (HBEP-10, The report, as amended by #665 and #666): a Scale's count is at most N; an End's end time
+// is set and not after now; a deployment that is gone, another one of the name, or being deleted ends the End's wait; a delete
+// on a live deployment does not hold; a Release has no spec effect. The cases are written out by hand.
+func TestWhetherTheCommittedSpecEffectHolds(t *testing.T) {
+	later := opAt.Add(time.Hour)
+	deleting := opTime(opAt)
+	for _, tc := range []struct {
+		name string
+		op   *v1alpha1.Operation
+		edit func(md *v1alpha1.ModelDeployment)
+		gone bool
+		want bool
+	}{
+		{"Scale: count above N", scaleOp(2), func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 3 }, false, false},
+		{"Scale: count at N", scaleOp(2), func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 2 }, false, true},
+		{"Scale: count below N", scaleOp(2), func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 1 }, false, true},
+		{"End: no end time", endOp(false), func(md *v1alpha1.ModelDeployment) {}, false, false},
+		{"End: end time now", endOp(false), func(md *v1alpha1.ModelDeployment) { md.Spec.EndTime = opTime(opAt) }, false, true},
+		{"End: end time in the past", endOp(false), func(md *v1alpha1.ModelDeployment) { md.Spec.EndTime = opTime(opAt.Add(-time.Hour)) }, false, true},
+		{"End: end time later", endOp(false), func(md *v1alpha1.ModelDeployment) { md.Spec.EndTime = opTime(later) }, false, false},
+		{"End with delete: a live deployment", endOp(true), func(md *v1alpha1.ModelDeployment) {}, false, false},
+		{"End with delete: being deleted", endOp(true), func(md *v1alpha1.ModelDeployment) { md.DeletionTimestamp = deleting }, false, true},
+		{"End with delete: gone", endOp(true), func(md *v1alpha1.ModelDeployment) {}, true, true},
+		{"End: another deployment of the name", endOp(false), func(md *v1alpha1.ModelDeployment) { md.UID = "uid-another" }, false, true},
+		{"Release: no spec effect", releaseOp(v1alpha1.ReleaseParameters{Allocations: []string{"a"}}), func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 9 }, false, true},
+	} {
+		f := newOpFixture(t, 2)
+		tc.edit(f.md)
+		op := executingOp("op", tc.op, nil)
+		p := f.pass()
+		p.now = opAt
+		md := f.md
+		if tc.gone {
+			md = nil
+		}
+		if got := p.specEffectHolds(op, md); got != tc.want {
+			t.Errorf("%s: specEffectHolds = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

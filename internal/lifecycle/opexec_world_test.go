@@ -36,6 +36,9 @@ type faultClient struct {
 	// failAfter, when set, runs after a write that was made: an error it returns is the write's result, though the write
 	// is stored (a reply that never came back).
 	failAfter func(method string, obj client.Object) error
+	// bumpGeneration makes every update of a ModelDeployment move its metadata.generation by one, as the API server does for a
+	// change of the spec: the fake client leaves it as it is.
+	bumpGeneration bool
 }
 
 // set replaces both hooks.
@@ -53,6 +56,9 @@ func (f *faultClient) hooks() (func(string, client.Object) error, func(string, c
 
 // write runs one write through the hooks.
 func (f *faultClient) write(method string, obj client.Object, do func() error) error {
+	if _, ok := obj.(*v1alpha1.ModelDeployment); ok && method == "Update" && f.bumpGeneration {
+		obj.SetGeneration(obj.GetGeneration() + 1)
+	}
 	before, after := f.hooks()
 	if before != nil {
 		if err := before(method, obj); err != nil {
@@ -428,4 +434,103 @@ func newTwoWorld(t *testing.T) (w *execWorld, insts [2]string, allocs [2]string)
 	w = &execWorld{hedgeRig: h, log: log, fc: &faultClient{Client: h.r.Client}}
 	h.r.Client = w.fc
 	return w, insts, allocs
+}
+
+// newTwoPendingWorld is a deployment of two Instances on A whose jobs both pend: R behind qR, then X behind qX. A Scale to
+// one takes X, the newest pending one, as CancelPending.
+func newTwoPendingWorld(t *testing.T, qR, qX time.Duration) (w *execWorld, r, x string) {
+	t.Helper()
+	log := newCauseLog()
+	h := newHedgeRig(t, withInterceptors(log.funcs()))
+	h.batch.Enqueue(pfake.Script{QueueWait: qR}, pfake.Script{QueueWait: qX})
+	h.Step()
+	md := noOverAllocation(mdSpec(hoMD))
+	md.Spec.Instances = 1
+	h.create(md)
+	pol := globalPolicy(person)
+	h.create(&pol)
+	h.until(5*time.Minute, 10*time.Second, "R pending", func() bool { return len(h.liveInstances(hoMD)) == 1 })
+	r = h.liveInstances(hoMD)[0].Name
+	h.run(time.Minute, 10*time.Second) // X is made later than R, so that a Scale to one takes X
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
+	h.until(5*time.Minute, 10*time.Second, "X pending", func() bool { return len(h.liveInstances(hoMD)) == 2 })
+	for _, in := range h.liveInstances(hoMD) {
+		if in.Name != r {
+			x = in.Name
+		}
+	}
+	w = &execWorld{hedgeRig: h, log: log, fc: &faultClient{Client: h.r.Client}}
+	h.r.Client = w.fc
+	return w, r, x
+}
+
+// newTwoStartingWorld is a deployment of two Instances on A whose jobs have both started: R's engine never comes up, and X's
+// takes three minutes. The Allocations are released the moment they are empty (release when idle after no time), so a Scale to
+// one takes X as EndStarting and plans its Allocation as ReleaseStarted.
+func newTwoStartingWorld(t *testing.T) (w *execWorld, r, x string) {
+	t.Helper()
+	log := newCauseLog()
+	h := newHedgeRig(t, withInterceptors(log.funcs()))
+	started := 0
+	h.engine = func(string) afake.Engine {
+		started++
+		if started == 2 {
+			return afake.Engine{StartDelay: 3 * time.Minute}
+		}
+		return afake.Engine{StartDelay: 6 * time.Hour}
+	}
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{})
+	h.Step()
+	md := noOverAllocation(mdSpec(hoMD))
+	md.Spec.Instances = 1
+	md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(0)}
+	h.create(md)
+	pol := globalPolicy(person)
+	h.create(&pol)
+	jobStarted := func(in v1alpha1.Instance) bool {
+		a, ok := h.allocation(in.Spec.AllocationRef.Name)
+		return ok && a.Status.AtProvider.StartTime != nil
+	}
+	h.until(10*time.Minute, 10*time.Second, "R on a started job", func() bool {
+		live := h.liveInstances(hoMD)
+		return len(live) == 1 && jobStarted(live[0])
+	})
+	r = h.liveInstances(hoMD)[0].Name
+	h.run(time.Minute, 10*time.Second) // X is made later than R, so that a Scale to one takes X
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
+	h.until(10*time.Minute, 10*time.Second, "X on a started job", func() bool {
+		live := h.liveInstances(hoMD)
+		if len(live) != 2 || h.readyCount(hoMD) != 0 {
+			return false
+		}
+		for _, in := range live {
+			if !jobStarted(in) {
+				return false
+			}
+		}
+		return true
+	})
+	for _, in := range h.liveInstances(hoMD) {
+		if in.Name != r {
+			x = in.Name
+		}
+	}
+	w = &execWorld{hedgeRig: h, log: log, fc: &faultClient{Client: h.r.Client}}
+	h.r.Client = w.fc
+	return w, r, x
+}
+
+// conflictOnce makes the first update of the ModelDeployment fail with a Conflict after racing: edit runs first, as a person's
+// edit that lands between the pass's read and its write, and the write is not made. It stands for the API server's refusal of an
+// update that carries a resourceVersion that is no longer current.
+func (w *execWorld) conflictOnce(method string, edit func()) {
+	armed := true
+	w.fc.set(func(m string, obj client.Object) error {
+		if _, ok := obj.(*v1alpha1.ModelDeployment); ok && m == method && armed {
+			armed = false
+			edit()
+			return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("modeldeployments").GroupResource(), obj.GetName(), errors.New("the object has been modified"))
+		}
+		return nil
+	}, nil)
 }

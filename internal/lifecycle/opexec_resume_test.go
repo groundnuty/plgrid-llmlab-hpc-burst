@@ -37,7 +37,7 @@ func (w *execWorld) failSpecWrites() (stop func()) {
 // cancelled (the approval was for a queued job, which is priced differently), and the target is reported Failed for good with
 // JobStartedSinceCommit: the Operation, all else done, is PartlyFailed and finished.
 func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNotCancelled(t *testing.T) {
-	w := newExecWorld(t, 10*time.Hour)
+	w := newExecWorld(t, time.Hour) // R drains from 1 h 50 min into its 4 h lease: it is still ready when P turns ready
 	pendingUID, pendingAllocUID := w.mustInstance(w.pending).UID, w.allocOrNil(w.pendingAlloc).UID
 	stop := w.failSpecWrites()
 	w.plan("scale", scaleTo(1))
@@ -50,8 +50,7 @@ func TestACommittedCancelPendingThatStartedAndTurnedReadyIsDrainedAndItsJobIsNot
 	}
 
 	// The queue wait ends and P's engine comes up, all while the spec write keeps failing and no act is made.
-	w.clock.Advance(10 * time.Hour)
-	w.stepsUntil(30*time.Minute, 10*time.Second, "P ready", func() bool { return w.instance(w.pending).Status.Phase == v1alpha1.InstanceReady })
+	w.stepsUntil(90*time.Minute, 2*time.Minute, "P ready", func() bool { return w.instance(w.pending).Status.Phase == v1alpha1.InstanceReady })
 	if a := w.allocOrNil(w.pendingAlloc); a == nil || a.Status.AtProvider.StartTime == nil || !a.DeletionTimestamp.IsZero() {
 		t.Fatalf("P's Allocation is %+v: its job should have started, and nothing should have released it", a)
 	}
@@ -185,57 +184,6 @@ func TestAnEndResumedAfterItsSpecWriteLeavesTheDrainingInstanceToStepSix(t *test
 	w.wantCause(w.readyAlloc, w.getOp("end"))
 }
 
-// A Scale whose spec write landed and whose status record of it did not (a kill between the two). A person then raises the
-// count. The resumed pass must not write the Operation's count over that edit: the deployment's generation is past the plan's, so
-// the spec is left as it is, and the record is made. The Operation's own acts go on.
-func TestASpecWriteThatLandedButWasNotRecordedIsNotWrittenOverAPersonsEdit(t *testing.T) {
-	w := newExecWorld(t, 10*time.Hour)
-	w.plan("scale", scaleTo(1))
-	w.confirm("scale")
-	w.untilPhase("scale", v1alpha1.OperationPhaseAwaitingApproval)
-	dead := false
-	w.fc.set(func(string, client.Object) error {
-		if dead {
-			return errKilled
-		}
-		return nil
-	}, func(method string, obj client.Object) {
-		if _, ok := obj.(*v1alpha1.ModelDeployment); ok && method == "Update" {
-			dead = true
-		}
-	})
-	w.approve("scale", "person", userPerson)
-	w.clock.Advance(10 * time.Second)
-	if err := w.stepKeepingErrors(); !errors.Is(err, errKilled) {
-		t.Fatalf("the pass: %v, want the kill", err)
-	}
-	if got := w.md(hoMD).Spec.Instances; got != 1 {
-		t.Fatalf("spec.instances is %d after the kill, want 1: the Operation's write landed", got)
-	}
-	if isTrue(w.getOp("scale").Status.Conditions, v1alpha1.ConditionSpecWritten) {
-		t.Fatal("SpecWritten is recorded: the kill was to come between the spec write and its record")
-	}
-
-	// A person raises the count again, then the controller comes back.
-	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
-	w.restart(true)
-	w.clock.Advance(10 * time.Second)
-	if err := w.stepKeepingErrors(); err != nil {
-		t.Fatalf("the resumed pass: %v", err)
-	}
-	op := w.getOp("scale")
-	if got := w.md(hoMD).Spec.Instances; got != 2 {
-		t.Errorf("spec.instances is %d after the resumed pass, want the person's 2: the Operation's 1 must not be written over it", got)
-	}
-	if c := condOf(op, v1alpha1.ConditionSpecWritten); c == nil || c.Status != "True" || !strings.Contains(c.Message, "not written over") {
-		t.Errorf("SpecWritten %+v, want True, saying the spec changed after the plan and was not written over", c)
-	}
-	w.untilPhase("scale", v1alpha1.OperationPhaseDone)
-	if got := w.md(hoMD).Spec.Instances; got != 2 {
-		t.Errorf("spec.instances is %d at the end, want 2", got)
-	}
-}
-
 // The condition is in status right after the spec write, before any act: the process is killed at the first act of the
 // Operation, and the record is already written. (With the record left to the report after the acts, a kill there would
 // leave it unset, and a person's edit after it would be written over by the resumed pass.)
@@ -270,13 +218,17 @@ func TestTheSpecRecordIsWrittenBeforeAnyAct(t *testing.T) {
 	if in := w.instance(w.pending); ended(in) {
 		t.Fatal("P's Instance ended: the kill was to come at the first act")
 	}
-	// A person raises the count; the controller comes back and leaves it.
+	// A person raises the count; the controller comes back, leaves it, and acts on nothing (opexec_spec_test.go).
 	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
 	w.restart(true)
-	w.untilPhase("scale", v1alpha1.OperationPhaseDone)
+	w.clock.Advance(10 * time.Second)
+	if err := w.stepKeepingErrors(); err != nil {
+		t.Fatalf("the resumed pass: %v", err)
+	}
 	if got := w.md(hoMD).Spec.Instances; got != 2 {
 		t.Errorf("spec.instances is %d, want the person's 2", got)
 	}
+	w.wantNoTargetActedOn("scale")
 }
 
 // Two ready Operations on one deployment, and the first one's commit write is STORED yet returns an error (the reply is

@@ -22,6 +22,8 @@ func TestWhichFailuresAreFinal(t *testing.T) {
 		want   bool
 	}{
 		{"JobStartedSinceCommit", true},
+		{"SpecChangedSinceCommit", true},
+		{"LastReadySinceCommit", true},
 		{"ReconcileError", false},
 		{"WriteFailed", false},
 		{"ReleaseFailed", false},

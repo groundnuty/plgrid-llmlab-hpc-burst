@@ -224,7 +224,7 @@ type OperationStatus struct {
 
 	// FinishedAt is when the Operation became Done, Stale or Refused, or
 	// PartlyFailed with every failure final (HBEP-10, The report, as amended by
-	// #665: the science agent's ruling on #664, 16 Nov 2026). The controller
+	// #665 and #666: the science agent's rulings on #664, 16 and 17 Nov 2026). The controller
 	// removes the Operation 7 days later (HBEP-10, Operations, Removal).
 	//
 	// +optional
@@ -394,7 +394,7 @@ type TargetOutcome struct {
 	// State is done, failed or not started. A failed target is retried with
 	// backoff unless its failure is final, as when the target changed since the
 	// commit so that its approved effect cannot apply (HBEP-10, The report, as
-	// amended by #665).
+	// amended by #665 and #666).
 	State TargetState `json:"state"`
 
 	// Reason is the CamelCase code of a failure.

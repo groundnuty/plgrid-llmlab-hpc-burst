@@ -30,17 +30,33 @@ func noActDone(effect v1alpha1.PlanEffect, specWritten, deploymentGone bool) boo
 }
 
 // reasonJobStartedSinceCommit is the reason of a committed CancelPending Allocation target whose job started between the
-// commit and the act (HBEP-10, The report, as amended by #665: the science agent's ruling on #664, 16 Nov 2026).
+// commit and the act (HBEP-10, The report, as amended by #665 and #666: the science agent's rulings on #664, 16 and 17 Nov 2026).
 const reasonJobStartedSinceCommit = "JobStartedSinceCommit"
 
+// reasonSpecChangedSinceCommit is the reason of a target the Operation did not act on because the deployment's spec changed
+// after the commit so that the effect it was approved for no longer holds (specEffectHolds).
+const reasonSpecChangedSinceCommit = "SpecChangedSinceCommit"
+
+// reasonLastReadySinceCommit is the reason of a committed CancelPending or EndStarting Instance of a Scale that is Ready now
+// and would be the last ready one: draining it is a DrainLastReady that nobody approved.
+const reasonLastReadySinceCommit = "LastReadySinceCommit"
+
 // failureIsFinal is the ONE function that says which failures of a target are final (HBEP-10, The report, as amended by
-// #665): a failure that no retry can fix, because it is the approved effect that cannot apply any more. A refused cancel and
+// #665 and #666): a failure that no retry can fix, because it is the approved effect that cannot apply any more. A refused cancel and
 // the controller's own write's error are retried with backoff; a job that started after it was approved for cancelling
-// in the queue is never released under that approval. phaseOf says what a final failure does to the Operation.
-func failureIsFinal(reason string) bool { return reason == reasonJobStartedSinceCommit }
+// in the queue is never released under that approval, an Instance that has become the last ready one is never drained under
+// an approval that did not cover it, and nothing is acted on once the spec effect no longer holds. phaseOf says what a final
+// failure does to the Operation.
+func failureIsFinal(reason string) bool {
+	switch reason {
+	case reasonJobStartedSinceCommit, reasonSpecChangedSinceCommit, reasonLastReadySinceCommit:
+		return true
+	}
+	return false
+}
 
 // phaseOf is the ONE function that says what the outcomes of the committed targets make of the Operation, and whether it is
-// finished (HBEP-10, The report, as amended by #665): Done when every target is done; PartlyFailed and finished (finishedAt
+// finished (HBEP-10, The report, as amended by #665 and #666): Done when every target is done; PartlyFailed and finished (finishedAt
 // is set, so the deployment is free for the next Operation and the Operation is removed 7 days later) when every target is
 // done or has failed for good; PartlyFailed and not finished while a failure that a retry can fix remains, which is
 // retried; and Executing while none has failed.
@@ -88,22 +104,43 @@ func (p *pass) targetDone(t v1alpha1.CommittedTarget) (bool, error) {
 }
 
 // finalFailure reports whether a target has failed for good, with its reason and message: a committed CancelPending
-// Allocation whose job started since the commit. It is never released under that approval, which was to cancel a queued job
-// and not a running one, and is left to retention. Once it is recorded in status it stays: the Allocation's later release
-// by retention is not the approved act.
-func (p *pass) finalFailure(t v1alpha1.CommittedTarget, prior *v1alpha1.TargetOutcome) (reason, message string, ok bool, err error) {
+// Allocation whose job started since the commit (it is never released under that approval, which was to cancel a queued job
+// and not a running one, and is left to retention); a committed CancelPending or EndStarting Instance of a Scale that is
+// Ready now and would be the last ready one (not drained, since nobody approved that); and a releasing Allocation target that
+// such an Instance keeps from ever being empty. Once it is recorded in status it stays: the Allocation's later release by
+// retention is not the approved act.
+func (p *pass) finalFailure(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, prior *v1alpha1.TargetOutcome) (reason, message string, ok bool, err error) {
 	if prior != nil && prior.State == v1alpha1.TargetStateFailed && failureIsFinal(prior.Reason) {
 		return prior.Reason, prior.Message, true, nil
 	}
-	if t.Kind != v1alpha1.TargetKindAllocation || t.Effect != v1alpha1.PlanEffectCancelPending {
-		return "", "", false, nil
+	switch t.Kind {
+	case v1alpha1.TargetKindInstance:
+		if p.lastReadyScaleTarget(op, t, p.instanceByUID(t.UID)) {
+			return reasonLastReadySinceCommit, lastReadyMessage, true, nil
+		}
+	case v1alpha1.TargetKindAllocation:
+		a, err := p.committedAllocation(t)
+		if err != nil || a == nil {
+			return "", "", false, err
+		}
+		if startedSinceCommit(t, a) {
+			return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and its retention policy now keeps or releases it", true, nil
+		}
+		if releasingEffect(t.Effect) {
+			// An Instance that is a committed target and has failed for good stays live, so this Allocation is never empty.
+			for _, c := range op.Status.Committed {
+				if c.Kind == v1alpha1.TargetKindInstance && p.instanceByUID(c.UID) != nil && p.instanceByUID(c.UID).Spec.AllocationRef.Name == a.Name &&
+					p.lastReadyScaleTarget(op, c, p.instanceByUID(c.UID)) {
+					return reasonLastReadySinceCommit, "the Instance on it, a target of this Operation, became the last ready one and was not drained, so the Allocation never empties: " + lastReadyMessage, true, nil
+				}
+			}
+		}
 	}
-	a, err := p.committedAllocation(t)
-	if err != nil || !startedSinceCommit(t, a) {
-		return "", "", false, err
-	}
-	return reasonJobStartedSinceCommit, "its job started after the Operation was committed, and the approval covered cancelling a queued job, which is priced differently from releasing a running one: the Operation did not release it, and its retention policy now keeps or releases it", true, nil
+	return "", "", false, nil
 }
+
+// lastReadyMessage says why a committed Instance was not drained.
+const lastReadyMessage = "it became ready after the Operation was committed and is now the last ready Instance, so draining it would be a drain of the last ready Instance, which the approval did not cover: the Operation did not drain it"
 
 // outcomes is the report: one entry per committed target, Done, Failed for good or NotStarted, with the time its state last
 // changed kept while it does not.
@@ -121,7 +158,7 @@ func (p *pass) outcomes(op *v1alpha1.Operation) ([]v1alpha1.TargetOutcome, error
 		}
 		// A final failure first: a target is never reported done when its approved act did not happen, so an Allocation that
 		// started and that retention then released is still the failure it was.
-		reason, msg, failed, err := p.finalFailure(t, was)
+		reason, msg, failed, err := p.finalFailure(op, t, was)
 		if err != nil {
 			return nil, err
 		}
