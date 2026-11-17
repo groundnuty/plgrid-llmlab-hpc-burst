@@ -11,6 +11,7 @@ package launcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,19 +158,38 @@ func (f *ctlFixture) ctlUp() EntryRecord {
 	return f.awaitEntry(controllerEntryName, "the controller to run", func(e EntryRecord) bool { return e.State == entryRunning && e.Proc != nil })
 }
 
-// logReady waits until the log's monitoring port lists both streams: they are made and verified,
-// which /healthz alone does not say (it answers once JetStream is up). A log that was killed and
-// started again is asked afresh, since the old process's port is closed until the new one binds it.
-func (f *ctlFixture) logReady() {
+// logConn waits until a client can connect to the log, and returns that connection: the monitoring
+// port lists both streams (they are made and verified, which /healthz alone does not say: it answers
+// once JetStream is up), AND a client with the token connects to the client address. The second is
+// not implied by the first: nats-server lists the streams it restored from the store before it
+// opens the client port, so a log that was killed and started again lists them while a connection is
+// still refused (issue #669). A log that was killed is also asked afresh, since the old process's
+// ports are closed until the new one binds them. The wait is bounded by 30 s and polls every 10 ms;
+// an attempt that fails leaves nothing open (nats.Connect closes what it made).
+func (f *ctlFixture) logConn() *nats.Conn {
 	f.t.Helper()
+	token := f.logToken()
 	deadline := time.Now().Add(30 * time.Second)
+	streams, connectErr := false, errors.New("not tried: the streams were not listed yet")
 	for time.Now().Before(deadline) {
-		if eventLogStreamsExist(f.ports.EventLogMonitorAddr()) {
-			return
+		if streams = eventLogStreamsExist(f.ports.EventLogMonitorAddr()); streams {
+			nc, err := nats.Connect("nats://"+f.ports.EventLogAddr(), nats.Token(token), nats.MaxReconnects(0))
+			if err == nil {
+				return nc
+			}
+			connectErr = err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	f.t.Fatal(f.withChildLogs("the event log's streams were not listed within 30 s"))
+	f.t.Fatal(f.withChildLogs(fmt.Sprintf("the event log was not ready for a client within 30 s: both streams listed on %s: %v; a token connection to %s: %v",
+		f.ports.EventLogMonitorAddr(), streams, f.ports.EventLogAddr(), connectErr)))
+	return nil
+}
+
+// logReady waits until the log is ready for a client (logConn) and closes the probe connection.
+func (f *ctlFixture) logReady() {
+	f.t.Helper()
+	f.logConn().Close()
 }
 
 // logToken reads the token file the way a client does.
@@ -182,14 +202,10 @@ func (f *ctlFixture) logToken() string {
 	return strings.TrimSpace(string(b))
 }
 
-// logClient connects to the running log with its token.
+// logClient connects to the running log with its token, once it is ready for a client (logConn).
 func (f *ctlFixture) logClient() (*nats.Conn, jetstream.JetStream) {
 	f.t.Helper()
-	f.logReady()
-	nc, err := nats.Connect("nats://"+f.ports.EventLogAddr(), nats.Token(f.logToken()), nats.MaxReconnects(0))
-	if err != nil {
-		f.t.Fatal(f.withChildLogs(fmt.Sprintf("connect to the event log: %v", err)))
-	}
+	nc := f.logConn()
 	f.t.Cleanup(nc.Close)
 	js, err := jetstream.New(nc)
 	if err != nil {

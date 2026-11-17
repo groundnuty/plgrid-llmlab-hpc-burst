@@ -56,7 +56,9 @@
 // direct or host-dialed only. With --event-log-token-file (either role) it records what the durable log's
 // /healthz answered at its own start, in eventlog-probe-<pid>.txt. With "eventlog" as its first argument
 // the binary is the durable log, as hpcburst-controller's subcommand is: it runs the real log
-// (node.Run) with the subcommand's flags and exit codes, and records eventlog-starts. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
+// (node.Run) with the subcommand's flags and exit codes, and records eventlog-starts. A steering file
+// eventlog-idle (a number) makes that role run no log at all: it records its start and waits for
+// SIGTERM, so a test can stand its own listeners on the log's two ports. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
 // hpcburst-controller's subcommand is: it runs the real keeper (relaykeeper.Run) with the
 // subcommand's flags, --state-dir and --port-base, so the launcher's tests supervise a real keeper,
 // with its state file, process lock and socket. In that role it records argv-<pid>.json too, and
@@ -519,6 +521,10 @@ func eventlogMain(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+	if _, idle := steeredInt(dir, "eventlog-idle"); idle {
+		<-ctx.Done() // no log: the test's own listeners stand in for it
+		return 0
+	}
 	err := node.Run(ctx, node.Options{ConfigPath: *conf, CapsPath: *caps, Stdout: os.Stdout, Stderr: os.Stderr})
 	var refused *node.RefusedError
 	switch {

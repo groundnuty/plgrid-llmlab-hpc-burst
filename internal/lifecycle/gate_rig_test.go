@@ -1,8 +1,9 @@
 package lifecycle
 
 // The throughput gate through the pass (HBEP-7, Test plan, Over-allocation and
-// the throughput gate, the gate's rows; this version judges and records only).
-// The fixture is the HBEP's: one entry for the Instance's ID, with max-num-seqs
+// the throughput gate, the gate's rows). This file holds the rows where the gate
+// passes or records only; gate_act_rig_test.go holds the rows where it acts. The
+// fixture is the HBEP's: one entry for the Instance's ID, with max-num-seqs
 // 16, 8 sessions, and contexts of 1,024 and outputs of 128 tokens, at 20 ms per
 // output token and 400 ms to first token, the default tolerance, dated 10 days
 // before the rig clock (2026-11-02 08:00 UTC, so 2026-10-23). Every measurement
@@ -124,9 +125,8 @@ func oneEntry(edit ...func(*v1alpha1.ExpectedPerformance)) func(string) []v1alph
 	}
 }
 
-// A would-miss and a record-only verdict leave the Instance ready as it was
-// before the gate judged: no restart, no end, and status.gate keeps no verdict
-// for a would-miss and no misses at all.
+// A pass and a record-only verdict leave the Instance ready as it was before the
+// gate judged: no restart, no end, and status.gate keeps no misses.
 func gateRecordsOnly(t *testing.T, in v1alpha1.Instance, rg *rig) {
 	t.Helper()
 	if in.Status.Phase != v1alpha1.InstanceReady || len(in.Status.Restarts) != 0 || in.Status.EndReason != "" {
@@ -136,37 +136,30 @@ func gateRecordsOnly(t *testing.T, in v1alpha1.Instance, rg *rig) {
 		t.Errorf("a restart event was recorded: %v", got)
 	}
 	if g := in.Status.Gate; g != nil && len(g.Misses) != 0 {
-		t.Errorf("status.gate holds misses %+v: this version writes none", g.Misses)
+		t.Errorf("status.gate holds misses %+v: nothing missed", g.Misses)
 	}
 }
 
 // The limits (HBEP-7, Test plan, The gate): 40 ms and max(800, 500) = 800 ms.
-// Each limit has its pass and its miss, and a miss leaves the Instance ready
-// with no restart and no verdict, naming both limits in Qualified's message.
-func TestGateJudgesEachLimitAndActsOnNothing(t *testing.T) {
+// Each limit has its pass here, just inside it, naming both limits in
+// Qualified's message and leaving the Instance ready with no restart; its miss,
+// just over it, is a row of gate_act_rig_test.go.
+func TestGatePassesWithinEachLimit(t *testing.T) {
 	ms := time.Millisecond
 	for _, tc := range []struct {
 		name  string
 		tpot  time.Duration
 		ttft  time.Duration
 		edit  []func(*v1alpha1.ExpectedPerformance)
-		pass  bool
 		wants []string
 	}{
-		{"39 ms passes", 39 * ms, 300 * ms, nil, true,
+		{"39 ms passes", 39 * ms, 300 * ms, nil,
 			[]string{"passed the entry dated 2026-10-23", "time per output token 39ms (limit 40ms)", "time to first token 300ms (limit 800ms)"}},
-		{"41 ms would miss", 41 * ms, 300 * ms, nil, false,
-			[]string{"would miss the entry dated 2026-10-23", "time per output token 41ms (limit 40ms)", "(limit 800ms)", "only records the verdict"}},
-		{"790 ms to first token passes", 20 * ms, 790 * ms, nil, true, []string{"time to first token 790ms (limit 800ms)"}},
-		{"810 ms to first token would miss", 20 * ms, 810 * ms, nil, false, []string{"would miss", "time to first token 810ms (limit 800ms)"}},
-		{"entry ttft 50 ms: 140 ms passes", 20 * ms, 140 * ms, []func(*v1alpha1.ExpectedPerformance){func(e *v1alpha1.ExpectedPerformance) { e.TimeToFirstToken = "50ms" }}, true,
+		{"790 ms to first token passes", 20 * ms, 790 * ms, nil, []string{"time to first token 790ms (limit 800ms)"}},
+		{"entry ttft 50 ms: 140 ms passes", 20 * ms, 140 * ms, []func(*v1alpha1.ExpectedPerformance){func(e *v1alpha1.ExpectedPerformance) { e.TimeToFirstToken = "50ms" }},
 			[]string{"time to first token 140ms (limit 150ms)"}},
-		{"entry ttft 50 ms: 160 ms would miss", 20 * ms, 160 * ms, []func(*v1alpha1.ExpectedPerformance){func(e *v1alpha1.ExpectedPerformance) { e.TimeToFirstToken = "50ms" }}, false,
-			[]string{"would miss", "time to first token 160ms (limit 150ms)"}},
-		{"tolerance 50: 30 ms passes", 30 * ms, 300 * ms, []func(*v1alpha1.ExpectedPerformance){func(e *v1alpha1.ExpectedPerformance) { e.TolerancePercent = ptrTo(int32(50)) }}, true,
+		{"tolerance 50: 30 ms passes", 30 * ms, 300 * ms, []func(*v1alpha1.ExpectedPerformance){func(e *v1alpha1.ExpectedPerformance) { e.TolerancePercent = ptrTo(int32(50)) }},
 			[]string{"time per output token 30ms (limit 30ms)"}},
-		{"tolerance 50: 31 ms would miss", 31 * ms, 300 * ms, []func(*v1alpha1.ExpectedPerformance){func(e *v1alpha1.ExpectedPerformance) { e.TolerancePercent = ptrTo(int32(50)) }}, false,
-			[]string{"would miss", "time per output token 31ms (limit 30ms)"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rg, in := gateReady(t, tc.tpot, gateMD(), oneEntry(tc.edit...), tc.ttft)
@@ -183,12 +176,8 @@ func TestGateJudgesEachLimitAndActsOnNothing(t *testing.T) {
 			if c := apimeta.FindStatusCondition(in.Status.Conditions, v1alpha1.ConditionQualified); c == nil || c.Status != "True" || c.Reason != v1alpha1.ReasonPassed {
 				t.Errorf("Qualified is %+v, want True/Passed", c)
 			}
-			g := in.Status.Gate
-			switch {
-			case tc.pass && (g == nil || g.Verdict != v1alpha1.GatePassed || g.ReferenceDate != "2026-10-23"):
+			if g := in.Status.Gate; g == nil || g.Verdict != v1alpha1.GatePassed || g.ReferenceDate != "2026-10-23" {
 				t.Errorf("status.gate %+v, want Passed against 2026-10-23", g)
-			case !tc.pass && g != nil:
-				t.Errorf("status.gate %+v after a would-miss, want none: the verdict stays unset", g)
 			}
 			gateRecordsOnly(t, in, rg)
 		})
@@ -262,14 +251,18 @@ func TestGateRecordsOnlyWithNoMatchingEntry(t *testing.T) {
 
 // An entry 90 days from its date gates the day before and records only on it:
 // 2026-08-05 ages at 2026-11-03 00:00 UTC, 16 hours after the rig's clock starts,
-// so 41 ms is judged against it. (The boundary to the second is in
-// TestMatchReferenceAgeBoundary, on the matcher with the clock handed in.)
+// so 41 ms is judged against it: its first miss restarts the worker. (The
+// boundary to the second is in TestMatchReferenceAgeBoundary, on the matcher with
+// the clock handed in.)
 func TestGateStillGatesAnEntryOnItsLastDay(t *testing.T) {
-	rg, in := gateReady(t, 41*time.Millisecond, gateMD(), oneEntry(func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-08-05" }))
-	if msg := conditionMessage(&in, v1alpha1.ConditionQualified); !strings.Contains(msg, "would miss the entry dated 2026-08-05") {
-		t.Errorf("Qualified's message %q, want a would-miss against the entry dated 2026-08-05", msg)
+	rg := newRig(t)
+	rg.engine = gateSequence(41 * time.Millisecond)
+	name, _ := gateEntries(rg, gateMD(), oneEntry(func(e *v1alpha1.ExpectedPerformance) { e.Date = "2026-08-05" }))
+	startUntil(rg, "md", 10*time.Minute, "the first miss's restart", func() bool { return len(rg.rec.Find("failing", "WorkerRestart")) == 1 })
+	in := rg.instance(name)
+	if g := in.Status.Gate; g == nil || len(g.Misses) != 1 || g.ReferenceDate != "2026-08-05" || len(in.Status.Restarts) != 1 || in.Status.Restarts[0].Signal != "ThroughputMissed" {
+		t.Errorf("status.gate %+v, restarts %+v, want the entry's first miss recorded with its ThroughputMissed restart", g, in.Status.Restarts)
 	}
-	gateRecordsOnly(t, in, rg)
 }
 
 // The capacity flags are part of the key (HBEP-4): an Instance declaring

@@ -12,9 +12,6 @@ import (
 	"testing"
 	"time"
 
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
@@ -91,27 +88,18 @@ func TestLaunchCapacityFlagsFromHandWrittenCommands(t *testing.T) {
 	}
 }
 
-// The key's shape is a worker's: ceil(targetSessions / workers) sessions, the
-// typical context and the typical output; its ID is the display form.
-func TestInstanceKeyIsAWorkersShape(t *testing.T) {
+// The key's shape is the one the warm-up ran, handed to instanceKey: it takes the sessions, the typical context and
+// the typical output as given, and its ID is the display form. (Where the shape comes from, the verification record
+// and the settled round, is gate_shape_test.go's.)
+func TestInstanceKeyTakesTheShapeTheWarmUpRan(t *testing.T) {
 	full := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	sh := shapes{typical: 1024, outputTypical: 128, targetSessions: 17, short: 64, outputLongest: 2048}
-	for _, tc := range []struct {
-		workers *int32
-		want    int32
-	}{
-		{nil, 17},            // one worker runs them all
-		{ptrTo(int32(2)), 9}, // ceil(17 / 2)
-		{ptrTo(int32(4)), 5}, // ceil(17 / 4)
-	} {
-		in := &v1alpha1.Instance{Spec: v1alpha1.InstanceSpec{
-			DeploymentID: v1alpha1.FullDeploymentID(full),
-			Launch:       v1alpha1.Launch{Command: []string{"vllm", "serve", "/model", "--max-num-seqs=16"}, MaxNumSeqs: 16, Workers: tc.workers},
-		}}
-		k := instanceKey(in, sh)
-		if k.DeploymentID != "0123456789ab" || k.Sessions != tc.want || k.ContextTokens != 1024 || k.OutputTokens != 128 || len(k.CapacityFlags) != 1 {
-			t.Errorf("workers %v: key %+v, want ID 0123456789ab, %d sessions, 1024 and 128 tokens, one flag", tc.workers, k, tc.want)
-		}
+	in := &v1alpha1.Instance{Spec: v1alpha1.InstanceSpec{
+		DeploymentID: v1alpha1.FullDeploymentID(full),
+		Launch:       v1alpha1.Launch{Command: []string{"vllm", "serve", "/model", "--max-num-seqs=16"}, MaxNumSeqs: 16},
+	}}
+	k := instanceKey(in, ranShape{sessions: 9, context: 2048, output: 64})
+	if k.DeploymentID != "0123456789ab" || k.Sessions != 9 || k.ContextTokens != 2048 || k.OutputTokens != 64 || len(k.CapacityFlags) != 1 || k.CapacityFlags["max-num-seqs"] != "16" {
+		t.Errorf("key %+v, want ID 0123456789ab, 9 sessions, 2048 and 64 tokens, the one flag max-num-seqs 16", k)
 	}
 }
 
@@ -342,22 +330,23 @@ func TestGateLimitsAtTheirEdges(t *testing.T) {
 		{"tolerance 50: ttft 600 ms and 1 ns", entry("400ms", ptrTo(int32(50))), measuresOne(20*ms, 600*ms+1), false, "(limit 600ms)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := judgeGate(tc.profile, gateKey(), tc.m, now)
-			if !strings.Contains(v.text, tc.limits) || !strings.Contains(v.text, "2026-10-23") {
-				t.Errorf("message %q does not name the limit %s and the entry's date", v.text, tc.limits)
+			v := judgeGate(tc.profile, gateKey(), tc.m, now, nil)
+			shown := v.text + v.detail // a pass's message, or a miss's measurements and limits
+			if !strings.Contains(shown, tc.limits) || v.date != "2026-10-23" {
+				t.Errorf("verdict %+v does not name the limit %s and the entry's date", v, tc.limits)
 			}
-			if tc.passes && (v.status != v1alpha1.GatePassed || v.date != "2026-10-23" || !strings.HasPrefix(v.text, "passed")) {
+			if tc.passes && (v.status != v1alpha1.GatePassed || !strings.HasPrefix(v.text, "passed")) {
 				t.Errorf("verdict %+v, want Passed against 2026-10-23", v)
 			}
-			if !tc.passes && (v.status != "" || !strings.HasPrefix(v.text, "would miss") || !strings.Contains(v.text, "only records the verdict")) {
-				t.Errorf("verdict %+v, want a would-miss with no status, saying this version only records", v)
+			if !tc.passes && (v.status != "" || len(v.missed) != 1 || v.missed[0] != "worker-0" || v.text != "") {
+				t.Errorf("verdict %+v, want a miss by worker-0 with no final status", v)
 			}
 		})
 	}
 }
 
 // With several workers each is judged on its own measurement: 20 ms and 45 ms
-// would miss, naming worker-1, though their mean, 32.5 ms, is within 40 ms; two
+// miss by worker-1 alone, though their mean, 32.5 ms, is within 40 ms; two
 // workers at 20 ms and 39 ms pass, the message giving each one's.
 func TestGateJudgesEachWorkerNotTheirMean(t *testing.T) {
 	now := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
@@ -365,12 +354,12 @@ func TestGateJudgesEachWorkerNotTheirMean(t *testing.T) {
 	two := func(a, b time.Duration) []workerMeasure {
 		return []workerMeasure{{"worker-0", a, 300 * ms}, {"worker-1", b, 300 * ms}}
 	}
-	v := judgeGate(gateProfile(gateFixtureEntry(gateKey())), gateKey(), two(20*ms, 45*ms), now)
-	if v.status != "" || !strings.HasPrefix(v.text, "worker-1 would miss") || strings.Contains(v.text, "worker-0 would miss") ||
-		!strings.Contains(v.text, "worker-0: time per output token 20ms (limit 40ms)") || !strings.Contains(v.text, "worker-1: time per output token 45ms (limit 40ms)") {
+	v := judgeGate(gateProfile(gateFixtureEntry(gateKey())), gateKey(), two(20*ms, 45*ms), now, nil)
+	if v.status != "" || len(v.missed) != 1 || v.missed[0] != "worker-1" ||
+		!strings.Contains(v.detail, "worker-0: time per output token 20ms (limit 40ms)") || !strings.Contains(v.detail, "worker-1: time per output token 45ms (limit 40ms)") {
 		t.Errorf("verdict %+v, want worker-1 alone to miss, each worker's measurement shown", v)
 	}
-	v = judgeGate(gateProfile(gateFixtureEntry(gateKey())), gateKey(), two(20*ms, 39*ms), now)
+	v = judgeGate(gateProfile(gateFixtureEntry(gateKey())), gateKey(), two(20*ms, 39*ms), now, nil)
 	if v.status != v1alpha1.GatePassed || !strings.Contains(v.text, "worker-1: time per output token 39ms (limit 40ms)") {
 		t.Errorf("verdict %+v, want Passed with each worker's measurement", v)
 	}
@@ -381,15 +370,15 @@ func TestGateJudgesEachWorkerNotTheirMean(t *testing.T) {
 func TestGateRecordsOnlyWhatItCannotJudge(t *testing.T) {
 	now := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
 	p := gateProfile(gateFixtureEntry(gateKey()))
-	if v := judgeGate(p, gateKey(), nil, now); v.status != v1alpha1.GateRecordOnly || v.date != "2026-10-23" || !strings.Contains(v.text, "no readable measurement") {
+	if v := judgeGate(p, gateKey(), nil, now, nil); v.status != v1alpha1.GateRecordOnly || v.date != "2026-10-23" || !strings.Contains(v.text, "no readable measurement") {
 		t.Errorf("no measurement: %+v", v)
 	}
 	bad := gateFixtureEntry(gateKey())
 	bad.TimePerOutputToken = "fast"
-	if v := judgeGate(gateProfile(bad), gateKey(), measuresOne(20*time.Millisecond), now); v.status != v1alpha1.GateRecordOnly || !strings.Contains(v.text, `"fast" does not parse`) {
+	if v := judgeGate(gateProfile(bad), gateKey(), measuresOne(20*time.Millisecond), now, nil); v.status != v1alpha1.GateRecordOnly || !strings.Contains(v.text, `"fast" does not parse`) {
 		t.Errorf("an unreadable entry: %+v", v)
 	}
-	if v := judgeGate(nil, gateKey(), measuresOne(20*time.Millisecond), now); v.status != v1alpha1.GateRecordOnly || !strings.Contains(v.text, "no entry matches") {
+	if v := judgeGate(nil, gateKey(), measuresOne(20*time.Millisecond), now, nil); v.status != v1alpha1.GateRecordOnly || !strings.Contains(v.text, "no entry matches") {
 		t.Errorf("no profile: %+v", v)
 	}
 }
@@ -416,70 +405,5 @@ func TestQualifiedMessageKeepsTheChecksText(t *testing.T) {
 	in.Status.Gate = &v1alpha1.InstanceGate{Verdict: v1alpha1.GatePassed}
 	if m := qualifiedMessage(in, checks); !strings.HasPrefix(m, checks+"; throughput gate: judged on the first qualification (Passed)") {
 		t.Errorf("after a verdict: %q", m)
-	}
-}
-
-// gatePass is a pass whose Provider's profile holds entries, and a passed-qualification
-// Instance of one worker on it, for gateRecord.
-func gatePass(entries ...v1alpha1.ExpectedPerformance) (*pass, *v1alpha1.Instance) {
-	in := &v1alpha1.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: "i", Labels: map[string]string{v1alpha1.LabelProvider: "prov"}},
-		Spec: v1alpha1.InstanceSpec{
-			DeploymentID: v1alpha1.FullDeploymentID("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-			Launch:       v1alpha1.Launch{Command: []string{"vllm", "serve", "/model", "--max-num-seqs=16"}, MaxNumSeqs: 16},
-		},
-		Status: v1alpha1.InstanceStatus{Conditions: []metav1.Condition{{
-			Type: v1alpha1.ConditionQualified, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPassed,
-			Message: "every check passed; throughput gate: judged after warm-up",
-		}}},
-	}
-	p := &pass{now: time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC), pvByName: map[string]*providerView{"prov": {profile: gateProfile(entries...)}}}
-	return p, in
-}
-
-func gateTP(tpot, ttft string) *v1alpha1.Throughput {
-	return &v1alpha1.Throughput{TimePerOutputToken: v1alpha1.Duration(tpot), TimeToFirstToken: v1alpha1.Duration(ttft), TargetSessions: 8}
-}
-
-var gateShapes = shapes{typical: 1024, outputTypical: 128, targetSessions: 8}
-
-// The status change is idempotent, so setStatus skips it on every later pass;
-// a would-miss writes the message and no gate record; a Passed one writes both;
-// and once a verdict is set nothing is judged.
-func TestGateRecordWritesOnceAndLeavesAWouldMissOpen(t *testing.T) {
-	key := gateKey()
-	key.DeploymentID = "0123456789ab"
-	p, in := gatePass(gateFixtureEntry(key))
-
-	miss := p.gateRecord(in, gateShapes, []*v1alpha1.Throughput{gateTP("41ms", "300ms")})
-	next := in.DeepCopy()
-	miss(&next.Status)
-	if next.Status.Gate != nil {
-		t.Errorf("a would-miss wrote the gate record %+v: the verdict stays unset", next.Status.Gate)
-	}
-	if m := next.Status.Conditions[0].Message; !strings.Contains(m, "would miss") || strings.Contains(m, "judged after warm-up") {
-		t.Errorf("a would-miss's message %q", m)
-	}
-	again := next.DeepCopy()
-	miss(&again.Status)
-	if !apiequality.Semantic.DeepEqual(next.Status, again.Status) {
-		t.Errorf("the same measurement wrote twice differently: %+v then %+v", next.Status, again.Status)
-	}
-
-	passed := p.gateRecord(in, gateShapes, []*v1alpha1.Throughput{gateTP("39ms", "300ms")})
-	next = in.DeepCopy()
-	passed(&next.Status)
-	if g := next.Status.Gate; g == nil || g.Verdict != v1alpha1.GatePassed || g.ReferenceDate != "2026-10-23" || len(g.Misses) != 0 {
-		t.Errorf("a pass wrote the gate record %+v, want Passed against 2026-10-23 and no misses", g)
-	}
-	again = next.DeepCopy()
-	passed(&again.Status)
-	if !apiequality.Semantic.DeepEqual(next.Status, again.Status) {
-		t.Errorf("the same pass wrote twice differently")
-	}
-
-	in.Status = next.Status
-	if f := p.gateRecord(in, gateShapes, []*v1alpha1.Throughput{gateTP("41ms", "300ms")}); f != nil {
-		t.Errorf("an Instance with a verdict was judged again")
 	}
 }

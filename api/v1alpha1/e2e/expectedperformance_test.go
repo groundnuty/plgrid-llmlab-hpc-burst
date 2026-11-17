@@ -2,7 +2,8 @@ package e2e
 
 // Expected performance's API (beta; HBEP-4, Platform profile schema, Expected performance; HBEP-4's Test plan row
 // "Expected performance (beta)"; #616 PR A): a PlatformProfile's spec.expectedPerformance, the reference
-// measurements the throughput gate reads, and a ModelDeployment's status.suspendedReferences, which hold the same key.
+// measurements the throughput gate reads, and a ModelDeployment's status.suspendedReferences and status.referenceMisses
+// (amendment 655), which hold the same key and name the profile it comes from.
 // Every value is written out here and invented: none comes from a spike or a live run.
 
 import (
@@ -14,6 +15,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -225,7 +227,7 @@ func TestExpectedPerformanceBounds(t *testing.T) {
 }
 
 // TestCapacityFlagsAlwaysHoldMaxNumSeqs and TestCapacityFlagNamesAreOneTo64Characters are the two rules of the key that
-// an expected-performance entry and a suspended reference share, each tried at both places.
+// an expected-performance entry, a suspended reference and a reference miss share, each tried at all three places.
 func TestCapacityFlagsAlwaysHoldMaxNumSeqs(t *testing.T) {
 	for _, site := range keySites() {
 		t.Run(site.name, func(t *testing.T) {
@@ -271,6 +273,9 @@ func keySites() []keySite {
 		}},
 		{"a ModelDeployment's suspended reference", func(t *testing.T, k v1alpha1.ReferenceKey) error {
 			return writeSuspended(t, suspended(k, "2026-11-10"))
+		}},
+		{"a ModelDeployment's reference miss", func(t *testing.T, k v1alpha1.ReferenceKey) error {
+			return writeReferenceMisses(t, referenceMiss(k, "2026-11-10"))
 		}},
 	}
 }
@@ -350,9 +355,10 @@ func TestExpectedPerformanceKeyIsUnique(t *testing.T) {
 }
 
 // dateSite is a place that holds a calendar date: try writes one there, with the rest of the object valid, and returns the
-// error of the write. Every date the API holds (an entry's date, a suspended reference's date, a gate verdict's
-// referenceDate on an Instance and on a start-up outcome) matches YYYY-MM-DD and must also be a real calendar date,
-// which a pattern cannot say (rules ...[].date#0, ...suspendedReferences[].date#0 and the two ...referenceDate#0).
+// error of the write. Every date the API holds (an entry's date, a suspended reference's date, a reference miss's date, a
+// gate verdict's referenceDate on an Instance and on a start-up outcome) matches YYYY-MM-DD and must also be a real
+// calendar date, which a pattern cannot say (rules ...[].date#0, ...suspendedReferences[].date#0,
+// ...referenceMisses[].date#0 and the two ...referenceDate#0).
 type dateSite struct {
 	name     string
 	field    string // the field's JSON name, which the refusal names
@@ -371,6 +377,9 @@ func dateSites() []dateSite {
 		}},
 		{"a suspended reference's date", "date", msgDate, false, func(t *testing.T, date string) error {
 			return writeSuspended(t, suspended(entry().ReferenceKey, date))
+		}},
+		{"a reference miss's date", "date", msgDate, false, func(t *testing.T, date string) error {
+			return writeReferenceMisses(t, referenceMiss(entry().ReferenceKey, date))
 		}},
 		{"an Instance gate's referenceDate", "referenceDate", msgRefDate, true, func(t *testing.T, date string) error {
 			return writeInstanceGate(t, &v1alpha1.InstanceGate{Verdict: v1alpha1.GatePassed, ReferenceDate: date})
@@ -429,6 +438,47 @@ func writeSuspended(t *testing.T, refs ...v1alpha1.SuspendedReference) error {
 	return c.Status().Update(bg(), got)
 }
 
+// referenceMiss is a reference miss of one profile's entry, with a key and a date, recorded at a fixed time from an
+// Instance and an Allocation named by invented UIDs.
+func referenceMiss(k v1alpha1.ReferenceKey, date string) v1alpha1.ReferenceMiss {
+	return v1alpha1.ReferenceMiss{PlatformProfile: "example-profile", ReferenceKey: k, Date: date,
+		InstanceUID: "uid-1", AllocationUID: "uid-2",
+		Time: metav1.NewTime(time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC))}
+}
+
+// writeReferenceMisses writes the reference misses to a fresh deployment's status and returns the error of that write.
+func writeReferenceMisses(t *testing.T, misses ...v1alpha1.ReferenceMiss) error {
+	t.Helper()
+	md := newModelDeployment(newNamespace(t), uniq("refmiss"))
+	must(t, c.Create(bg(), md), "create")
+	got := &v1alpha1.ModelDeployment{}
+	must(t, c.Get(bg(), objKey(md), got), "get")
+	got.Status.ReferenceMisses = misses
+	return c.Status().Update(bg(), got)
+}
+
+// writeReferenceMissWithout writes one reference miss to a fresh deployment's status with the JSON field named left
+// out of it, as a client that omits the field would write it, and returns the error of that write. The typed client
+// writes "" for a string left empty, which is a value, so it cannot show a field's absence.
+func writeReferenceMissWithout(t *testing.T, miss v1alpha1.ReferenceMiss, field string) error {
+	t.Helper()
+	md := newModelDeployment(newNamespace(t), uniq("without"))
+	must(t, c.Create(bg(), md), "create")
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("ModelDeployment"))
+	must(t, c.Get(bg(), objKey(md), u), "get")
+	raw, err := json.Marshal(miss)
+	must(t, err, "marshal the miss")
+	m := map[string]any{}
+	must(t, json.Unmarshal(raw, &m), "unmarshal the miss")
+	if _, ok := m[field]; !ok {
+		t.Fatalf("the miss has no %q to leave out: %v", field, m)
+	}
+	delete(m, field)
+	must(t, unstructured.SetNestedSlice(u.Object, []any{m}, "status", "referenceMisses"), "set status.referenceMisses")
+	return c.Status().Update(bg(), u)
+}
+
 // TestSuspendedReferencesRoundTripAndAreBounded: a suspended reference is kept as written, 32 are accepted and 33
 // refused, and it needs its date and its time.
 func TestSuspendedReferencesRoundTripAndAreBounded(t *testing.T) {
@@ -469,4 +519,138 @@ func TestSuspendedReferencesRoundTripAndAreBounded(t *testing.T) {
 	noTime := suspended(entry().ReferenceKey, "2026-11-10")
 	noTime.SuspendedTime = metav1.Time{}
 	requireRefused(t, writeSuspended(t, noTime), "suspendedTime")
+}
+
+// TestSuspendedReferenceNamesItsProfile: a suspended reference's platformProfile is kept when set, is left out of the
+// object when unset (a listing written before amendment 655 names no profile), and is at most 253 characters.
+func TestSuspendedReferenceNamesItsProfile(t *testing.T) {
+	named := func(profile string) v1alpha1.SuspendedReference {
+		r := suspended(entry().ReferenceKey, "2026-11-10")
+		r.PlatformProfile = profile
+		return r
+	}
+	// stored writes one suspended reference and returns it as the API server holds it, with only the fields it has.
+	stored := func(t *testing.T, r v1alpha1.SuspendedReference) map[string]any {
+		t.Helper()
+		md := newModelDeployment(newNamespace(t), uniq("suspended"))
+		must(t, c.Create(bg(), md), "create")
+		got := &v1alpha1.ModelDeployment{}
+		must(t, c.Get(bg(), objKey(md), got), "get")
+		got.Status.SuspendedReferences = []v1alpha1.SuspendedReference{r}
+		must(t, c.Status().Update(bg(), got), "write one suspended reference")
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("ModelDeployment"))
+		must(t, c.Get(bg(), objKey(md), u), "get")
+		items, _, err := unstructured.NestedSlice(u.Object, "status", "suspendedReferences")
+		must(t, err, "read status.suspendedReferences")
+		if len(items) != 1 {
+			t.Fatalf("%d suspended references read back, want 1", len(items))
+		}
+		return items[0].(map[string]any)
+	}
+	t.Run("set", func(t *testing.T) {
+		if got := stored(t, named("example-profile"))["platformProfile"]; got != "example-profile" {
+			t.Errorf("platformProfile reads back %v, want example-profile", got)
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		if got, present := stored(t, named(""))["platformProfile"]; present {
+			t.Errorf("platformProfile reads back %q, want it absent", got)
+		}
+	})
+	t.Run("253 characters", func(t *testing.T) {
+		must(t, writeSuspended(t, named(repeat(253))), "write a 253-character platformProfile")
+	})
+	t.Run("254 characters", func(t *testing.T) {
+		requireRefused(t, writeSuspended(t, named(repeat(254))), "platformProfile")
+	})
+}
+
+// TestReferenceMissesRoundTripAndAreBounded (amendment 655): a reference miss is kept as written, 32 are accepted and 33
+// refused, and each of its fields is needed and bounded: the profile's name is 1 to 253 characters, each UID 1 to 64.
+func TestReferenceMissesRoundTripAndAreBounded(t *testing.T) {
+	ns := newNamespace(t)
+	md := newModelDeployment(ns, "refmiss")
+	must(t, c.Create(bg(), md), "create")
+	got := &v1alpha1.ModelDeployment{}
+	must(t, c.Get(bg(), objKey(md), got), "get")
+	got.Status.ReferenceMisses = []v1alpha1.ReferenceMiss{{
+		PlatformProfile: "example-profile",
+		ReferenceKey: v1alpha1.ReferenceKey{
+			DeploymentID: "0123456789ab", CapacityFlags: flags("max-num-seqs", "16", "gpu-memory-utilization", "0.9"),
+			Sessions: 8, ContextTokens: 1024, OutputTokens: 128,
+		},
+		Date: "2026-11-10", InstanceUID: "uid-1", AllocationUID: "uid-2",
+		Time: metav1.NewTime(time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC)),
+	}}
+	must(t, c.Status().Update(bg(), got), "write one reference miss")
+	back := &v1alpha1.ModelDeployment{}
+	must(t, c.Get(bg(), objKey(md), back), "get")
+	if len(back.Status.ReferenceMisses) != 1 {
+		t.Fatalf("%d reference misses read back, want 1", len(back.Status.ReferenceMisses))
+	}
+	r := back.Status.ReferenceMisses[0]
+	for _, f := range []struct {
+		name      string
+		got, want any
+	}{
+		{"platformProfile", r.PlatformProfile, "example-profile"},
+		{"deploymentID", r.DeploymentID, "0123456789ab"},
+		{"capacityFlags", fmt.Sprint(r.CapacityFlags), "map[gpu-memory-utilization:0.9 max-num-seqs:16]"},
+		{"sessions", r.Sessions, int32(8)},
+		{"contextTokens", r.ContextTokens, int32(1024)},
+		{"outputTokens", r.OutputTokens, int32(128)},
+		{"date", r.Date, "2026-11-10"},
+		{"instanceUID", string(r.InstanceUID), "uid-1"},
+		{"allocationUID", string(r.AllocationUID), "uid-2"},
+		{"time", r.Time.UTC().Format(time.RFC3339), "2026-11-15T09:30:00Z"},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s reads back %v, want %v", f.name, f.got, f.want)
+		}
+	}
+
+	many := func(n int) []v1alpha1.ReferenceMiss {
+		var misses []v1alpha1.ReferenceMiss
+		for i := 1; i <= n; i++ {
+			misses = append(misses, referenceMiss(withKey(func(k *v1alpha1.ReferenceKey) { k.Sessions = int32(i) }).ReferenceKey, "2026-11-10"))
+		}
+		return misses
+	}
+	must(t, writeReferenceMisses(t, many(32)...), "write 32 reference misses")
+	requireRefused(t, writeReferenceMisses(t, many(33)...), "must have at most 32 items")
+
+	// with changes a valid miss: one field is set to a value the rule behind it refuses.
+	with := func(set func(*v1alpha1.ReferenceMiss)) v1alpha1.ReferenceMiss {
+		m := referenceMiss(entry().ReferenceKey, "2026-11-10")
+		set(&m)
+		return m
+	}
+	// The shared key's own bounds hold here too.
+	requireRefused(t, writeReferenceMisses(t, referenceMiss(withKey(func(k *v1alpha1.ReferenceKey) { k.DeploymentID = "0123456789a" }).ReferenceKey, "2026-11-10")), "deploymentID")
+	requireRefused(t, writeReferenceMisses(t, referenceMiss(withKey(func(k *v1alpha1.ReferenceKey) { k.OutputTokens = 1 }).ReferenceKey, "2026-11-10")), "outputTokens")
+
+	t.Run("the profile's name is 1 to 253 characters", func(t *testing.T) {
+		requireRefused(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.PlatformProfile = "" })), "platformProfile")
+		requireRefused(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.PlatformProfile = repeat(254) })), "platformProfile")
+		must(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.PlatformProfile = "x" })), "write a 1-character platformProfile")
+		must(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.PlatformProfile = repeat(253) })), "write a 253-character platformProfile")
+	})
+	t.Run("each UID is 1 to 64 characters", func(t *testing.T) {
+		requireRefused(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.InstanceUID = "" })), "instanceUID")
+		requireRefused(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.AllocationUID = "" })), "allocationUID")
+		requireRefused(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.InstanceUID = types.UID(repeat(65)) })), "instanceUID")
+		requireRefused(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.AllocationUID = types.UID(repeat(65)) })), "allocationUID")
+		must(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) {
+			m.InstanceUID, m.AllocationUID = types.UID(repeat(64)), types.UID(repeat(64))
+		})), "write two 64-character UIDs")
+		must(t, writeReferenceMisses(t, with(func(m *v1alpha1.ReferenceMiss) { m.InstanceUID, m.AllocationUID = "u", "v" })), "write two 1-character UIDs")
+	})
+	t.Run("a field left out is refused", func(t *testing.T) {
+		for _, field := range []string{"platformProfile", "date", "instanceUID", "allocationUID", "time"} {
+			t.Run(field, func(t *testing.T) {
+				requireRefused(t, writeReferenceMissWithout(t, referenceMiss(entry().ReferenceKey, "2026-11-10"), field), field)
+			})
+		}
+	})
 }

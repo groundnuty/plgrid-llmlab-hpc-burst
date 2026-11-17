@@ -21,6 +21,7 @@ var workerZeroSites = map[string]string{
 	"verify.go:workerRunning":            "one worker's start (starting, behind several) and its ready-phase healthSignal",
 	"verify.go:workerExited":             "as workerRunning",
 	"verify.go:worker0":                  "the report's worker-0, for workerRunning, workerExited and healthSignal",
+	"verify.go:starting":                 "one worker's start, and so its gate's one worker (the throughput gate judges each worker apart; several workers' are in startingWorkers, behind several)",
 	"writes.go:verificationGeneration":   "one worker's verification generation; several workers' is workerVerificationGeneration",
 	"routerhealth.go:verifiedGeneration": "one worker's verifiedGeneration; several workers' is in desiredWorkers",
 	"routerhealth.go:routerCheckSignal":  "one worker's router check; several workers' is workerRouterCheck, from readyWorkers",
