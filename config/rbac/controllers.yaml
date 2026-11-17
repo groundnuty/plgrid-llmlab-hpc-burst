@@ -24,8 +24,11 @@
 # A controller change that adds an API call extends its role in the same change. The rules of one resource
 # carry the reason in the comment above them. Three things that follow from how the clients are built:
 #   - A read through a manager's cached client (mgr.GetClient()) is a LIST and a WATCH of the kind: the
-#     informer's. A read through its API reader (mgr.GetAPIReader()) or a typed clientset is a GET or a
-#     LIST on its own. So a kind that is only ever read from the cache has no `get` below.
+#     informer's. client-go v0.35.3's reflector streams the initial state with a watch and falls back to a
+#     list (tools/cache/reflector.go:414-439, "expected if watchlist is not supported or disabled in
+#     kube-apiserver"), so a role without `list` would break against such a server; against envtest 1.36.2
+#     only the watch is seen. A read through its API reader (mgr.GetAPIReader()) or a typed clientset is a
+#     GET or a LIST on its own. So a kind that is only ever read from the cache has no `get` below.
 #   - Both Kubernetes event recorders write only CREATE and PATCH (client-go tools/record and tools/events),
 #     the first into core/v1 events, the second into events.k8s.io events.
 #   - A leader-election Lease lock is GET, CREATE and UPDATE (client-go resourcelock leaselock.go). Every
