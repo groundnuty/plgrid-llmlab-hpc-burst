@@ -50,6 +50,14 @@ const repeatEvery = provider.EventRepeatInterval
 // leaseReadTimeout bounds the read of the Lease for its UID.
 const leaseReadTimeout = 5 * time.Second
 
+// leaseTimeout is the bound on one Lease read: leaseReadTimeout, unless a test has set its own.
+func (p *Publisher) leaseTimeout() time.Duration {
+	if p.leaseTimeoutFor > 0 {
+		return p.leaseTimeoutFor
+	}
+	return leaseReadTimeout
+}
+
 type jobKind int
 
 const (
@@ -108,7 +116,7 @@ func (j *raiseJob) run(stopped func() bool) {
 		r.finish(j, false)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.p.ctx, leaseReadTimeout)
+	ctx, cancel := context.WithTimeout(r.p.ctx, r.p.leaseTimeout())
 	lease, err := spec.lease(ctx)
 	cancel()
 	if err != nil || lease == nil || lease.UID == "" {

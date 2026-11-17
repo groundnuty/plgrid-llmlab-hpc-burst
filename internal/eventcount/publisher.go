@@ -104,6 +104,8 @@ type Publisher struct {
 	afterPublish func(id string, ack *jetstream.PubAck, err error) error
 	// emitHook, when set (tests only), is called by a raise between its dead check and its recorder call.
 	emitHook func()
+	// leaseTimeoutFor, when set (tests only), replaces the bound on a Lease read.
+	leaseTimeoutFor time.Duration
 }
 
 // item is one event waiting for the log.

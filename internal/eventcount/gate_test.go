@@ -70,6 +70,7 @@ func TestANewRunIsNotGatedByAnOlderRunsRaise(t *testing.T) {
 	ctl := ControllerProvider("p1")
 	l := newBlockedLease("provider-p1", 1) // every read waits until released
 	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, l.read)
+	r.pub.leaseTimeoutFor = time.Hour // the blocked read waits for the test, whatever the time between the two runs
 	// Run 1: the log is down, and the event's retries run out. Its raise's Lease read waits.
 	r.raise(crashUID, "gate-a", "JobStarted")
 	clk.set(base.Add(101 * time.Second))
