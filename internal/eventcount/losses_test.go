@@ -186,9 +186,11 @@ func TestTheFirstLossAfterTheStartRaisesEventsNotLogged(t *testing.T) {
 	// The log comes up: the event the first loss raised, still within its own retries, is stored.
 	r.proc = r.d.Start(t)
 	r.proc.Ready()
-	eventually(t, "EventsNotLogged to be stored in the log", func() bool {
-		_, js := r.d.Connect(t)
-		return nodetest.StreamInfo(t, js, "HB_EVENTS").State.Msgs >= 1
+	// The first loss's event is stored by the retries; since that is the first publish the log takes, it
+	// closes the run, and the notifier raises the closing event a moment later.
+	_, js := r.d.Connect(t)
+	eventually(t, "both EventsNotLogged to be stored in the log", func() bool {
+		return nodetest.StreamInfo(t, js, eventlog.StreamEvents).State.Msgs >= 2
 	})
 	r.settled()
 	// The log then holds the event the first loss raised, and, since it was the first publish the log
@@ -243,15 +245,21 @@ func TestEventsNotLoggedAtMostOncePerHourAndOnceMoreOnReturn(t *testing.T) {
 	if !strings.Contains(closing.note, "takes events again") || !strings.Contains(closing.note, "from 2026-11-17T12:01:41Z") {
 		t.Errorf("the closing note is %q, want it to say the log takes events again, and since when", closing.note)
 	}
-	var inLog int
-	for _, m := range r.read() {
-		_, d, _ := Decode(m.Payload)
-		if d.Reason == ReasonEventsNotLogged && strings.Contains(d.Note, "takes events again") {
-			inLog++
+	// The closing event is queued a moment after the recorder is handed it: wait for the log to hold it.
+	closingInLog := func() int {
+		var n int
+		for _, m := range r.read() {
+			_, d, _ := Decode(m.Payload)
+			if d.Reason == ReasonEventsNotLogged && strings.Contains(d.Note, "takes events again") {
+				n++
+			}
 		}
+		return n
 	}
-	if inLog != 1 {
-		t.Errorf("the log holds %d closing EventsNotLogged, want 1: it shows the span it lacks", inLog)
+	eventually(t, "the closing EventsNotLogged to be in the log", func() bool { return closingInLog() >= 1 })
+	r.settled()
+	if n := closingInLog(); n != 1 {
+		t.Errorf("the log holds %d closing EventsNotLogged, want 1: it shows the span it lacks", n)
 	}
 }
 
