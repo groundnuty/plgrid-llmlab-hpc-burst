@@ -88,6 +88,10 @@ type Counter struct {
 	// route and its loss gate then, since its manager has stopped for good.
 	mu       sync.Mutex
 	onForget map[string][]func()
+
+	// forgetMid, when set (tests only), is called by Forget between retiring the controller's route and
+	// deleting its series, the window in which an event of the controller can still be lost.
+	forgetMid func()
 }
 
 // forgetHook registers f to run when the controller's series are forgotten.
@@ -156,11 +160,12 @@ func (c *Counter) Zero(controller string, series []Series) {
 // now of another kind) raises nothing more, so series created at 0 for it would
 // read as a Provider that raised nothing. A series that does not exist is
 // skipped.
+//
+// The controller is retired first and its series deleted after: the hooks mark its publisher route dead, and
+// a dead route counts no loss and raises nothing, so no event of the controller that is still queued, or
+// whose EventsNotLogged is being raised, can bring a series back once it is deleted (the delta review of
+// #697, 17 Nov 2026).
 func (c *Counter) Forget(controller string, series []Series) {
-	for _, s := range series {
-		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
-	}
-	c.unlogged.DeleteLabelValues(controller)
 	c.mu.Lock()
 	hooks := c.onForget[controller]
 	delete(c.onForget, controller)
@@ -168,6 +173,13 @@ func (c *Counter) Forget(controller string, series []Series) {
 	for _, f := range hooks {
 		f()
 	}
+	if c.forgetMid != nil {
+		c.forgetMid()
+	}
+	for _, s := range series {
+		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
+	}
+	c.unlogged.DeleteLabelValues(controller)
 }
 
 // count adds one event to its series.
