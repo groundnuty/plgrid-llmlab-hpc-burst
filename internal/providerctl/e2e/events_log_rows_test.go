@@ -42,10 +42,12 @@ func (r *evRig) leaseAPIEvents(reason string) []eventsv1.Event {
 
 // Down past the retries (the publisher's budget shortened to 2 s), with the API: the emitter is a real Provider
 // manager's typed recorder, its 500 events are about five Allocations, and the log is SIGKILLed at a seeded random point
-// and stays down until the retries have run out. The stream's ids plus the counter's value total at least 500, and every
-// stream id is one the emitter raised. One EventsNotLogged follows the log's return, in the API and in the log, regarding
+// and stays down until the retries have run out. Whatever the node's speed, a fast one can store all 500 before the kill,
+// so a further 25 events are raised after it: they meet a dead log and are lost, and the branch always has losses. The
+// stream's ids plus the counter's value total at least all the events raised, and every stream id is one the emitter raised. One EventsNotLogged follows the log's return, in the API and in the log, regarding
 // the Provider's own provider-<name> Lease.
 func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
+	const crashAfterKill = 25
 	seed := time.Now().UnixNano()
 	if s := os.Getenv("HPCBURST_TEST_SEED"); s != "" {
 		var err error
@@ -64,17 +66,24 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 		allocs = append(allocs, r.newAlloc(fmt.Sprintf("o%d", i), "3h"))
 	}
 	raised := map[string]string{} // id -> the Allocation's UID
-	for n := 0; n < 500; n++ {
+	raise := func(n int) {
 		a := allocs[n%5]
 		id := fmt.Sprintf("crash-%03d", n)
 		raised[id] = string(a.UID)
 		r.typed.EventfID(id, a, nil, provider.EventKindOrdinary, "JobStarted", "ready", "event %d", n)
+	}
+	for n := 0; n < 500; n++ {
+		raise(n)
 	}
 	_, js := r.logDir.Connect(t)
 	eventually(t, fmt.Sprintf("the stream to hold %d events", kill), 60*time.Second, func() bool {
 		return nodetest.StreamInfo(t, js, eventlog.StreamEvents).State.Msgs >= kill
 	})
 	r.logProc.Kill()
+	// The log is dead now, so these are lost whatever was stored before the kill.
+	for n := 500; n < 500+crashAfterKill; n++ {
+		raise(n)
+	}
 
 	// The retries run out. The first loss raises EventsNotLogged, which the API shows; its own publish, to the
 	// dead log, runs out too, so wait for it to be shown and then for the publisher to hold nothing.
@@ -85,7 +94,7 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 		t.Fatalf("no event was lost with the log down past the retries (kill at %d)", kill)
 	}
 	// The counter also counts the EventsNotLogged that ran out against the dead log: each was raised while the
-	// log was down, so each was lost, and none is among the 500. The raised-events counter holds how many were
+	// log was down, so each was lost, and none is among the events raised. The raised-events counter holds how many were
 	// raised (exactly, by HBEP-8's rule); subtracting them takes away the unit of slack they would give an event
 	// that was neither stored nor counted.
 	lostEvents := lost - r.count(r.key(eventcount.ActionDegraded, eventcount.ReasonEventsNotLogged, provider.EventKindWarning))
@@ -126,9 +135,9 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 			t.Errorf("the log holds %s (%s on %s), which the emitter did not raise", m.ID, m.Data.Reason, m.Subject)
 		}
 	}
-	t.Logf("500 raised: %d in the stream; the counter reads %v, %v of it EventsNotLogged that ran out: %v accounted for", stored, lost, lost-lostEvents, float64(stored)+lostEvents)
-	if float64(stored)+lostEvents < 500 {
-		t.Errorf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least 500: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents)
+	t.Logf("%d raised: %d in the stream; the counter reads %v, %v of it EventsNotLogged that ran out: %v accounted for", len(raised), stored, lost, lost-lostEvents, float64(stored)+lostEvents)
+	if float64(stored)+lostEvents < float64(len(raised)) {
+		t.Errorf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least %d: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents, len(raised))
 	}
 	if closing != 1 {
 		t.Errorf("the log holds %d EventsNotLogged closing the run, want exactly one after the log's return", closing)
