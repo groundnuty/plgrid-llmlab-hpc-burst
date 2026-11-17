@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -31,5 +32,36 @@ func TestAgentEnvCarriesTheVariablesAndAsksOnlyAtATerminal(t *testing.T) {
 	}
 	if env.IsTerminal() {
 		t.Error("a buffer is not a terminal")
+	}
+}
+
+// A command asks only when stdin AND stdout are terminals. The files are real, so that their descriptors differ,
+// and the check on a descriptor is a stand-in that names which of them is a terminal.
+func TestAskOnlyWhenStdinAndStdoutAreBothTerminals(t *testing.T) {
+	in, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct {
+		name          string
+		inTTY, outTTY bool
+		stdout        any
+		want          bool
+	}{
+		{"both are terminals", true, true, out, true},
+		{"stdout is a terminal and stdin is not (a pipe feeds the answers)", false, true, out, false},
+		{"stdin is a terminal and stdout is not (the output is redirected)", true, false, out, false},
+		{"neither is", false, false, out, false},
+		{"stdout is not a file at all", true, true, &bytes.Buffer{}, false},
+	} {
+		isTerm := func(fd int) bool { return (fd == int(in.Fd()) && r.inTTY) || (fd == int(out.Fd()) && r.outTTY) }
+		w, _ := r.stdout.(interface{ Write([]byte) (int, error) })
+		if got := bothTerminals(isTerm, in, w); got != r.want {
+			t.Errorf("%s: %v, want %v", r.name, got, r.want)
+		}
 	}
 }

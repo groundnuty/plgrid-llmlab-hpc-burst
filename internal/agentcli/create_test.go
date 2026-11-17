@@ -3,6 +3,7 @@ package agentcli
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -219,4 +220,45 @@ func TestAnOperationThatExistsAlreadyConfirmedIsNotAskedAgain(t *testing.T) {
 	if got := w.writes(); len(got) != 1 {
 		t.Errorf("writes %v: a retry of a confirmed request writes only its create, which is refused", got)
 	}
+}
+
+// Without a terminal nothing is asked, whatever stdin holds: a "y" on a pipe is not a person at a terminal, so the
+// Operation is made and its plan printed, and nothing is confirmed. A test that feeds no input cannot see the gate,
+// since reading nothing answers no; and the line "confirm with:" is also a part of the line a declined prompt prints
+// ("not confirmed; confirm with:"), so it proves nothing by itself. Four things are asserted: the stored confirm is
+// absent, the create is the one write, no prompt was printed, and no decline was.
+func assertNothingAsked(t *testing.T, w *world, name string) {
+	t.Helper()
+	if op := w.operation(name); op.Spec.Confirm != nil {
+		t.Errorf("the stored confirm is %v: an answer on stdin confirmed a plan with no terminal", op.Spec.Confirm)
+	}
+	if got := w.writes(); len(got) != 1 || got[0] != "create *v1alpha1.Operation" {
+		t.Errorf("writes %v, want the one create", got)
+	}
+	lacks(t, "stdout", w.out.String(), "[y/N]", "not confirmed")
+	if !regexp.MustCompile(`(?m)^confirm with: hpcburst confirm ` + regexp.QuoteMeta(name) + ` --plan ` + planAB + ` -n ` + testNS + `$`).MatchString(w.out.String()) {
+		t.Errorf("stdout has no line that starts with the confirm command:\n%s", w.out.String())
+	}
+}
+
+func TestScaleWithoutATerminalNeverAsksEvenWhenStdinSaysYes(t *testing.T) {
+	w := newWorld(t, nil)
+	w.names = []string{"op-nnnnnnnnnn"}
+	w.tty = false
+	w.controller("op-nnnnnnnnnn", simplePlan(planAB), "")
+	if code := w.run("y\ny\nyes\n", "scale", "m", "--instances", "1"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	assertNothingAsked(t, w, "op-nnnnnnnnnn")
+}
+
+func TestReleaseWithoutATerminalNeverAsksEvenWhenStdinSaysYes(t *testing.T) {
+	w := newWorld(t, []client.Object{alloc("a1", "m1", nil)})
+	w.names = []string{"op-rrrrrrrrrr"}
+	w.tty = false
+	w.controller("op-rrrrrrrrrr", simplePlan(planAB), "")
+	if code := w.run("y\n", "release", "a1"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	assertNothingAsked(t, w, "op-rrrrrrrrrr")
 }

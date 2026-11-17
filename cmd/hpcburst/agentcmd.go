@@ -26,9 +26,14 @@ func agentEnv(stdout io.Writer) agentcli.Env {
 		Kubeconfig:   os.Getenv("KUBECONFIG"),
 		Home:         os.Getenv("HOME"),
 		XDGStateHome: os.Getenv("XDG_STATE_HOME"),
-		IsTerminal: func() bool {
-			out, ok := stdout.(*os.File)
-			return ok && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(out.Fd()))
-		},
+		IsTerminal:   func() bool { return bothTerminals(term.IsTerminal, os.Stdin, stdout) },
 	}
+}
+
+// bothTerminals reports whether stdin and stdout are both terminals: only then may a command ask a question,
+// since a prompt on a pipe or an answer read from one is not a person at a terminal. isTerm is the check on a
+// file descriptor.
+func bothTerminals(isTerm func(fd int) bool, stdin *os.File, stdout io.Writer) bool {
+	out, ok := stdout.(*os.File)
+	return ok && isTerm(int(stdin.Fd())) && isTerm(int(out.Fd()))
 }
