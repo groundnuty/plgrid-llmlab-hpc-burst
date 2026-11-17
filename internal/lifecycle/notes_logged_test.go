@@ -99,6 +99,27 @@ func TestAnAllocationRefusedEventNamesNoPathUserAccountOrGrant(t *testing.T) {
 	}
 }
 
+// An Instance whose Allocation is set Refused ends with the end reason AllocationRefused, read back from the Instance
+// itself: the reason the start-up outcome table (outcomes.go) classifies, not the event the pass raises beside it.
+func TestARefusedAllocationEndsItsInstanceWithAllocationRefused(t *testing.T) {
+	rg := newRig(t)
+	instName, allocName := firstAllocation(t, rg)
+	a, ok := rg.allocation(allocName)
+	if !ok {
+		t.Fatalf("Allocation %s is gone", allocName)
+	}
+	a.Status.AtProvider.Phase, a.Status.AtProvider.Reason = v1alpha1.AllocationRefused, "example refusal"
+	if err := rg.c.Status().Update(rg.ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	rg.until(10*time.Minute, 10*time.Second, "the Instance ended", func() bool {
+		return rg.instance(instName).Status.Phase == v1alpha1.InstanceEnded
+	})
+	if in := rg.instance(instName); in.Status.EndReason != v1alpha1.ReasonAllocationRefused {
+		t.Fatalf("the Instance's end reason is %q, want %s", in.Status.EndReason, v1alpha1.ReasonAllocationRefused)
+	}
+}
+
 // A RelayEndedForGood Allocation, whose condition message quotes the agent's
 // staging path as an EndFailed from the relay line does, ends its Instance with
 // an event whose note is the code and a fixed description.
