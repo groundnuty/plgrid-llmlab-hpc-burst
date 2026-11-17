@@ -9,13 +9,17 @@ package main
 //     authenticates, through a SelfSubjectReview made WITH that file, as its own ServiceAccount of
 //     hpcburst-system, never as the administrator;
 //   - the token's life is a year, from the token's own exp claim;
-//   - the API server's audit log FILE, which is today's Metadata policy, holds a write made with the lifecycle
+//   - the API server's audit log FILE holds a write made with the lifecycle
 //     identity under user.username = the lifecycle ServiceAccount, and the real front's Lease writes under the
 //     front's, so the real front process runs on its identity; the administrator's name is on neither;
+//   - up writes the embedded audit policy and starts k3s with the flags that keep every rotated file, gzipped (read from
+//     k3s's argument list), and an agent's Operation create is in the audit log FILE at RequestResponse, under the
+//     agent's user name (issue #660, PR B);
 //   - down leaves the files, and the next up issues new tokens, with new expiries, to the same paths;
 //   - status lists each identity, valid, with its expiry and no warning.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/audit"
 )
 
 const (
@@ -182,6 +189,66 @@ func TestControllerIdentitiesOnARealK3s(t *testing.T) {
 		if e.ResponseStatus.Code == 403 && strings.HasPrefix(e.User.Username, controllerSA) {
 			t.Errorf("a controller identity was refused (403): %s %s %q by %s", e.Verb, e.ObjectRef.Resource, e.ObjectRef.Name, e.User.Username)
 		}
+	}
+
+	// ---- the audit policy and its rotation (HBEP-10, Audit; issue #660, PR B) ----
+	// up wrote the embedded policy, owner only; k3s runs with the flags that keep every rotated file, gzipped
+	// (read from the process's own argument list); and an agent's Operation create is in the log FILE at
+	// RequestResponse, with its body, under the agent's user name.
+	policyPath := filepath.Join(h.dir, "audit-policy.yaml")
+	if got, err := os.ReadFile(policyPath); err != nil || !bytes.Equal(got, audit.Policy) {
+		t.Errorf("up did not write the embedded audit policy to %s: %v", policyPath, err)
+	}
+	if fi, err := os.Stat(policyPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the audit policy file: %v, %v, want mode 600", fi, err)
+	}
+	k3sArgv := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", readState(t, h.dir).Processes[0].PID)), "\x00"), "\x00")
+	argIs := func(prefix, suffix string) bool {
+		for _, a := range k3sArgv {
+			if strings.HasPrefix(a, prefix) && strings.HasSuffix(a, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range []struct{ prefix, suffix string }{
+		{"--kube-apiserver-arg=audit-policy-file=", "/audit-policy.yaml"}, {"--kube-apiserver-arg=audit-log-path=", "/logs/audit.log"},
+		{"--kube-apiserver-arg=audit-log-maxsize=100", ""}, {"--kube-apiserver-arg=audit-log-maxbackup=0", ""},
+		{"--kube-apiserver-arg=audit-log-maxage=0", ""}, {"--kube-apiserver-arg=audit-log-compress=true", ""},
+	} {
+		if !argIs(f.prefix, f.suffix) {
+			t.Errorf("k3s's argument list has no %s...%s: the audit flags are not what the launcher installs", f.prefix, f.suffix)
+		}
+	}
+	for _, a := range k3sArgv {
+		if strings.HasPrefix(a, "--kube-apiserver-arg=audit-log-maxbackup=") && a != "--kube-apiserver-arg=audit-log-maxbackup=0" {
+			t.Errorf("k3s runs with %s: a rotated audit file would be removed", a)
+		}
+	}
+	for _, p := range []string{filepath.Join(h.dir, "logs"), auditPath} {
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("%s: %v, %v, want owner only", p, fi, err)
+		}
+	}
+	agent := cli(t, "identity", "add", "agent-a", "--json", "--state-dir", h.dir)
+	if agent.code != exitOK {
+		t.Fatalf("identity add agent-a exited %d: %s", agent.code, agent.err)
+	}
+	var agentID identityJSON
+	parseJSON(t, agent.out, &agentID)
+	_, agentDyn := kubeClients(t, agentID.Kubeconfig)
+	const opName = "audit-agent-op"
+	waitFor(t, 60*time.Second, "agent-a's Operation create, accepted", func() bool {
+		_, err := agentDyn.Resource(opGVR).Namespace("default").Create(ctx, toUnstructured(t, operationFor(agentID.Username, opName), "Operation"), metav1.CreateOptions{})
+		return err == nil || apierrors.IsAlreadyExists(err) // the agent's role is the wide one a moment after up returns
+	})
+	waitFor(t, 30*time.Second, "the agent's Operation create in the audit log file", func() bool {
+		_, evs := readAudit(t, auditPath, true)
+		return findAuditBy(evs, "create", "operations", opName, agentID.Username) != nil
+	})
+	_, evs = readAudit(t, auditPath, true)
+	if e := findAuditBy(evs, "create", "operations", opName, agentID.Username); e == nil || e.Level != "RequestResponse" || !e.hasBody {
+		t.Errorf("the agent's Operation create is logged as %+v, want level RequestResponse with a body, under %s", e, agentID.Username)
 	}
 
 	// ---- status: each identity valid, with its expiry and no warning ----
