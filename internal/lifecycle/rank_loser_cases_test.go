@@ -273,31 +273,37 @@ func TestAKeptLoserThatFailsACheckIsReleased(t *testing.T) {
 	}
 }
 
-// TestAKeptLoserIsSurplusWhileTheDeploymentIsShort: instances 2. The first primary P is still pending on A behind a 10 h
-// wait, and the second's hedge has M1 on A (started 08:00:20) and M2 on B, which wins at 08:01:10 measuring 20 ms. The
-// deployment is one primary short, so by its rank alone (started, above pending) M1 would be chosen; it is the surplus
-// of A all the same (HBEP-7, How it counts: a hedge's started loser kept as a candidate is surplus on its Provider
-// too), so it is ranked: at 08:11:00, measuring 18.0 ms against M2's 20, it ends HedgeLost, where a chosen M1 would
-// have become ready unranked. P stays pending and chosen, and no Allocation is made: three jobs in all, P's, M1's and
-// M2's. Members are seeded.
-func TestAKeptLoserIsSurplusWhileTheDeploymentIsShort(t *testing.T) {
-	h, p, m1, m2 := klMissingA(t, []pfake.Script{{QueueWait: 10 * time.Hour}, {}}, 2, rk180)
+// TestAKeptLoserIsNoPrimaryWhileTheDeploymentIsShort: instances 2. P, the first primary, is ready on A at 08:01:10 and
+// its job fails at 08:04:20 (FailAfter 4 min from its start at 08:00:20). The second's hedge has M1 on A (started
+// 08:00:20, still verifying) and M2 on B, which wins at 08:01:10 measuring 20 ms. M1 is a candidate, the surplus of A
+// (HBEP-7, How it counts: a hedge's started loser kept as a candidate is surplus on its Provider too), not a primary:
+// so when P ends the deployment is a primary short, and the missing primary is submitted in that pass, at once: a
+// fourth job in all, P's, M1's, M2's and the new one, where a candidate counted as a primary would leave the
+// deployment at its two until M1 ended. M1 passes at 08:11:00, measuring 18.0 ms, and ends HedgeLost, ranked against
+// M2 alone; the new primary still pends, and no further job is made. Members are seeded.
+func TestAKeptLoserIsNoPrimaryWhileTheDeploymentIsShort(t *testing.T) {
+	fail := 4 * time.Minute
+	h, p, m1, m2 := klMissingA(t, []pfake.Script{{FailAfter: &fail}, {}, {QueueWait: 10 * time.Hour}}, 2, rk180)
 	if in := h.mustInstance(m1); ended(in) || in.Annotations[annotationCandidateOf] != m2 {
 		t.Fatalf("M1 is %s with candidate-of %q at the win, want it kept as M2's candidate", in.Status.Phase, in.Annotations[annotationCandidateOf])
 	}
-	if a, _ := h.allocation(h.mustInstance(p).Spec.AllocationRef.Name); a == nil || jobStarted(a) {
-		t.Fatalf("P's job started, want it pending behind its 10 h wait: %+v", a)
+	if subs := h.sbatches(); subs != 3 {
+		t.Fatalf("%d jobs at the win, want P's, M1's and M2's", subs)
+	}
+	hoStepTo(h.rig, hoT(8, 4, 40), 10*time.Second, nil)
+	if in := h.mustInstance(p); !ended(in) || in.Status.EndReason == "" || cleanEnd(in.Status.EndReason) {
+		t.Fatalf("P is %s (end %q) at 08:04:40, want ended for a failure: the fixture's primary did not fail", in.Status.Phase, in.Status.EndReason)
+	}
+	if subs := h.sbatches(); subs != 4 {
+		t.Fatalf("%d jobs at 08:04:40, want 4: the missing primary is submitted when P ends, M1 being no primary", subs)
 	}
 	hoStepTo(h.rig, hoT(8, 11, 0), 10*time.Second, nil)
 	l := h.mustInstance(m1)
 	if !ended(l) || l.Status.EndReason != v1alpha1.ReasonHedgeLost || l.Status.EndTime == nil || !l.Status.EndTime.Time.Equal(hoT(8, 11, 0)) {
-		t.Fatalf("M1 is %s (end %q at %v) at 08:11:00, want ended for HedgeLost at 08:11:00: it is surplus, so it is ranked and 18.0 ms is not faster than 20 ms by more than 10%%", l.Status.Phase, l.Status.EndReason, l.Status.EndTime)
+		t.Fatalf("M1 is %s (end %q at %v) at 08:11:00, want ended for HedgeLost at 08:11:00: 18.0 ms is not faster than M2's 20 ms by more than 10%%", l.Status.Phase, l.Status.EndReason, l.Status.EndTime)
 	}
-	if in := h.mustInstance(p); ended(in) || jobStarted(h.allocOrNil(in.Spec.AllocationRef.Name)) {
-		t.Fatalf("P is %s at 08:11:00, want it pending still", in.Status.Phase)
-	}
-	if subs := h.sbatches(); subs != 3 {
-		t.Fatalf("%d jobs submitted, want P's, M1's and M2's only", subs)
+	if subs := h.sbatches(); subs != 4 {
+		t.Fatalf("%d jobs at 08:11:00, want 4", subs)
 	}
 }
 
