@@ -21,9 +21,11 @@ package alpha
 // its dial-home listener 28474; nothing else here binds.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -277,6 +279,107 @@ func opsPolicies(op *v1alpha1.Operation) map[string]map[string]bool {
 	return out
 }
 
+// dump logs the state the stand-in's waits and checks read, for the reading of a failure: every Instance of the two deployments
+// (ended ones too), every Operation's status, each deployment's spec and counts, and the fake Slurm's jobs by tag. It prints no
+// value of a live system: the cluster is the fake Slurm, and no job ID, path or credential is logged, only names, UIDs of this
+// run's objects, phases, times, reasons and job states.
+func (s *opsStand) dump(label string) {
+	t := s.t
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var b strings.Builder
+	fmt.Fprintf(&b, "stand-in state, %s (at %s)\n", label, time.Now().UTC().Format(time.RFC3339))
+	for _, name := range []string{opsMDP, opsMDQ} {
+		var md v1alpha1.ModelDeployment
+		if err := s.person.c.Get(ctx, client.ObjectKey{Namespace: stack.Namespace, Name: name}, &md); err != nil {
+			fmt.Fprintf(&b, "ModelDeployment %s: %v\n", name, err)
+			continue
+		}
+		over := "unset"
+		if md.Spec.OverAllocation != nil {
+			over = fmt.Sprint(*md.Spec.OverAllocation)
+		}
+		fmt.Fprintf(&b, "ModelDeployment %s: spec.instances %d, overAllocation %s, generation %d; status instances %d, ready %d, desired %d\n",
+			name, md.Spec.Instances, over, md.Generation, md.Status.Instances, md.Status.ReadyInstances, md.Status.DesiredInstances)
+		for _, c := range md.Status.Conditions {
+			fmt.Fprintf(&b, "  condition %s=%s (%s): %.300s\n", c.Type, c.Status, c.Reason, c.Message)
+		}
+		var il v1alpha1.InstanceList
+		if err := s.person.c.List(ctx, &il, client.InNamespace(stack.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(name)}); err != nil {
+			fmt.Fprintf(&b, "  Instances: %v\n", err)
+			continue
+		}
+		sort.Slice(il.Items, func(i, j int) bool { return il.Items[i].CreationTimestamp.Before(&il.Items[j].CreationTimestamp) })
+		for _, in := range il.Items {
+			ready, lease, end := "-", "-", "-"
+			if in.Status.ReadyTime != nil {
+				ready = in.Status.ReadyTime.UTC().Format(time.TimeOnly)
+			}
+			if in.Status.LeaseEnd != nil {
+				lease = in.Status.LeaseEnd.UTC().Format(time.TimeOnly)
+			}
+			if in.Status.EndTime != nil {
+				end = in.Status.EndTime.UTC().Format(time.TimeOnly)
+			}
+			fmt.Fprintf(&b, "  Instance %s uid %s: phase %q, created %s, ready %s, leaseEnd %s, ended %s (%q), allocation %s, predecessor %q, deleting %v\n",
+				in.Name, in.UID, in.Status.Phase, in.CreationTimestamp.UTC().Format(time.TimeOnly), ready, lease, end, in.Status.EndReason,
+				in.Spec.AllocationRef.Name, in.Annotations[v1alpha1.AnnotationPredecessor], !in.DeletionTimestamp.IsZero())
+		}
+		var al v1alpha1.AllocationList
+		if err := s.person.c.List(ctx, &al, client.InNamespace(stack.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(name)}); err != nil {
+			fmt.Fprintf(&b, "  Allocations: %v\n", err)
+			continue
+		}
+		jobs := map[string]string{}
+		for _, j := range s.cl.Plat.Jobs() {
+			jobs[j.Name] = j.State
+		}
+		for _, a := range al.Items {
+			tag := v1alpha1.JobTag(a.Namespace, a.Name, a.UID)
+			fmt.Fprintf(&b, "  Allocation %s uid %s: deleting %v, release cause %q; fake Slurm job under its tag %s: %q\n",
+				a.Name, a.UID, !a.DeletionTimestamp.IsZero(), a.Annotations[v1alpha1.AnnotationReleaseCause], tag, jobs[tag])
+		}
+	}
+	var ol v1alpha1.OperationList
+	if err := s.person.c.List(ctx, &ol, client.InNamespace(stack.Namespace)); err != nil {
+		fmt.Fprintf(&b, "Operations: %v\n", err)
+	}
+	for _, op := range ol.Items {
+		fmt.Fprintf(&b, "Operation %s: %s of %s, phase %q, finishedAt %v\n", op.Name, op.Spec.Action, op.Spec.ModelDeploymentRef.Name, op.Status.Phase, op.Status.FinishedAt)
+		if op.Status.Plan != nil {
+			for _, pt := range op.Status.Plan.Targets {
+				fmt.Fprintf(&b, "  plan target %s %s: %s, provider %s, needsApproval %v\n", pt.Kind, pt.Name, pt.Effect, pt.Provider, pt.NeedsApproval)
+			}
+		}
+		for _, c := range op.Status.Committed {
+			fmt.Fprintf(&b, "  committed %s %s: %s\n", c.Kind, c.Name, c.Effect)
+		}
+		for _, o := range op.Status.Targets {
+			fmt.Fprintf(&b, "  outcome %s %s: %s %s %.300s\n", o.Kind, o.Name, o.State, o.Reason, o.Message)
+		}
+		for _, c := range op.Status.Conditions {
+			fmt.Fprintf(&b, "  condition %s=%s (%s): %.300s\n", c.Type, c.Status, c.Reason, c.Message)
+		}
+	}
+	t.Log(b.String())
+}
+
+// instancesLine is the one-line state of a deployment's Instances for a wait's failure message.
+func (s *opsStand) instancesLine(md string) string {
+	var l v1alpha1.InstanceList
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.person.c.List(ctx, &l, client.InNamespace(stack.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md)}); err != nil {
+		return err.Error()
+	}
+	sort.Slice(l.Items, func(i, j int) bool { return l.Items[i].CreationTimestamp.Before(&l.Items[j].CreationTimestamp) })
+	var parts []string
+	for _, in := range l.Items {
+		parts = append(parts, fmt.Sprintf("%s %s (predecessor %q, ended %q)", in.Name, in.Status.Phase, in.Annotations[v1alpha1.AnnotationPredecessor], in.Status.EndReason))
+	}
+	return strings.Join(parts, "; ")
+}
+
 // TestStandInOperations is the owner's Sano example and an approved End, end to end on the stand-in cluster, as the file's
 // comment says.
 //
@@ -309,6 +412,13 @@ func TestStandInOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &opsStand{t: t, h: h, cl: cl, person: opsWhoIs(t, "person", admin, adminCS)}
+	// Whatever wait times out, or check fails, the state it read is logged once, before the stack is stopped (a cleanup runs
+	// ahead of those StartCluster and StartHost registered): the run keeps no artifacts, so the log is all there is.
+	t.Cleanup(func() {
+		if t.Failed() {
+			s.dump("at the failure")
+		}
+	})
 
 	// The Providers P and Q over the one login node, and a deployment of two Instances on each.
 	provP, provQ := stack.BatchProvider(creds), stack.BatchProvider(creds)
@@ -359,6 +469,8 @@ func TestStandInOperations(t *testing.T) {
 	}
 	stack.Create(t, admin, policyP)
 
+	s.dump("before A's Scale of the deployment on P")
+
 	// A's Scale of the deployment on P, to one Instance: its targets are on Provider P, whose policy names A, so A's own
 	// approval runs it.
 	planP := s.request(s.a, "scale-p", opsMDP, v1alpha1.OperationSpec{Action: v1alpha1.OperationActionScale, Scale: &v1alpha1.ScaleParameters{Instances: 1}})
@@ -375,9 +487,10 @@ func TestStandInOperations(t *testing.T) {
 	if got := s.deployment(opsMDP).Spec.Instances; got != 1 {
 		t.Errorf("after A's own approval, spec.instances of P's deployment is %d, want 1", got)
 	}
+	s.dump("A's Scale of the deployment on P is Done")
 	stack.WaitState(t, 5*time.Minute, "one ready Instance of "+opsMDP, func() (bool, string) {
 		live, ready := s.instancesOf(opsMDP)
-		return len(live) == 1 && len(ready) == 1, fmt.Sprintf("%d live, %d ready", len(live), len(ready))
+		return len(live) == 1 && len(ready) == 1, fmt.Sprintf("%d live, %d ready: %s", len(live), len(ready), s.instancesLine(opsMDP))
 	})
 
 	// A's Scale of the deployment on Q: Provider Q has no policy of its own, so the global policy applies, which names the
