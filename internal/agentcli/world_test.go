@@ -184,10 +184,22 @@ func newWorld(t *testing.T, objs []client.Object, f ...interceptor.Funcs) *world
 // run executes one command line and returns its exit code; the output is in w.out and w.errs.
 func (w *world) run(stdin string, args ...string) int {
 	w.t.Helper()
+	return w.runReader(strings.NewReader(stdin), args...)
+}
+
+// runReader is run with a stdin that is a reader of the test's own, which can act when it is read: a person who answers a
+// prompt does so after the controller has moved on.
+func (w *world) runReader(stdin io.Reader, args ...string) int {
+	w.t.Helper()
 	w.out.Reset()
 	w.errs.Reset()
-	return w.cli.run(context.Background(), args, strings.NewReader(stdin), &w.out, &w.errs)
+	return w.cli.run(context.Background(), args, stdin, &w.out, &w.errs)
 }
+
+// readerFunc is an io.Reader made of a function.
+type readerFunc func(p []byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 // writes are the writes the CLI made so far, by verb and kind.
 func (w *world) writes() []string {

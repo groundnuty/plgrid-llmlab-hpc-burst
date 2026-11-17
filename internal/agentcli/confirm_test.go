@@ -3,11 +3,13 @@ package agentcli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -195,5 +197,100 @@ func TestConfirmJSON(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.out.Bytes(), &doc); err != nil || doc.Result != "planChanged" || !strings.Contains(w.out.String(), planCD) {
 		t.Errorf("document %q (%v), want result planChanged with the new plan", w.out.String(), err)
+	}
+}
+
+// moveTo is what the controller does to an Operation that was planned and not yet confirmed: it turns it into another
+// phase, with the plan still in its status, as Refused leaves it (the plan is not cleared).
+func moveTo(w *world, name string, phase v1alpha1.OperationPhase, finished bool, message string) {
+	op := w.operation(name)
+	op.Status.Phase = phase
+	op.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionFalse, Reason: string(phase),
+		Message: message, LastTransitionTime: metav1.NewTime(w.now)}}
+	if finished {
+		op.Status.FinishedAt = &metav1.Time{Time: w.now}
+	}
+	if err := w.store.Status().Update(context.Background(), op); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+// A confirm is for a plan that waits for it: the phase Planned. Any other phase, a terminal one above all, is refused with
+// the condition's message, and nothing is written: a Refused Operation that kept its plan would otherwise be confirmed, and
+// reported as a success.
+func TestConfirmRefusesAnOperationThatIsNotPlanned(t *testing.T) {
+	for _, r := range []struct {
+		phase    v1alpha1.OperationPhase
+		finished bool
+	}{
+		{v1alpha1.OperationPhaseRefused, true}, {v1alpha1.OperationPhaseDone, true}, {v1alpha1.OperationPhaseStale, true},
+		{v1alpha1.OperationPhasePartlyFailed, true}, {v1alpha1.OperationPhaseExecuting, false},
+	} {
+		t.Run(string(r.phase), func(t *testing.T) {
+			w := newWorld(t, []client.Object{planned("op", planAB)})
+			moveTo(w, "op", r.phase, r.finished, "a live Instance runs on Allocation alloc-k")
+			if code := w.run("", "confirm", "op", "--plan", planAB); code != exitFail {
+				t.Fatalf("exit %d, want 1; stdout %q", code, w.out.String())
+			}
+			contains(t, "stderr", w.errs.String(), "Operation op is in phase "+string(r.phase), "a live Instance runs on Allocation alloc-k", "nothing was confirmed")
+			if op := w.operation("op"); op.Spec.Confirm != nil {
+				t.Errorf("confirm is %v: a plan of an Operation in phase %s was confirmed", op.Spec.Confirm, r.phase)
+			}
+			if got := w.writes(); len(got) != 0 {
+				t.Errorf("writes %v, want none", got)
+			}
+		})
+	}
+}
+
+// The same at a terminal: the answer is typed after the plan was shown, and the controller refused the Operation meanwhile.
+func TestAnInteractiveYesDoesNotConfirmAnOperationRefusedMeanwhile(t *testing.T) {
+	w := newWorld(t, nil)
+	w.names = []string{"op-iiiiiiiiii"}
+	w.tty = true
+	w.controller("op-iiiiiiiiii", simplePlan(planAB), "")
+	answered := false
+	stdin := readerFunc(func(p []byte) (int, error) {
+		if answered {
+			return 0, io.EOF
+		}
+		answered = true
+		moveTo(w, "op-iiiiiiiiii", v1alpha1.OperationPhaseRefused, true, "the deployment was deleted")
+		return copy(p, "y\n"), nil
+	})
+	if code := w.runReader(stdin, "scale", "m", "--instances", "1"); code != exitFail {
+		t.Fatalf("exit %d, want 1; stdout %q", code, w.out.String())
+	}
+	contains(t, "stderr", w.errs.String(), "Operation op-iiiiiiiiii is in phase Refused", "the deployment was deleted")
+	if op := w.operation("op-iiiiiiiiii"); op.Spec.Confirm != nil {
+		t.Errorf("confirm is %v: a typed y confirmed a refused Operation", op.Spec.Confirm)
+	}
+	if got := w.writes(); len(got) != 1 || got[0] != "create *v1alpha1.Operation" {
+		t.Errorf("writes %v, want the one create", got)
+	}
+}
+
+// A retry of a confirm that landed is a success while the Operation goes on or is over (Executing, Done); one the controller
+// refused or found stale will not run, and the retry says so with a failure.
+func TestConfirmWhenAlreadyConfirmedFollowsWhereTheOperationWent(t *testing.T) {
+	for _, r := range []struct {
+		phase v1alpha1.OperationPhase
+		want  int
+	}{
+		{v1alpha1.OperationPhaseAwaitingApproval, exitOK}, {v1alpha1.OperationPhaseExecuting, exitOK}, {v1alpha1.OperationPhaseDone, exitOK},
+		{v1alpha1.OperationPhaseRefused, exitFail}, {v1alpha1.OperationPhaseStale, exitFail},
+	} {
+		t.Run(string(r.phase), func(t *testing.T) {
+			op := planned("op", planAB)
+			op.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planAB}
+			w := newWorld(t, []client.Object{op})
+			moveTo(w, "op", r.phase, r.phase == v1alpha1.OperationPhaseRefused || r.phase == v1alpha1.OperationPhaseStale || r.phase == v1alpha1.OperationPhaseDone, "the committed message")
+			if code := w.run("", "confirm", "op", "--plan", planAB); code != r.want {
+				t.Errorf("exit %d, want %d; stdout %q stderr %q", code, r.want, w.out.String(), w.errs.String())
+			}
+			if got := w.writes(); len(got) != 0 {
+				t.Errorf("writes %v, want none", got)
+			}
+		})
 	}
 }
