@@ -222,7 +222,7 @@ func (s *session) settle(ctx context.Context, op *v1alpha1.Operation) (operation
 func (s *session) reportConfirmed(op *v1alpha1.Operation, v operationView) (operationView, int) {
 	if !s.o.asJSON {
 		fmt.Fprintf(s.stdout, "plan %s is already confirmed\n", op.Spec.Confirm.PlanID)
-		printWaiting(s.stdout, op, v)
+		printWaiting(s.stdout, op, v, true)
 	}
 	return v, exitOK
 }
@@ -247,12 +247,12 @@ func (s *session) confirm(ctx context.Context, op *v1alpha1.Operation, planID st
 	if outcome == confirmChanged {
 		return operationViewOf(got, s.rt.now()), s.rt.reportChanged(s.stdout, s.stderr, got, planID, false)
 	}
-	got, err = s.rt.awaitPhaseAfterConfirm(ctx, s.cl.c, got, s.o.timeout)
+	got, seen, err := s.rt.awaitConfirmSeen(ctx, s.cl.c, got, s.o.timeout)
 	v := operationViewOf(got, s.rt.now())
 	if err != nil {
 		return v, failf(s.stderr, exitFail, "%v", err)
 	}
 	fmt.Fprintf(s.stdout, "confirmed plan %s\n", planID)
-	printWaiting(s.stdout, got, v)
+	printWaiting(s.stdout, got, v, seen)
 	return v, exitOK
 }

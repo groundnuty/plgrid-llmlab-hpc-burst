@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -292,5 +293,64 @@ func TestConfirmWhenAlreadyConfirmedFollowsWhereTheOperationWent(t *testing.T) {
 				t.Errorf("writes %v, want none", got)
 			}
 		})
+	}
+}
+
+// noApprovalPlan is a plan whose one target needs no approval: a drain of an Instance while another stays ready.
+func noApprovalPlan(id string) *v1alpha1.OperationPlan {
+	return &v1alpha1.OperationPlan{ID: id, ObservedAt: metav1.NewTime(t0), ModelDeployment: v1alpha1.PlannedDeployment{Name: "m", UID: "uid-m", Generation: 4},
+		Targets: []v1alpha1.PlanTarget{{Kind: v1alpha1.TargetKindInstance, Name: "inst-a", UID: "uid-inst-a", Provider: "sano", Effect: v1alpha1.PlanEffectDrainInstance}}}
+}
+
+// A plan that needs no approval does not move the phase where the execution is not built, so a confirm that waited for the phase
+// would wait out its timeout and then say that the controller had not picked the confirm up. The controller has: it records the
+// generation it saw, and the command reports what it says. The test's clock moves by one second at each wait, so a wait that
+// used the timeout moved it by a minute.
+func TestConfirmOfAPlanThatNeedsNoApprovalDoesNotWaitOutTheTimeout(t *testing.T) {
+	op := opObject("op", userA, scaleSpec("m", 1), v1alpha1.OperationStatus{Phase: v1alpha1.OperationPhasePlanned, Plan: noApprovalPlan(planAB), ObservedGeneration: 1})
+	op.Generation = 1
+	w := newWorld(t, []client.Object{op})
+	w.controllerNoApproval("op", noApprovalPlan(planAB))
+	if code := w.run("", "confirm", "op", "--plan", planAB, "--timeout", "60s"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	if used := w.now.Sub(t0); used >= 10*time.Second {
+		t.Errorf("the command waited %s of its 60s timeout", used)
+	}
+	contains(t, "stdout", w.out.String(), "confirmed plan "+planAB+" of op", "phase: Planned", "Executable=False ExecutionNotBuilt: confirmed, and no target needs approval")
+	lacks(t, "stdout", w.out.String(), "has not picked up")
+}
+
+// The same at a terminal, through scale.
+func TestAnInteractiveConfirmOfAPlanThatNeedsNoApprovalDoesNotWaitOutTheTimeout(t *testing.T) {
+	w := newWorld(t, nil)
+	w.names = []string{"op-aaaaaaaaaa"}
+	w.tty = true
+	w.controllerNoApproval("op-aaaaaaaaaa", noApprovalPlan(planAB))
+	if code := w.run("y\n", "scale", "m", "--instances", "1", "--timeout", "60s"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	if used := w.now.Sub(t0); used >= 10*time.Second {
+		t.Errorf("the command waited %s of its 60s timeout", used)
+	}
+	contains(t, "stdout", w.out.String(), "confirmed plan "+planAB, "Executable=False ExecutionNotBuilt")
+}
+
+// When the controller does not record the confirm within the timeout, the command says so, with the phase it saw, and the confirm
+// stands: it is written, and the command's success is the write's.
+func TestConfirmThatTheControllerNeverSeesSaysSo(t *testing.T) {
+	op := planned("op", planAB)
+	op.Generation = 1
+	op.Status.ObservedGeneration = 1
+	w := newWorld(t, []client.Object{op})
+	if code := w.run("", "confirm", "op", "--plan", planAB, "--timeout", "5s"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	if used := w.now.Sub(t0); used < 5*time.Second {
+		t.Errorf("the command gave up after %s, before its timeout of 5s", used)
+	}
+	contains(t, "stdout", w.out.String(), "phase: Planned (the controller has not picked up the confirm yet)")
+	if op := w.operation("op"); op.Spec.Confirm == nil {
+		t.Error("the confirm was not written")
 	}
 }

@@ -78,7 +78,7 @@ func (rt *cli) cmdConfirm(ctx context.Context, args []string, stdout, stderr io.
 	fs, o := newFlags("confirm", stderr, false)
 	var planID string
 	fs.StringVar(&planID, "plan", "", "the ID of the plan to confirm (required)")
-	fs.DurationVar(&o.timeout, "timeout", defaultTimeout, "how long to wait for the controller to move the Operation on")
+	fs.DurationVar(&o.timeout, "timeout", defaultTimeout, "how long to wait for the controller to record the confirm")
 	name, code, done := oneArg(fs, args, "Operation name")
 	if done {
 		return code
@@ -100,8 +100,9 @@ func (rt *cli) cmdConfirm(ctx context.Context, args []string, stdout, stderr io.
 	if outcome == confirmedAlready && (op.Status.Phase == v1alpha1.OperationPhaseRefused || op.Status.Phase == v1alpha1.OperationPhaseStale) {
 		return failf(stderr, exitFail, "Operation %s was confirmed with plan %s, and is in phase %s%s: it will not run", name, planID, phaseOf(op), why(op))
 	}
+	seen := true
 	if outcome == confirmedNow {
-		if op, err = rt.awaitPhaseAfterConfirm(ctx, cl.c, op, o.timeout); err != nil {
+		if op, seen, err = rt.awaitConfirmSeen(ctx, cl.c, op, o.timeout); err != nil {
 			return failf(stderr, exitFail, "%v", err)
 		}
 	}
@@ -114,7 +115,7 @@ func (rt *cli) cmdConfirm(ctx context.Context, args []string, stdout, stderr io.
 	} else {
 		fmt.Fprintf(stdout, "confirmed plan %s of %s\n", planID, name)
 	}
-	printWaiting(stdout, op, v)
+	printWaiting(stdout, op, v, seen)
 	return exitOK
 }
 

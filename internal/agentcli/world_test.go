@@ -57,6 +57,10 @@ func (r *recorder) Create(ctx context.Context, obj client.Object, opts ...client
 
 func (r *recorder) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
 	r.note("update", obj)
+	if _, ok := obj.(*v1alpha1.Operation); ok {
+		// The API server moves metadata.generation when the spec changes, which is what a confirm does; the fake client does not.
+		obj.SetGeneration(obj.GetGeneration() + 1)
+	}
 	return r.Client.Update(ctx, obj, opts...)
 }
 
@@ -303,9 +307,29 @@ func (w *world) controller(name string, plan *v1alpha1.OperationPlan, waiting st
 		case op.Status.Plan == nil:
 			w.planFor(name, plan)
 		case op.Spec.Confirm != nil && op.Status.Phase == v1alpha1.OperationPhasePlanned:
-			op.Status.Phase = v1alpha1.OperationPhaseAwaitingApproval
+			op.Status.Phase, op.Status.ObservedGeneration = v1alpha1.OperationPhaseAwaitingApproval, op.Generation
 			op.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionFalse,
 				Reason: v1alpha1.ReasonAwaitingApproval, Message: waiting, LastTransitionTime: metav1.NewTime(w.now)}}
+			if err := w.store.Status().Update(context.Background(), op); err != nil {
+				w.t.Fatal(err)
+			}
+		}
+	}
+}
+
+// controllerNoApproval is the controller of a plan that needs no approval, as it is where the execution is not built (HBEP-10,
+// beta step 1): it writes the plan, and on the confirm it records that it has seen the generation and says that nothing runs,
+// and the phase stays Planned.
+func (w *world) controllerNoApproval(name string, plan *v1alpha1.OperationPlan) {
+	w.onPause = func() {
+		op := w.operation(name)
+		switch {
+		case op.Status.Plan == nil:
+			w.planFor(name, plan)
+		case op.Spec.Confirm != nil && op.Status.ObservedGeneration < op.Generation:
+			op.Status.ObservedGeneration = op.Generation
+			op.Status.Conditions = []metav1.Condition{{Type: v1alpha1.ConditionExecutable, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonExecutionNotBuilt,
+				Message: "confirmed, and no target needs approval; this release plans Operations and does not execute them", LastTransitionTime: metav1.NewTime(w.now)}}
 			if err := w.store.Status().Update(context.Background(), op); err != nil {
 				w.t.Fatal(err)
 			}

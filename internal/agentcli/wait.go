@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -65,21 +66,25 @@ func hasPlanOrRefusal(op *v1alpha1.Operation) bool {
 	return op.Status.Plan != nil || op.Status.Phase == v1alpha1.OperationPhaseRefused
 }
 
-// awaitPhaseAfterConfirm reads the Operation until the controller has moved it out of Planned.
-func (rt *cli) awaitPhaseAfterConfirm(ctx context.Context, c client.Client, op *v1alpha1.Operation, timeout time.Duration) (*v1alpha1.Operation, error) {
-	cur := op
-	moved := func() bool {
-		return cur.Status.Phase != "" && cur.Status.Phase != v1alpha1.OperationPhasePlanned && cur.Status.Phase != v1alpha1.OperationPhasePlanning
+// awaitConfirmSeen reads the Operation until the controller has seen the confirm. The confirm's update moved the spec's
+// metadata.generation, and the controller records the generation it acted on in status.observedGeneration; the phase cannot be
+// waited for, since a plan that needs no approval does not move it where the execution is not built. A phase that has moved
+// on counts as seen too. seen is false when the timeout passed first. confirmed is the Operation as the update answered.
+func (rt *cli) awaitConfirmSeen(ctx context.Context, c client.Client, confirmed *v1alpha1.Operation, timeout time.Duration) (cur *v1alpha1.Operation, seen bool, err error) {
+	cur = confirmed
+	isSeen := func() bool {
+		moved := cur.Status.Phase != "" && cur.Status.Phase != v1alpha1.OperationPhasePlanned && cur.Status.Phase != v1alpha1.OperationPhasePlanning
+		return moved || cur.Status.ObservedGeneration >= confirmed.Generation
 	}
-	_, err := rt.waitUntil(ctx, timeout, func() (bool, error) {
+	timedOut, err := rt.waitUntil(ctx, timeout, func() (bool, error) {
 		got, err := getOperation(ctx, c, cur.Namespace, cur.Name)
 		if err != nil {
 			return false, err
 		}
 		cur = got
-		return moved(), nil
+		return isSeen(), nil
 	})
-	return cur, err
+	return cur, !timedOut && err == nil, err
 }
 
 // conditionMessage is the message of the named condition, or the first condition that is false.
@@ -97,10 +102,11 @@ func conditionMessage(op *v1alpha1.Operation, typ string) string {
 	return ""
 }
 
-// printWaiting writes the phase an Operation reached after a confirm, and who must approve when it waits.
-func printWaiting(w io.Writer, op *v1alpha1.Operation, v operationView) {
-	if op.Status.Phase == v1alpha1.OperationPhasePlanned || op.Status.Phase == "" {
-		fmt.Fprintln(w, "phase: Planned (the controller has not picked up the confirm yet)")
+// printWaiting writes what the controller says after a confirm: the phase, the Executable condition (its reason and its message),
+// and who must approve when the plan waits. seen is false when the controller had not recorded the confirm within the timeout.
+func printWaiting(w io.Writer, op *v1alpha1.Operation, v operationView, seen bool) {
+	if !seen {
+		fmt.Fprintf(w, "phase: %s (the controller has not picked up the confirm yet)\n", v.Phase)
 		return
 	}
 	fmt.Fprintf(w, "phase: %s\n", v.Phase)
@@ -109,5 +115,9 @@ func printWaiting(w io.Writer, op *v1alpha1.Operation, v operationView) {
 			fmt.Fprintf(w, "  waiting: %s\n", m)
 		}
 		printApprovers(w, v.Plan)
+		return
+	}
+	if c := apimeta.FindStatusCondition(op.Status.Conditions, v1alpha1.ConditionExecutable); c != nil {
+		fmt.Fprintf(w, "  %s=%s %s: %s\n", c.Type, c.Status, c.Reason, c.Message)
 	}
 }
