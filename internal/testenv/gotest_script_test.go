@@ -27,7 +27,9 @@ const outlivedWait = 30 * time.Second
 // runs through the script (PR #306), host-dialed and the rest, and internal/agent's two real-Envoy tests
 // that wait out Envoy's own defaults (issue #429). Part B of issue #295 adds the slowest tests of
 // internal/lifecycle and hack/livechecks in three more groups: lifecycle-apiserver (envtest),
-// lifecycle-slow (fake-clock, no control plane and no port) and livechecks-tree.
+// lifecycle-slow (fake-clock, no control plane and no port) and livechecks-tree. Part B2 adds
+// lifecycle-slow2, eight more fake-clock tests of internal/lifecycle, and part B3 lifecycle-slow3, six more:
+// four serial ones and the two whose subtests run in parallel.
 const ownTestName = "TestLifecycleManagerReleasesItsLeaseOnEveryStop"
 
 var (
@@ -45,6 +47,13 @@ var (
 		"TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear", "TestAWarmAllocationDoesNotCancelAPendingSurplus",
 		"TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations", "TestAMarkedPeerThatRestartsNeverOutranks",
 		"TestAReplacementHedgesByItsWaits"}
+	lifecycleSlow2 = []string{"TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry", "TestRetentionNoneOutlivesHardEnd",
+		"TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart", "TestMetricsNoProgressNeedsFreshKnownCounters",
+		"TestNoOverlapModeBoundaries", "TestRetentionJobEndsAndLeavesListing", "TestTunnelDownAloneRestartsNothing",
+		"TestMetricsDrainEndsOnAKnownZeroReadAfterTheDrainBegan"}
+	lifecycleSlow3 = []string{"TestVerifyRefusedGenerationConfigStopsClass", "TestReadyInstanceStaysReadyWhenTunnelDrops",
+		"TestGateAMissTheFullRecordCantHoldSuspendsItsEntry", "TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases",
+		"TestTheTwoJobGuardKeepsALongWaitToTwoAllocations", "TestADeadStepLeavesTheDeploymentAtItsLastEnd"}
 	controllerFailover = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
 	envoyTimeouts      = []string{"TestEnvoyStreamIdleOutlivesTheDefault", "TestEnvoyClosesIdleUpstreamConnectionsFirst"}
 	hostDialedDry      = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
@@ -71,6 +80,8 @@ var groups = []group{
 	{"lifecycle-control-plane", "./internal/lifecycle", "170s", lifecycleControlPlane},
 	{"lifecycle-apiserver", "./internal/lifecycle", "130s", lifecycleAPIServer},
 	{"lifecycle-slow", "./internal/lifecycle", "520s", lifecycleSlow},
+	{"lifecycle-slow2", "./internal/lifecycle", "330s", lifecycleSlow2},
+	{"lifecycle-slow3", "./internal/lifecycle", "350s", lifecycleSlow3},
 	{"controller-failover", "./cmd/hpcburst-controller", "460s", controllerFailover},
 	{"envoy-timeouts", "./internal/agent", "1200s", envoyTimeouts},
 	{"livechecks-hostdialed", "./hack/livechecks", "150s", hostDialedDry},
