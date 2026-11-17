@@ -446,7 +446,10 @@ func (w *world) reportSize(t *testing.T, rd *reader, from, to time.Time, operati
 		written.bytes/operations, controllerReads.bytes/operations, testReads.bytes)
 
 	// An idle controller: the lifecycle identity's events over a window in which the test makes no request of its own.
-	const quiet = 30 * time.Second
+	quiet := 30 * time.Second
+	if testing.Short() {
+		quiet = 3 * time.Second // a repeated run (-count, a mutant) measures nothing it reports: it need not wait
+	}
 	start := time.Now()
 	time.Sleep(quiet)
 	end := time.Now()
