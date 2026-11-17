@@ -165,6 +165,14 @@ func countUsable(pvs []*providerView) int {
 // (HBEP-7, Reconcile loop, step 7; Release: scale-down; scaleDownTargets).
 func (p *pass) scaleDown(prim []*v1alpha1.Instance, surplus int) error {
 	for _, t := range p.scaleDownTargets(prim, surplus) {
+		if b := p.yielding[t.instance.UID]; b != "" {
+			// An extra that yields its submit slot is cancelled only by the owner's commit, from fresh reads under the
+			// yield lock (yield.go, commitYield); it may clear its mark or wait instead.
+			if err := p.commitYield(t, b); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := p.applyScaleTarget(t); err != nil {
 			return err
 		}

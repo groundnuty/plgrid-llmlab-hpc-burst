@@ -81,23 +81,32 @@ const listTimeout = 30 * time.Second
 // own deployment's objects before it asks, so nothing under the lock reads it.
 //
 // The yield (yield.go; #616 PR 4) adds the only WRITES made under a Provider's
-// lock, always after slotTable.mu is released: when a missing primary's
-// reservation is refused for the submit limit alone, slotAsk.onLimit is
-// called with the reads just made, under the same Provider's lock and a
-// listTimeout of its own. It reads, through the uncached Reader and no other
-// lock, the marks that name the asking deployment (one List of the Instances
-// by the yield-mark label, across every Provider, and one Get of each mark's
-// Allocation), and patches the annotationYieldTo mark and the label on a
-// pending extra's Instance (any deployment's) by one merge patch. A pass
-// clearing the marks that name its deployment does the same through
-// slotTable.underLock, one Provider's lock at a time (the marks of each
-// Provider under that Provider's own lock, never two held together). Nothing
-// else is taken or read by them, so the order above holds.
+// lock, always after slotTable.mu is released, and one more lock, yieldMu,
+// which serialises every decision to mark or cancel an extra for a yield, in
+// this process. yieldMu may be held while taking ONE Provider's lock
+// (slotLock); a Provider's lock is never held while taking yieldMu, and yieldMu
+// is never taken twice. A missing primary's marking takes yieldMu, then the
+// reservation takes the Provider's lock and calls slotAsk.onLimit under it,
+// when the limit alone refuses: the callback reads, through the uncached
+// Reader and no other lock, the marks that name the asking deployment (one List
+// of the Instances by the yield-mark label, across every Provider, one Get of
+// each mark's Allocation) and the Allocations being deleted for it (one List),
+// and patches the annotationYieldTo mark and the label on a pending extra's
+// Instance (any deployment's) by one merge patch. The owner's cancel takes
+// yieldMu, then the extra's Provider's lock (underLockCounted), re-reads
+// everything it decides on, and under both writes the release cause, deletes
+// the Allocation and ends the Instance's status; its memory and finalizer
+// writes follow after both are released. A pass clearing the marks that name
+// its deployment takes yieldMu and then each mark's Provider's lock in turn
+// (slotTable.underLock), never two together. Nothing else is taken or read by
+// them, so the order above holds.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
 	listTimeout time.Duration
-	mu          sync.Mutex
+	// yieldMu serialises the yield's decisions (see the lock order above).
+	yieldMu sync.Mutex
+	mu      sync.Mutex
 	// locks holds one lock per Provider name, created on first use.
 	locks map[string]*sync.Mutex
 	// expect holds, per Provider, the Allocations (namespace/name) this
@@ -315,6 +324,28 @@ func (t *slotTable) underLock(ctx context.Context, provider string, fn func(ctx 
 	cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
 	defer cancel()
 	return fn(cctx)
+}
+
+// underLockCounted runs fn under the Provider's lock, with a listTimeout of its own and the Provider's count at that
+// moment: what a new primary's reservation compares with the limit (listed + expected + reserved), counted from the same
+// reads and without reserving anything. The owner's cancel of a yielded extra asks it, to know whether freeing the extra's
+// slot would admit the primary it yields to (yield.go, commitYield).
+func (t *slotTable) underLockCounted(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, now time.Time, fn func(ctx context.Context, total int) error) error {
+	l := t.slotLock(provider)
+	l.Lock()
+	defer l.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+	defer cancel()
+	rd, err := t.readBounded(cctx, r, provider, true, profile)
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	c := t.observe(provider, rd.seen, rd.listed, now)
+	reserved, _ := counted(rd.reserved, "", nil, t.expect[provider])
+	total := c.total() + reserved
+	t.mu.Unlock()
+	return fn(cctx, total)
 }
 
 // capsFit reports whether a new Allocation of size add fits the Provider's

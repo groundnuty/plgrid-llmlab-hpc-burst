@@ -139,24 +139,34 @@ func endCause(in *v1alpha1.Instance, reason, msg string) string {
 // once that write succeeded: a failed write leaves the Allocation in place, and
 // the next pass tries again, so no Allocation goes without its cause. The UID
 // precondition makes sure a recreated object of the same name is not hit.
+// writeReleaseCause writes the release cause on the Allocation when it differs (an Update carrying the resourceVersion it
+// read), and reports whether the Allocation is gone already.
+func (p *pass) writeReleaseCause(a *v1alpha1.Allocation, cause string) (gone bool, err error) {
+	if a.Annotations[v1alpha1.AnnotationReleaseCause] == cause {
+		return false, nil
+	}
+	next := a.DeepCopy()
+	if next.Annotations == nil {
+		next.Annotations = map[string]string{}
+	}
+	next.Annotations[v1alpha1.AnnotationReleaseCause] = cause
+	if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("write the release cause of Allocation %s (%s): %w", a.Name, cause, err)
+	}
+	*a = *next
+	return false, nil
+}
+
 func (p *pass) deleteAllocation(a *v1alpha1.Allocation, why string) error {
 	if !a.DeletionTimestamp.IsZero() {
 		return nil
 	}
 	cause := releaseCause(why)
-	if a.Annotations[v1alpha1.AnnotationReleaseCause] != cause {
-		next := a.DeepCopy()
-		if next.Annotations == nil {
-			next.Annotations = map[string]string{}
-		}
-		next.Annotations[v1alpha1.AnnotationReleaseCause] = cause
-		if err := p.r.Client.Update(p.ctx, next, owner); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil // gone already
-			}
-			return fmt.Errorf("write the release cause of Allocation %s (%s): %w", a.Name, cause, err)
-		}
-		*a = *next
+	if gone, err := p.writeReleaseCause(a, cause); err != nil || gone {
+		return err
 	}
 	uid := a.UID
 	err := p.r.Client.Delete(p.ctx, a, client.Preconditions{UID: &uid})

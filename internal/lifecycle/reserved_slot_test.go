@@ -214,9 +214,15 @@ func TestReservedSlotGoesToTheNoOverlapSuccessorBeforeB(t *testing.T) {
 	hoStepTo(rg, rg.clock.Now().Add(time.Minute), 10*time.Second, bWaits)
 }
 
+// passKey is the context key under which a test names the deployment whose pass a context belongs to.
+type passKey struct{}
+
 // passGate is a client.Reader that holds a deployment's pass at its first list of its own Allocations (the
 // first read of a pass, reconcile.go), once, until its hook returns. It forces one interleaving of two passes run at
-// once, so that the order which matters is pinned, not left to the scheduler.
+// once, so that the order which matters is pinned, not left to the scheduler. It holds only a list made in that
+// deployment's OWN pass, which the test marks in the pass's context (passKey): reservedOn lists every deployment's
+// Allocations by its label when it counts the reserved slots (D8, #616 PR 4), so another deployment's reservation can
+// list md-a's Allocations too, and a hold keyed on the label alone fired in that other pass, which then waited for itself.
 type passGate struct {
 	client.Reader
 	mu   sync.Mutex
@@ -231,7 +237,7 @@ func (g *passGate) List(ctx context.Context, list client.ObjectList, opts ...cli
 			o.ApplyToList(lo)
 		}
 		if lo.LabelSelector != nil {
-			if md, found := lo.LabelSelector.RequiresExactMatch(v1alpha1.LabelModelDeployment); found {
+			if md, found := lo.LabelSelector.RequiresExactMatch(v1alpha1.LabelModelDeployment); found && ctx.Value(passKey{}) == md {
 				g.mu.Lock()
 				h, first := g.hold[md], !g.done[md]
 				g.done[md] = true
@@ -305,7 +311,7 @@ func TestReservedSlotIsAtomicAgainstAStaleCache(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					_, err := rg.r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: rigNS, Name: n}})
+					_, err := rg.r.Reconcile(context.WithValue(rg.ctx, passKey{}, n), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: rigNS, Name: n}})
 					mu.Lock()
 					errs[n] = err
 					mu.Unlock()

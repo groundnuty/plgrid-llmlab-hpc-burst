@@ -202,7 +202,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if pred == nil && !o.extra && o.hedgeGroup == "" {
 			onLimit = p.yieldOnLimit(pv)
 		}
-		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
+		ok, holds, err := p.reserveYielding(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, onLimit)
 		if err != nil {
 			return false, err
 		}
@@ -597,7 +597,7 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	default:
 		onLimit = p.yieldOnLimit(pv)
 	}
-	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, alsoLeave, onLimit)
+	ok, holds, err := p.reserveYielding(pv, name, holder, takers, capsOf, quiet, alsoLeave, onLimit)
 	if err != nil {
 		return err
 	}

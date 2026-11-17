@@ -118,10 +118,9 @@ type pass struct {
 	// never a placement on a warm Allocation). capacity() reads what its missing-primary loop appended, to give each
 	// such Provider its extra (extra.go).
 	submitted []string
-	// limitRefused is the Providers where a missing primary of this pass was refused for the submit limit alone, with
-	// the count that refused it and the limit (yield.go): its yield marks there may stay, and the ones elsewhere are
-	// cleared.
-	limitRefused map[string]limitRefusal
+	// limitRefused is the Providers where a missing primary of this pass was refused for the submit limit alone
+	// (yield.go): its yield marks there may stay, and the ones elsewhere are cleared.
+	limitRefused map[string]bool
 	// marked is the Instances this pass marked to yield their slots, by UID: counted with the marks the Reader lists,
 	// which may lag, so two refusals in one pass never both mark for one shortage.
 	marked map[types.UID]bool
