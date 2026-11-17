@@ -77,7 +77,7 @@ func randomToken(t testing.TB) string {
 // One line is a group, its resources and the verbs they take.
 var wantControllerRules = map[string][]string{
 	"hpcburst-lifecycle": {
-		"hpcburst.groundnuty.github.io modeldeployments: get list watch",
+		"hpcburst.groundnuty.github.io modeldeployments: get list watch patch",
 		"hpcburst.groundnuty.github.io providers platformprofiles operations approvals approvalpolicies: list watch",
 		"hpcburst.groundnuty.github.io instances: get list watch create update delete",
 		"hpcburst.groundnuty.github.io instances/status: update",
