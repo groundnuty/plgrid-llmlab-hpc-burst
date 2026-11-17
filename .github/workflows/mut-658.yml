@@ -1,0 +1,50 @@
+# DO NOT MERGE: a throwaway that runs #658's kill-test mutant on hosted runners, never on the shared
+# development VM, because the mutant wedges a FUSE mount on purpose. Two jobs: the baseline (the PR's
+# head) and the mutant (the same head with .github/mutants/b658-mutant.patch applied, which puts the
+# volume's server back in the test process). The mutant is killed when its test FAILS with "did not
+# finish dying"; a pass means the mutant survived. The step log is the evidence: post-job clean-up may
+# hang on the wedged mount, so the job's own conclusion is not.
+name: mut-658
+on:
+  pull_request:
+    paths:
+      - .github/workflows/mut-658.yml
+permissions:
+  contents: read
+jobs:
+  run:
+    name: kill-test-${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, mutant]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Go toolchain
+        run: |
+          bash hack/fetch-go.sh "$RUNNER_TEMP/go-download" "$RUNNER_TEMP/go-toolchain"
+          echo "$RUNNER_TEMP/go-toolchain/go/bin" >> "$GITHUB_PATH"
+          echo "GOROOT=$RUNNER_TEMP/go-toolchain/go" >> "$GITHUB_ENV"
+
+      - name: Download and verify the Go modules
+        run: bash hack/go-mod-download.sh
+
+      - name: Apply the mutant
+        if: matrix.variant == 'mutant'
+        run: git apply .github/mutants/b658-mutant.patch && git diff --stat
+
+      - name: Show the FUSE helper this runner has
+        run: |
+          command -v fusermount3 || command -v fusermount || echo "no fusermount helper"
+          ls -l /dev/fuse || true
+
+      - name: Run the kill test
+        run: |
+          mkdir -p /tmp/mut658 && export TMPDIR=/tmp/mut658
+          HPCBURST_REQUIRE_INTEGRATION=1 go test ./cmd/hpcburst -run '^TestAKilledTestProcessMidWriteLeavesADeadMountNotAWedgedOne$' -count=1 -timeout 4m -v

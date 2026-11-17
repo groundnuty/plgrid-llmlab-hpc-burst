@@ -1,0 +1,46 @@
+diff --git a/cmd/hpcburst/capfs_volume_test.go b/cmd/hpcburst/capfs_volume_test.go
+index 3b3c391f..9e49034f 100644
+--- a/cmd/hpcburst/capfs_volume_test.go
++++ b/cmd/hpcburst/capfs_volume_test.go
+@@ -26,6 +26,7 @@ import (
+ 	"strings"
+ 	"syscall"
+ 	"testing"
++	"time"
+ )
+ 
+ // The files of a volume's control directory.
+@@ -197,18 +198,23 @@ func newCapVolume(t *testing.T, limit int64) *capHandle {
+ 	if res := sweepDeadCapMounts(realSweepEnv(t.Logf)); res.failure() != "" {
+ 		t.Fatal(res.failure())
+ 	}
+-	c := launchCapServer(t, capChildMode{auto: true, limit: limit})
+-	waitCapServerMounted(t, c)
+-	if errno, answered := capStatErrno(c.mount, capChildBound); !answered || errno != 0 {
+-		t.Fatalf("the new volume %s does not answer a stat: answered %t, errno %v. Its server's output: %s", c.mount, answered, errno, c.output())
++	dir, err := os.MkdirTemp("", "cv")
++	if err != nil {
++		t.Fatal(err)
+ 	}
+-	return &capHandle{
+-		t:         t,
+-		mount:     c.mount,
+-		backing:   filepath.Join(c.dir, "backing"),
+-		ctl:       capCtl{filepath.Join(c.dir, "ctl")},
+-		serverPID: c.cmd.Process.Pid,
++	v, err := mountCapVolume(dir, limit, capFsName, true) // MUTANT: the server runs in this process
++	if err != nil {
++		t.Fatal(err)
+ 	}
++	t.Cleanup(func() {
++		if err := v.unmount(30 * time.Second); err != nil {
++			t.Errorf("unmount %s: %v", v.mount, err)
++		}
++		if err := capRemoveDir(dir); err != nil {
++			t.Errorf("%v", err)
++		}
++	})
++	return &capHandle{t: t, mount: v.mount, backing: v.backing, ctl: v.ctl, serverPID: os.Getpid()}
+ }
+ 
+ // capSkipOrFailOnMount ends a test whose volume's server could not mount (it exited with capfsExitMount): the test skips, with the exact
