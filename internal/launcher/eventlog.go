@@ -94,7 +94,7 @@ func (s *State) eventLogEntry(l layout) *supervised {
 		Args:   []string{eventLogEntryName, "--config", filepath.Join(dir, eventlog.ConfFile), "--caps-file", filepath.Join(dir, eventlog.CapsFile)},
 		Health: h.EventLogMonitorAddr(), Ports: []int{h.EventLogPort(), h.EventLogMonitorPort()},
 		Setsid: true, WaitReady: true, TermGrace: EventLogTermGrace,
-		ready: func() bool { return eventLogStreamsExist(h.EventLogMonitorAddr()) },
+		ready: func() bool { return eventLogAcceptsClient(h) },
 	}
 }
 
