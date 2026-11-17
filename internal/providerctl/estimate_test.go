@@ -10,6 +10,7 @@ package providerctl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -18,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"github.com/go-logr/logr/funcr"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -563,6 +566,88 @@ func TestAFailedEstimateIsAFinalUnknownEntryWithAFixedReason(t *testing.T) {
 				t.Fatalf("error %v, %d calls: a final unknown ends the asking", err, e.asked())
 			}
 		})
+	}
+}
+
+// What a failed estimate's error says (Slurm's own text keeps the account, a node and a job ID) never reaches the log, the
+// entry written into status (which every agent reads, and the audit logs at RequestResponse) or the error the pass
+// returns: the log names a fixed class of failure, and the status a fixed reason. The values are invented.
+func TestAFailedEstimatesTextNeverReachesTheLogTheStatusOrTheReturnedError(t *testing.T) {
+	const seedText = "sbatch --test-only: exit 1: sbatch: error: Invalid account SEEDACCT on node n0042 for job 1234567"
+	secrets := []string{"SEEDACCT", "n0042", "1234567"}
+	for _, tc := range []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{"a command that failed", errors.New(seedText), "command"},
+		{"a time-out", fmt.Errorf("%s: %w", seedText, slurm.ErrTimeout), "timeout"},
+		{"a transport error", fmt.Errorf("%s: %w", seedText, slurm.ErrTransport), "transport"},
+		{"a refused request", fmt.Errorf("%w: %s", provider.ErrInvalidRequest, seedText), "refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEstEnv(t)
+			var mu sync.Mutex
+			var logged strings.Builder
+			sink := funcr.New(func(prefix, args string) {
+				mu.Lock()
+				defer mu.Unlock()
+				logged.WriteString(prefix + " " + args + "\n")
+			}, funcr.Options{Verbosity: 4})
+			e.ctl.shared.o.Log = logging.NewLogrLogger(sink)
+			e.batch.FailEstimate(tc.err)
+			a1 := e.newAlloc("alloc-1")
+			e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1))
+			reconcileErr := e.reconcileOp("op-1")
+
+			mu.Lock()
+			text := logged.String()
+			mu.Unlock()
+			applied, err := json.Marshal(e.log.last())
+			if err != nil {
+				t.Fatal(err)
+			}
+			returned := ""
+			if reconcileErr != nil {
+				returned = reconcileErr.Error()
+			}
+			for _, secret := range secrets {
+				for where, got := range map[string]string{"the log": text, "the applied entries": string(applied), "the returned error": returned} {
+					if strings.Contains(got, secret) {
+						t.Errorf("%s names %q:\n%s", where, secret, got)
+					}
+				}
+			}
+			// The control, so that the checks can fail: the log does say that it failed and which class, and the
+			// entry is written, with one of the fixed reasons.
+			if !strings.Contains(text, "the estimate failed") || !strings.Contains(text, tc.class) {
+				t.Errorf("the log %q does not say that the estimate failed with class %q", text, tc.class)
+			}
+			if e.log.count() != 1 || len(e.log.last()) != 1 || e.log.last()[0].Start.Unknown == "" {
+				t.Errorf("applies %d, last %+v, want one apply with an unknown entry", e.log.count(), e.log.last())
+			}
+		})
+	}
+}
+
+// A Provider whose profile cannot be read fails the pass with a fixed text: the reader's error may name a credentials path or
+// an account, and the controller-runtime logs a pass's error.
+func TestAProviderThatCannotBeReadFailsThePassWithAFixedText(t *testing.T) {
+	e := newEstEnv(t)
+	e.batch.SetEstimate(startE1)
+	a1 := e.newAlloc("alloc-1")
+	e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1))
+	e.profiles.mu.Lock()
+	e.profiles.err = errors.New("the credentials file /home/example-user/creds names the account SEEDACCT")
+	e.profiles.mu.Unlock()
+	err := e.reconcileOp("op-1")
+	if err == nil {
+		t.Fatal("no error, want the pass retried")
+	}
+	for _, secret := range []string{"SEEDACCT", "/home/example-user"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("the pass's error %q names %q", err, secret)
+		}
 	}
 }
 

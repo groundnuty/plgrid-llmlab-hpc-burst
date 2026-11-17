@@ -17,7 +17,6 @@ package providerctl
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -223,8 +222,10 @@ func (e *estimator) Reconcile(ctx context.Context, req reconcile.Request) (recon
 	v, platform, err := e.s.h.get(ctx)
 	if err != nil {
 		// The Provider cannot be read now. Nothing is written: an entry would end the asking for this
-		// plan, and the next pass may succeed within the plan's bound.
-		return reconcile.Result{}, fmt.Errorf("estimate: the Provider is not ready: %w", err)
+		// plan, and the next pass may succeed within the plan's bound. The text is fixed: the reader's
+		// error may name a credentials path or an account, and controller-runtime logs a pass's error. The
+		// Allocation controller reports the reader's own error, under its own rules.
+		return reconcile.Result{}, errors.New("estimate: the Provider is not ready: its profile or credentials could not be read")
 	}
 	groups, err := e.groups(ctx, &op, targets, v)
 	if err != nil {
@@ -324,7 +325,8 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, ui
 	res, estErr := platform.Estimate(ectx, g.req)
 	cancel()
 	if estErr != nil {
-		e.s.o.Log.Info("the estimate failed", "operation", req.String(), "error", estErr.Error())
+		// A fixed class, never the error's text: Slurm's own message keeps the account, a node's name and a job ID.
+		e.s.o.Log.Info("the estimate failed", "operation", req.String(), "class", estimateFailureClass(estErr))
 	}
 	entry := e.entry(planID, g, res, estErr)
 
@@ -383,6 +385,20 @@ func (e *estimator) entry(planID string, g group, res provider.EstimateResult, e
 		fig.Unknown = provider.EstimateNoAnswer
 	}
 	return v1alpha1.OperationEstimate{Provider: e.provider, PlanID: planID, Shape: g.shape, Targets: g.targets, Start: fig}
+}
+
+// estimateFailureClass is the fixed class of an estimate that failed, for the log: timeout, refused (before any call),
+// transport (no connection, or one that broke), or command (the command ran and failed, or the answer could not be had).
+func estimateFailureClass(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, slurm.ErrTimeout):
+		return "timeout"
+	case errors.Is(err, provider.ErrInvalidRequest):
+		return "refused"
+	case errors.Is(err, slurm.ErrTransport), errors.Is(err, slurm.ErrNotStarted):
+		return "transport"
+	}
+	return "command"
 }
 
 // estimateFailure is the fixed reason of an estimate that failed.
