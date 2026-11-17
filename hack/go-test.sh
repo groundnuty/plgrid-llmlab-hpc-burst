@@ -278,7 +278,12 @@ own_lanes() {
   echo "own: ${#groups[@]} groups in ${#lanes[@]} lanes, one per package: a package's groups run one after another, the lanes at the same time"
   for i in "${!lanes[@]}"; do
     dir="$own_work/lane$i"
-    mkdir "$dir" || return 1
+    if ! mkdir "$dir"; then
+      # Lanes already started must not outlive the step: stop them and wait for them.
+      stop_lanes 1
+      wait
+      return 1
+    fi
     : > "$dir/events"
     dirs[${lanes[$i]}]=$dir
     events_seen[i]=0
