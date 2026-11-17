@@ -82,15 +82,55 @@ func (s *scenario) checkLife(t *testing.T, set *logSet) {
 		a.User.Username != "system:serviceaccount:hpcburst-agents:agent-a" || b.User.Username != "system:serviceaccount:hpcburst-agents:agent-b" {
 		t.Errorf("the two agents' creates are logged under %q and %q (the administrator is %q), want agent-a and agent-b of hpcburst-agents", a.User.Username, b.User.Username, w.admin.user)
 	}
-	// No Operation, Approval or ApprovalPolicy request of this run is logged below RequestResponse.
+	// No WRITE of an Operation, Approval or ApprovalPolicy in this run is logged below RequestResponse (its reads are Metadata).
 	for _, e := range set.events {
 		switch e.ObjectRef.Resource {
 		case "operations", "approvals", "approvalpolicies":
-			if e.ObjectRef.APIGroup == v1alpha1.Group && e.Level != "RequestResponse" && e.ResponseStatus.Code != 0 {
-				t.Errorf("a request on %s is logged at %s, want RequestResponse: %s", e.ObjectRef.Resource, e.Level, e)
+			write := e.Verb == "create" || e.Verb == "update" || e.Verb == "patch" || e.Verb == "delete" || e.Verb == "deletecollection"
+			if write && e.ObjectRef.APIGroup == v1alpha1.Group && e.Level != "RequestResponse" && e.ResponseStatus.Code != 0 {
+				t.Errorf("a write of %s is logged at %s, want RequestResponse: %s", e.ObjectRef.Resource, e.Level, e)
 				return
 			}
 		}
+	}
+}
+
+// checkReadsAreMetadata is the S3 policy in the log FILE: the controllers' reads of Operations, Approvals and ApprovalPolicies, which
+// they make on every reconcile pass, are logged at Metadata with no body, and no logged body, of any level, carries managedFields.
+func (s *scenario) checkReadsAreMetadata(t *testing.T, set *logSet) {
+	w := s.world
+	lists := set.find("list", "operations", "", "", w.lc.user)
+	if len(lists) == 0 {
+		t.Fatalf("the lifecycle identity listed Operations on no pass in this run, so no read of them is in the log to judge")
+	}
+	for _, e := range lists {
+		if e.Level != "Metadata" || len(e.RequestObject) != 0 || len(e.ResponseObject) != 0 {
+			t.Errorf("a list of Operations by the lifecycle identity is logged at %s with a body of %d and %d bytes, want Metadata and none: %s", e.Level, len(e.RequestObject), len(e.ResponseObject), e)
+			break
+		}
+	}
+	// The writes still carry their bodies: an Operation's create is the one the run made (checkLife reads its content).
+	if creates := set.find("create", "operations", "", "end-a", w.a.user); len(creates) != 1 || len(creates[0].RequestObject) == 0 {
+		t.Errorf("agent A's Operation create has no body: %v", creates)
+	}
+	var withBodies, withManaged int
+	for _, e := range set.events {
+		if len(e.RequestObject) == 0 && len(e.ResponseObject) == 0 {
+			continue
+		}
+		withBodies++
+		if managedFieldsBytes(e.RequestObject)+managedFieldsBytes(e.ResponseObject) > 0 {
+			withManaged++
+			if withManaged == 1 {
+				t.Errorf("a logged body carries managedFields: %s", e)
+			}
+		}
+	}
+	if withBodies == 0 {
+		t.Errorf("no event of the run carries a body, so the managedFields check judged nothing")
+	}
+	if withManaged > 1 {
+		t.Errorf("%d of the %d events with a body carry managedFields", withManaged, withBodies)
 	}
 }
 

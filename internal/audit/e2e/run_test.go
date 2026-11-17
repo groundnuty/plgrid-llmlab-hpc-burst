@@ -61,6 +61,7 @@ func TestTheAuditLogOfAnOperationsLifeAndItsRotation(t *testing.T) {
 	set := s.waitLife()
 	t.Run("b: each write under its own identity, at its level, with its content", func(t *testing.T) { s.checkLife(t, set) })
 	t.Run("rule 3: the lifecycle's update of an Allocation is logged at Request, with its body", func(t *testing.T) { s.checkAllocationWrite(t, set) })
+	t.Run("S3: the controllers' reads of the framework's kinds are Metadata, and no body carries managedFields", func(t *testing.T) { s.checkReadsAreMetadata(t, set) })
 	t.Run("e: the Secret's requests are logged at Metadata, and its content is not in any file", func(t *testing.T) { s.checkSecretLogged(t, set) })
 	t.Run("lease: the controller's renewals happened and are not in the log", s.checkLease)
 	t.Run("size: the log per Operation and per minute of an idle controller", func(t *testing.T) {

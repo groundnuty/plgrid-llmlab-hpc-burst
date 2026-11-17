@@ -106,17 +106,23 @@ func TestThePolicyGivesEachRequestItsLevel(t *testing.T) {
 	add(request{user: lifecycle, verb: "get", group: "", resource: "leases", namespace: "hpcburst-system"}, meta, "a leases resource of another group")
 	add(request{user: lifecycle, verb: "update", group: "", resource: "configmaps"}, meta, "a controller's other write")
 
-	// Rule 2, RequestResponse: Operations, their status, Approvals and ApprovalPolicies, by every user and verb.
+	// Rule 2, RequestResponse: the WRITES of Operations, their status, Approvals and ApprovalPolicies, by every user.
 	for _, res := range []struct{ resource, sub string }{{"operations", ""}, {"operations", "status"}, {"approvals", ""}, {"approvalpolicies", ""}} {
 		for _, u := range []string{agentA, person, lifecycle, provider} {
-			for _, verb := range []string{"create", "update", "patch", "get"} {
-				add(request{user: u, verb: verb, group: hbGroup, resource: res.resource, subresource: res.sub}, reqresp, "rule 2")
+			for _, verb := range []string{"create", "update", "patch", "delete", "deletecollection"} {
+				add(request{user: u, verb: verb, group: hbGroup, resource: res.resource, subresource: res.sub}, reqresp, "rule 2: a write")
+			}
+			// The reads fall through to rule 4, Metadata: the controllers list these kinds on every reconcile pass.
+			for _, verb := range []string{"get", "list", "watch"} {
+				add(request{user: u, verb: verb, group: hbGroup, resource: res.resource, subresource: res.sub}, meta, "rule 2 has a verb filter: a read is Metadata")
 			}
 		}
 	}
 	add(request{user: lifecycle, verb: "delete", group: hbGroup, resource: "operations"}, reqresp, "rule 2 comes before rule 3: the removal of an Operation")
-	add(request{user: lifecycle, verb: "list", group: hbGroup, resource: "operations"}, reqresp, "rule 2 has no verb filter: a controller's list of Operations")
-	add(request{user: provider, verb: "watch", group: hbGroup, resource: "approvals"}, reqresp, "rule 2 has no verb filter: a controller's watch")
+	add(request{user: lifecycle, verb: "list", group: hbGroup, resource: "operations"}, meta, "a controller's list of Operations, which fills an idle controller's log, is Metadata")
+	add(request{user: lifecycle, verb: "list", group: hbGroup, resource: "approvalpolicies"}, meta, "a controller's list of ApprovalPolicies")
+	add(request{user: provider, verb: "watch", group: hbGroup, resource: "approvals"}, meta, "a controller's watch")
+	add(request{user: person, verb: "get", group: hbGroup, resource: "operations"}, meta, "the person's read of an Operation")
 	// Its non-matches: the same names in another group, and the neighbouring kinds and subresources.
 	add(request{user: agentA, verb: "create", group: "example.org", resource: "operations"}, meta, "operations of another group")
 	add(request{user: agentA, verb: "update", group: hbGroup, resource: "operations", subresource: "scale"}, meta, "a subresource the rule does not name")
@@ -170,6 +176,10 @@ func TestThePolicyGivesEachRequestItsLevel(t *testing.T) {
 		// Every request is logged once, as it is answered: RequestReceived is omitted at every level.
 		if !slices.Contains(got.OmitStages, auditapi.StageRequestReceived) {
 			t.Errorf("%s: omitted stages %v do not include %s", row.r, got.OmitStages, auditapi.StageRequestReceived)
+		}
+		// No body that is logged carries managedFields: the policy omits them, at every level.
+		if !got.OmitManagedFields {
+			t.Errorf("%s: managedFields are not omitted", row.r)
 		}
 	}
 }
