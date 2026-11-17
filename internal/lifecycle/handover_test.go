@@ -119,6 +119,12 @@ func hoStepNoWaits(rg *rig) {
 // expected times rest on and returns the primary.
 func hoStart(rg *rig, step func()) *v1alpha1.Instance {
 	rg.t.Helper()
+	return hoStartLease(rg, step, hoT(12, 0, 20))
+}
+
+// hoStartLease is hoStart for a partition whose jobs end at leaseEnd (4 h: 12:00:20; 12 h: 20:00:20).
+func hoStartLease(rg *rig, step func(), leaseEnd time.Time) *v1alpha1.Instance {
+	rg.t.Helper()
 	if step == nil {
 		step = rg.Step
 	}
@@ -134,8 +140,8 @@ func hoStart(rg *rig, step func()) *v1alpha1.Instance {
 		rg.t.Fatalf("the primary's job should start at 08:00:20, got %+v", a)
 	case p.Status.ReadyTime == nil || !p.Status.ReadyTime.Time.Equal(hoT(8, 1, 10)):
 		rg.t.Fatalf("the primary should be ready at 08:01:10, got %v", p.Status.ReadyTime)
-	case p.Status.LeaseEnd == nil || !p.Status.LeaseEnd.Time.Equal(hoT(12, 0, 20)):
-		rg.t.Fatalf("the primary's leaseEnd should be 12:00:20, got %v", p.Status.LeaseEnd)
+	case p.Status.LeaseEnd == nil || !p.Status.LeaseEnd.Time.Equal(leaseEnd):
+		rg.t.Fatalf("the primary's leaseEnd should be %s, got %v", leaseEnd.Format(time.TimeOnly), p.Status.LeaseEnd)
 	}
 	if recs := hoVerificationRecords(rg, p.UID); len(recs) != 1 || !recs[0].CreationTimestamp.Time.Equal(hoT(8, 0, 40)) {
 		rg.t.Fatalf("the primary's verification record should be the one written at 08:00:40, got %+v", recs)

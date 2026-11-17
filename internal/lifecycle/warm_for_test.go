@@ -1,16 +1,19 @@
 package lifecycle
 
-// A replacement goes on a warm Allocation only when the warm Allocation's drain start is STRICTLY later than its
-// predecessor's (HBEP-7, Hedging (beta), Started losers are kept; Over-allocation and qualification (beta), The
-// lowest-ranked is kept; #604 PR 3's plan, Q4): warmFor, which provisioning places by and the no-overlap decision
-// reads (reusableWarm), so placement and the mode agree. Without it the ranked-out extra's Allocation, which
-// started with the primary's and drains with it, took the primary's replacement, which then ended at the very moment
-// it was to take over (CapacityDropped, no ReplacementLate, no new job).
+// A replacement goes on a warm Allocation only when the warm Allocation's drain start is later than its predecessor's BY AT
+// LEAST the lead an Instance needs (HBEP-7, Hedging (beta), Started losers are kept; Over-allocation and qualification
+// (beta), The lowest-ranked is kept; #604 PR 3's plan, Q4; amendment #711 of the science agent's ruling on #708's Fable
+// review): warmFor, which provisioning places by and the no-overlap decision reads (reusableWarm), so placement and the mode
+// agree. The lead (leadOf) is the drain window, handoverMargin and health.startTimeout: 2 h 10 min + 30 min + 1 h = 3 h 40 min
+// in this fixture. Without the rule the ranked-out extra's Allocation, which started with the primary's and drains with it,
+// took the primary's replacement, which then ended at the very moment it was to take over (CapacityDropped, no
+// ReplacementLate, no new job), and one that drained moments after it left the deployment without a ready Instance.
 //
 // The fixture is handover_test.go's: a 4 h job limit, drain window 2 h 10 min, handoverMargin 30 min, no wait but the
 // jobs' own 0 s, start-to-ready 50 s. A job that starts at s ends at s + 4 h and drains from s + 1 h 50 min, so the
-// warm Allocation's drain start is its job's start plus 1 h 50 min and the predecessor's is its own. Every expected
-// time and count is worked by hand in the row.
+// warm Allocation's drain start is its job's start plus 1 h 50 min and the predecessor's is its own. In 4 h jobs the
+// two never differ by 3 h 40 min, so every row here is "not used"; the rows where it is used, and the boundary, are in
+// warm_lead_test.go on a 12 h partition. Every expected time and count is worked by hand in the row.
 
 import (
 	"slices"
@@ -25,7 +28,8 @@ import (
 )
 
 // TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater: instances 2, then 1, with a warm Allocation left, and the
-// primary's replacement at its planned time. The first job starts at 08:00:20 (hard end 12:00:20, drain start
+// primary's replacement at its planned time. The first row was "used" before the lead: a warm Allocation draining 10 min
+// after the predecessor took the replacement; under the lead (3 h 40 min) 10 min is not enough, so it is not used now. The first job starts at 08:00:20 (hard end 12:00:20, drain start
 // 09:50:20), so its replacement is planned at 09:50:20 - (0 + 50 s + 30 min) = 09:19:30.
 func TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater(t *testing.T) {
 	for _, c := range []struct {
@@ -41,7 +45,7 @@ func TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater(t *testing.T) {
 		// warmDrain and predDrain are the two drain starts, for the failure message.
 		warmDrain, predDrain string
 	}{
-		{name: "the warm Allocation drains 10 min AFTER the predecessor: used", raise: hoT(8, 10, 0), slow: true, lower: hoT(8, 11, 0), planned: hoT(9, 19, 30), warmUsed: true,
+		{name: "the warm Allocation drains 10 min AFTER the predecessor, less than the lead of 3 h 40 min: not used", raise: hoT(8, 10, 0), slow: true, lower: hoT(8, 11, 0), planned: hoT(9, 19, 30), warmUsed: false,
 			warmDrain: "10:00:20", predDrain: "09:50:20"},
 		{name: "the warm Allocation drains exactly AT the predecessor's drain start: not used", slow: true, lower: hoT(8, 2, 0), planned: hoT(9, 19, 30), warmUsed: false,
 			warmDrain: "09:50:20", predDrain: "09:50:20"},
