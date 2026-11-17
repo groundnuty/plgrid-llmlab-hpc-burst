@@ -807,6 +807,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-17: erratum: a run of losses that includes a queue-full loss ends only with a publish that succeeds while the publisher's queue is below half its size (#697).
 - 2026-11-17: erratum: the closing `EventsNotLogged` stays owed until its event is stored; a closing that is lost is covered by the next, since the earliest unreported loss, with the counts summed (#697).
 - 2026-11-17: erratum: an event still queued for a controller whose manager has stopped for good counts nothing when it is lost and raises nothing, one log line each (#697).
+- 2026-11-17: erratum: the route and the `hpcburst_events_unlogged_total` series of a controller label end with the last manager of the label that is forgotten, not the first: a Provider that changes kind has a manager of each kind for a while (#697).
 - 2026-11-17: erratum: the S2 ratios measured for #625's publisher (#697), recorded under Retention.
 
 ## Amendments

@@ -20,6 +20,8 @@
 package eventcount
 
 import (
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -88,6 +90,11 @@ type Counter struct {
 	// route and its loss gate then, since its manager has stopped for good.
 	mu       sync.Mutex
 	onForget map[string][]func()
+	// regs are the managers of each controller label that have set their series up and not yet had them
+	// forgotten: a registration per series set, the one a manager's Setup passes to Zero and its Dropped hook
+	// to Forget. Two managers of one label can run at once, as when a Provider changes kind, and the label's
+	// route and unlogged series live as long as either does.
+	regs map[string]map[string][]Series
 
 	// forgetMid, when set (tests only), is called by Forget between retiring the controller's route and
 	// deleting its series, the window in which an event of the controller can still be lost.
@@ -149,10 +156,31 @@ func (c *Counter) Unlogged(controller string) (value float64, exists bool) {
 // are created at 0 for every reason, action and type that the lifecycle
 // controller, the front and a managed Provider can raise). A series that
 // exists already keeps its count.
+//
+// The series set is also the registration of the manager that asks for it: see Forget.
 func (c *Counter) Zero(controller string, series []Series) {
 	for _, s := range series {
 		c.vec.WithLabelValues(controller, s.Reason, s.Action, s.Type)
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.regs == nil {
+		c.regs = map[string]map[string][]Series{}
+	}
+	if c.regs[controller] == nil {
+		c.regs[controller] = map[string][]Series{}
+	}
+	c.regs[controller][seriesKey(series)] = append([]Series(nil), series...)
+}
+
+// seriesKey names a series set: its entries sorted, so the set a manager zeroes is the set it forgets.
+func seriesKey(series []Series) string {
+	keys := make([]string, 0, len(series))
+	for _, s := range series {
+		keys = append(keys, s.Reason+"|"+s.Action+"|"+s.Type)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 // Forget deletes the controller's series named in series, whatever their
@@ -161,14 +189,30 @@ func (c *Counter) Zero(controller string, series []Series) {
 // read as a Provider that raised nothing. A series that does not exist is
 // skipped.
 //
-// The controller is retired first and its series deleted after: the hooks mark its publisher route dead, and
-// a dead route counts no loss and raises nothing, so no event of the controller that is still queued, or
-// whose EventsNotLogged is being raised, can bring a series back once it is deleted (the delta review of
-// #697, 17 Nov 2026).
+// The series set is the registration of the manager that Zero was given it for, and the manager that is
+// forgotten is the one whose set this is. Two managers of one label can run at once, when a Provider changes
+// kind: while another registration of the label is live, the label's route, its unlogged series and the
+// series the other manager also raises are left alone, and only the series of this manager's own are deleted.
+// When it was the last, the controller is retired first and its series deleted after: the hooks mark its
+// publisher route dead, and a dead route counts no loss and raises nothing, so no event of the controller
+// that is still queued, or whose EventsNotLogged is being raised, can bring a series back once it is deleted
+// (the delta reviews of #697, 17 Nov 2026).
 func (c *Counter) Forget(controller string, series []Series) {
 	c.mu.Lock()
-	hooks := c.onForget[controller]
-	delete(c.onForget, controller)
+	delete(c.regs[controller], seriesKey(series))
+	live := len(c.regs[controller]) > 0
+	kept := map[Series]bool{} // series another live registration of the label raises too
+	for _, ss := range c.regs[controller] {
+		for _, s := range ss {
+			kept[s] = true
+		}
+	}
+	var hooks []func()
+	if !live {
+		delete(c.regs, controller)
+		hooks = c.onForget[controller]
+		delete(c.onForget, controller)
+	}
 	c.mu.Unlock()
 	for _, f := range hooks {
 		f()
@@ -177,9 +221,13 @@ func (c *Counter) Forget(controller string, series []Series) {
 		c.forgetMid()
 	}
 	for _, s := range series {
-		c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
+		if !kept[s] {
+			c.vec.DeleteLabelValues(controller, s.Reason, s.Action, s.Type)
+		}
 	}
-	c.unlogged.DeleteLabelValues(controller)
+	if !live {
+		c.unlogged.DeleteLabelValues(controller)
+	}
 }
 
 // count adds one event to its series.

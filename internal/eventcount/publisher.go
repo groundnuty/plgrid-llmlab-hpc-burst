@@ -401,8 +401,8 @@ func (p *Publisher) Wrapped(controller string) int {
 	return n
 }
 
-// Unregister drops a controller's route and its loss gate: its manager has stopped for good. The
-// next wrapper of the controller starts a new one.
+// Unregister drops a controller's route and its loss gate: the last manager of its label has stopped for
+// good (Counter.Forget decides that). The next wrapper of the controller starts a new one.
 func (p *Publisher) Unregister(controller string, counter *Counter) {
 	k := routeKey{controller: controller, counter: counter}
 	p.mu.Lock()

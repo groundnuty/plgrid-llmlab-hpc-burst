@@ -105,3 +105,45 @@ func TestAForgetBetweenARaisesDeadCheckAndItsEmitLeavesNoSeries(t *testing.T) {
 		t.Errorf("the forgotten controller's unlogged series is back, at %v", v)
 	}
 }
+
+// Two managers of one label at once, as when a Provider changes kind (a batch manager and a managed one): the
+// first is dropped, and its Forget names its own series. The route and the unlogged series belong to the label,
+// so they live as long as any manager of the label does: the second's losses still count, its
+// EventsNotLogged is still raised, and only the last Forget retires the route and deletes the series (the delta
+// review of #697, 17 Nov 2026).
+func TestAForgetOfOneManagerOfALabelLeavesTheOthersRouteAlone(t *testing.T) {
+	clk := &fakeClock{t: base}
+	ctl := ControllerProvider("p1")
+	batch := []Series{{Reason: "JobStarted", Action: "start", Type: provider.EventKindOrdinary}}
+	managed := []Series{{Reason: "JobEnded", Action: "end", Type: provider.EventKindOrdinary}}
+	r := newRig(t, ctl, true, bigCaps, func(o *PublisherOptions) { o.Now = clk.now }, leaseFor("provider-p1"))
+	r.counter.Zero(ctl, batch) // the batch manager's Setup
+	// The managed manager of the same name is set up before the batch one is dropped.
+	inner2 := &recInner{}
+	rec2 := Events(inner2, r.counter, ctl, WithLog(Log{Publisher: r.pub, Scheme: testScheme(), ReportingController: "hpcburst-test", Lease: leaseFor("provider-p1")}))
+	r.counter.Zero(ctl, managed)
+	r.counter.Forget(ctl, batch) // the batch pass drops its manager
+	if _, exists := r.counter.Unlogged(ctl); !exists {
+		t.Fatal("the first manager's Forget deleted the unlogged series that the second manager still counts into")
+	}
+	// The second manager's event is lost with the log down: counted, and its EventsNotLogged raised through
+	// the second manager's recorder.
+	rec2.EventfID("live-a", alloc(crashUID), nil, provider.EventKindOrdinary, "JobEnded", "ended", "%s", "a note")
+	clk.set(base.Add(101 * time.Second))
+	within(t, 20*time.Second, "the second manager's loss to be counted", func() bool { v, _ := r.counter.Unlogged(ctl); return v >= 1 })
+	within(t, 20*time.Second, "the second manager's EventsNotLogged", func() bool { return len(inner2.byReason(ReasonEventsNotLogged)) == 1 })
+	if strings.Contains(r.logs.String(), "stopped for good") {
+		t.Errorf("a live manager's loss was treated as a stopped controller's: %q", r.logs.String())
+	}
+	// The last manager's Forget retires the route and deletes the series; a late loss is one log line.
+	r.counter.Forget(ctl, managed)
+	if _, exists := r.counter.Unlogged(ctl); exists {
+		t.Error("the last Forget left the unlogged series")
+	}
+	rec2.EventfID("live-b", alloc(crashUID), nil, provider.EventKindOrdinary, "JobEnded", "ended", "%s", "a note")
+	clk.set(base.Add(202 * time.Second))
+	within(t, 20*time.Second, "the late loss to be refused", func() bool { return strings.Contains(r.logs.String(), "stopped for good") })
+	if _, exists := r.counter.Unlogged(ctl); exists {
+		t.Error("a late loss after the last Forget brought the series back")
+	}
+}
