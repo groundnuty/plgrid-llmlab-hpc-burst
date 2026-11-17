@@ -82,11 +82,10 @@ func inSelection(reps []*v1alpha1.Instance, in *v1alpha1.Instance) bool {
 // is then ranked against the peers: the chosen primaries on its Provider that are ready and have no live
 // replacement, which is a handover ranking leaves alone.
 func (p *pass) enterReady(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ready func() error) error {
-	// A kept started loser is ranked against its hedge's winner alone, before the selection is read: its hedge is a
-	// replacement hedge or not, and whatever the selection says of its Provider's other primaries, they are no peers of
-	// it (HBEP-7, Hedging's started losers).
-	if w := p.candidateWinner(in); w != nil {
-		return p.rankCandidate(in, alloc, w, ready)
+	// A kept started loser never enters the general ranking below: its one peer is its hedge's winner, never the
+	// deployment's other primaries on its Provider (HBEP-7, The ranking point, Its peers).
+	if waitingCandidate(in) {
+		return p.candidateStep(in, alloc, ready)
 	}
 	chosen, surplus := selectPrimaries(p.selection(in), p.desiredCount())
 	if !inSelection(surplus, in) || inSelection(chosen, in) {
@@ -164,9 +163,40 @@ func (p *pass) candidateWinner(in *v1alpha1.Instance) *v1alpha1.Instance {
 	return candidateWinnerOf(in, p.instanceNamed, p.stale)
 }
 
-// rankCandidate ranks a hedge's kept started loser at its ranking point, against its hedge's winner alone, whatever
-// their classes (HBEP-7, Hedging's started losers; #616, PR 5). It is ranked as soon as it passes, the winner being
-// ready:
+// candidateStep is a kept started loser's step at its ranking point, where starting would make it ready (HBEP-7,
+// Over-allocation and qualification (beta), Hedging's started losers; #616, PR 5; the science agent's ruling on #721).
+// The selection treats it as any Instance, so:
+//   - the selection chooses it (the deployment is short, or it is a replacement whose winner has gone): it becomes
+//     ready with no ranking, since ranking never holds back an Instance the deployment needs. Its mark stays while its
+//     winner is countable, and is cleared once the winner has gone (readyUnmarked);
+//   - the selection leaves it surplus: it is ranked against its winner alone while that winner can be ranked against
+//     (rankCandidate), and otherwise it ends HedgeLost, kept as warm capacity. A winner that has gone, is draining,
+//     is being deleted, or is already outranked (it carries the ranked-out mark of another Instance, whose rewriting
+//     would leave two ready for one slot) cannot be ranked against.
+//
+// It is never ranked against another primary of its Provider.
+func (p *pass) candidateStep(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ready func() error) error {
+	chosen, surplus := selectPrimaries(p.selection(in), p.desiredCount())
+	w := p.candidateWinner(in)
+	if !inSelection(surplus, in) || inSelection(chosen, in) {
+		if w != nil {
+			// Its winner serves beside it: it keeps its mark, which is what makes it a hedge of its own (hedgeKey). Without
+			// the mark it would rejoin its winner's hedge, and the next resolveHedges would drain it as that hedge's loser.
+			return ready()
+		}
+		return p.readyUnmarked(in, ready)
+	}
+	switch {
+	case w == nil:
+		return p.endCandidate(in, alloc, nil, fmt.Sprintf("hedge lost to %s, on Provider %s: its winner has left and the deployment's need is met without Instance %s, so it passed its checks and is kept as warm capacity", candidateOf(in), in.Labels[v1alpha1.LabelProvider], in.Name))
+	case w.Annotations[annotationRankedOut] != "":
+		return p.endCandidate(in, alloc, w, fmt.Sprintf("hedge lost to %s, on Provider %s: its winner has been outranked by another Instance, whose mark is not rewritten, so Instance %s passed its checks and is kept as warm capacity", w.Name, w.Labels[v1alpha1.LabelProvider], in.Name))
+	}
+	return p.rankCandidate(in, alloc, w, ready)
+}
+
+// rankCandidate ranks a kept started loser against its hedge's winner alone, whatever their classes (HBEP-7, Hedging's
+// started losers), the winner being countable and not outranked:
 //   - the winner has a live replacement: it is in its handover, which ranking leaves alone, so the loser ends with
 //     HedgeLost;
 //   - the winner is not ready (restarting): the loser waits, returning nil with no write, as one waits for a chosen
@@ -190,10 +220,15 @@ func (p *pass) rankCandidate(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, 
 
 // endCandidate ends a kept started loser at its ranking point with HedgeLost, its Allocation kept as warm capacity
 // (end with release false, so anchorIfLast writes idle-since). It passed every check, so startOutcomeOf counts a
-// success for it. One replaced HedgeLost event regards it, with the winner related.
+// success for it. One replaced HedgeLost event regards it, with its winner related when it still exists (w is nil
+// once it has gone).
 func (p *pass) endCandidate(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, w *v1alpha1.Instance, msg string) error {
 	if p.mem.once("hedge-lost/" + string(in.UID)) {
-		p.r.Recorder.Event(in, w, eventReplaced, v1alpha1.ReasonHedgeLost, msg)
+		var related client.Object
+		if w != nil {
+			related = w
+		}
+		p.r.Recorder.Event(in, related, eventReplaced, v1alpha1.ReasonHedgeLost, msg)
 	}
 	return p.end(in, alloc, v1alpha1.ReasonHedgeLost, msg, false)
 }
@@ -215,6 +250,45 @@ func (p *pass) rankOut(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, peer *
 		p.r.Recorder.Event(in, related, eventReplaced, v1alpha1.ReasonRankedOut, msg)
 	}
 	return p.end(in, alloc, v1alpha1.ReasonRankedOut, msg, false)
+}
+
+// readyThisPass reports whether an Instance that has passed its checks becomes ready in this very pass: its tunnel is
+// connected, the agent has reported its warm-up done, the router's gates (when it is routed) are open, and the
+// selection chooses it or holds no primary slot for it, so enterReady makes it ready and never holds it. Such an
+// Instance is no longer judged by health.startTimeout (startSignal): a passed Instance that waited at its ranking point,
+// behind a winner that was not ready, and is chosen only after its own start deadline, becomes ready, and is not failed
+// with StartTimeout and released (the Fable review of #721, point 1). An Instance whose tunnel is not connected, or whose
+// router has not admitted it, is judged by the deadline as before: TunnelNotConnected for a chosen Instance
+// (HBEP-6, Key restriction).
+func (p *pass) readyThisPass(in *v1alpha1.Instance, av agentView) bool {
+	if p.md == nil || in.Status.ReadyTime != nil || !passedChecks(in) || !isTrue(in.Status.Conditions, v1alpha1.ConditionTunnelConnected) {
+		return false
+	}
+	if routed(in) && (!routerProbePasses(in, av) || !routerAdmitsReady(in, av)) {
+		return false
+	}
+	if !warmUpReported(in, av) {
+		return false
+	}
+	_, surplus := selectPrimaries(p.selection(in), p.desiredCount())
+	return !inSelection(surplus, in)
+}
+
+// warmUpReported reports whether the agent has reported the Instance's warm-up done at its current verification
+// generation: every worker's, for several (the gate before the ranking point in starting and startingWorkers).
+func warmUpReported(in *v1alpha1.Instance, av agentView) bool {
+	ir := av.report
+	if ir == nil || av.unreachable {
+		return false
+	}
+	if several(in) {
+		return everyWorker(workerNames(in), func(w string) bool {
+			c := workerResults(ir, in, w)
+			return c != nil && c.WarmUp != nil && c.WarmUp.Done
+		})
+	}
+	c := ir.Checks
+	return c != nil && c.VerificationGeneration == verificationGeneration(in) && c.WarmUp != nil && c.WarmUp.Done
 }
 
 // waitingAtRankingPoint reports whether the Instance has passed its checks, has its tunnel connected and is surplus

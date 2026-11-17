@@ -259,38 +259,65 @@ func (rd *klRound) settled() *v1alpha1.Instance {
 	return h.mustInstance(rd.l)
 }
 
-// TestAKeptLoserDoesNotRewriteTheMarkOfAWinnerAnotherCandidateOutranked (Opus, point 1a; instances 1, no P): F is the
-// round's winner and S, the extra, passes and outranks it, so F carries the ranked-out mark naming S and stays ready
-// through the front's 10 s window. L passes in that window, 10 s after S: its winner is F, which is already outranked,
-// so L is not ranked against it. L ends HedgeLost, kept warm; F's mark still names S, and only S serves in the end: one
-// ready Instance for the one slot, where ranking L against F would rewrite the mark to L and leave S and L both ready
-// for one slot, with step 7 draining whichever has the nearer hard end. Members are seeded.
+// TestAKeptLoserDoesNotRewriteTheMarkOfAWinnerAnotherCandidateOutranked (Opus, point 1a, and Fable, point 2; instances 1,
+// no P): F is the round's winner and S, the extra, passes and outranks it, so F carries the ranked-out mark naming S and
+// stays ready through the front's 10 s window. In the first row L passes in that window, 10 s after S: its winner is F,
+// which is already outranked, so L is not ranked against it. L ends HedgeLost, kept warm; F's mark still names S, and only
+// S serves in the end: one ready Instance for the one slot, where ranking L against F would rewrite the mark to L and
+// leave S and L both ready for one slot, with step 7 draining whichever has the nearer hard end. In the second row L
+// passes a minute after S, when F has ended and no primary is on L's Provider: it ends HedgeLost, where the general ranking
+// would end it RankedOut against no peer, which HBEP-7 says is HedgeLost for a hedge's started loser. Members are seeded.
 func TestAKeptLoserDoesNotRewriteTheMarkOfAWinnerAnotherCandidateOutranked(t *testing.T) {
-	rd := klExtraRound(t, false, 4*time.Minute, 4*time.Minute+10*time.Second)
-	h := rd.h
-	rd.keptAtTheWin()
-	rd.outranked()
-	h.clock.Advance(10 * time.Second)
-	h.Step() // L passes, in F's window
-	l := h.mustInstance(rd.l)
-	if l.Status.ReadyTime != nil || !ended(l) || l.Status.EndReason != v1alpha1.ReasonHedgeLost {
-		t.Fatalf("L is %s (end %q, ready %v) in F's window, want ended for HedgeLost: F was outranked, so L is not ranked against it", l.Status.Phase, l.Status.EndReason, l.Status.ReadyTime)
-	}
-	if got := h.mustInstance(rd.f).Annotations[annotationRankedOut]; got != rd.s {
-		t.Fatalf("F's ranked-out mark names %q, want %q: a mark is never rewritten", got, rd.s)
-	}
-	h.until(3*time.Minute, 10*time.Second, "F ended", func() bool { return ended(h.mustInstance(rd.f)) })
-	if r := h.mustInstance(rd.f).Status.EndReason; r != v1alpha1.ReasonRankedOut {
-		t.Fatalf("F ended for %q, want RankedOut", r)
-	}
-	if n := h.readyCount(hoMD); n != 1 || h.mustInstance(rd.s).Status.Phase != v1alpha1.InstanceReady {
-		t.Fatalf("%d ready Instances, S %s, want S alone: one Instance for the one slot", n, h.mustInstance(rd.s).Status.Phase)
-	}
-	if h.released(h.mustInstance(rd.l).Spec.AllocationRef.Name) {
-		t.Fatal("L's Allocation was released, want it kept as warm capacity")
-	}
-	if subs := h.sbatches(); subs != 3 {
-		t.Fatalf("%d jobs submitted, want F's, S's and L's", subs)
+	for _, c := range []struct {
+		name   string
+		lDelay time.Duration
+		window bool // L passes in F's window
+	}{
+		{"L passes in F's window", 4*time.Minute + 10*time.Second, true},
+		{"L passes after F has ended", 5 * time.Minute, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rd := klExtraRound(t, false, 4*time.Minute, c.lDelay)
+			h := rd.h
+			rd.keptAtTheWin()
+			rd.outranked()
+			var l *v1alpha1.Instance
+			if c.window {
+				h.clock.Advance(10 * time.Second)
+				h.Step() // L passes, in F's window
+				l = h.mustInstance(rd.l)
+			} else {
+				h.until(3*time.Minute, 10*time.Second, "F ended", func() bool { return ended(h.mustInstance(rd.f)) })
+				if in := h.mustInstance(rd.l); ended(in) || in.Status.ReadyTime != nil {
+					t.Fatalf("L is %s (ready %v) when F has ended, want it still waiting: the fixture's timeline is off", in.Status.Phase, in.Status.ReadyTime)
+				}
+				l = rd.settled()
+			}
+			if l.Status.ReadyTime != nil || !ended(l) || l.Status.EndReason != v1alpha1.ReasonHedgeLost {
+				t.Fatalf("L is %s (end %q, ready %v), want ended for HedgeLost: F was outranked, so L is not ranked against it, and it has no peer", l.Status.Phase, l.Status.EndReason, l.Status.ReadyTime)
+			}
+			if got := h.mustInstance(rd.f).Annotations[annotationRankedOut]; got != rd.s {
+				t.Fatalf("F's ranked-out mark names %q, want %q: a mark is never rewritten", got, rd.s)
+			}
+			for _, e := range h.rec.Find(eventReplaced, v1alpha1.ReasonRankedOut) {
+				if e.Name == rd.l {
+					t.Fatalf("a RankedOut event regards L: %+v", e)
+				}
+			}
+			h.until(3*time.Minute, 10*time.Second, "F ended", func() bool { return ended(h.mustInstance(rd.f)) })
+			if r := h.mustInstance(rd.f).Status.EndReason; r != v1alpha1.ReasonRankedOut {
+				t.Fatalf("F ended for %q, want RankedOut", r)
+			}
+			if n := h.readyCount(hoMD); n != 1 || h.mustInstance(rd.s).Status.Phase != v1alpha1.InstanceReady {
+				t.Fatalf("%d ready Instances, S %s, want S alone: one Instance for the one slot", n, h.mustInstance(rd.s).Status.Phase)
+			}
+			if h.released(h.mustInstance(rd.l).Spec.AllocationRef.Name) {
+				t.Fatal("L's Allocation was released, want it kept as warm capacity")
+			}
+			if subs := h.sbatches(); subs != 3 {
+				t.Fatalf("%d jobs submitted, want F's, S's and L's", subs)
+			}
+		})
 	}
 }
 
@@ -317,8 +344,8 @@ func TestAKeptLoserIsNeverRankedAgainstAPrimaryOnceTheWinnerSIsOutranked(t *test
 		t.Fatalf("P is %s with ranked-out %q, want it ready and unmarked: it was compared with the candidate", p.Status.Phase, p.Annotations[annotationRankedOut])
 	}
 	for _, e := range h.rec.Find(eventReplaced, v1alpha1.ReasonRankedOut) {
-		if e.Name == rd.p {
-			t.Fatalf("a RankedOut event regards P: %+v", e)
+		if e.Name == rd.p || e.Name == rd.l {
+			t.Fatalf("a RankedOut event regards P or L: %+v", e)
 		}
 	}
 	if n := h.readyCount(hoMD); n != 2 {
@@ -326,5 +353,65 @@ func TestAKeptLoserIsNeverRankedAgainstAPrimaryOnceTheWinnerSIsOutranked(t *test
 	}
 	if subs := h.sbatches(); subs != 4 {
 		t.Fatalf("%d jobs submitted, want P's, L's, F's and S's", subs)
+	}
+}
+
+// forceNotReady writes the Instance's phase as verifying, as a failed probe and its restart leave it.
+func (h *klRig) forceNotReady(name string) {
+	h.t.Helper()
+	in := h.mustInstance(name)
+	in.Status.Phase = v1alpha1.InstanceVerifying
+	if err := h.c.Status().Update(h.ctx, in); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// TestAPassedCandidateIsReadyNotFailedWhenItsWinnerLeavesAfterItsDeadline (Fable, point 1; HBEP-7, Instance start, and
+// The ranking point: an Instance that has passed waits at its ranking point, which health.startTimeout does not judge).
+// The fixture is P's replacement hedge, with health.startTimeout 15 min: R1 on A is the candidate, its job started at 09:19:40
+// and its agent instructed at 09:19:40, so its deadline is 09:34:40; R2 on B wins at 09:20:40. R1 passes at 09:30:20. R2's
+// probe has failed and it restarts, so it is verifying, countable and not ready (written before each pass from 09:29:30,
+// as the restart leaves it, since the fake's restart takes a minute and not forty); R1, a replacement of P, which still
+// counts, is surplus and waits for R2 to be ready: past 09:30:20 it waits, neither ready nor ended. R2 is deleted at
+// 09:35:00, after R1's deadline, which it has waited through from 09:34:40. In that pass R1's winner has gone, so the selection no longer holds R1 as surplus and
+// enterReady makes it ready: it is ready at 09:35:00, with no StartTimeout, no job submitted (P's, R1's and R2's, three
+// in all) and its Allocation kept. Judged for the deadline first, a passed Instance that waited would be failed and its
+// Allocation released, so the deployment would hold nothing of R1's. Members are seeded.
+func TestAPassedCandidateIsReadyNotFailedWhenItsWinnerLeavesAfterItsDeadline(t *testing.T) {
+	h, p0 := klPrimary(t, withProfile(func(s *v1alpha1.PlatformProfileSpec) {
+		s.Health = &v1alpha1.HealthThresholds{StartTimeout: dur(15 * time.Minute)}
+	}))
+	w := klWin(t, h, p0, rk179, ptrTo(int32(1)), false)
+	w.keptAtTheWin()
+	if got := h.mustInstance(w.r1).Status.StartInstructionTime; got == nil || !got.Time.Equal(hoT(9, 19, 40)) {
+		t.Fatalf("R1's start instruction at %v, want 09:19:40, so its deadline is 09:34:40", got)
+	}
+	hoStepTo(h.rig, hoT(9, 29, 30), 30*time.Second, nil)
+	for h.clock.Now().Before(hoT(9, 34, 50)) {
+		h.forceNotReady(w.r2)
+		h.clock.Advance(10 * time.Second)
+		h.Step()
+		if in := h.mustInstance(w.r1); ended(in) || in.Status.Phase == v1alpha1.InstanceReady {
+			t.Fatalf("R1 is %s (end %q) at %s, want it waiting behind its winner, which is not ready", in.Status.Phase, in.Status.EndReason, h.clock.Now().Format(time.TimeOnly))
+		}
+	}
+	if !isTrue(h.mustInstance(w.r1).Status.Conditions, v1alpha1.ConditionWarmedUp) {
+		t.Fatal("R1 has not passed its checks by 09:34:50, so the row does not exercise a passed Instance")
+	}
+	if err := h.c.Delete(h.ctx, h.mustInstance(w.r2)); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.Advance(10 * time.Second)
+	h.Step() // 09:35:00, after R1's deadline
+	h.at(hoT(9, 35, 0))
+	l := h.mustInstance(w.r1)
+	if l.Status.Phase != v1alpha1.InstanceReady || l.Status.ReadyTime == nil || !l.Status.ReadyTime.Time.Equal(hoT(9, 35, 0)) {
+		t.Fatalf("R1 is %s (end %q, ready %v) at 09:35:00, want ready at 09:35:00: it passed, its winner left and the deployment needs it", l.Status.Phase, l.Status.EndReason, l.Status.ReadyTime)
+	}
+	if h.released(w.r1A) {
+		t.Fatal("R1's Allocation was released, want it kept")
+	}
+	if subs := h.sbatches(); subs != 3 {
+		t.Fatalf("%d jobs submitted, want P's, R1's and R2's: no Allocation is made", subs)
 	}
 }

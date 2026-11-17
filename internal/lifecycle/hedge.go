@@ -63,6 +63,14 @@ func candidateWinnerOf(in *v1alpha1.Instance, named func(string) *v1alpha1.Insta
 	return w
 }
 
+// waitingCandidate reports whether the Instance is a kept started loser that has never been ready and has not ended:
+// it carries the mark. Starting reads it at its ranking point (candidateStep), and never through the general ranking.
+// One that was ready, and restarted after it outranked its winner, is not waiting: it takes the general path, the
+// stated limit of #730.
+func waitingCandidate(in *v1alpha1.Instance) bool {
+	return candidateOf(in) != "" && in.Status.ReadyTime == nil && !ended(in)
+}
+
 // hedgeKey is the hedge an Instance belongs to: its AnnotationHedgeGroup, or its own name for a first member or a
 // hedge of one. A kept started loser, which carries annotationCandidateOf, is a hedge of one of its own from the
 // win on, under a key no member's can be: it is ranked against its hedge's winner and is no part of the hedge's

@@ -284,7 +284,8 @@ func TestAKeptLoserThatFailsACheckIsReleased(t *testing.T) {
 // candidate is an ordinary Instance of the selection, so both are chosen and no primary is missing: no Allocation is
 // made, and the jobs stay 3 (a fourth is the third script's 10 h wait, which would show as a pending job). M1's worker
 // starts 10 min after its job (08:10:20) and its checks take 40 s, so it passes at 08:11:00; it is chosen, so it
-// becomes ready then with no ranking and its mark is cleared: M2 and M1 are both ready, 2 of 2, and no HedgeLost
+// becomes ready then with no ranking, and keeps its mark, which is what keeps it a hedge of its own beside M2 (cleared,
+// it would rejoin M2's hedge and be drained as its loser): M2 and M1 are both ready, 2 of 2, and no HedgeLost
 // event was raised. Its outcome is a success at 08:11:00. Members are seeded.
 func TestAKeptLoserIsChosenWhenTheDeploymentIsShort(t *testing.T) {
 	fail := 4 * time.Minute
@@ -308,8 +309,8 @@ func TestAKeptLoserIsChosenWhenTheDeploymentIsShort(t *testing.T) {
 	if l.Status.Phase != v1alpha1.InstanceReady || l.Status.ReadyTime == nil || !l.Status.ReadyTime.Time.Equal(hoT(8, 11, 0)) {
 		t.Fatalf("M1 is %s (ready %v, end %q) at 08:11:00, want ready at 08:11:00: it is chosen, so it is not ranked", l.Status.Phase, l.Status.ReadyTime, l.Status.EndReason)
 	}
-	if l.Annotations[annotationCandidateOf] != "" {
-		t.Fatalf("M1 still carries candidate-of %q once chosen, want it cleared", l.Annotations[annotationCandidateOf])
+	if l.Annotations[annotationCandidateOf] != m2 {
+		t.Fatalf("M1 carries candidate-of %q once chosen, want it kept naming %s: M1 serves beside its winner, and without the mark it would rejoin M2's hedge and be drained as its loser", l.Annotations[annotationCandidateOf], m2)
 	}
 	if n := h.readyCount(hoMD); n != 2 || h.mustInstance(m2).Status.Phase != v1alpha1.InstanceReady {
 		t.Fatalf("%d ready Instances at 08:11:00, M2 %s, want M2 and M1: 2 of 2", n, h.mustInstance(m2).Status.Phase)
@@ -323,6 +324,9 @@ func TestAKeptLoserIsChosenWhenTheDeploymentIsShort(t *testing.T) {
 	h.run(20*time.Minute, time.Minute)
 	if subs := h.sbatches(); subs != 3 {
 		t.Fatalf("%d jobs by 08:31, want the three: no Allocation is made for the failed primary", subs)
+	}
+	if n := h.readyCount(hoMD); n != 2 {
+		t.Fatalf("%d ready Instances at 08:31, want M2 and M1 still serving: neither is drained", n)
 	}
 }
 

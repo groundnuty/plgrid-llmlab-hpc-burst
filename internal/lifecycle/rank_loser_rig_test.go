@@ -43,8 +43,8 @@ type klRig struct {
 	corrupt map[string]int
 }
 
-func newKlRig(t *testing.T) *klRig {
-	h := &klRig{hedgeRig: newHedgeRig(t), tpot: map[string]time.Duration{}, delay: map[string]time.Duration{}, corrupt: map[string]int{}}
+func newKlRig(t *testing.T, opts ...rigOption) *klRig {
+	h := &klRig{hedgeRig: newHedgeRig(t, opts...), tpot: map[string]time.Duration{}, delay: map[string]time.Duration{}, corrupt: map[string]int{}}
 	h.rig.engine = func(alloc string) afake.Engine {
 		tp, ok := h.tpot[alloc]
 		if !ok {
@@ -149,9 +149,9 @@ func (h *klRig) sbatches() int { return h.batch.Count("sbatch") + h.b.batch.Coun
 
 // klPrimary starts the deployment of one instance at k = 0: P is ready at 08:01:10 on A (scripts: P's, then the
 // replacement R1's, both starting at once; B's member's starts at once too).
-func klPrimary(t *testing.T) (*klRig, string) {
+func klPrimary(t *testing.T, opts ...rigOption) (*klRig, string) {
 	t.Helper()
-	h := newKlRig(t)
+	h := newKlRig(t, opts...)
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{})
 	h.b.batch.Enqueue(pfake.Script{})
 	reservedStart(h.rig, hoMD, klMD(1, 0))
