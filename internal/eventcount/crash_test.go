@@ -13,12 +13,15 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
@@ -151,16 +154,58 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 		t.Run(fmt.Sprintf("kill-%02d-at-%d", i, kill), func(t *testing.T) {
 			ctl := ControllerProvider("p1")
 			r := newRig(t, ctl, false, bigCaps, func(o *PublisherOptions) { o.Budget = 2 * time.Second }, leaseFor("provider-p1"))
+			// The publisher's own record of what the log acknowledged, id by id: an event the log stored whose
+			// acknowledgement the kill swallowed is counted lost though it is in the stream, so the stream
+			// cannot say which events are accounted twice; the acknowledgements can.
+			var ackMu sync.Mutex
+			acked := map[string]bool{}
+			r.pub.afterPublish = func(id string, _ *jetstream.PubAck, err error) error {
+				if err == nil {
+					ackMu.Lock()
+					acked[id] = true
+					ackMu.Unlock()
+				}
+				return err
+			}
 			idList, uidOf := r.raiseAll(i)
 			r.killAt(kill)
 			// Down past the retries: every event still queued is lost within the budget, and so is the
 			// EventsNotLogged the first loss raises, which the log cannot take either.
-			eventually(t, "every event to be stored or lost", func() bool { return r.pub.Pending() == 0 })
 			rt := r.route(ctl)
+			// The first loss raises EventsNotLogged from the notifier, a goroutine of its own, and that event runs
+			// out too, one budget later. Wait for the raise first: a queue that is empty before it is made is no
+			// proof that the EventsNotLogged has been settled, and counting before it ran out reads one lost
+			// event too few.
+			eventually(t, "the loss to be raised", func() bool {
+				raised := len(r.inner.byReason(ReasonEventsNotLogged))
+				rt.mu.Lock()
+				defer rt.mu.Unlock()
+				return raised >= 1 && rt.loss == nil
+			})
+			eventually(t, "every event, the EventsNotLogged too, to be stored or lost", func() bool { return r.pub.Pending() == 0 })
 			eventually(t, "every loss to be handled", func() bool { return rt.handled.Load() == uint64(r.unlogged(ctl)) })
 			lost := r.unlogged(ctl)
 			if lost < 1 {
 				t.Fatalf("no event was lost with the log down past the retries (kill at %d)", kill)
+			}
+			// The counter also counts the EventsNotLogged that ran out against the dead log, each raised
+			// while the log was down and so lost: they are not among the 500, and subtracting them takes
+			// away the unit of slack they would give an event that was neither stored nor counted.
+			ackMu.Lock()
+			ackedEvents, ackedNotLogged := 0, 0
+			for id := range acked {
+				if strings.HasPrefix(id, "crash-") {
+					ackedEvents++
+				} else {
+					ackedNotLogged++ // an EventsNotLogged the log took: it was not lost
+				}
+			}
+			ackMu.Unlock()
+			lostEvents := lost - float64(len(r.inner.byReason(ReasonEventsNotLogged))-ackedNotLogged)
+			// Every one of the 500 is exactly one of two things: acknowledged by the log, or counted lost. A
+			// count that is higher or lower is an event that is neither, or both.
+			if float64(ackedEvents)+lostEvents != crashEvents {
+				t.Fatalf("%d acknowledged + %v counted lost (less the lost EventsNotLogged) = %v, want exactly %d (kill at %d)", ackedEvents, lostEvents, float64(ackedEvents)+lostEvents, crashEvents, kill)
 			}
 			r.restart()
 			// The log is back: the next publish that it takes closes the run of losses with one
@@ -199,8 +244,8 @@ func TestEventsSurviveALogCrashDownPastTheRetries(t *testing.T) {
 				}
 			}
 			stored := kept - 1 // the after-return event
-			if float64(stored)+lost < crashEvents {
-				t.Fatalf("stream %d + counter %v = %v, want at least %d: an event is neither in the log nor counted", stored, lost, float64(stored)+lost, crashEvents)
+			if float64(stored)+lostEvents < crashEvents {
+				t.Fatalf("stream %d + counter %v less the lost EventsNotLogged = %v, want at least %d: an event is neither in the log nor counted", stored, lost, float64(stored)+lostEvents, crashEvents)
 			}
 			for _, m := range ms {
 				if uid, ok := uidOf[m.ID]; ok && m.Subject != "hb.ev.allocation."+uid {

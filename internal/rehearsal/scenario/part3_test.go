@@ -337,23 +337,27 @@ func (p3 *part3) instancesOf(md string) []v1alpha1.Instance {
 }
 
 // waitPrimary waits for the deployment's first Instance, the one with no
-// predecessor, to be ready and registered at the front, and checks that its
-// job was submitted held and released once.
+// predecessor, to be ready and registered at the front and the front to route
+// the deployment's model (#676: the steps after start send requests that expect
+// a 200), and checks that its job was submitted held and released once.
 func (p3 *part3) waitPrimary(d *depRun) {
 	r := p3.rig
 	r.t.Helper()
-	stack.WaitState(r.t, stack.WaitDeadline, "the primary of "+d.Name+" to be ready and registered at the front", func() (bool, string) {
+	stack.WaitState(r.t, stack.WaitDeadline, "the primary of "+d.Name+" to be ready and registered at the front, and the front to route "+d.Model, func() (bool, string) {
+		why := ""
 		for _, in := range p3.instancesOf(d.Name) {
 			if in.Annotations[v1alpha1.AnnotationPredecessor] != "" || in.Status.Phase != v1alpha1.InstanceReady {
 				continue
 			}
-			if reg, known := stack.Registered(r.ports, &in); known && reg {
-				in := in
+			in := in
+			ok, w := r.routedModelNow(d.Model, &in)
+			if ok {
 				d.primary = &in
 				return true, ""
 			}
+			why = w + ";"
 		}
-		return false, r.describe()
+		return false, why + r.describe()
 	})
 	d.primaryJob = jobIDOf(r.t, d.primary)
 	r.checkReleased(d.primaryJob)

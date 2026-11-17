@@ -112,6 +112,8 @@ type item struct {
 	subject  string
 	body     []byte
 	queuedAt time.Time
+	// closes is the closing EventsNotLogged job this event is, if it is one: its outcome settles the closing.
+	closes *raiseJob
 }
 
 // NewPublisher starts a publisher. It connects when the first event arrives, and again whenever its
@@ -237,21 +239,21 @@ func (p *Publisher) deliver(it *item) {
 	var last error
 	for {
 		if p.ctx.Err() != nil {
-			it.r.lost(lostStop, it.reason, it.id, last)
+			it.r.lost(lostStop, it.reason, it.id, last, it.closes)
 			return
 		}
 		left := deadline.Sub(p.now())
 		if left <= 0 {
-			it.r.lost(lostBudget, it.reason, it.id, last)
+			it.r.lost(lostBudget, it.reason, it.id, last, it.closes)
 			return
 		}
 		full, err := p.attempt(it, left)
 		switch {
 		case err == nil:
-			it.r.logged()
+			it.r.logged(it)
 			return
 		case full:
-			it.r.lost(lostFull, it.reason, it.id, err)
+			it.r.lost(lostFull, it.reason, it.id, err, it.closes)
 			return
 		}
 		last = err
@@ -350,7 +352,7 @@ func (p *Publisher) Shutdown(ctx context.Context) {
 	p.queue = nil
 	p.mu.Unlock()
 	for _, it := range rest {
-		it.r.lost(lostStop, it.reason, it.id, nil)
+		it.r.lost(lostStop, it.reason, it.id, nil, it.closes)
 	}
 	p.notify.stop()
 	p.drop()
@@ -376,12 +378,40 @@ func (p *Publisher) routeFor(controller string, counter *Counter) *route {
 	return r
 }
 
+// Wrapped is how many recorders of the controller have been built with this publisher (WithLog), over all the
+// copies' counters. It is a diagnostic for the tests of a program's wiring: the option does nothing in a process
+// with no log, so a recorder built without the publisher by mistake looks like one built with it, except here.
+func (p *Publisher) Wrapped(controller string) int {
+	p.mu.Lock()
+	routes := make([]*route, 0, len(p.routes))
+	for k, r := range p.routes {
+		if k.controller == controller {
+			routes = append(routes, r)
+		}
+	}
+	p.mu.Unlock()
+	n := 0
+	for _, r := range routes {
+		r.mu.Lock()
+		n += r.wrapped
+		r.mu.Unlock()
+	}
+	return n
+}
+
 // Unregister drops a controller's route and its loss gate: its manager has stopped for good. The
 // next wrapper of the controller starts a new one.
 func (p *Publisher) Unregister(controller string, counter *Counter) {
+	k := routeKey{controller: controller, counter: counter}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.routes, routeKey{controller: controller, counter: counter})
+	r := p.routes[k]
+	delete(p.routes, k)
+	p.mu.Unlock()
+	// Events of the controller still queued keep their route, which is dead now: they publish, and their
+	// late losses are one log line each, uncounted (route.lost).
+	if r != nil {
+		r.markDead()
+	}
 }
 
 type routeKey struct {

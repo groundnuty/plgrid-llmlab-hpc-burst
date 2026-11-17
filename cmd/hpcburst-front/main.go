@@ -103,15 +103,8 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The durable log's publisher, with --event-log-token-file: the front's typed events go to the
-	// log as well as to the API (beta; HBEP-8, The durable log, Who writes). It is a second client
-	// beside the usage forwarder's. Without the flag there is none.
-	logPub, err := newEventPublisher(*eventLogTokenFile, agentapi.Host{StateDir: *stateDir, PortBase: *portBase})
-	if err != nil {
-		return err
-	}
-	defer stopEventPublisher(logPub)
-	rec, stopEvents, err := front.NewKubeRecorderWithLog(cs, logPub)
+	// The front's events, with the durable log's publisher when there is a token file (eventpub.go).
+	rec, stopEvents, err := newRecorder(cs, *eventLogTokenFile, agentapi.Host{StateDir: *stateDir, PortBase: *portBase})
 	if err != nil {
 		return err
 	}
