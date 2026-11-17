@@ -216,31 +216,44 @@ func takesOnePointerTo(fn *ast.FuncDecl, typ string) bool {
 // groupRow is a row of the script's groups table, "name|package|tests|timeout".
 var groupRow = regexp.MustCompile(`(?m)^\s*"([a-z0-9-]+)\|(\./[^|"]*)\|[^|"]*\|[0-9]+s"\s*$`)
 
-// scriptGroupNames returns the names of the groups in the script's table, in order.
-func scriptGroupNames(t *testing.T, root string) []string {
+// scriptGroupNames returns the names of the groups in the script's table, in order, and the number of
+// distinct packages they run in: the script's lanes.
+func scriptGroupNames(t *testing.T, root string) ([]string, int) {
 	t.Helper()
 	src, err := os.ReadFile(filepath.Join(root, "hack", "go-test.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var names []string
+	pkgs := map[string]bool{}
 	for _, m := range groupRow.FindAllStringSubmatch(string(src), -1) {
 		names = append(names, m[1])
+		pkgs[m[2]] = true
 	}
-	return names
+	return names, len(pkgs)
 }
 
 // scriptParts runs the script in root with the double, once for the packages and once for each group in
 // its table, and returns the parts from the calls it made. "own" with no group must make one call per
-// group read from the table, so that a row this reading missed is not missed by the count.
+// group read from the table, so that a row this reading missed is not missed by the count, plus its
+// warm-up build when the groups run in more than one package, and no other call.
 func scriptParts(t *testing.T, root string) []part {
 	t.Helper()
-	names := scriptGroupNames(t, root)
+	names, lanes := scriptGroupNames(t, root)
 	if len(names) == 0 {
 		t.Fatal("found no group in hack/go-test.sh's table")
 	}
-	if _, _, calls := runGoTestScript(t, root, allPassed(), "own"); len(calls) != len(names) {
-		t.Fatalf("own ran %d groups, but the table reads as %d (%q): a row is not in the form this test reads", len(calls), len(names), names)
+	_, _, ownCalls := runGoTestScript(t, root, allPassed(), "own")
+	var warm, runs int
+	for _, c := range ownCalls {
+		if strings.Contains(c, " -exec ") {
+			warm++
+		} else {
+			runs++
+		}
+	}
+	if wantWarm := map[bool]int{false: 0, true: 1}[lanes > 1]; runs != len(names) || warm != wantWarm {
+		t.Fatalf("own made %d group calls and %d warm-up calls, but the table reads as %d groups in %d lanes (%q), which want %d warm-up calls: a row is not in the form this test reads", runs, warm, len(names), lanes, names, wantWarm)
 	}
 	_, _, calls := runGoTestScript(t, root, allPassed(), "packages")
 	if len(calls) != 1 {
