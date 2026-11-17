@@ -1246,17 +1246,22 @@ jobs:
   # mode as the science agent ruled on #563, (a) with the both-INVALID failure (hack/bulkverdict): it fails on
   # an S4 FAIL, on any functional witness failing whatever the control, on a bulk p99 over 75 ms even beside an
   # INVALID control, and on both modes INVALID; one mode INVALID, otherwise clean, warns with its figures and
-  # passes. It is the rehearsal job's setup with one test, without Envoy, in a job of its own, since its four
-  # stacks would take any other rehearsal job past half of its time limit (#295). Like the other rehearsal
-  # jobs, it is not one of the required checks.
+  # passes. It is the rehearsal job's setup with one judged test, without Envoy, in a job of its own, since its
+  # four stacks would take any other rehearsal job past half of its time limit (#295). A second step runs the bulk
+  # path's three operations tests (bulk_ops_test.go, #676), which no REHEARSAL_RUN matched before: they are a step
+  # of their own because the first step's verdict reads one test and discards hack/rehearsal.sh's exit. Like the
+  # other rehearsal jobs, it is not one of the required checks.
   rehearsal-bulk:
     name: rehearsal-bulk
     runs-on: ubuntu-24.04
-    # Compiling the four binaries and the test from scratch, then a run whose -test.timeout is 30
-    # minutes (hack/rehearsal.sh); about 19 minutes in all on #448's hosted runs, 9.5 on this job's first. The job
-    # must outlive the test's timeout, so that its own waits give up and its clean-up runs before the job
-    # is cancelled, and stay under half of its limit (#295).
-    timeout-minutes: 50
+    # Compiling the four binaries and the test from scratch, then the S4 run, whose -test.timeout is 30
+    # minutes (hack/rehearsal.sh); about 19 minutes in all on #448's hosted runs, 9.5 on this job's first.
+    # Then the operations step (#676): three tests of two stacks each, under the same 30 minutes, with the
+    # build cached. No test states a duration; from S4's four stacks they are estimated at 8 to 21 minutes. The
+    # job must outlive both timeouts, so that its own waits give up and its clean-up runs before the job is
+    # cancelled (setup about 5 + 30 + 30 = 65, under 80), and stay under half of its limit (#295): about 27 to
+    # 40 minutes expected, against 40.
+    timeout-minutes: 80
     env:
       # The k3s versions this job fetches; the cache key and the fetch step both read this list (see
       # launcher-k3s).
@@ -1379,6 +1384,20 @@ jobs:
           REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^TestBulk64MiBReplyBesideEightStreams$' bash hack/rehearsal.sh 2>&1 | tee "$RUNNER_TEMP/rehearsal-bulk.log" || rc=$?
           echo "hack/rehearsal.sh exited $rc; the job's verdict is S4's mapping, read from the test's log (#563)"
           go run ./hack/bulkverdict "$RUNNER_TEMP/rehearsal-bulk.log"
+
+      # The bulk path's three operations tests (bulk_ops_test.go, #448 part 7; #676): the second frps's restart
+      # cuts only the bulk tunnels, a teardown leaves no bulk proxy, and an Allocation staged before the bulk path
+      # keeps its token tunnel. No REHEARSAL_RUN matched them before, so they ran only on hosted throwaways. They are
+      # a step of their own, and not in the pattern above, because that step discards hack/rehearsal.sh's exit and
+      # hack/bulkverdict reads only the S4 test: a failed or skipped test among them would leave the job green. Here
+      # hack/rehearsal.sh's exit is the step's, and the step runs even when the S4 verdict failed, so one red run
+      # shows both. The evidence that they ran is three "--- PASS" lines for them in this step's log, not a green
+      # step: a pattern that matches nothing exits 0, and so does a skip (hack/rehearsal.sh sets HPCBURST_REQUIRE_FRP
+      # and HPCBURST_REQUIRE_SSHD, so a missing input fails). A step that runs after a failure requires the verified
+      # toolchain (hack/gotoolchain/ci_workflow_test.go).
+      - name: hack/rehearsal.sh, the bulk path's operations tests
+        if: ${{ !cancelled() && steps.gocheck.outcome == 'success' }}
+        run: REHEARSAL_OUT="$RUNNER_TEMP/rehearsal" REHEARSAL_RUN='^Test(FrpsBulkRestartCutsOnlyBulk|TeardownLeavesNoBulkProxy|PreBulkAllocationKeepsItsTokenTunnel)$' bash hack/rehearsal.sh
 
   # The one-host rehearsal's third part (issue #193), on #146's rig: HBEP-5's 7,000-token stream
   # and attribution, HBEP-8's events and metrics, HBEP-3's requeue, HBEP-6's controller restart
