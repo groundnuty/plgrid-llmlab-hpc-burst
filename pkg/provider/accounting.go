@@ -21,6 +21,12 @@ type JobAccounting struct {
 	// record lists none. A job that asked for no GPU has none listed, which
 	// AccountingOf reads as 0 only when the allocation list itself was read.
 	AllocatedGPUs *int32
+	// AllocatedBilling is the billing entry of the latest execution's
+	// tres.allocated, the scheduler's own count for the job (beta; HBEP-8,
+	// Provider accounting, Billing); nil when the record has none or its count
+	// cannot be read. The scheduler computes it from the partition's billing
+	// weights, so no framework formula stands behind it.
+	AllocatedBilling *int32
 	// GPUsListed is true when the latest execution's tres.allocated lists a
 	// gres entry named gpu or gpu:*, readable or not. An entry whose count is
 	// null, missing, negative or too large leaves AllocatedGPUs nil, and
@@ -51,6 +57,9 @@ type JobAccounting struct {
 //     to now. Once it has ended, it is the end time minus the start time when the
 //     final state came from the queue listing, and otherwise accounting's
 //     time.elapsed (job.Accounting.Elapsed), summed over the executions.
+//   - The billing count (beta) is read and kept as the CPU count is: from
+//     job.Accounting, else from prior. A reply with no billing entry leaves it
+//     unknown, and an unknown count never reads as 0.
 //   - A requeued job (AccountingRequeued) has its counts, its elapsed time and
 //     so its hours unknown, whatever the read shows (science agent,
 //     31 Oct 2026, on the review of PR 118: Astra B1 to B4). Per-execution
@@ -69,6 +78,7 @@ func AccountingOf(job Job, requestedGPUs int32, prior *v1alpha1.AllocationAccoun
 	out := &v1alpha1.AllocationAccounting{ReadTime: metav1.NewTime(read)}
 	if a := job.Accounting; a != nil {
 		out.AllocatedCPUs, out.AllocatedGPUs = copyCount(a.AllocatedCPUs), copyCount(a.AllocatedGPUs)
+		out.AllocatedBilling = copyCount(a.AllocatedBilling)
 	}
 	if prior != nil {
 		if out.AllocatedCPUs == nil {
@@ -76,6 +86,9 @@ func AccountingOf(job Job, requestedGPUs int32, prior *v1alpha1.AllocationAccoun
 		}
 		if out.AllocatedGPUs == nil {
 			out.AllocatedGPUs = copyCount(prior.AllocatedGPUs)
+		}
+		if out.AllocatedBilling == nil {
+			out.AllocatedBilling = copyCount(prior.AllocatedBilling)
 		}
 	}
 	if out.AllocatedGPUs == nil && out.AllocatedCPUs != nil && requestedGPUs == 0 && (job.Accounting == nil || !job.Accounting.GPUsListed) {
@@ -125,10 +138,10 @@ const AccountingRefresh = v1alpha1.ProviderPollInterval
 // is, readTime included, when storing the new one would be a write that
 // carries nothing:
 //   - nothing but readTime would change (PR 76: no identical status writes);
-//   - the job is still running, the allocated counts are unchanged, and prior
-//     was read less than AccountingRefresh ago. Its elapsed time is still
-//     elapsedSeconds at readTime; a reader that needs it now counts on from
-//     readTime.
+//   - the job is still running, the allocated counts (the billing count
+//     included) are unchanged, and prior was read less than AccountingRefresh
+//     ago. Its elapsed time is still elapsedSeconds at readTime; a reader that
+//     needs it now counts on from readTime.
 //
 // A change in a count, the job's end, and a stored block a minute old are
 // written at once. So is the block of a pass that made an accounting read for
@@ -171,7 +184,8 @@ func AccountingRequeued(job Job) bool {
 // would change nothing a reader needs (MirrorAccounting).
 func keepStored(prior *v1alpha1.AllocationObservation, next *v1alpha1.AllocationAccounting, ended bool) bool {
 	stored := prior.Accounting
-	if stored == nil || next == nil || !sameCount(stored.AllocatedCPUs, next.AllocatedCPUs) || !sameCount(stored.AllocatedGPUs, next.AllocatedGPUs) {
+	if stored == nil || next == nil || !sameCount(stored.AllocatedCPUs, next.AllocatedCPUs) || !sameCount(stored.AllocatedGPUs, next.AllocatedGPUs) ||
+		!sameCount(stored.AllocatedBilling, next.AllocatedBilling) {
 		return false
 	}
 	if ended && prior.EndTime == nil {

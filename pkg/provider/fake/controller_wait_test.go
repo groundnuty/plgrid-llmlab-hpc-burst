@@ -40,7 +40,7 @@ func (e *env) failStatusUpdateOnce(kind string) (arm func()) {
 }
 
 func (e *env) restart() {
-	e.ctl = &Controller{Client: e.c, Provider: testProvider, Batch: e.batch, Clock: e.clock}
+	e.ctl = e.newController()
 }
 
 func (e *env) wantOneWait(jobID string, submit, start time.Time) {

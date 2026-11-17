@@ -243,9 +243,9 @@ func newEnv(t *testing.T, mods ...envOption) *env {
 				InflightWindow: &window, LostGrace: &lost, UnknownBound: &bound, StagingDir: "$SCRATCH/stage",
 			},
 			Partition: v1alpha1.PartitionProfile{Name: gpuPart, AcceleratorClass: v1alpha1.AcceleratorClass{GPUModel: "A100", CPUArch: testArch},
-				GPUsPerNode: &gpus, MaxTime: &maxTime},
+				GPUsPerNode: &gpus, MaxTime: &maxTime, BillingUnit: v1alpha1.BillingUnitGPUHour},
 		},
-		Settings: provider.Settings{Provider: testProvider, Account: "example-account", Partition: gpuPart},
+		Settings: provider.Settings{Provider: testProvider, Account: "example-account", Grant: "example-grant", Partition: gpuPart},
 		SSH:      slurm.SSHConfig{HostName: "login.example.org", User: "example-user", IdentityFile: "/nonexistent/key"},
 	}}
 	e.credDir = t.TempDir()

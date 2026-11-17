@@ -159,11 +159,13 @@ import (
 //     no unresolved attempt, and before its files and finalizer go, the
 //     Controller creates the ControllerRevision acct-<Allocation UID> with
 //     v1alpha1.NewAccountingRecord: the Provider, the batch partition, the tag,
-//     the IDs of every job read with the tag in numeric order (and the recorded
+//     the Controller's Grant, Account and BillingUnit, the billing count of the
+//     accounting block it keeps (beta), the IDs of every job read with the tag in numeric order (and the recorded
 //     job's ID if no read showed it), and the counts, elapsed seconds, start and
 //     end times of the first of these that applies, in order: a requeued job
 //     (provider.AccountingRequeued of the recorded job read, with the stored
-//     status's requeue flag ORed in) has the counts and elapsed seconds unknown,
+//     status's requeue flag ORed in) has the counts, the billing count and the
+//     elapsed seconds unknown,
 //     its times from the read if the job was read and else from the stored
 //     status; a read of the recorded job that shows it never started (every
 //     hours field unknown, its end time if it has one), or whose
@@ -289,6 +291,13 @@ type Controller struct {
 	// Allocation's credential file and an agent build, as the real provider
 	// does; nil checks none of them.
 	Prerequisites *Prerequisites
+	// Grant and Account are the Provider's grant and account, and BillingUnit
+	// the partition's billingUnit, which the accounting record copies when it is
+	// written (beta; HBEP-8, Provider accounting, Billing). Each left empty is
+	// unknown in the record, and named in its unknown list. The stand-in reads
+	// no Provider or PlatformProfile for them: the test says what they are.
+	Grant, Account string
+	BillingUnit    v1alpha1.BillingUnit
 }
 
 const (

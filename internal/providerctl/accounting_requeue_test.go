@@ -39,10 +39,20 @@ func newRequeueEnv(t *testing.T, version string) *requeueEnv {
 	e.run("alloc-a", 2)
 	r := &requeueEnv{realEnv: e, sl: sl, id: e.get("alloc-a").Annotations[v1alpha1.AnnotationJobID]}
 	r.n = jobNumber(t, r.id)
+	// The scheduler's billing count of the job is 5 by hand, which is neither its
+	// CPUs (8) nor its GPUs (1): every reply of the job lists it, those of the
+	// second execution too, and the requeued job's is unknown all the same.
+	five := int64(5)
+	if err := sl.SetBilling(r.n, &five); err != nil {
+		t.Fatal(err)
+	}
 	clock.Advance(60 * time.Second)
 	e.start("alloc-a")
 	e.poll("alloc-a", 1)
 	wantAcctStatus(t, "first execution", e.accStatus("alloc-a"), 8, 1, 40, at(12, 1, 40))
+	if b := e.accStatus("alloc-a").AllocatedBilling; b == nil || *b != 5 {
+		t.Fatalf("precondition: first execution's allocatedBilling = %v, want 5", b)
+	}
 	if got := jobReads(sl, r.id); got != 1 {
 		t.Fatalf("precondition: %d accounting reads, want 1", got)
 	}
@@ -58,10 +68,15 @@ func (r *requeueEnv) do(what string, f func(int) error) {
 	}
 }
 
-// unknown checks that the block is there, read at read, with nothing known.
+// unknown checks that the block is there, read at read, with nothing known:
+// the billing count included.
 func (r *requeueEnv) unknown(what string, read time.Time) {
 	r.t.Helper()
-	wantAcctStatus(r.t, what, r.accStatus("alloc-a"), -1, -1, -1, read)
+	acct := r.accStatus("alloc-a")
+	wantAcctStatus(r.t, what, acct, -1, -1, -1, read)
+	if acct != nil && acct.AllocatedBilling != nil {
+		r.t.Errorf("%s: allocatedBilling %d, want unknown for a requeued job", what, *acct.AllocatedBilling)
+	}
 }
 
 // noAllocatedRead checks that no accounting read was made since the first
@@ -80,8 +95,8 @@ func (r *requeueEnv) deleteAndWantRecord(start, end string) {
 	head := head(r.realEnv, "alloc-a", r.id)
 	r.del("alloc-a")
 	deleteUntilGone(r.realEnv, r.sl, "alloc-a", r.id)
-	r.wantRecord("alloc-a", head+`,"startTime":"2026-10-30T`+start+`Z","endTime":"2026-10-30T`+end+`Z","basis":"allocated",`+
-		`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds"]}`)
+	r.wantRecord("alloc-a", head+`,`+acctNoCountsBeta+`"startTime":"2026-10-30T`+start+`Z","endTime":"2026-10-30T`+end+`Z","basis":"allocated",`+
+		`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","allocatedBilling"]}`)
 }
 
 var dialects = []string{"v0.0.40", "v0.0.42"}

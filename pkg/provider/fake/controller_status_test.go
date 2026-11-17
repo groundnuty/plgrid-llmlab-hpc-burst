@@ -256,7 +256,7 @@ func TestQueueWaitIsRecordedByARestartedControllerFromAccountingTimes(t *testing
 
 	// The controller is down while the job starts. A fresh Controller, on the
 	// same client, makes the first observation of the started job at 12:20:00.
-	e.ctl = &Controller{Client: e.c, Provider: testProvider, Batch: e.batch, Clock: e.clock}
+	e.ctl = e.newController()
 	e.syncAt(at(12, 20, 0))
 	waits := e.provider().Status.QueueWaits
 	if len(waits) != 1 {
@@ -279,15 +279,15 @@ func TestQueueWaitsAddNoDuplicateAndKeepTheOldAcrossARestart(t *testing.T) {
 		t.Fatalf("setup: queue wait job IDs = %v, want [998]", got)
 	}
 
-	e.ctl = &Controller{Client: e.c, Provider: testProvider, Batch: e.batch, Clock: e.clock} // restart
-	e.syncAt(at(12, 7, 0))                                                                   // observes 998 again
+	e.ctl = e.newController() // restart
+	e.syncAt(at(12, 7, 0))    // observes 998 again
 	if got := waitIDs(e.provider()); len(got) != 1 || got[0] != "998" {
 		t.Fatalf("after the restart queue wait job IDs = %v, want [998] and no duplicate", got)
 	}
 
 	e.newAlloc("a2", testProvider) // job 999 submitted 12:07:00, starts 12:17:00
 	e.sync()
-	e.ctl = &Controller{Client: e.c, Provider: testProvider, Batch: e.batch, Clock: e.clock} // another restart
+	e.ctl = e.newController() // another restart
 	e.syncAt(at(12, 18, 0))
 	waits := e.provider().Status.QueueWaits
 	if got := waitIDs(e.provider()); len(got) != 2 || got[0] != "998" || got[1] != "999" {
