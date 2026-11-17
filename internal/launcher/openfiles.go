@@ -198,7 +198,7 @@ func checkOpenFiles(h *procHandle, eh *EntryHealth) {
 
 // degradedOrder is the order in which causes are named in EntryHealth.Degraded, whichever check
 // finds its cause first.
-var degradedOrder = []string{DegradedUsage, DegradedOpenFiles}
+var degradedOrder = []string{DegradedUsage, DegradedUsageLogBehind, DegradedOpenFiles}
 
 // addDegraded names one more thing that is degraded while the process keeps serving. Causes are
 // joined with "; " in degradedOrder, so a front that has both lost usage records and run low on

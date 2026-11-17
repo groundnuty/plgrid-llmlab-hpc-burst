@@ -135,6 +135,22 @@ type supervised struct {
 	// sealed copy, which Path names as /proc/self/fd/3, so the bytes run are the bytes checked
 	// (HBEP-15).
 	Open func() ([]*os.File, error)
+	// StartGate, when set, is consulted before each start of the process, the first and every
+	// restart: false keeps it from starting, and the reason is written to its record in
+	// supervisor.json, where status reads it (state "gated"). The runner asks again every
+	// SuperviseOptions.GatePoll and starts the process once the gate opens. The durable log's gate is
+	// the free-space floor (eventlog.go): HBEP-8, A log refused for space.
+	StartGate func() (ok bool, reason string)
+
+	// startAfter, when set, holds the runner's first start until it is closed; settle, when set, is
+	// called once the process is healthy, or will not start now (its gate is closed, it failed to
+	// start, or the wait ran out), and closes the channel the others wait for. The log "starts
+	// first": the other entries wait on it (Supervise).
+	startAfter <-chan struct{}
+	settle     func()
+	// ready, when set, is what "healthy" means for settle, instead of GET /healthz alone: the log is
+	// ready once its two streams exist, which /healthz does not say.
+	ready func() bool
 }
 
 // supervisedSet is what the supervisor runs, from the record the launcher wrote. The controller's
@@ -187,6 +203,13 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 		set[0].Args = append(set[0].Args, "--relay-keeper-socket", keeper.HealthSocket)
 		set = append(set, *keeper)
 	}
+	if log := s.eventLogEntry(l); log != nil {
+		// The controller gets the token file, only while the recorded choice is on; without the log, its
+		// command line is as before, byte for byte. The log is last in the slice, and first to start
+		// and last to stop by the order Supervise gives it (a slice position decides neither).
+		set[0].Args = append(set[0].Args, s.eventLogClientArgs(l)...)
+		set = append(set, *log)
+	}
 	return set, nil
 }
 
@@ -211,6 +234,10 @@ const (
 	entryRunning  = "running"
 	entryBackoff  = "backoff" // exited; waiting to be started again
 	entryStopped  = "stopped" // the supervisor was told to stop
+	// entryGated is an entry whose start gate is closed: it is not running, on purpose, and the
+	// reason is in EntryRecord.Gate. status reports it as degraded, not as a fault (the durable log
+	// refused for space, HBEP-8).
+	entryGated = "gated"
 )
 
 const supervisorSchema = 1
@@ -240,6 +267,8 @@ type EntryRecord struct {
 	// HealthSocket is the Unix socket of a process whose health is a ping (supervised.HealthSocket):
 	// the relay keeper. Such a process must listen on no port.
 	HealthSocket string `json:"health_socket,omitempty"`
+	// Gate is why a gated entry is not started (state entryGated); empty otherwise.
+	Gate string `json:"gate,omitempty"`
 }
 
 // ExitRecord is how the previous child ended.
@@ -310,15 +339,24 @@ type SuperviseOptions struct {
 	Handoff io.ReadCloser
 	// HandoffTimeout bounds that wait; the default is DefaultHandoffTimeout.
 	HandoffTimeout time.Duration
+	// GatePoll is how often a closed start gate is asked again; the default is DefaultGatePoll.
+	GatePoll time.Duration
+	// EventLogStartWait bounds how long the controllers and the front wait for the log to be healthy
+	// before they start (with the log on); the default is DefaultEventLogStartWait.
+	EventLogStartWait time.Duration
 	// onDelay, set by tests only, sees every restart delay as it is chosen.
 	onDelay func(name string, delay time.Duration)
+	// disk, set by tests only, replaces the reads of the free space and the sizes behind the log's
+	// start gate (nil reads the file system).
+	disk diskReader
 }
 
 func (o *SuperviseOptions) defaults() {
 	for _, d := range []struct {
 		v *time.Duration
 		d time.Duration
-	}{{&o.BackoffMin, DefaultBackoffMin}, {&o.BackoffMax, DefaultBackoffMax}, {&o.StableAfter, DefaultStableAfter}, {&o.TermGrace, DefaultTermGrace}, {&o.HandoffTimeout, DefaultHandoffTimeout}} {
+	}{{&o.BackoffMin, DefaultBackoffMin}, {&o.BackoffMax, DefaultBackoffMax}, {&o.StableAfter, DefaultStableAfter}, {&o.TermGrace, DefaultTermGrace}, {&o.HandoffTimeout, DefaultHandoffTimeout},
+		{&o.GatePoll, DefaultGatePoll}, {&o.EventLogStartWait, DefaultEventLogStartWait}} {
 		if *d.v <= 0 {
 			*d.v = d.d
 		}
@@ -391,6 +429,35 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	logf(o.Log, "supervisor pid %d runs %d process(es)", self.PID, len(specs))
 
 	env := childEnv(os.Environ())
+	// The durable log starts first and stops last (HBEP-8, The durable log; HBEP-11). It starts first
+	// by a barrier: every other runner waits until the log is healthy, or will not start now (its
+	// gate is closed, it failed to start, or EventLogStartWait is over), so nothing waits on a log
+	// that does not come. Its gate is the free-space floor.
+	for i := range specs {
+		if specs[i].Name != eventLogEntryName {
+			continue
+		}
+		disk := o.disk
+		if disk == nil {
+			disk = osDisk{}
+		}
+		specs[i].StartGate = st.eventLogGate(l, disk)
+		barrier := newStartBarrier()
+		specs[i].settle = func() { barrier.release() }
+		for j := range specs {
+			if j != i {
+				specs[j].startAfter = barrier.ch
+			}
+		}
+		// The timer is the barrier's bound. It logs only when it is what releases the barrier, so a log
+		// that became healthy, was gated or exited in time leaves no line (Fable's review of #639).
+		timer := time.AfterFunc(o.EventLogStartWait, func() {
+			if barrier.release() {
+				logf(o.Log, "%s: not healthy within %s: starting the controllers and the front without waiting for it", eventLogEntryName, o.EventLogStartWait)
+			}
+		})
+		defer timer.Stop()
+	}
 	runInStopOrder(ctx, specs, func(ctx context.Context, sp supervised) {
 		(&runner{l: l, spec: sp, env: env, rep: rep, o: o}).run(ctx)
 	}, func(stage string) { logf(o.Log, "supervisor: stopping %s", stage) })
@@ -398,24 +465,44 @@ func Supervise(ctx context.Context, o SuperviseOptions) error {
 	return nil
 }
 
+// startBarrier is a one-shot signal: release closes ch, once, and reports whether this call did.
+type startBarrier struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+func newStartBarrier() *startBarrier { return &startBarrier{ch: make(chan struct{})} }
+
+func (s *startBarrier) release() (released bool) {
+	s.once.Do(func() { close(s.ch); released = true })
+	return released
+}
+
 // runInStopOrder runs each spec's runner until ctx is done, then stops them in HBEP-11's order (on down
 // and upgrade, #553): the front first, waiting until its runner has returned, which is once its process
 // has exited (its shutdown grace, its cuts and its usage records, within FrontTermGrace's SIGKILL), then
 // every other process together: frps and the bulk frps, the relay keeper, the controller. So the front
-// cuts its requests in flight itself, as HBEP-5 says, before frps closes their tunnels. A set with no front
-// stops all at once. Until ctx is done each runner restarts its process as before. logStage, when set,
+// cuts its requests in flight itself, as HBEP-5 says, before frps closes their tunnels. With the durable
+// log (beta) a third stage follows, the log alone, waited for, so the front's and the controllers' last
+// events and usage records reach it (HBEP-11, Single-user host). A set with no front stops all at once,
+// the log still last. Until ctx is done each runner restarts its process as before. logStage, when set,
 // is told each stage as it starts.
 func runInStopOrder(ctx context.Context, specs []supervised, run func(context.Context, supervised), logStage func(string)) {
 	frontCtx, stopFront := context.WithCancel(context.WithoutCancel(ctx))
 	restCtx, stopRest := context.WithCancel(context.WithoutCancel(ctx))
+	logCtx, stopLog := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopFront()
 	defer stopRest()
-	var front, rest sync.WaitGroup
-	hasFront := false
+	defer stopLog()
+	var front, rest, durable sync.WaitGroup
+	hasFront, hasLog := false, false
 	for _, sp := range specs {
 		wg, c := &rest, restCtx
-		if sp.Name == frontEntryName {
+		switch sp.Name {
+		case frontEntryName:
 			wg, c, hasFront = &front, frontCtx, true
+		case eventLogEntryName:
+			wg, c, hasLog = &durable, logCtx, true
 		}
 		wg.Add(1)
 		go func() {
@@ -436,6 +523,13 @@ func runInStopOrder(ctx context.Context, specs []supervised, run func(context.Co
 	}
 	stopRest()
 	rest.Wait()
+	if hasLog {
+		if logStage != nil {
+			logStage("the event log last")
+		}
+		stopLog()
+		durable.Wait()
+	}
 }
 
 // runner keeps one supervised process running.
@@ -488,7 +582,19 @@ func (r *runner) start() (*procHandle, *exec.Cmd, error) {
 func (r *runner) run(ctx context.Context) {
 	b := &backoff{min: r.o.BackoffMin, max: r.o.BackoffMax, stable: r.o.StableAfter}
 	name := r.spec.Name
-	stopped := func() { r.rep.update(name, func(e *EntryRecord) { e.State, e.Proc = entryStopped, nil }) }
+	stopped := func() { r.rep.update(name, func(e *EntryRecord) { e.State, e.Proc, e.Gate = entryStopped, nil, "" }) }
+	if r.spec.startAfter != nil {
+		// The durable log starts first: wait for it, or for the supervisor to stop.
+		select {
+		case <-r.spec.startAfter:
+		case <-ctx.Done():
+			stopped()
+			return
+		}
+	}
+	if r.spec.settle != nil {
+		defer r.spec.settle() // whatever ends this runner, nobody waits on it any longer
+	}
 	// pause waits out the restart delay; false means the supervisor was told to stop meanwhile.
 	pause := func(uptime time.Duration) bool {
 		d := b.next(uptime)
@@ -505,9 +611,15 @@ func (r *runner) run(ctx context.Context) {
 	}
 	everStarted := false
 	for ctx.Err() == nil {
+		if !r.passGate(ctx) {
+			break
+		}
 		h, cmd, err := r.start()
 		if err != nil {
 			logf(r.o.Log, "%s: cannot start: %v", name, err)
+			if r.spec.settle != nil {
+				r.spec.settle()
+			}
 			r.rep.update(name, func(e *EntryRecord) {
 				e.State, e.Proc = entryBackoff, nil
 				e.LastExit = &ExitRecord{Code: -1, Detail: "start failed: " + err.Error(), At: time.Now().UTC()}
@@ -521,7 +633,7 @@ func (r *runner) run(ctx context.Context) {
 		rec := h.rec
 		r.rep.update(name, func(e *EntryRecord) {
 			t := started.UTC()
-			e.State, e.Proc, e.StartedAt = entryRunning, &rec, &t
+			e.State, e.Proc, e.StartedAt, e.Gate = entryRunning, &rec, &t, ""
 			if everStarted {
 				e.Restarts++
 			}
@@ -530,6 +642,13 @@ func (r *runner) run(ctx context.Context) {
 		logf(r.o.Log, "%s: started as pid %d", name, rec.PID)
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
+		if r.spec.settle != nil {
+			// The runner the others wait for: they may start once its process is healthy.
+			go func() {
+				waitHealthzOK(r.spec.Health, r.spec.ready, done, ctx.Done())
+				r.spec.settle()
+			}()
+		}
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -552,6 +671,56 @@ func (r *runner) run(ctx context.Context) {
 		}
 	}
 	stopped()
+}
+
+// passGate consults the entry's start gate before a start. With no gate it returns true at once. A
+// gate that is closed puts the entry in state gated, with the reason in its record, and the runner
+// asks again every GatePoll; it returns true once the gate opens, and false when the supervisor is
+// told to stop first. The reason is written when it changes, and the controllers and the front are
+// not held back for a gated log.
+func (r *runner) passGate(ctx context.Context) bool {
+	gate := r.spec.StartGate
+	if gate == nil {
+		return true
+	}
+	name, last := r.spec.Name, ""
+	for {
+		ok, reason := gate()
+		if ok {
+			return true
+		}
+		if reason != last {
+			last = reason
+			logf(r.o.Log, "%s: not started: %s", name, reason)
+			r.rep.update(name, func(e *EntryRecord) { e.State, e.Proc, e.Gate = entryGated, nil, reason })
+		}
+		if r.spec.settle != nil {
+			r.spec.settle()
+		}
+		select {
+		case <-time.After(r.o.GatePoll):
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+// waitHealthzOK returns once GET /healthz on addr answers 200 and ready, when set, holds, or one of
+// the channels closes.
+func waitHealthzOK(addr string, ready func() bool, stop ...<-chan struct{}) {
+	for {
+		if _, err := healthz(addr, time.Second); err == nil && (ready == nil || ready()) {
+			return
+		}
+		for _, c := range stop {
+			select {
+			case <-c:
+				return
+			default:
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 // terminate stops a child on shutdown: SIGTERM through the verified pidfd, SIGKILL after the grace

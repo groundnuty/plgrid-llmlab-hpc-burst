@@ -1,0 +1,35 @@
+# The control: every other file here differs from this one by the defect its name says, so each
+# failure is that defect's. A hand-written fixture.
+- id: KI-0001
+  symptom: an example engine closes an idle connection after 5 s
+  component: vllm
+  affected: 0.32.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9
+- id: KI-0002
+  symptom: an example site runtime cannot run an image format on two partitions
+  component: apptainer
+  affected: ">=1.4.0,<1.5.0"
+  fixedIn: 1.5.0
+  scope:
+    platforms:
+      - example-alpha
+      - example-beta
+    partitions:
+      - part-two
+      - part-three
+  workaround:
+    where: profiles, a field
+    what: the field is set
+  test:
+    package: pkg/one
+    name: TestInAnotherFile
+  source:
+    - an upstream link
+    - an issue comment

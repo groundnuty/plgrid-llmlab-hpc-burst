@@ -1,0 +1,13 @@
+- id: KI-0001
+  symptom: an example binary cuts a long stream at its default
+  component: envoy
+  affected: 1.40.2
+  fixedIn: "1.41.0"
+  workaround:
+    where: example/package, a setting
+    what: none
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9

@@ -45,6 +45,9 @@ func runSubcommand(args []string, stderr io.Writer) (code int, ok bool) {
 	if len(args) > 0 && args[0] == relaykeeperCommand {
 		return relaykeeperMain(args[1:], stderr), true
 	}
+	if len(args) > 0 && args[0] == eventlogCommand {
+		return eventlogMain(args[1:], os.Stdout, stderr), true
+	}
 	return 0, false
 }
 

@@ -152,4 +152,24 @@ const (
 	// ReasonExecutionNotBuilt is the reason of Executable=False in the releases
 	// that plan Operations and do not execute them.
 	ReasonExecutionNotBuilt = "ExecutionNotBuilt"
+	// ReasonNotConfirmed is the reason of Executable=False while a plan waits for its owner's confirm
+	// (phase Planned).
+	ReasonNotConfirmed = "NotConfirmed"
+
+	// ReasonAwaitingApproval is the reason of Executable=False while a confirmed plan has a target that needs
+	// approval and lacks it (phase AwaitingApproval); the message says which.
+	ReasonAwaitingApproval = "AwaitingApproval"
+
+	// ReasonRefused is the reason of Executable=False on a Refused Operation; the message says why: the
+	// request cannot be planned, or a confirm names a plan this controller never wrote.
+	ReasonRefused = "Refused"
+
+	// ReasonNoApprovalPolicy is the reason of NoApprovalPolicy=True when no ApprovalPolicy applies to a
+	// target that needs approval: with none, nothing is approvable.
+	ReasonNoApprovalPolicy = "NoApprovalPolicy"
+
+	// ReasonDuplicateApprovalPolicy is the reason of NoApprovalPolicy=True when two ApprovalPolicies name one
+	// scope that applies to a target: it is unapprovable until one is removed (fail-closed; HBEP-10, Approval
+	// policy). The message names both.
+	ReasonDuplicateApprovalPolicy = "DuplicateApprovalPolicy"
 )

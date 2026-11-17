@@ -343,6 +343,7 @@ func TestAccountingOfAGPUJobWithNoGPUEntryHasUnknownGPUs(t *testing.T) {
 	}
 	tag := v1alpha1.JobTag(testNS, "alloc-a", "uid-alloc-a")
 	want := fmt.Sprintf(`{"provider":"%s","partition":"%s","tag":"%s","jobIDs":["%s"],"allocatedCPUs":8,"elapsedSeconds":120,`+
+		`"allocatedBilling":8,"billingUnit":"gpu-hour","grant":"example-grant","account":"example-account",`+
 		`"startTime":"2026-10-30T12:01:00Z","endTime":"2026-10-30T12:03:00Z","basis":"allocated","unknown":["allocatedGPUs"]}`,
 		testProvider, gpuPart, tag, id)
 	if string(rec.Data.Raw) != want {

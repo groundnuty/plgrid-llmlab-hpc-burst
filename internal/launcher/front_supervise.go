@@ -135,5 +135,7 @@ func (s *State) frontEntry(l layout) (*supervised, error) {
 		// The bulk path (HBEP-6): with no bulk path, the front's command line is as before.
 		args = append(args, "--bulk-path")
 	}
+	// The durable log's token file (beta; HBEP-8), only while the recorded choice is on.
+	args = append(args, s.eventLogClientArgs(l)...)
 	return &supervised{Name: frontEntryName, Path: s.FrontRun.Binary, Args: args, Health: health, TermGrace: FrontTermGrace, WaitReady: true}, nil
 }

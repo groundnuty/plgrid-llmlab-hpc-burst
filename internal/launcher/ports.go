@@ -40,6 +40,11 @@ type Ports struct {
 	// (beta; HBEP-6, The bulk path): All() then reaches base+15. Without it the block is base to
 	// base+12, exactly as before the bulk path (the science agent's ruling S1 on #448).
 	BulkPath bool `json:"bulk_path,omitempty"`
+	// EventLog is set when the block also holds the durable log's two ports, base+16 (clients) and
+	// base+17 (monitoring) (beta; HBEP-8, The durable log; HBEP-11): All() then reaches base+17,
+	// whether or not the bulk path runs, so base+13 to base+15 stay the bulk path's. Without it the
+	// block is as before (#625, R14).
+	EventLog bool `json:"event_log,omitempty"`
 }
 
 // Base is the start of the block, the port the controllers' --port-base names. PortsFromBase puts
@@ -103,6 +108,29 @@ func (p Ports) WithBulkPath() (Ports, error) {
 	return p, nil
 }
 
+// eventLogBlockLastOffset is the block's last port with the durable log: its monitoring port,
+// agentapi.EventLogMonitorPortOffset (17).
+const eventLogBlockLastOffset = agentapi.EventLogMonitorPortOffset
+
+// WithEventLog is p with the durable log's two ports added to its block, base+16 and base+17 (HBEP-8,
+// The durable log), whatever the bulk path does. A base whose block would then pass 65535 is refused,
+// naming the top port.
+func (p Ports) WithEventLog() (Ports, error) {
+	if top := p.Base() + eventLogBlockLastOffset; top > 65535 {
+		return Ports{}, fmt.Errorf("port base %d does not fit the event log (--event-log): its block base..base+%d would end at port %d, above 65535; the highest base for it is %d", p.Base(), eventLogBlockLastOffset, top, 65535-eventLogBlockLastOffset)
+	}
+	p.EventLog = true
+	return p, nil
+}
+
+// EventLogAddr is where the durable log's clients connect, 127.0.0.1:base+16.
+func (p Ports) EventLogAddr() string { return agentapi.Host{PortBase: p.Base()}.EventLogAddr() }
+
+// EventLogMonitorAddr is where the durable log serves GET /healthz and GET /jsz, 127.0.0.1:base+17.
+func (p Ports) EventLogMonitorAddr() string {
+	return agentapi.Host{PortBase: p.Base()}.EventLogMonitorAddr()
+}
+
 // Expected are the ports the running k3s must hold, and no others. The controllers' ports are
 // not among them: status checks those per supervised process.
 func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
@@ -110,11 +138,15 @@ func (p Ports) Expected() []int { return []int{p.API, p.HTTPS, p.KCM} }
 // All are the ports that must be free before a start: the whole block, base..base+12. k3s binds
 // three of them and the controller, the front and frps the others, so an operator's listener on
 // any of them makes up refuse. down warns about a foreign listener left on any of them. With the
-// bulk path the block is base..base+15 (WithBulkPath).
+// bulk path the block is base..base+15 (WithBulkPath), and with the durable log base..base+17
+// (WithEventLog).
 func (p Ports) All() []int {
 	last := blockLastOffset
 	if p.BulkPath {
 		last = bulkBlockLastOffset
+	}
+	if p.EventLog {
+		last = eventLogBlockLastOffset
 	}
 	all := make([]int, 0, last+1)
 	for port := p.Base(); port <= p.Base()+last; port++ {

@@ -60,12 +60,17 @@ func run(args []string) error {
 	health := fs.String("health-addr", "", "loopback host:port for GET /healthz")
 	kubeconfig := fs.String("kubeconfig", "", "the control plane's kubeconfig (default: <state-dir>/kubeconfig)")
 	bulkPath := fs.Bool("bulk-path", false, "beta: the bulk path (HBEP-6): split the dial-home listener by TLS server name, and send each non-streamed request through the Instance's bulk transport while it is registered; the launcher passes it with up --bulk-path")
+	eventLogTokenFile := fs.String("event-log-token-file", "", "the durable log's token file (beta; HBEP-8), which the launcher passes only while it runs the log; the address comes from --port-base. With it the front copies each synced usage record into the log's HB_USAGE stream; the usage files stay the record")
 	if err := fs.Parse(args); err != nil {
 		return usageError{err}
 	}
 	switch {
 	case *cfgPath == "" || *stateDir == "" || *portBase <= 0:
 		return usageError{errors.New("--config, --state-dir and --port-base are required")}
+	case *eventLogTokenFile != "" && !filepath.IsAbs(*eventLogTokenFile):
+		return usageError{fmt.Errorf("--event-log-token-file %q must be an absolute path", *eventLogTokenFile)}
+	case *eventLogTokenFile != "" && *portBase > 65535-agentapi.EventLogMonitorPortOffset:
+		return usageError{fmt.Errorf("--port-base %d is out of range with --event-log-token-file: the block reaches base+%d", *portBase, agentapi.EventLogMonitorPortOffset)}
 	case *mode != "" && !front.ValidMode(*mode):
 		return usageError{fmt.Errorf("--mode %q: want %s, %s or %s", *mode, front.ModeDirect, front.ModeSSH, front.ModeHostDialed)}
 	}
@@ -108,6 +113,7 @@ func run(args []string) error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	o := options(cfg, agentapi.Host{StateDir: *stateDir, PortBase: *portBase}, *mode, dyn, cs, records, rec, log, *health)
 	o.BulkPath = *bulkPath
+	o.EventLogTokenFile = *eventLogTokenFile
 	return front.Run(ctx, o)
 }
 

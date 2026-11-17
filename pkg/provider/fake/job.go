@@ -35,6 +35,11 @@ type jobRec struct {
 	// noElapsed: accounting's record has no time.elapsed.
 	accountingLags bool
 	noElapsed      bool
+	// billing is the billing count accounting shows for a started job once
+	// SetBilling has set it (billingSet): nil shows none. Until then it shows
+	// the CPU count, as fakeslurm's sacct does.
+	billing    *int32
+	billingSet bool
 
 	// priorRun is the time the job's earlier executions ran, added by each
 	// requeue (accounting sums the executions of a requeued job).
@@ -196,8 +201,9 @@ func (b *Batch) record(j *jobRec, now time.Time) provider.Job {
 // accountingOf is what accounting reports about the job whose record is r at
 // now, in the shape of internal/slurm/fakeslurm's sacct: the cpu entry of
 // tres.allocated once the job has started, the gpu entry only for a job that
-// has GPUs, and time.elapsed summed over the executions. A job that never
-// started has no allocation and 0 elapsed.
+// has GPUs, the billing entry (the CPU count unless SetBilling set it), and
+// time.elapsed summed over the executions. A job that never started has no
+// allocation and 0 elapsed.
 func (b *Batch) accountingOf(j *jobRec, r provider.Job, now time.Time) *provider.JobAccounting {
 	a := &provider.JobAccounting{Executions: int(j.restartCount) + 1}
 	run := j.priorRun
@@ -211,6 +217,14 @@ func (b *Batch) accountingOf(j *jobRec, r provider.Job, now time.Time) *provider
 		}
 		cpus := j.cpus
 		a.AllocatedCPUs = &cpus
+		switch {
+		case !j.billingSet:
+			bill := cpus
+			a.AllocatedBilling = &bill
+		case j.billing != nil:
+			bill := *j.billing
+			a.AllocatedBilling = &bill
+		}
 		if j.gpus > 0 {
 			gpus := j.gpus
 			a.AllocatedGPUs = &gpus

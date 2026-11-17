@@ -1,0 +1,12 @@
+- id: KI-12
+  symptom: an example engine closes an idle connection after 5 s
+  component: vllm
+  affected: 0.32.0
+  workaround:
+    where: example/package, a setting
+    what: the setting is 4 s
+  test:
+    package: pkg/one
+    name: TestPlain
+  source:
+    - L-9.9

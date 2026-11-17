@@ -162,6 +162,13 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 			return err
 		}
 	}
+	// The durable log's files, whether or not the log may start: the token is there for the clients
+	// once it does (HBEP-8, A log refused for space). Written again at each start, from the record.
+	if st.EventLog != nil {
+		if err := prepareEventLogFiles(l.host(st.Ports), *st.EventLog); err != nil {
+			return fmt.Errorf("the event log's files: %w", err)
+		}
+	}
 	lf, err := os.OpenFile(l.supervisorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -268,8 +275,8 @@ func entriesNotReady(l layout, sup *procHandle, want map[string]bool) (string, e
 		return "", err
 	}
 	for _, e := range f.Entries {
-		if !want[e.Name] {
-			continue
+		if !want[e.Name] || e.State == entryGated {
+			continue // a gated entry is not running on purpose: it holds nobody back and is no start failure
 		}
 		if _, problems := checkEntry(sup, sup.rec.PID, e); len(problems) > 0 {
 			return e.Name + ": " + strings.Join(problems, "; "), nil
@@ -298,6 +305,11 @@ func childrenStarted(l layout, sup ProcRec) (bool, error) {
 	}
 	ready := true
 	for _, e := range f.Entries {
+		if e.State == entryGated {
+			// Not started on purpose, and the reason is on record (the durable log refused for space):
+			// up goes on with the others, and says so.
+			continue
+		}
 		if e.LastExit != nil {
 			return false, fmt.Errorf("%s exited while it was being started: %s", e.Name, e.LastExit.Detail)
 		}

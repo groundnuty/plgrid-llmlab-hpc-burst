@@ -112,18 +112,20 @@ func accEnd() *metav1.Time {
 
 // The data is a golden string, written by hand from HBEP-8's list: the Provider,
 // the partition, the tag, the job IDs, allocatedCPUs, allocatedGPUs,
-// elapsedSeconds, the start and end times and basis allocated.
+// elapsedSeconds, the beta fields (allocatedBilling, billingUnit, grant and
+// account, with synthetic names), the start and end times and basis allocated.
 func TestNewAccountingRecordGolden(t *testing.T) {
 	rec, err := NewAccountingRecord("ns-a", "0b8e3f7c-9d1a-4c52-8f60-2a4d6e8c1b57", AccountingRecordData{
 		Provider: "prov-a", Partition: "plgrid-gpu-a100", Tag: "hb-x-0123456789ab", JobIDs: []string{"4501", "4502"},
 		AllocatedCPUs: i32(4), AllocatedGPUs: i32(1), ElapsedSeconds: i64(90), StartTime: accStart(), EndTime: accEnd(),
+		AllocatedBilling: i32(1), BillingUnit: BillingUnitGPUHour, Grant: "g1", Account: "a1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := `{"provider":"prov-a","partition":"plgrid-gpu-a100","tag":"hb-x-0123456789ab","jobIDs":["4501","4502"],` +
-		`"allocatedCPUs":4,"allocatedGPUs":1,"elapsedSeconds":90,"startTime":"2026-10-31T12:00:00Z","endTime":"2026-10-31T12:01:30Z",` +
-		`"basis":"allocated"}`
+		`"allocatedCPUs":4,"allocatedGPUs":1,"elapsedSeconds":90,"allocatedBilling":1,"billingUnit":"gpu-hour","grant":"g1","account":"a1",` +
+		`"startTime":"2026-10-31T12:00:00Z","endTime":"2026-10-31T12:01:30Z","basis":"allocated"}`
 	if string(rec.Data.Raw) != want {
 		t.Errorf("data\n got %s\nwant %s", rec.Data.Raw, want)
 	}
@@ -156,7 +158,7 @@ func TestNewAccountingRecordUnknowns(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"provider":"prov-a","partition":"p","tag":"t","jobIDs":[],"basis":"allocated",` +
-		`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime","endTime"]}`
+		`"unknown":["allocatedCPUs","allocatedGPUs","elapsedSeconds","startTime","endTime","allocatedBilling","billingUnit","grant","account"]}`
 	if string(rec.Data.Raw) != want {
 		t.Errorf("data\n got %s\nwant %s", rec.Data.Raw, want)
 	}
@@ -166,9 +168,47 @@ func TestNewAccountingRecordUnknowns(t *testing.T) {
 		t.Fatal(err)
 	}
 	want = `{"provider":"prov-a","partition":"p","tag":"t","jobIDs":["7"],"allocatedCPUs":2,"allocatedGPUs":0,` +
-		`"startTime":"2026-10-31T12:00:00Z","basis":"allocated","unknown":["elapsedSeconds","endTime"]}`
+		`"startTime":"2026-10-31T12:00:00Z","basis":"allocated","unknown":["elapsedSeconds","endTime","allocatedBilling","billingUnit","grant","account"]}`
 	if string(rec.Data.Raw) != want {
 		t.Errorf("data\n got %s\nwant %s", rec.Data.Raw, want)
+	}
+}
+
+// Each beta field that is not known is absent and named in unknown after the
+// alpha ones, in the order allocatedBilling, billingUnit, grant, account, and a
+// known one is in the data and not in unknown. The expectation is by hand.
+func TestNewAccountingRecordBetaUnknowns(t *testing.T) {
+	base := AccountingRecordData{Provider: "prov-a", Partition: "p", Tag: "t", JobIDs: []string{"7"},
+		AllocatedCPUs: i32(2), AllocatedGPUs: i32(0), ElapsedSeconds: i64(60), StartTime: accStart(), EndTime: accEnd()}
+	const known = `{"provider":"prov-a","partition":"p","tag":"t","jobIDs":["7"],"allocatedCPUs":2,"allocatedGPUs":0,"elapsedSeconds":60,`
+	const times = `"startTime":"2026-10-31T12:00:00Z","endTime":"2026-10-31T12:01:30Z","basis":"allocated"`
+	for _, c := range []struct {
+		name string
+		mod  func(*AccountingRecordData)
+		want string
+	}{
+		{"only the billing count known", func(d *AccountingRecordData) { d.AllocatedBilling = i32(3) },
+			`"allocatedBilling":3,` + times + `,"unknown":["billingUnit","grant","account"]}`},
+		{"only the unit known", func(d *AccountingRecordData) { d.BillingUnit = BillingUnitCPUHour },
+			`"billingUnit":"cpu-hour",` + times + `,"unknown":["allocatedBilling","grant","account"]}`},
+		{"only the grant known", func(d *AccountingRecordData) { d.Grant = "g1" },
+			`"grant":"g1",` + times + `,"unknown":["allocatedBilling","billingUnit","account"]}`},
+		{"only the account known", func(d *AccountingRecordData) { d.Account = "a1" },
+			`"account":"a1",` + times + `,"unknown":["allocatedBilling","billingUnit","grant"]}`},
+		{"a known 0 billing count is known", func(d *AccountingRecordData) { d.AllocatedBilling = i32(0) },
+			`"allocatedBilling":0,` + times + `,"unknown":["billingUnit","grant","account"]}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := base
+			c.mod(&d)
+			rec, err := NewAccountingRecord("ns-a", "uid-1", d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(rec.Data.Raw); got != known+c.want {
+				t.Errorf("data\n got %s\nwant %s", got, known+c.want)
+			}
+		})
 	}
 }
 

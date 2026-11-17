@@ -53,7 +53,10 @@
 // The controller's role also takes --relay-keeper-socket under the real controller's rule (#343,
 // PR 4): with --front-mode host-dialed only, an absolute path of at most agentapi.MaxRelaySocketPath
 // bytes. It also takes --bulk-path (#448, part 3), as the real controller does: with --front-mode
-// direct or host-dialed only. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
+// direct or host-dialed only. With --event-log-token-file (either role) it records what the durable log's
+// /healthz answered at its own start, in eventlog-probe-<pid>.txt. With "eventlog" as its first argument
+// the binary is the durable log, as hpcburst-controller's subcommand is: it runs the real log
+// (node.Run) with the subcommand's flags and exit codes, and records eventlog-starts. With "relaykeeper" as its first argument the binary is the relay keeper instead, as
 // hpcburst-controller's subcommand is: it runs the real keeper (relaykeeper.Run) with the
 // subcommand's flags, --state-dir and --port-base, so the launcher's tests supervise a real keeper,
 // with its state file, process lock and socket. In that role it records argv-<pid>.json too, and
@@ -88,6 +91,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -98,6 +103,9 @@ func main() {
 	log.SetLogger(logr.Discard())
 	if len(os.Args) > 1 && os.Args[1] == "relaykeeper" {
 		os.Exit(keeperMain(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "eventlog" {
+		os.Exit(eventlogMain(os.Args[2:]))
 	}
 	fs := flag.NewFlagSet("fakecontroller", flag.ContinueOnError)
 	asFront := filepath.Base(os.Args[0]) == "hpcburst-front"
@@ -114,6 +122,7 @@ func main() {
 	stateDir := fs.String("state-dir", "", "")
 	portBase := fs.Int("port-base", 0, "")
 	health := fs.String("health-addr", "", "")
+	eventLogToken := fs.String("event-log-token-file", "", "") // the durable log's token file, in either role
 	if err := fs.Parse(os.Args[1:]); err != nil || fs.NArg() > 0 || *stateDir == "" || *portBase <= 0 || *health == "" || (asFront && *config == "") || !frontFlagsOK(fs) {
 		fmt.Fprintln(os.Stderr, "fakecontroller: bad command line:", os.Args[1:])
 		os.Exit(2)
@@ -125,6 +134,12 @@ func main() {
 	}
 	pid := os.Getpid()
 	record(filepath.Join(dir, fmt.Sprintf("argv-%d.json", pid)), os.Args[1:])
+	if *eventLogToken != "" {
+		// The launcher passes the token file only with the durable log on. At its start, the process asks
+		// the log's /healthz once and records the answer: the log is up before the controllers and the
+		// front start (HBEP-11), which only the process itself can see at that moment.
+		recordText(filepath.Join(dir, fmt.Sprintf("eventlog-probe-%d.txt", pid)), probeEventLog(*portBase))
+	}
 	record(filepath.Join(dir, fmt.Sprintf("env-%d.json", pid)), os.Environ())
 	if f, err := os.OpenFile(filepath.Join(dir, "starts"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 		fmt.Fprintf(f, "%d %d\n", pid, time.Now().UnixNano())
@@ -463,4 +478,56 @@ func keeperMain(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// probeEventLog asks the durable log's monitoring port, base+17, for GET /healthz, and returns the
+// status code, or the error's text.
+func probeEventLog(portBase int) string {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://" + agentapi.Host{PortBase: portBase}.EventLogMonitorAddr() + "/healthz")
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	resp.Body.Close()
+	return strconv.Itoa(resp.StatusCode)
+}
+
+func recordText(path, text string) {
+	_ = os.WriteFile(path, []byte(text+"\n"), 0o644)
+}
+
+// eventlogMain is the eventlog role: hpcburst-controller eventlog's flags, and the real log
+// (node.Run) until SIGTERM, with the subcommand's exit codes (2 a bad command line, 3 a refusal, 1 any
+// other failure). It records its start in eventlog-starts, as <pid> <nanoseconds>, and its argv.
+func eventlogMain(args []string) int {
+	fs := flag.NewFlagSet("eventlog", flag.ContinueOnError)
+	conf := fs.String("config", "", "")
+	caps := fs.String("caps-file", "", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() > 0 || *conf == "" || *caps == "" {
+		fmt.Fprintln(os.Stderr, "fakecontroller eventlog: bad command line:", args)
+		return 2
+	}
+	dir := os.Getenv("FAKECTRL_DIR")
+	if dir == "" {
+		exe, _ := os.Executable()
+		dir = filepath.Dir(exe)
+	}
+	record(filepath.Join(dir, fmt.Sprintf("argv-%d.json", os.Getpid())), append([]string{"eventlog"}, args...))
+	if f, err := os.OpenFile(filepath.Join(dir, "eventlog-starts"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(f, "%d %d\n", os.Getpid(), time.Now().UnixNano())
+		f.Close()
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	err := node.Run(ctx, node.Options{ConfigPath: *conf, CapsPath: *caps, Stdout: os.Stdout, Stderr: os.Stderr})
+	var refused *node.RefusedError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &refused):
+		fmt.Fprintln(os.Stderr, "fakecontroller eventlog:", err)
+		return eventlog.ExitRefused
+	}
+	fmt.Fprintln(os.Stderr, "fakecontroller eventlog:", err)
+	return 1
 }

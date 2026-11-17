@@ -69,6 +69,10 @@ type job struct {
 	nodes      int
 	gpus       int
 	memMiB     int64
+	// billing is the billing entry of the job's tres lists once SetBilling
+	// has set it: nil omits the entry. Until then the entry is the CPU count.
+	billing    *int64
+	billingSet bool
 	requeue    bool
 	output     string
 	errPath    string

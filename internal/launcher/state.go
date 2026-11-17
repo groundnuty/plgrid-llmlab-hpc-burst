@@ -44,6 +44,11 @@ func (l layout) tmpDir() string          { return filepath.Join(l.dir, "tmp") }
 func (l layout) auditPolicy() string     { return filepath.Join(l.dir, "audit-policy.yaml") }
 func (l layout) auditLog() string        { return filepath.Join(l.logDir(), "audit.log") }
 
+// The durable log's directory, and its copy in the backups (eventlog.go). The copy is one directory,
+// replaced at each upgrade, never one per backup.
+func (l layout) eventLogDir() string     { return filepath.Join(l.dir, "eventlog") }
+func (l layout) eventLogCopyDir() string { return filepath.Join(l.backupsDir(), "eventlog") }
+
 // The controllers' files: the supervisor's own record and the logs of the supervisor and of each
 // supervised process. The credentials and agent-builds directories are the shared host layout's.
 func (l layout) controllerDir() string       { return filepath.Join(l.dir, "controller") }
@@ -114,6 +119,10 @@ type State struct {
 	// InstanceRouter is up --instance-router: the router each new Instance runs in front of its
 	// worker, passed to the controller (#429, #454); "" for none (alpha).
 	InstanceRouter string `json:"instance_router,omitempty"`
+	// EventLog is up --event-log (beta; HBEP-8, The durable log): the supervisor runs the durable log
+	// before the controllers and the front and stops it last, with these caps and this free-space
+	// floor, which upgrade keeps. Nil when the log is off: nothing of it runs (eventlog.go).
+	EventLog *EventLogConfig `json:"event_log,omitempty"`
 }
 
 // ControllerConfig is the launcher's choice of what to run beside k3s.

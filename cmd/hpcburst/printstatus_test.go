@@ -133,6 +133,12 @@ func TestPrintStatusOpenFiles(t *testing.T) {
 			e.OpenFiles = &launcher.OpenFiles{InUse: 810, Soft: launcher.Limit{Value: 1000}, Hard: launcher.Limit{Value: 100000}}
 			e.Degraded = launcher.DegradedUsage + "; " + launcher.DegradedOpenFiles
 		}), prefix + ", open files 810 in use, soft limit 1000, hard limit 100000, degraded: usage writes failing; open files\n"},
+		{"usage log behind", with(func(e *launcher.EntryHealth) {
+			e.Degraded = launcher.DegradedUsageLogBehind
+		}), prefix + ", degraded: usage log behind\n"},
+		{"usage log behind with a failing sink", with(func(e *launcher.EntryHealth) {
+			e.Degraded = launcher.DegradedUsage + "; " + launcher.DegradedUsageLogBehind
+		}), prefix + ", degraded: usage writes failing; usage log behind\n"},
 		{"unknown", with(func(e *launcher.EntryHealth) {
 			e.OpenFilesUnknown = "pid 8: /proc/8/limits: permission denied"
 		}), prefix + ", open files unknown (pid 8: /proc/8/limits: permission denied)\n"},

@@ -153,7 +153,8 @@ type Profile struct {
 
 // Settings are a Provider's settings (HBEP-4, Provider settings): account,
 // grant, credentials reference, allowed partition, labels and an optional QOS.
-// The grant is recorded in alpha but not read.
+// The grant and the account are copied into the accounting record (beta;
+// HBEP-8, Provider accounting, Billing).
 type Settings struct {
 	// Provider is the Provider's name.
 	Provider string

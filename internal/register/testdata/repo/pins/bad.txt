@@ -1,0 +1,2 @@
+# A hand-written fixture pins file with a first column that is no version.
+one-point-four  amd64  x  0000
