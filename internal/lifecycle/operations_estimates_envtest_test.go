@@ -116,28 +116,33 @@ func (s *raceStatus) Update(ctx context.Context, obj client.Object, opts ...clie
 	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
+// plannedWithEstimates plans a new Scale Operation, and has each of the two Providers its targets are on apply an
+// estimate for the plan. It returns the fixture, the plan's ID and the list as it then is.
+func (e *opsEnv) plannedWithEstimates(t *testing.T, name string) (f *opFixture, id, list string) {
+	t.Helper()
+	e.setPolicies(t, globalFor(e.person))
+	f = opsFixture(t)
+	e.request(t, e.a, name, scaleOp(1))
+	e.step(t, f, opAt)
+	planned := e.get(t, name)
+	e.applyEstimate(t, planned, "sano", estimateTime)
+	e.applyEstimate(t, planned, "helios", estimateTime.Add(2*time.Hour))
+	withEstimates := e.get(t, name)
+	list = estimatesOf(t, withEstimates)
+	if len(withEstimates.Status.Estimates) != 2 || !strings.Contains(list, `"2026-11-30T05:48:10Z"`) {
+		t.Fatalf("the applied estimates are %s, want one per Provider with the probe's time", list)
+	}
+	return f, planned.Status.Plan.ID, list
+}
+
 func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 	e := newOpsEnv(t)
 
-	// A planned Operation with an estimate from each of the two Providers its targets are on. The first
-	// subtest makes the rows below it: S4-2, then S4-1, then S4-5's AwaitingApproval.
-	t.Run("S4-2, S4-1 and S4-5 (AwaitingApproval): an estimate keeps the ID, a re-plan keeps the estimate, a confirm keeps it", func(t *testing.T) {
-		e.setPolicies(t, globalFor(e.person))
-		f := opsFixture(t)
-		e.request(t, e.a, "est-1", scaleOp(1))
-		e.step(t, f, opAt)
-		planned := e.get(t, "est-1")
-		id := planned.Status.Plan.ID
-		e.applyEstimate(t, planned, "sano", estimateTime)
-		e.applyEstimate(t, planned, "helios", estimateTime.Add(2*time.Hour))
+	// S4-2: an estimate changes neither the plan's ID nor the phase, and the pass finds nothing to write: had the
+	// estimate sat in the plan's costs, the plan would differ from the stored one and be written.
+	t.Run("S4-2: a new estimate never changes the plan ID, and raises no write", func(t *testing.T) {
+		f, id, list := e.plannedWithEstimates(t, "est-1")
 		withEstimates := e.get(t, "est-1")
-		wantList := estimatesOf(t, withEstimates)
-		if len(withEstimates.Status.Estimates) != 2 || !strings.Contains(wantList, `"2026-11-30T05:48:10Z"`) {
-			t.Fatalf("the applied estimates are %s, want one per Provider with the probe's time", wantList)
-		}
-
-		// S4-2: the estimate changes neither the plan's ID nor the phase, and the pass finds nothing to write:
-		// had the estimate sat in the plan's costs, the plan would differ from the stored one and be written.
 		if got := withEstimates.Status; got.Plan.ID != id || got.Phase != v1alpha1.OperationPhasePlanned {
 			t.Fatalf("after the estimates: plan %s phase %s, want %s Planned", got.Plan.ID, got.Phase, id)
 		}
@@ -146,64 +151,71 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 		if quiet.ResourceVersion != withEstimates.ResourceVersion {
 			t.Fatalf("a pass after the estimates wrote the Operation: resourceVersion %s -> %s; an estimate must raise no write", withEstimates.ResourceVersion, quiet.ResourceVersion)
 		}
-		if quiet.Status.Plan.ID != id || estimatesOf(t, quiet) != wantList {
-			t.Fatalf("a pass after the estimates changed the plan ID (%s) or the list (%s)", quiet.Status.Plan.ID, estimatesOf(t, quiet))
+		if quiet.Status.Plan.ID != id || quiet.Status.Phase != v1alpha1.OperationPhasePlanned || estimatesOf(t, quiet) != list {
+			t.Fatalf("a pass after the estimates changed the plan ID (%s), the phase (%s) or the list (%s)", quiet.Status.Plan.ID, quiet.Status.Phase, estimatesOf(t, quiet))
 		}
+	})
 
-		// S4-1: a re-plan with the same ID and a moved cost input (a new queue wait). The pass writes, which the
-		// resourceVersion and the plan's own figure show, and the list is the same bytes.
+	// S4-1: a re-plan with the same ID and a moved cost input (a new queue wait). The pass writes, which the
+	// resourceVersion and the plan's own figure show, and the list is the same bytes.
+	t.Run("S4-1: a re-plan after the Provider wrote an estimate keeps it unchanged", func(t *testing.T) {
+		f, id, list := e.plannedWithEstimates(t, "est-2")
+		before := e.get(t, "est-2")
 		f.pvs["sano"].prov.Status.QueueWaits = waitsOf(6, 9)
 		e.step(t, f, opAt.Add(time.Minute))
-		replanned := e.get(t, "est-1")
-		if replanned.ResourceVersion == quiet.ResourceVersion {
+		replanned := e.get(t, "est-2")
+		if replanned.ResourceVersion == before.ResourceVersion {
 			t.Fatal("the re-plan wrote nothing, so this row proves nothing: the new queue wait did not move the plan's figures")
 		}
 		if replanned.Status.Plan.ID != id {
 			t.Fatalf("the re-plan changed the plan ID %s -> %s", id, replanned.Status.Plan.ID)
 		}
-		if before, after := sanoWaits(t, quiet), sanoWaits(t, replanned); before.Count == after.Count {
-			t.Fatalf("the re-plan did not change the queue-waits figure (%+v -> %+v), so it moved no cost input", before, after)
+		if b, a := sanoWaits(t, before), sanoWaits(t, replanned); b.Count == a.Count {
+			t.Fatalf("the re-plan did not change the queue-waits figure (%+v -> %+v), so it moved no cost input", b, a)
 		}
-		if got := estimatesOf(t, replanned); got != wantList {
-			t.Fatalf("the re-plan changed status.estimates\n before %s\n after  %s", wantList, got)
+		if got := estimatesOf(t, replanned); got != list {
+			t.Fatalf("the re-plan changed status.estimates\n before %s\n after  %s", list, got)
 		}
+	})
 
-		// S4-5, AwaitingApproval: the owner confirms, and the pass writes the new phase with the list as it was.
-		e.confirmAs(t, e.a, "est-1", id)
+	// S4-5, AwaitingApproval: the owner confirms, and the pass writes the new phase with the list as it was.
+	t.Run("S4-5 (AwaitingApproval): the write to AwaitingApproval keeps the list", func(t *testing.T) {
+		f, id, list := e.plannedWithEstimates(t, "est-4")
+		e.confirmAs(t, e.a, "est-4", id)
 		e.step(t, f, opAt.Add(2*time.Minute))
-		awaiting := e.get(t, "est-1")
+		awaiting := e.get(t, "est-4")
 		if awaiting.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval {
 			t.Fatalf("phase %q after the confirm, want AwaitingApproval", awaiting.Status.Phase)
 		}
-		if got := estimatesOf(t, awaiting); got != wantList {
-			t.Fatalf("the write to AwaitingApproval changed status.estimates\n before %s\n after  %s", wantList, got)
+		if got := estimatesOf(t, awaiting); got != list {
+			t.Fatalf("the write to AwaitingApproval changed status.estimates\n before %s\n after  %s", list, got)
 		}
 	})
 
 	t.Run("S4-5 (Refused): the backstop's write keeps the list", func(t *testing.T) {
 		e.setPolicies(t, globalFor(e.person))
 		f := opsFixture(t)
-		e.request(t, e.a, "est-2", scaleOp(1))
+		e.request(t, e.a, "est-5", scaleOp(1))
 		e.step(t, f, opAt)
-		planned := e.get(t, "est-2")
+		planned := e.get(t, "est-5")
 		e.applyEstimate(t, planned, "sano", estimateTime)
-		wantList := estimatesOf(t, e.get(t, "est-2"))
+		wantList := estimatesOf(t, e.get(t, "est-5"))
 		// The admin writes a plan ID the controller never wrote, the owner confirms that ID, and the pass refuses.
-		forged := e.get(t, "est-2")
+		forged := e.get(t, "est-5")
 		forged.Status.Plan.ID = "0123456789abcdef"
 		if err := e.admin.c.Status().Update(e.ctx, forged); err != nil {
 			t.Fatal(err)
 		}
-		if got := estimatesOf(t, e.get(t, "est-2")); got != wantList {
+		if got := estimatesOf(t, e.get(t, "est-5")); got != wantList {
 			t.Fatalf("the forged write changed the list: %s", got)
 		}
-		confirm := e.get(t, "est-2")
+		confirm := e.get(t, "est-5")
 		confirm.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: "0123456789abcdef"}
 		if err := e.a.c.Update(e.ctx, confirm); err != nil {
 			t.Fatalf("A's confirm of the forged plan's ID: %v", err)
 		}
 		e.step(t, f, opAt.Add(time.Minute))
-		refused := e.get(t, "est-2")
+		refused := e.get(t, "est-5")
 		if refused.Status.Phase != v1alpha1.OperationPhaseRefused {
 			t.Fatalf("phase %q, want Refused", refused.Status.Phase)
 		}
@@ -218,9 +230,9 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 	t.Run("S4-3: a status write that races the Provider's apply is a conflict, retried on the next pass", func(t *testing.T) {
 		e.setPolicies(t, globalFor(e.person))
 		f := opsFixture(t)
-		e.request(t, e.a, "est-3", scaleOp(1))
+		e.request(t, e.a, "est-6", scaleOp(1))
 		e.step(t, f, opAt)
-		planned := e.get(t, "est-3")
+		planned := e.get(t, "est-6")
 
 		// A moved cost input, so that the pass has a write to make.
 		f.pvs["sano"].prov.Status.QueueWaits = waitsOf(6, 9)
@@ -232,7 +244,7 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 		if racing.before != nil {
 			t.Fatal("the Provider's apply never ran between the pass's read and its write, so no race happened")
 		}
-		raced := e.get(t, "est-3")
+		raced := e.get(t, "est-6")
 		if len(raced.Status.Estimates) != 1 || raced.Status.Estimates[0].Provider != "sano" || raced.Status.Estimates[0].Start.Time == nil ||
 			!raced.Status.Estimates[0].Start.Time.Equal(&metav1.Time{Time: estimateTime}) {
 			t.Fatalf("after the conflict the estimates are %s, want the Provider's entry as it applied it", estimatesOf(t, raced))
@@ -246,7 +258,7 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 		if err := e.stepWith(t, f, opAt.Add(2*time.Minute), e.admin.c); err != nil {
 			t.Fatalf("the next pass: %v", err)
 		}
-		retried := e.get(t, "est-3")
+		retried := e.get(t, "est-6")
 		if retried.ResourceVersion == raced.ResourceVersion || sanoWaits(t, retried).Count == sanoWaits(t, planned).Count {
 			t.Fatalf("the next pass did not write the figure the conflicted pass wanted")
 		}
