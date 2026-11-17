@@ -159,8 +159,9 @@ func checkSupervision(l layout, st *State, sup *procHandle, rep *StatusReport, n
 			continue
 		}
 		eh, problems := checkEntry(sup, supRec.PID, e)
-		if e.Name == eventLogEntryName && !eh.Running {
-			// A log that exited refusing its settings names them, from the file it wrote first.
+		if e.Name == eventLogEntryName && eventLogRefusalShown(e, eh) {
+			// A log that exited refusing its settings names them, from the file it wrote first, in
+			// the backoff and through each restart attempt, until it is healthy (#680).
 			if p := eventLogRefusalProblem(l); p != "" {
 				problems = append(problems, p)
 			}
