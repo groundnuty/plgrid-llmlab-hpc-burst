@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -208,26 +209,83 @@ func TestLoadCallerRefusesWhatItCannotUse(t *testing.T) {
 	}
 }
 
-// Run with no credential exits 2 for every command and names both ways to give one.
+// Run with no credential exits 2 for every command and names both ways to give one. The commands run in a CHILD
+// process of the test binary, whose HOME and XDG_STATE_HOME are the test's: client-go computes the default
+// kubeconfig path from HOME when the process starts, so only a process started with the planted HOME can see a
+// fallback to it. An admin-style kubeconfig that works is planted at $HOME/.kube/config and at the launcher's
+// state directory, once readable and once at mode 000, and KUBECONFIG is unset. A command that tried either
+// would reach the stand-in server (readable) or print "permission denied" (mode 000); the server must see
+// nothing, and the output neither "permission denied" nor the state path.
 func TestRunWithoutAKubeconfig(t *testing.T) {
-	srv := newAPIServer(t, userA, groupsOfAgent)
-	home := t.TempDir()
-	kubeconfigFor(t, home, "config", srv.URL, "")
-	cmds := [][]string{
+	for _, mode := range []os.FileMode{0o600, 0o000} {
+		t.Run(fmt.Sprintf("planted kubeconfigs of mode %04o", mode), func(t *testing.T) {
+			if mode == 0 && os.Geteuid() == 0 {
+				t.Skip("a process of root reads a file of mode 000, so there is nothing to refuse")
+			}
+			srv := newAPIServer(t, "admin", []string{"system:masters"})
+			home, xdg := t.TempDir(), t.TempDir()
+			state := filepath.Join(xdg, "hpcburst")
+			for _, dir := range []string{filepath.Join(home, ".kube"), state} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, p := range []string{kubeconfigFor(t, filepath.Join(home, ".kube"), "config", srv.URL, ""), kubeconfigFor(t, state, "kubeconfig", srv.URL, "")} {
+				if err := os.Chmod(p, mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestCommandsWithoutAKubeconfigInAChildProcess$", "-test.v")
+			cmd.Env = append(withoutEnv(os.Environ(), "KUBECONFIG", "HOME", "XDG_STATE_HOME"), childEnv+"="+state, "HOME="+home, "XDG_STATE_HOME="+xdg)
+			out, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(out), "--- PASS: TestCommandsWithoutAKubeconfigInAChildProcess") {
+				t.Fatalf("the child process: %v\n%s", err, out)
+			}
+			if n := len(srv.seen()); n != 0 {
+				t.Errorf("the API server got %d requests: a planted kubeconfig was used", n)
+			}
+		})
+	}
+}
+
+// childEnv marks the child process of TestRunWithoutAKubeconfig and carries the launcher's state directory.
+const childEnv = "AGENTCLI_TEST_CHILD_STATE_DIR"
+
+func withoutEnv(env []string, names ...string) []string {
+	var out []string
+	for _, kv := range env {
+		keep := true
+		for _, n := range names {
+			keep = keep && !strings.HasPrefix(kv, n+"=")
+		}
+		if keep {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// TestCommandsWithoutAKubeconfigInAChildProcess is the child: it runs every command as hpcburst's main does,
+// with the three variables read from the process, and does nothing when it is not the child.
+func TestCommandsWithoutAKubeconfigInAChildProcess(t *testing.T) {
+	state := os.Getenv(childEnv)
+	if state == "" {
+		t.Skip("run by TestRunWithoutAKubeconfig")
+	}
+	if os.Getenv("KUBECONFIG") != "" {
+		t.Fatal("the child has a KUBECONFIG")
+	}
+	env := Env{Kubeconfig: os.Getenv("KUBECONFIG"), Home: os.Getenv("HOME"), XDGStateHome: os.Getenv("XDG_STATE_HOME")}
+	for _, args := range [][]string{
 		{"scale", "m", "--instances", "1"}, {"end", "m"}, {"release", "alloc-a"},
 		{"confirm", "op", "--plan", "p"}, {"approvals"}, {"approve", "op", "--plan", "p"}, {"operation", "op"},
-	}
-	for _, args := range cmds {
+	} {
 		var out, errs bytes.Buffer
-		env := Env{Home: home, XDGStateHome: home}
 		if code := Run(context.Background(), args, env, strings.NewReader(""), &out, &errs); code != exitUsage {
-			t.Errorf("%v: exit %d, want 2", args, code)
+			t.Errorf("%v: exit %d, want 2; stderr %q", args, code, errs.String())
 		}
 		contains(t, strings.Join(args, " ")+" stderr", errs.String(), "KUBECONFIG", "--kubeconfig")
-		lacks(t, strings.Join(args, " ")+" output", out.String()+errs.String(), "permission denied", home)
-	}
-	if n := len(srv.seen()); n != 0 {
-		t.Errorf("the API server got %d requests", n)
+		lacks(t, strings.Join(args, " ")+" output", out.String()+errs.String(), "permission denied", state)
 	}
 }
 
