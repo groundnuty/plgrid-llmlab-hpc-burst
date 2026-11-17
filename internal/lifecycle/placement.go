@@ -48,25 +48,54 @@ type placeTarget struct {
 	params v1alpha1.BatchParameters
 }
 
-// placementOrder returns the steps of a placement, in order.
+// placementOrder returns the steps of a placement, in order (HBEP-7, Provisioning, Where):
+//   - a replacement: its predecessor's Provider, warm then submit; then a warm Allocation of the predecessor's class
+//     on each other allowed Provider, in order; then a warm Allocation of another class on each; then a submit step
+//     on each, in order;
+//   - a missing primary: a warm step on each allowed Provider, in order, of any class; then a submit step on each.
+//
+// A hedge's member (o.hedgeGroup) takes the rows of its need, and o.skipProviders names the Providers of the hedge's
+// live members, which it passes over. o.only is a filter over every step: no step on another Provider, warm or
+// submit (the queued no-overlap successor, whose Provider is its predecessor's, and the over-allocation extra,
+// which is made beside the Allocation that was just submitted; the plan's ruling of k616, 16 Nov 2026). o.skip
+// names the predecessor's Provider when its caps keep the replacement from running beside the predecessor, so the
+// rows are the replacement's without its own two steps. The predecessor's Provider has its two steps first and is
+// left out of the sweeps, which would only try it again. A predecessor whose Provider is unknown has no own steps and
+// no class, so every Provider is of another class.
 func (p *pass) placementOrder(pred *v1alpha1.Instance, o placeOpts) []step {
 	allowed := func(pv *providerView) bool {
 		return pv.name != o.skip && !o.skipProviders[pv.name] && (o.only == "" || pv.name == o.only)
 	}
-	order := p.providers
+	var own *providerView
 	if pred != nil {
-		if pv := p.pvOf(pred.Labels); pv != nil {
-			order = append([]*providerView{pv}, order...)
-		}
+		own = p.pvOf(pred.Labels)
 	}
 	var steps []step
-	seen := map[string]bool{}
-	for _, pv := range order {
-		if seen[pv.name] || !allowed(pv) {
-			continue
+	if own != nil && allowed(own) {
+		steps = append(steps, step{own, stepWarm}, step{own, stepSubmit})
+	}
+	var rest []*providerView
+	for _, pv := range p.providers {
+		if allowed(pv) && (own == nil || pv.name != own.name) {
+			rest = append(rest, pv)
 		}
-		seen[pv.name] = true
-		steps = append(steps, step{pv, stepWarm}, step{pv, stepSubmit})
+	}
+	if pred == nil {
+		for _, pv := range rest {
+			steps = append(steps, step{pv, stepWarm})
+		}
+	} else {
+		// The predecessor's class first: a warm Allocation of it takes the replacement before one of another class.
+		for _, sameClass := range []bool{true, false} {
+			for _, pv := range rest {
+				if (own != nil && pv.class == own.class) == sameClass {
+					steps = append(steps, step{pv, stepWarm})
+				}
+			}
+		}
+	}
+	for _, pv := range rest {
+		steps = append(steps, step{pv, stepSubmit})
 	}
 	return steps
 }
@@ -109,10 +138,42 @@ func (p *pass) targetOf(pv *providerView, o placeOpts, record bool) *placeTarget
 	return &placeTarget{cid: cid, params: params}
 }
 
-// deferralEnd is when a placement that waits for an unregistered warm Allocation (until: the end of agentGrace after
-// the controller's start) next looks again, and false when it does not wait.
+// deferralEnd is when a placement that waits for an unregistered warm Allocation next looks again, and false when it
+// does not wait. until is the end of agentGrace after the controller's start (warmFor), zero when no warm Allocation
+// waits. A replacement never waits past its start deadline, its ReplacementLate deadline (replacementDeadline): the
+// wait ends there, and at that deadline the deferral lapses and the placement goes on to a submission, since the
+// replacement is late and its predecessor's drain start is near. A missing primary has no start deadline, so
+// agentGrace alone bounds it (the science agent's ruling on #604 PR 3's plan, Q3, 16 Nov 2026).
 func (p *pass) deferralEnd(pred *v1alpha1.Instance, until time.Time) (time.Time, bool) {
-	return until, !until.IsZero()
+	if until.IsZero() {
+		return time.Time{}, false
+	}
+	if pred != nil {
+		if deadline, ok := p.replacementDeadline(pred); ok {
+			if !p.now.Before(deadline) {
+				return time.Time{}, false
+			}
+			if until.After(deadline) {
+				until = deadline
+			}
+		}
+	}
+	return until, true
+}
+
+// replacementDeadline is the start deadline of pred's replacement: the predecessor's drain start minus its class's
+// start-to-ready time (lateAt), the time after which a replacement that has not started is late (HBEP-7, Handover,
+// lateness). False when the predecessor's Provider, class or lease is unknown.
+func (p *pass) replacementDeadline(pred *v1alpha1.Instance) (time.Time, bool) {
+	pv := p.pvOf(pred.Labels)
+	if pv == nil || !pv.hasClass {
+		return time.Time{}, false
+	}
+	ds, ok := p.drainStart(pred, pv)
+	if !ok {
+		return time.Time{}, false
+	}
+	return lateAt(ds, startToReady(p.md, pv.class)), true
 }
 
 // placeOnWarm is a warm step: it places the Instance on the Provider's warm Allocation that warmFor picks. An
