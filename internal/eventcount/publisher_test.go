@@ -151,27 +151,38 @@ func TestTheUnloggedSeriesStartsAtZeroWithALog(t *testing.T) {
 
 // The envelope's time is the clock read once, just before the Kubernetes recorder's own call, and not
 // read again for the log's copy (HBEP-8, The durable log, Streams; the science agent's ruling on #625's
-// PR E2).
+// PR E2). Both ways of raising an event, Eventf and EventfID, read it so.
 func TestTheEnvelopeTimeIsReadOnceJustBeforeTheRecordersCall(t *testing.T) {
-	clk := &countingClock{t: base.Add(1234 * time.Millisecond)}
-	var inner recInner
-	inner.clock = clk
-	d, _ := startLog(t, bigCaps)
-	pub := NewPublisher(PublisherOptions{Addr: d.Ports.Addr(), Token: d.Token, Now: clk.now})
-	t.Cleanup(func() { pub.Shutdown(t.Context()) })
-	rec := Events(&inner, New(), ControllerFront, WithLog(Log{Publisher: pub, Scheme: testScheme(), ReportingController: "hpcburst-test"}))
-	rec.EventfID("t-1", alloc("66666666-6666-4666-8666-666666666666"), nil, provider.EventKindOrdinary, "Ready", "ready", "n")
-	eventually(t, "the event to be stored", func() bool { return pub.Pending() == 0 })
-	if got := inner.byReason("Ready"); len(got) != 1 || got[0].clockSeen != 1 {
-		t.Fatalf("the recorder's call: %+v, want one call after exactly one read of the clock", got)
-	}
-	ms := d.ReadAll(t, eventlog.StreamEvents)
-	ev, _, err := Decode(ms[0].Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ev.Time().Equal(clk.t) {
-		t.Errorf("the envelope's time %s, want the one clock reading %s", ev.Time(), clk.t)
+	for name, raise := range map[string]func(IDRecorder, *v1alpha1.Allocation){
+		"Eventf": func(r IDRecorder, a *v1alpha1.Allocation) {
+			r.Eventf(a, nil, provider.EventKindOrdinary, "Ready", "ready", "n")
+		},
+		"EventfID": func(r IDRecorder, a *v1alpha1.Allocation) {
+			r.EventfID("t-1", a, nil, provider.EventKindOrdinary, "Ready", "ready", "n")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clk := &countingClock{t: base.Add(1234 * time.Millisecond)}
+			var inner recInner
+			inner.clock = clk
+			d, _ := startLog(t, bigCaps)
+			pub := NewPublisher(PublisherOptions{Addr: d.Ports.Addr(), Token: d.Token, Now: clk.now})
+			t.Cleanup(func() { pub.Shutdown(t.Context()) })
+			rec := Events(&inner, New(), ControllerFront, WithLog(Log{Publisher: pub, Scheme: testScheme(), ReportingController: "hpcburst-test"}))
+			raise(rec, alloc("66666666-6666-4666-8666-666666666666"))
+			eventually(t, "the event to be stored", func() bool { return pub.Pending() == 0 })
+			if got := inner.byReason("Ready"); len(got) != 1 || got[0].clockSeen != 1 {
+				t.Fatalf("the recorder's call: %+v, want one call after exactly one read of the clock", got)
+			}
+			ms := d.ReadAll(t, eventlog.StreamEvents)
+			ev, _, err := Decode(ms[0].Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ev.Time().Equal(clk.t) {
+				t.Errorf("the envelope's time %s, want the one clock reading %s", ev.Time(), clk.t)
+			}
+		})
 	}
 }
 
