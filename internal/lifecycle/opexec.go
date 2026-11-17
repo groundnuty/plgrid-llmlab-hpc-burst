@@ -156,6 +156,9 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 	deleting := p.deletingBeforeThePass(op)
 	specOK := true
 	if err := p.applySpec(op); err != nil {
+		if errors.Is(err, errSpecChanged) {
+			return p.failSpecChanged(op)
+		}
 		specOK = false
 		// Nothing is acted on, created or replaced until the spec has landed and is recorded. An End's deployment target is
 		// the one that failed; a Scale has no deployment target, and stays Executing until the write lands.
@@ -166,6 +169,13 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 				failed[t.UID] = err
 			}
 		}
+	} else if !p.specEffectHolds(op, p.md) {
+		// On EVERY pass, before any act: the effect the Operation committed to must still hold. A person who raises the count
+		// while a Scale drains, or moves the end time of an End, would otherwise have the Operation release what the controller
+		// then provisions back, which is churn at the cost of a queue position. When it no longer holds nothing more is acted
+		// on: every target not yet done fails for good, and the Operation is finished (HBEP-10, The report, as amended by #665
+		// and #666).
+		return p.failSpecChanged(op)
 	} else {
 		var actErrs []error
 		actErrs, failed = p.actOnCommitted(op)
@@ -180,6 +190,100 @@ func (p *pass) executing(op *v1alpha1.Operation) error {
 // finishedOperation reports whether the Operation has finished, whichever way: it has a finish time.
 func finishedOperation(op *v1alpha1.Operation) bool { return op.Status.FinishedAt != nil }
 
+// errSpecChanged is what applySpec returns when the spec changed after the plan and the effect the Operation committed to no
+// longer holds.
+var errSpecChanged = errors.New("the deployment's spec changed after the plan, and the committed effect no longer holds")
+
+// specEffectHolds is the ONE check of whether the spec effect an Operation committed to holds now, by value, for the
+// deployment as it is read (HBEP-10, The report, as amended by #665 and #666): a Scale, spec.instances is at most N; an End, spec.endTime is set and not after now, or the
+// deployment is deleted (or is being, or is another one of the name now); a Release has no spec effect. Applied where the
+// generation moved before the first act (applySpec) and on every pass before any act (executing): a person who undoes
+// the effect while the Operation is carried out stops it.
+func (p *pass) specEffectHolds(op *v1alpha1.Operation, md *v1alpha1.ModelDeployment) bool {
+	switch op.Spec.Action {
+	case v1alpha1.OperationActionScale:
+		return md == nil || op.Spec.Scale == nil || md.Spec.Instances <= op.Spec.Scale.Instances
+	case v1alpha1.OperationActionEnd:
+		if op.Status.Plan != nil && (md == nil || md.UID != op.Status.Plan.ModelDeployment.UID || !md.DeletionTimestamp.IsZero()) {
+			return true // gone, another deployment of the name, or being deleted: the End's job is done, or there is nothing to end
+		}
+		if op.Spec.End != nil && op.Spec.End.Delete {
+			return false // a live deployment that is not being deleted
+		}
+		return md.Spec.EndTime != nil && !md.Spec.EndTime.After(p.now)
+	}
+	return true
+}
+
+// failSpecChanged ends the Operation when the effect it committed to no longer holds: nothing more is acted on, every
+// target not yet done fails for good with SpecChangedSinceCommit, a target already done stays done, and the Operation is
+// PartlyFailed and finished (phaseOf). A spec target (SetEndTime, DeleteDeployment) is not done when its effect no longer
+// holds, whatever it did.
+func (p *pass) failSpecChanged(op *v1alpha1.Operation) error {
+	prior := map[types.UID]v1alpha1.TargetOutcome{}
+	for _, o := range op.Status.Targets {
+		prior[o.UID] = o
+	}
+	var out []v1alpha1.TargetOutcome
+	for _, t := range op.Status.Committed {
+		o := v1alpha1.TargetOutcome{Kind: t.Kind, Name: t.Name, UID: t.UID, State: v1alpha1.TargetStateNotStarted, LastTransitionTime: metav1.NewTime(p.now)}
+		done := false
+		if t.Kind != v1alpha1.TargetKindModelDeployment {
+			var err error
+			if done, err = p.targetDone(t, true); err != nil {
+				return err
+			}
+		}
+		if prev, ok := prior[t.UID]; ok && prev.State == v1alpha1.TargetStateFailed && failureIsFinal(prev.Reason) {
+			o.State, o.Reason, o.Message = prev.State, prev.Reason, prev.Message // a final failure already recorded stays
+		} else if done {
+			o.State = v1alpha1.TargetStateDone
+		} else {
+			o.State, o.Reason, o.Message = v1alpha1.TargetStateFailed, reasonSpecChangedSinceCommit,
+				"the deployment's spec changed after the Operation was committed, so that the effect it was approved for no longer holds: nothing more was acted on"
+		}
+		if prev, ok := prior[t.UID]; ok && prev.State == o.State {
+			o.LastTransitionTime = prev.LastTransitionTime
+		}
+		out = append(out, o)
+	}
+	phase, finished := phaseOf(out)
+	return p.setOperationStatus(op, func(s *v1alpha1.OperationStatus) {
+		s.Targets, s.Phase = out, phase
+		p.setCondition(s, op, v1alpha1.ConditionExecutable, metav1.ConditionFalse, v1alpha1.ReasonDone,
+			"the deployment's spec changed after the commit, so the committed effect no longer holds: nothing more was acted on, and the Operation is finished")
+		if finished && s.FinishedAt == nil {
+			t := metav1.NewTime(p.now)
+			s.FinishedAt = &t
+		}
+	})
+}
+
+// lastReadyScaleTarget reports whether the committed Instance target is one that a Scale committed as CancelPending or
+// EndStarting, that is Ready now, and would be the LAST ready one: no other Instance is Ready, not being deleted, not stale
+// and not itself a committed target, which is the planner's own staysReady. Draining it would be a DrainLastReady nobody
+// approved. An End drains every Ready Instance as the End itself, so it is not asked.
+func (p *pass) lastReadyScaleTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget, in *v1alpha1.Instance) bool {
+	if op.Spec.Action != v1alpha1.OperationActionScale || in == nil || in.Status.Phase != v1alpha1.InstanceReady {
+		return false
+	}
+	if t.Effect != v1alpha1.PlanEffectCancelPending && t.Effect != v1alpha1.PlanEffectEndStarting {
+		return false
+	}
+	taken := map[types.UID]bool{}
+	for _, c := range op.Status.Committed {
+		if c.Kind == v1alpha1.TargetKindInstance {
+			taken[c.UID] = true
+		}
+	}
+	for _, o := range p.insts {
+		if o.UID != in.UID && o.Status.Phase == v1alpha1.InstanceReady && o.DeletionTimestamp.IsZero() && !p.stale[o.UID] && !taken[o.UID] {
+			return false
+		}
+	}
+	return true
+}
+
 // applySpec writes the spec change an Operation commits to, once, before any target is acted on: Scale lowers
 // spec.instances to N, End sets spec.endTime to now or deletes the ModelDeployment with a UID precondition. The write
 // is an update that carries the resourceVersion read, under the lifecycle controller's field manager, and p.md
@@ -189,9 +293,10 @@ func finishedOperation(op *v1alpha1.Operation) bool { return op.Status.FinishedA
 // The write is made only while the deployment's generation is still the plan's. The stale check at the commit made them
 // equal, and a spec change moves the generation, so a generation past the plan's means the spec changed since: by this
 // Operation's own earlier write, whose record in status did not land (a kill between the two), or by a person or an agent.
-// The two cannot be told apart, and neither is written over: whatever the spec holds then stays. The record that the spec
-// is dealt with (v1alpha1.ConditionSpecWritten) is its own status write, made right after the spec write, so that the
-// window in which a kill leaves it unwritten is that one write.
+// Nothing is written over it. The two need not be told apart: what decides is whether the committed effect holds now
+// (specEffectHolds). If it does, the record is made and the Operation goes on; if it does not, errSpecChanged says nothing
+// is acted on. The record that the spec is dealt with (v1alpha1.ConditionSpecWritten) is its own status write, made right
+// after the spec write, so that the window in which a kill leaves it unwritten is that one write.
 func (p *pass) applySpec(op *v1alpha1.Operation) error {
 	if apimeta.IsStatusConditionTrue(op.Status.Conditions, v1alpha1.ConditionSpecWritten) {
 		return nil
@@ -201,7 +306,13 @@ func (p *pass) applySpec(op *v1alpha1.Operation) error {
 	case plan == nil || md == nil || md.UID != plan.ModelDeployment.UID || !md.DeletionTimestamp.IsZero():
 		return p.recordSpecWritten(op, "the deployment is gone, being deleted, or another one now: there is no spec to write")
 	case md.Generation != plan.ModelDeployment.Generation:
-		return p.recordSpecWritten(op, fmt.Sprintf("the deployment's spec changed after the plan (generation %d, the plan's %d): it is not written over", md.Generation, plan.ModelDeployment.Generation))
+		// The spec changed since the plan. Whether by this Operation's own write whose record did not land, or by someone else,
+		// what matters is whether the effect the Operation committed to holds now (specEffectHolds): if it does the spec is
+		// not written again and the Operation goes on; if it does not, nothing is acted on.
+		if !p.specEffectHolds(op, md) {
+			return errSpecChanged
+		}
+		return p.recordSpecWritten(op, fmt.Sprintf("the deployment's spec changed after the plan (generation %d, the plan's %d) and already holds the change: it is not written again", md.Generation, plan.ModelDeployment.Generation))
 	}
 	write, why := (*v1alpha1.ModelDeployment)(nil), ""
 	switch op.Spec.Action {
@@ -316,6 +427,9 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 		// Ready since, and a serving Instance is drained (HBEP-7, Handover, Draining), never ended: its requests are in flight.
 		switch in.Status.Phase {
 		case v1alpha1.InstanceReady:
+			if p.lastReadyScaleTarget(op, t, in) {
+				return nil // it would be the last ready Instance: a drain nobody approved, so it is a final failure (finalFailure)
+			}
 			return p.startDrain(in)
 		case v1alpha1.InstanceDraining:
 			return nil // step 6 carries the drain on (and, in a shutdown, step 6 began it in this very pass)
