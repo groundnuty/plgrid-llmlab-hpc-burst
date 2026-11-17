@@ -163,9 +163,9 @@ func (w *cliWorld) storeDeployment(t *testing.T, name, readyTag, pendingTag stri
 }
 
 // cliReconciler is the controller of the stepper: the admin, since the lifecycle controller's own identity is the person's
-// here, with no agent and no Provider.
+// here, with no agent and no Provider. An execution needs the clock, a recorder and the pass's memory too.
 func cliReconciler(c client.Client) *Reconciler {
-	return &Reconciler{Client: c, Reader: c, Backend: &Backend{}}
+	return &Reconciler{Client: c, Reader: c, Clock: SystemClock{}, Backend: &Backend{}, Recorder: &MemoryRecorder{}}
 }
 
 // fixture reads one deployment's world from the API server into the pass's fields, as the lifecycle controller's
@@ -219,6 +219,7 @@ func (w *cliWorld) step() {
 		p := f.pass()
 		p.key = types.NamespacedName{Namespace: rigNS, Name: mds.Items[i].Name}
 		p.r, p.ctx, p.now = cliReconciler(w.e.admin.c), ctx, now
+		p.mem = p.r.memory()
 		w.record(p.operations())
 	}
 	w.mu.Lock()
