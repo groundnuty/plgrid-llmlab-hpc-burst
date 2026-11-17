@@ -162,11 +162,9 @@ func (r *rig) relayKilledMidStream(in *v1alpha1.Instance, key string, relays map
 	// Within the backoff: its first wait is 1 s and at most 30 s, then an ssh
 	// and srun set-up.
 	r.t.Logf("the serving relay %d started again %s after the kill", again.pid, time.Since(killed).Round(100*time.Millisecond))
-	stack.WaitFor(r.t, stack.WaitDeadline, "frpc logged in again: the proxy online, TunnelConnected True and the front's registration back", func() bool {
-		now, ok := r.instance(in.Name)
-		reg, known := stack.Registered(r.ports, in)
-		return r.frpsProxies()[string(in.UID)] && ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
-	})
+	// frpc logged in again, then the front routing the model: the request below is sent with the key the
+	// Instance held (#676; its record, checked next, says which Instance served it).
+	r.tunnelBack("after the serving relay's kill", in)
 	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
 	if rp.Err != nil || rp.Status != http.StatusOK {
 		r.t.Fatalf("the request after the relay came back: %d %v: %.300s", rp.Status, rp.Err, rp.Body)
@@ -272,11 +270,8 @@ func (r *rig) hostDialedControllerRestart(in *v1alpha1.Instance, key string, see
 			r.t.Errorf("the new leader's %s relay is the old one, %d", ch, p.pid)
 		}
 	}
-	stack.WaitFor(r.t, stack.WaitDeadline, "frpc logged in again over the new serving relay", func() bool {
-		now, ok := r.instance(in.Name)
-		reg, known := stack.Registered(r.ports, in)
-		return r.frpsProxies()[string(in.UID)] && ok && conditionTrue(now.Status.Conditions, v1alpha1.ConditionTunnelConnected) && known && reg
-	})
+	// frpc logged in again over the new serving relay, then the front routing the model (#676).
+	r.tunnelBack("after the controller restart, over the new serving relay", in)
 	rp := r.fc.SendCtx(context.Background(), "/v1/chat/completions", stack.ChatBody(stack.Model, 4, 0, false, ""), key)
 	if rp.Err != nil || rp.Status != http.StatusOK {
 		r.t.Fatalf("a request after the controller restart: %d %v: %.300s", rp.Status, rp.Err, rp.Body)

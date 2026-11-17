@@ -267,19 +267,40 @@ func TestAKilledLogComesBackOnTheSameStoreAndTheGateIsAskedAgain(t *testing.T) {
 	}
 }
 
-// A log that exits refusing its settings is unhealthy in status, naming them. The configuration is
-// corrupted after up wrote it (a misspelt sync_interval), the supervisor starts the log as it is, the
-// log exits with status 3 at each start, and status reads the refusal it wrote.
-func TestALogThatRefusesItsSettingsIsUnhealthyByName(t *testing.T) {
-	f := eventLogFixture(t, plentyConfig())
+// misspellSyncInterval corrupts the log's configuration after up wrote it (sync_interval becomes
+// sync_intervall: nats-server does not accept it, so the log refuses at every start) and returns the
+// text as up wrote it, for a test that puts it back. It is called before the supervisor starts, so a
+// plain write is read whole.
+func (f *ctlFixture) misspellSyncInterval() (good string) {
+	f.t.Helper()
 	conf := filepath.Join(f.l.eventLogDir(), eventlog.ConfFile)
 	text, err := os.ReadFile(conf)
 	if err != nil {
-		t.Fatal(err)
+		f.t.Fatal(err)
 	}
-	if err := os.WriteFile(conf, []byte(strings.Replace(string(text), "sync_interval: always", "sync_intervall: always", 1)), 0o600); err != nil {
-		t.Fatal(err)
+	bad := strings.Replace(string(text), "sync_interval: always", "sync_intervall: always", 1)
+	if bad == string(text) {
+		f.t.Fatalf("the configuration has no sync_interval to misspell:\n%s", text)
 	}
+	if err := os.WriteFile(conf, []byte(bad), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+	return string(text)
+}
+
+// A log that exits refusing its settings is unhealthy in status, naming them. The configuration is
+// corrupted after up wrote it (a misspelt sync_interval), the supervisor starts the log as it is, the
+// log exits with status 3 at each start, and status reads the refusal it wrote.
+//
+// The read comes after the entry was seen in backoff, and by then the supervisor, which restarts the
+// log within 20 to 50 ms, may already have started a fresh process that holds no health address yet
+// (#680: a launcher-k3s run read it there and got only "does not hold its health address"). So the
+// read lands in the backoff or in a fresh attempt, whichever the scheduler gave, and the test passes
+// in both: the setting is named for as long as the last exit was a refusal. The attempt-only state is
+// pinned, observably, by TestARefusingLogNamesItsSettingWhileItRunsAFreshAttempt.
+func TestALogThatRefusesItsSettingsIsUnhealthyByName(t *testing.T) {
+	f := eventLogFixture(t, plentyConfig())
+	f.misspellSyncInterval()
 	f.supervise(SuperviseOptions{disk: f.diskFor(100*gb, 0, 0), BackoffMin: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond, EventLogStartWait: 200 * time.Millisecond})
 	e := f.awaitEntry(eventLogEntryName, "the log to exit refusing", func(e EntryRecord) bool {
 		return e.State == entryBackoff && e.LastExit != nil && e.LastExit.Code == eventlog.ExitRefused
@@ -295,7 +316,115 @@ func TestALogThatRefusesItsSettingsIsUnhealthyByName(t *testing.T) {
 	if reasons := strings.Join(rep.Reasons, "\n"); !strings.Contains(reasons, "the event log refuses to serve") || !strings.Contains(reasons, "sync_intervall") {
 		t.Errorf("the reasons do not name the setting:\n%s", reasons)
 	}
-	// Control: the same fixture with the configuration as up wrote it is healthy (the other tests).
+	// The control, a log that refused once and then served, is
+	// TestALogThatRefusedOnceAndIsHealthyShowsNoRefusal.
+}
+
+// #680: status names the refusal and its setting while the refusing log RUNS a fresh attempt, not
+// only in its backoff. The fake log's second start is held before it runs the log (the steering file
+// eventlog-hold-from), so the supervisor's record says running, the process holds no health address,
+// and the refusal of the first start is on disk. The test waits for the fake's own marker for that
+// pid, which says the process is held now, and only then reads status: no timing decides which state
+// the read lands in. The read reports the held pid as running, which a read in backoff cannot do, so
+// a version of the row that reads in the backoff window fails here. The generic line stays beside the
+// refusal.
+func TestARefusingLogNamesItsSettingWhileItRunsAFreshAttempt(t *testing.T) {
+	f := eventLogFixture(t, plentyConfig())
+	f.misspellSyncInterval()
+	f.steer("eventlog-hold-from", "2") // the first start refuses and exits; the second is held
+	f.supervise(SuperviseOptions{disk: f.diskFor(100*gb, 0, 0), BackoffMin: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond, EventLogStartWait: 200 * time.Millisecond})
+	held := f.awaitEntry(eventLogEntryName, "the log's second start to run", func(e EntryRecord) bool {
+		return e.State == entryRunning && e.Proc != nil && e.Restarts >= 1 && e.LastExit != nil && e.LastExit.Code == eventlog.ExitRefused
+	})
+	f.awaitFileText(fmt.Sprintf("eventlog-held-%d", held.Proc.PID)) // this process is held now
+
+	rep, health := f.statusOf()
+	eh, ok := rep.entry(eventLogEntryName)
+	if !ok || !eh.Running || eh.PID != held.Proc.PID {
+		t.Fatalf("the read did not land on the held fresh attempt (pid %d): %+v", held.Proc.PID, eh)
+	}
+	if eh.HealthzOK != nil {
+		t.Errorf("the held process answered /healthz: %+v", eh)
+	}
+	if health != Unhealthy {
+		t.Fatalf("status of a refusing log in a fresh attempt: %s %v, want unhealthy", health, rep.Reasons)
+	}
+	reasons := strings.Join(rep.Reasons, "\n")
+	if !strings.Contains(reasons, "the event log refuses to serve") || !strings.Contains(reasons, "sync_intervall") {
+		t.Errorf("the reasons do not name the setting while the log runs a fresh attempt:\n%s", reasons)
+	}
+	if !strings.Contains(reasons, fmt.Sprintf("pid %d does not hold its health address", held.Proc.PID)) {
+		t.Errorf("the generic line is gone from the reasons:\n%s", reasons)
+	}
+	// The same process was running for the whole read: the entry's record still says so.
+	if after, _ := recordEntry(f.record(), eventLogEntryName); after.State != entryRunning || after.Proc == nil || after.Proc.PID != held.Proc.PID {
+		t.Errorf("the held process changed during the read: %+v", after)
+	}
+}
+
+// The control of #680's row: a log that refused once and is now HEALTHY shows no refusal. The
+// configuration is corrupted, the log refuses at its first start, the configuration is put back, and
+// a later start serves. The entry's last exit stays the refusal (the record keeps it), so the
+// refusal is dropped because the log is healthy and for no other reason. The log removes its refusal
+// file once it serves, a moment AFTER its /healthz answers, so a read can land between the two:
+// the test waits for the removal, writes the refusal back (the state of that moment), and reads
+// status again, which must still show no refusal.
+func TestALogThatRefusedOnceAndIsHealthyShowsNoRefusal(t *testing.T) {
+	f := eventLogFixture(t, plentyConfig())
+	good := f.misspellSyncInterval()
+	f.supervise(SuperviseOptions{disk: f.diskFor(100*gb, 0, 0), BackoffMin: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond, EventLogStartWait: 200 * time.Millisecond})
+	f.awaitEntry(eventLogEntryName, "the log to exit refusing", func(e EntryRecord) bool {
+		return e.State == entryBackoff && e.LastExit != nil && e.LastExit.Code == eventlog.ExitRefused
+	})
+	refusal := filepath.Join(f.l.eventLogDir(), eventlog.RefusalFile)
+	planted, err := os.ReadFile(refusal)
+	if err != nil || !strings.Contains(string(planted), "sync_intervall") {
+		t.Fatalf("the refusal on record after the first exit: %q, %v", planted, err)
+	}
+	// The settings are corrected, as a person does: one atomic replacement, never read half written.
+	if err := eventlog.WriteFileAtomic(filepath.Join(f.l.eventLogDir(), eventlog.ConfFile), []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.logReady() // the log serves: its streams are made and a client connects
+
+	// node.Run removes the refusal file after the streams are made and before READY: wait for it.
+	deadline := time.Now().Add(20 * time.Second)
+	for _, err := os.Stat(refusal); err == nil; _, err = os.Stat(refusal) {
+		if !time.Now().Before(deadline) {
+			t.Fatal("the log serves but its refusal file is still there")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	check := func(when string) {
+		t.Helper()
+		rep, health := f.statusOf()
+		eh, _ := rep.entry(eventLogEntryName)
+		if health != Healthy || strings.Contains(strings.Join(rep.Reasons, "\n"), "refuses to serve") {
+			t.Fatalf("status of a healthy log %s: %s %v", when, health, rep.Reasons)
+		}
+		if !eh.Running || eh.HealthzOK == nil || !*eh.HealthzOK {
+			t.Fatalf("the log is not judged healthy %s: %+v", when, eh)
+		}
+		// The state the control needs: the entry still carries the refusal as its last exit.
+		if eh.LastExit == nil || eh.LastExit.Code != eventlog.ExitRefused || eh.Restarts < 1 {
+			t.Fatalf("the entry %s: last exit %+v, restarts %d: want the refusal kept and a restart", when, eh.LastExit, eh.Restarts)
+		}
+	}
+	check("once it serves")
+	if err := os.WriteFile(refusal, planted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check("with the refusal still on disk")
+}
+
+// recordEntry is the named entry of a supervisor record.
+func recordEntry(sf *SupervisorFile, name string) (EntryRecord, bool) {
+	for _, e := range sf.Entries {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return EntryRecord{}, false
 }
 
 // A full events stream is degraded, with its remedy, and the log keeps serving: status stays healthy
