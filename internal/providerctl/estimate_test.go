@@ -651,6 +651,65 @@ func TestAProviderThatCannotBeReadFailsThePassWithAFixedText(t *testing.T) {
 	}
 }
 
+// Eligibility to ask is decided when the estimate STARTS, from a time read once for the step; the answer is then written
+// whatever the plan's age has become. An estimate that ran the whole bound ends after the plan's own 60 s have passed, and a
+// timeout is an entry with an unknown start (HBEP-4, Estimate): the age is not asked again after the call. The fake clock MOVES
+// across the boundary while the estimate runs, which a frozen clock hides.
+func TestATimedOutEstimateIsStillWrittenWhenThePlanAgesPastTheBoundWhileItRuns(t *testing.T) {
+	e := newEstEnv(t)
+	a1 := e.newAlloc("alloc-1")
+	e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1)) // observed at 12:00:00
+	e.batch.FailEstimate(fmt.Errorf("sbatch --test-only: %w", slurm.ErrTimeout))
+	hold := e.batch.HoldEstimates()
+
+	e.clock.Advance(50 * time.Second) // 12:00:50: the plan is 50 s old, so the estimate starts
+	done := make(chan error, 1)
+	go func() { done <- e.reconcileOp("op-1") }()
+	<-hold.Blocked()
+	e.clock.Advance(20 * time.Second) // 12:01:10: the plan is 70 s old when the estimate ends, as one that ran the whole bound is
+	hold.Release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := e.log.count(); n != 1 {
+		t.Fatalf("%d applies, want the timed-out estimate's entry: an estimate that started in time is written, whatever the plan's age became", n)
+	}
+	got := e.stored("op-1")
+	if len(got) != 1 || got[0].Start.Time != nil || got[0].Start.Unknown != provider.EstimateTimedOut {
+		t.Fatalf("entries %+v, want one unknown with the time-out reason", got)
+	}
+	// The control, so that the age check is a real one: a plan that is already older than 60 s when the step starts is not asked.
+	e.newOperation("op-2", "plan-b", v1alpha1.OperationPhasePlanned, allocTarget(a1)) // observed at 12:01:10
+	e.clock.Advance(61 * time.Second)
+	before := e.asked()
+	if err := e.reconcileOp("op-2"); err != nil || e.asked() != before {
+		t.Fatalf("a plan 61 s old at the step's start: error %v, %d calls, want none", err, e.asked()-before)
+	}
+}
+
+// A shape whose turn comes after the plan has passed the bound is not started: the age is decided at each estimate's start, so
+// the first shape's slow answer is written and the second shape reads as unknown for want of an entry.
+func TestAShapeWhoseTurnComesAfterTheBoundIsNotStarted(t *testing.T) {
+	e := newEstEnv(t)
+	e.batch.SetEstimate(startE1)
+	a1 := e.newAlloc("alloc-1")
+	a2 := e.newAlloc("alloc-2", func(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.GPUs = 2 })
+	e.newOperation("op-1", "plan-a", v1alpha1.OperationPhasePlanned, allocTarget(a1), allocTarget(a2))
+	hold := e.batch.HoldEstimates()
+	e.clock.Advance(50 * time.Second)
+	done := make(chan error, 1)
+	go func() { done <- e.reconcileOp("op-1") }()
+	<-hold.Blocked()
+	e.clock.Advance(20 * time.Second) // the first shape's call ends 70 s after the plan
+	hold.Release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n, got := e.asked(), e.stored("op-1"); n != 1 || len(got) != 1 {
+		t.Fatalf("%d calls and entries %+v, want the first shape's one, and the second not started", n, got)
+	}
+}
+
 // An estimate that does not answer within the bound is unknown, with that reason,
 // and the controller does not wait past it.
 func TestAnEstimateThatHangsIsUnknownAtTheBound(t *testing.T) {

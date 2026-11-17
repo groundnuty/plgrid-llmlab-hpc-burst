@@ -133,24 +133,25 @@ func setupEstimates(mgr manager.Manager, c *Controller) error {
 		Complete(e)
 }
 
-// askable is the plan of an Operation this controller may ask estimates for, or
-// nil: an Operation in Planned or AwaitingApproval that is not being deleted,
-// with a plan that is not older than the estimate's bound. A terminal Operation
-// is never asked, nor is one planned longer ago than an estimate may take: an
-// estimate not filled in within that bound reads as unknown (HBEP-10, The release
-// cost; `@hpc-burst-science-agent`, 17 Nov 2026, #661, Q3: none is asked for a
-// plan older than 60 s).
-func (e *estimator) askable(op *v1alpha1.Operation) *v1alpha1.OperationPlan {
+// writable is the plan of an Operation an estimate may still be written onto, or nil: an Operation in Planned or AwaitingApproval
+// that is not being deleted and has a plan. A terminal Operation is never written to. It asks nothing about the plan's age:
+// that is decided when an estimate STARTS (startable), and never again when it ends.
+func writable(op *v1alpha1.Operation) *v1alpha1.OperationPlan {
 	if op.DeletionTimestamp != nil || op.Status.Plan == nil {
 		return nil
 	}
 	if ph := op.Status.Phase; ph != v1alpha1.OperationPhasePlanned && ph != v1alpha1.OperationPhaseAwaitingApproval {
 		return nil
 	}
-	if e.now().Sub(op.Status.Plan.ObservedAt.Time) > provider.EstimateTimeout {
-		return nil
-	}
 	return op.Status.Plan
+}
+
+// tooOldToStart reports whether a plan is older, at now, than an estimate may take: none is asked for it, since one not filled
+// in within that bound reads as unknown (HBEP-10, The release cost; `@hpc-burst-science-agent`, 17 Nov 2026, #661, Q3: none is
+// asked for a plan older than 60 s). The caller reads now once, for the decision; an estimate that started in time and ends
+// after the bound is written all the same, as a timeout is an entry with an unknown start (HBEP-4, Estimate).
+func tooOldToStart(plan *v1alpha1.OperationPlan, now time.Time) bool {
+	return now.Sub(plan.ObservedAt.Time) > provider.EstimateTimeout
 }
 
 // ownTargets are the plan's targets this Provider estimates: a target with a
@@ -211,8 +212,8 @@ func (e *estimator) Reconcile(ctx context.Context, req reconcile.Request) (recon
 	if err := e.cache.Get(ctx, req.NamespacedName, &op); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
-	plan := e.askable(&op)
-	if plan == nil {
+	plan := writable(&op)
+	if plan == nil || tooOldToStart(plan, e.now()) {
 		return reconcile.Result{}, nil
 	}
 	targets := e.ownTargets(plan)
@@ -312,6 +313,9 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, ui
 	if err != nil || fresh == nil {
 		return err
 	}
+	if tooOldToStart(fresh.Status.Plan, e.now()) {
+		return nil // this estimate's turn comes after the bound: it is not started, and the target reads as unknown
+	}
 	if slices.ContainsFunc(e.mine(fresh, planID), func(est v1alpha1.OperationEstimate) bool { return est.Shape == g.shape }) {
 		return nil
 	}
@@ -348,7 +352,8 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, ui
 }
 
 // freshPlan reads the Operation from the API server and returns it when it is
-// still the Operation with this UID and askable on the plan with this ID, else nil.
+// still the Operation with this UID, on the plan with this ID and in a phase an estimate may be written in, else nil.
+// It does not look at the plan's age.
 func (e *estimator) freshPlan(ctx context.Context, req reconcile.Request, uid types.UID, planID string) (*v1alpha1.Operation, error) {
 	var op v1alpha1.Operation
 	if err := e.api.Get(ctx, req.NamespacedName, &op); err != nil {
@@ -357,7 +362,7 @@ func (e *estimator) freshPlan(ctx context.Context, req reconcile.Request, uid ty
 		}
 		return nil, err
 	}
-	if plan := e.askable(&op); op.UID != uid || plan == nil || plan.ID != planID {
+	if plan := writable(&op); op.UID != uid || plan == nil || plan.ID != planID {
 		return nil, nil
 	}
 	return &op, nil
