@@ -335,6 +335,13 @@ func (e *estimator) estimateGroup(ctx context.Context, req reconcile.Request, ui
 		return err
 	}
 	entries := slices.DeleteFunc(e.mine(fresh, planID), func(est v1alpha1.OperationEstimate) bool { return est.Shape == g.shape })
+	// What remains is a race this controller cannot close, since the API server checks no UID on an apply: the
+	// Operation is deleted and created again between the read above and the apply below, and the entry lands on
+	// the new Operation under the old plan ID. Readers show only the current plan ID's entries, so under another
+	// plan ID it is never shown. Under the same plan ID, which takes identical inputs (the action, the
+	// ModelDeployment's UID and generation, and each target's kind, name, UID, generation, effect and policies;
+	// opid.go), it is an estimate for the same plan, targets and shape: advisory and correct, with its own
+	// observedAt showing its age.
 	return e.apply(ctx, fresh, append(entries, entry))
 }
 
