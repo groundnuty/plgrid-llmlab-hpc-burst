@@ -463,6 +463,9 @@ func (p *pass) actOnTarget(op *v1alpha1.Operation, t v1alpha1.CommittedTarget) e
 			// as retention's would.
 			return nil
 		}
+		if p.releasePending(a) {
+			return nil // a failure owes this release: its own path makes it, with its cause
+		}
 		return p.deleteAllocation(a, v1alpha1.ReleaseCauseOperation(op.Namespace, op.Name, op.UID))
 	}
 	return nil

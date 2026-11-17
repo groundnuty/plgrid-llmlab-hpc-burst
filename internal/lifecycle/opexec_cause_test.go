@@ -7,6 +7,7 @@ package lifecycle
 // failing), the Allocation is released by the gate's failure, not by the Operation.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -161,5 +162,96 @@ func TestAGateMissReleasesACommittedTargetsAllocationWithTheGatesCauseAndTheTarg
 	}
 	if cause, _ := w.log.deletedWith(xAlloc); cause != "Instance "+x+" failed: QualificationFailed" {
 		t.Errorf("X's Allocation's cause is %q at the end", cause)
+	}
+}
+
+// The edge of the failure's cause: a failure owes an Allocation its release, and the failure's own release write FAULTS in the
+// very pass in which the Operations step acts. A Scale's committed EndStarting target X fails at the throughput gate while the
+// Operation cannot act (its spec write fails), and its Allocation, ReleaseStarted, is not released: the failure's release write
+// faults at every pass, and so does retention's (the same Allocation, empty and idle, is retention's to release at once), so that
+// the only release that can succeed is the one under test. Then the spec write is let through and the failure's release faults
+// once more, in the pass whose Operations step then acts on the Allocation: it leaves it to the failure (releasePending), and the
+// next pass's tombstone releases it with the failure's own cause. Without that, the Operation's act deleted it in that pass with
+// the Operation's cause.
+func TestAFailureThatOwesAnAllocationItsReleaseKeepsItWhenItsOwnWriteFaultsInThePassTheOperationActs(t *testing.T) {
+	ms := time.Millisecond
+	knob := &gateKnob{tpot: 41 * ms, ttft: 300 * ms}
+	w, r, x := newGateExecWorld(t, knob)
+	xAlloc, rAlloc := w.mustInstance(x).Spec.AllocationRef.Name, w.mustInstance(r).Spec.AllocationRef.Name
+	specFails, releaseFaults := true, 1<<30
+	w.fc.set(func(method string, obj client.Object) error {
+		switch o := obj.(type) {
+		case *v1alpha1.ModelDeployment:
+			if method == "Update" && specFails {
+				return errors.New("injected: the write of the spec fails")
+			}
+		case *v1alpha1.Allocation:
+			cause := o.Annotations[v1alpha1.AnnotationReleaseCause]
+			if method != "Update" || o.Name != xAlloc || cause == "" {
+				return nil
+			}
+			switch {
+			case strings.HasPrefix(cause, "Instance "): // the failure's own release
+				if releaseFaults > 0 {
+					releaseFaults--
+					return errors.New("injected: the write of the failure's release cause fails")
+				}
+			case strings.HasPrefix(cause, "released when idle"): // retention's, which is held off throughout
+				return errors.New("injected: the write of retention's release cause fails")
+			}
+		}
+		return nil
+	}, nil)
+	planned := w.approveScale("scale", 1, 2)
+	if pt := planTargets(planned.Status.Plan); pt["Instance "+x] != v1alpha1.PlanEffectEndStarting || pt["Allocation "+xAlloc] != v1alpha1.PlanEffectReleaseStarted {
+		t.Fatalf("the plan takes X as %q and its Allocation as %q, want EndStarting and ReleaseStarted: %v", pt["Instance "+x], pt["Allocation "+xAlloc], pt)
+	}
+
+	// X fails at the gate with the Operation unable to act, and its Allocation stays: the failure's release faults at every pass.
+	w.stepsUntil(40*time.Minute, 10*time.Second, "X failed by the gate", func() bool { return w.instance(x).Status.EndReason == v1alpha1.ReasonQualificationFailed })
+	w.stepsUntil(time.Minute, 10*time.Second, "the failure's release to have faulted", func() bool { return releaseFaults < 1<<30 })
+	if a, ok := w.allocation(xAlloc); !ok || !a.DeletionTimestamp.IsZero() {
+		t.Fatalf("X's Allocation is %+v (found %v), want it present and not being deleted: the failure's release write faults", a, ok)
+	}
+	if _, deleted := w.log.deletedWith(xAlloc); deleted {
+		t.Fatal("X's Allocation was deleted while the failure's release write faults")
+	}
+
+	// The spec write goes through, and the failure's release faults once more: in the pass whose Operations step acts.
+	specFails, releaseFaults = false, 1
+	w.clock.Advance(10 * time.Second)
+	if err := w.stepKeepingErrors(); err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("the pass in which the failure's release faults returned %v, want the injected fault", err)
+	}
+	if releaseFaults != 0 {
+		t.Fatalf("the failure's release did not fault in that pass (%d left)", releaseFaults)
+	}
+	if got := w.md(hoMD).Spec.Instances; got != 1 {
+		t.Fatalf("spec.instances is %d after that pass, want 1: the spec write must have landed in it", got)
+	}
+
+	// It settles: the next pass's tombstone releases the Allocation with the failure's own cause, never the Operation's.
+	w.stepsUntil(10*time.Minute, 10*time.Second, "X's Allocation gone", func() bool { _, ok := w.allocation(xAlloc); return !ok })
+	cause, deleted := w.log.deletedWith(xAlloc)
+	if !deleted || cause != "Instance "+x+" failed: QualificationFailed" {
+		t.Errorf("X's Allocation was deleted (%v) with the cause %q, want the failure's: Instance %s failed: QualificationFailed", deleted, cause, x)
+	}
+	if ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(cause); ok {
+		t.Errorf("the cause %q parses as Operation %s/%s %s: the failure owed the release, not the Operation", cause, ns, name, uid)
+	}
+	w.untilPhase("scale", v1alpha1.OperationPhaseDone)
+	op := w.getOp("scale")
+	if o, ok := outcomeOf(op, xAlloc); !ok || o.State != v1alpha1.TargetStateDone || !strings.HasPrefix(o.Message, "released by "+v1alpha1.ReasonQualificationFailed) {
+		t.Errorf("X's Allocation outcome is %+v (%v), want Done naming %s", o, ok, v1alpha1.ReasonQualificationFailed)
+	}
+	// Nothing else is released.
+	if a, ok := w.allocation(rAlloc); !ok || !a.DeletionTimestamp.IsZero() {
+		t.Errorf("R's Allocation is %+v (found %v): the kept Instance's Allocation is untouched", a, ok)
+	}
+	if in := w.instance(r); isDraining(in) || ended(in) {
+		t.Errorf("R is %q: the kept Instance is untouched", in.Status.Phase)
+	}
+	if cause, deleted := w.log.deletedWith(rAlloc); deleted {
+		t.Errorf("R's Allocation was deleted with the cause %q", cause)
 	}
 }
