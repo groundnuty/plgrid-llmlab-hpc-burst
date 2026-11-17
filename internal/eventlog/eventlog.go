@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -81,6 +82,20 @@ func ValidToken(s string) bool {
 	}
 	b, err := hex.DecodeString(s)
 	return err == nil && len(b) == TokenBytes && hex.EncodeToString(b) == s
+}
+
+// ReadToken reads the token file the launcher wrote (<state>/eventlog/token) and checks that it holds
+// a token NewToken could have made. An error names the file and what was wrong, never the token.
+func ReadToken(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("the durable log's token file: %w", err)
+	}
+	t := strings.TrimSpace(string(b))
+	if !ValidToken(t) {
+		return "", fmt.Errorf("the durable log's token file %s does not hold a token (%d lower-case hex digits)", path, 2*TokenBytes)
+	}
+	return t, nil
 }
 
 // Caps are the two streams' caps in logical bytes, which nats-server counts as each message's

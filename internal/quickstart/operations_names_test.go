@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -147,6 +148,10 @@ var guideNames = map[string]string{
 	// Retention modes (HBEP-7, Retention).
 	"Keep":            string(v1alpha1.RetentionKeep),
 	"ReleaseWhenIdle": string(v1alpha1.RetentionReleaseWhenIdle),
+
+	// The event the durable log's publisher raises when the log did not take an event (HBEP-8, The
+	// durable log, When it is down).
+	"EventsNotLogged": eventcount.ReasonEventsNotLogged,
 }
 
 // unexportedNames are names the guide gives whose constant is unexported in its package, so this

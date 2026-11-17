@@ -13,6 +13,8 @@ import (
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -27,10 +29,10 @@ import (
 // The unit tests read the typed recorder's double, so they judge the decisions
 // and the ids; the rows that list the Events the API holds are in e2e.
 //
-// The ids are asserted on the double because eventcount's EventfID drops the id
-// before the API: an events.k8s.io Event holds none. Until the durable log's
-// publisher exists (PR E2, #625), the double is the only place an id can be read;
-// E2 verifies the STORED ids from the log itself, which is where an id is kept.
+// The ids are asserted on the double because an events.k8s.io Event holds none:
+// the API never sees an id. They are the unit tests' decisions; PR E2 (#625)
+// verifies the STORED ids from the durable log itself, in e2e, which is where an
+// id is kept.
 
 func longAlloc(a *v1alpha1.Allocation) { a.Spec.ForProvider.Batch.TimeLimit = "3h" }
 
@@ -266,6 +268,50 @@ func TestANoteThatNamesTheJobIDIsRefused(t *testing.T) {
 	x.typed(a, evJobStarted, "9", "started at 2026-01-01T00:00:00Z, count "+id+"0 and x"+id, nil)
 	if len(e.typed.events) != before+1 {
 		t.Errorf("a note with the digits inside longer tokens was refused")
+	}
+}
+
+// A note refused for naming the job ID reaches neither the recorder nor the publisher, so it is counted
+// through the recorder the manager holds, in the same series as every event the durable log did not take:
+// hpcburst_events_unlogged_total{controller="provider-<name>"} reads 1 after one refused note, and 2 after the
+// second, not through a counter of the controller's own (HBEP-8, The durable log, When it is down; team-lead,
+// 16 Nov 2026). The wrapper is the real eventcount.Events with a publisher whose log is not reachable: a
+// refusal counts at once, without an attempt on the log, so nothing here depends on one.
+func TestARefusedNoteIsCountedInTheUnloggedSeries(t *testing.T) {
+	e := newEnv(t)
+	e.newAlloc("a", longAlloc)
+	e.run("a", 4)
+	id := ptJobID(e, "a")
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	counter := eventcount.New()
+	pub := eventcount.NewPublisher(eventcount.PublisherOptions{Addr: "127.0.0.1:1", Token: strings.Repeat("a", 64)})
+	t.Cleanup(func() { pub.Shutdown(context.Background()) })
+	controller := eventcount.ControllerProvider(testProvider)
+	e.ctl.shared.o.TypedRecorder = eventcount.Events(events.NewFakeRecorder(10), counter, controller, pub.Option(scheme, v1alpha1.FieldManagerProvider, nil))
+	if v, exists := counter.Unlogged(controller); !exists || v != 0 {
+		t.Fatalf("the series is %v (exists %v) before any refusal, want 0 and existing", v, exists)
+	}
+	x := &external{s: e.ctl.shared}
+	a := e.get("a")
+	x.typed(a, evJobStarted, "9", "job "+id+" started", nil)
+	if v, _ := counter.Unlogged(controller); v != 1 {
+		t.Fatalf("hpcburst_events_unlogged_total{controller=%q} reads %v after one refused note, want 1", controller, v)
+	}
+	x.typedUnmarked(a, evAdminHold, "held ("+id+")", nil)
+	if v, _ := counter.Unlogged(controller); v != 2 {
+		t.Fatalf("the series reads %v after two refused notes, want 2", v)
+	}
+	// A note that is not refused is not counted here: it goes to the recorder and the publisher, and nothing is lost
+	// until the publisher gives up on it (its retries run for 100 s).
+	x.typed(a, evJobStarted, "9", "started at 2026-01-01T00:00:00Z", nil)
+	if v, _ := counter.Unlogged(controller); v != 2 {
+		t.Errorf("the series reads %v after a note that is not refused, want it still 2", v)
+	}
+	if n := e.ctl.RefusedNotes(); n != 2 {
+		t.Errorf("%d refused notes counted by the controller, want 2", n)
 	}
 }
 
