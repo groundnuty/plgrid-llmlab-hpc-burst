@@ -14,14 +14,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// These tests cover the pidfd confirmation of #690: on Linux 6.15 and later one poll of a pidfd
-// can read readable for an instant while its process runs execve from a non-leader thread, so
-// sysPidfd.exited confirms a readable poll with waitid (and, for a process that is not the
-// caller's child, one re-poll). The kernel's transient cannot be produced on kernels before 6.15.
-// So TestConfirmExit scripts the calls, TestIdentifyConfirmsATransientReadablePidfd injects the
-// transient through sysPidfd's seams on real processes, and TestLivenessAcrossConcurrentExec is
-// where a hosted runner on a 6.15 or later kernel shows the real one. None of them is evidence
-// that the fix works against the real race unless it ran on such a kernel beside the unfixed code.
+// These tests cover the pidfd confirmation of #690: on mainline Linux 6.15 and later, and on
+// stable kernels that took the backport (6.12.31 and 6.14.9 onwards; a distro kernel of any
+// number may carry it), one poll of a pidfd can read readable for an instant while its process
+// runs execve from a non-leader thread, so sysPidfd.exited confirms a readable poll with waitid
+// (and, for a process that is not the caller's child, one re-poll). The kernel's transient cannot
+// be produced on a kernel without that poll test, this VM's included. So TestConfirmExit scripts
+// the calls, TestIdentifyConfirmsATransientReadablePidfd injects the transient through sysPidfd's
+// seams on real processes, and TestLivenessAcrossConcurrentExec is where a hosted runner on a
+// kernel that has the poll test shows the real one. None of them is evidence that the fix works
+// against the real race unless it ran on such a kernel beside the unfixed code.
 
 type pollStep struct {
 	readable bool

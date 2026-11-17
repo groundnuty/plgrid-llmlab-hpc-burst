@@ -32,9 +32,10 @@ import (
 // recorded process, and the held pidfd pins it for every signal sent afterwards. Death is read
 // from the pidfd only, never from a /proc read that failed or came back empty.
 //
-// One poll of the pidfd can still read an exit that has not happened (#690). On Linux 6.15 and
-// later, pidfd_poll reads the task under RCU only, and its test is
-// `task->exit_state && !delay_group_leader(task)` (fs/pidfs.c; up to 6.14 it was
+// One poll of the pidfd can still read an exit that has not happened (#690). On mainline Linux
+// 6.15 and later, and on the stable kernels that took the backport (6.12.31 and 6.14.9 onwards; a
+// distro kernel of any number may carry it), pidfd_poll reads the task under RCU only, and its
+// test is `task->exit_state && !delay_group_leader(task)` (fs/pidfs.c; before that it was
 // `exit_state && thread_group_empty(task)`, which reads the instant below as alive). While a
 // thread other than the leader runs execve, de_thread (fs/exec.c), holding tasklist_lock for
 // writing, hands the PID to that thread (exchange_tids) and only then sets the old leader's

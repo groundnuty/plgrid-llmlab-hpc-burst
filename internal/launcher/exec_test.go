@@ -35,7 +35,8 @@ const (
 	execPidEnv    = "HPCBURST_TEST_EXEC_PIDFILE" // where the intermediate writes its helper's PID
 	execPipeEnv   = "HPCBURST_TEST_EXEC_PIPE"    // the helper's descriptor number for the pipe from the test
 	// execCountEnv sets how many execs TestLivenessAcrossConcurrentExec runs (default 300). A
-	// hosted run on a 6.15 or later kernel raises it to see the pidfd's transient (#690).
+	// hosted run on a kernel that has the #690 poll test (see handle.go) raises it to see the
+	// pidfd's transient.
 	execCountEnv     = "HPCBURST_TEST_EXEC_COUNT"
 	defaultExecCount = 300
 )
@@ -201,11 +202,12 @@ func kernelRelease() string {
 
 // TestLivenessAcrossConcurrentExec is the regression test for two races between a process's
 // execve from a non-leader thread and a liveness check. The first is the old rule "the leader
-// reads Z and the task scan finds no live thread, so the process is dead". The second, on Linux
-// 6.15 and later, is the pidfd itself (#690): while the PID is handed to the exec'ing thread, one
-// lockless pidfd_poll can read readable for a process that lives (fs/pidfs.c tests
-// `exit_state && !delay_group_leader(task)` on a leader whose exit_signal is already -1), which
-// sysPidfd.exited confirms with waitid. A real process re-executes itself many times from a
+// reads Z and the task scan finds no live thread, so the process is dead". The second, on mainline
+// 6.15 and later and on stable kernels that took the backport (6.12.31 and 6.14.9 onwards; a
+// distro kernel of any number may carry it), is the pidfd itself (#690): while the PID is handed
+// to the exec'ing thread, one lockless pidfd_poll can read readable for a process that lives
+// (fs/pidfs.c tests `exit_state && !delay_group_leader(task)` on a leader whose exit_signal is
+// already -1), which sysPidfd.exited confirms with waitid. A real process re-executes itself many times from a
 // non-leader thread while the test asks identify, in a tight loop, whether it is alive. It is
 // alive throughout (it only ends when the test kills it), so every answer other than "ours" is
 // a misreport. As a control, the same loop applies the old task-scan rule to the same process
@@ -214,9 +216,9 @@ func kernelRelease() string {
 // It runs twice: with the helper as the test's child (waitid answers for it, so the "alive by
 // waitid" counter can rise) and as a reparented grandchild, which is not the test's child (waitid
 // answers ECHILD, and the re-poll confirms, so the re-poll counter can rise). The second race does
-// not exist before Linux 6.15, so a pass on an older kernel shows nothing about it. The NUMBERS
-// lines name the kernel and the two overturn counts (zero on an older kernel), which are logged,
-// not asserted, since they depend on timing. HPCBURST_TEST_EXEC_COUNT raises the exec count.
+// not exist on a kernel without that poll test, so a pass there shows nothing about it. The
+// NUMBERS lines name the kernel and the two overturn counts (zero where the race cannot occur),
+// which are logged, not asserted, since they depend on timing. HPCBURST_TEST_EXEC_COUNT raises the exec count.
 func TestLivenessAcrossConcurrentExec(t *testing.T) {
 	execs := execCount(t)
 	t.Run("child", func(t *testing.T) { runExecLiveness(t, execs, false) })

@@ -36,8 +36,9 @@ type Verdict int
 
 const (
 	// Gone: the process has exited. Only the kernel's process handle (a pidfd, whose readable poll
-	// is confirmed by waitid: on Linux 6.15 and later one poll can read readable for an instant at
-	// a non-leader execve's PID hand-over, #690) or the absence of any process with the PID says
+	// is confirmed by waitid: on mainline 6.15 and later, and stable kernels that took the
+	// backport (6.12.31 and 6.14.9 onwards), one poll can read readable for an instant at a
+	// non-leader execve's PID hand-over, #690) or the absence of any process with the PID says
 	// so, never a /proc read that failed or came back empty.
 	Gone Verdict = iota
 	// Ours: a live process with the recorded PID, start time and boot ID.
