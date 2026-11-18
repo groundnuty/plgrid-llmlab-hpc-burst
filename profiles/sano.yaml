@@ -93,8 +93,10 @@ spec:
   # value, once the field exists, is epoch-seconds (HBEP-4, Estimate).
   # stagingDir is not set: no fact names a directory that the login node and the compute nodes share and that
   # a variable reaches. The compute nodes have no home directory (facts.slurm.srun_chdir), and the shared file
-  # system lies at a cluster path, which a public profile does not hold. ReadProfile refuses a Provider on this
-  # profile until it gives one (HBEP-4, Transport); #735 lists it before a live row.
+  # system lies at a cluster path, which carries a user name, so a public profile does not hold it. A Sano
+  # Provider gives it in its own settings, spec.stagingDir, which wins over a profile's and, like the account,
+  # never appears in a profile, a status, an event or a log (HBEP-4, Provider settings; #757, #735). ReadProfile
+  # refuses a Provider on this profile that gives none.
   #
   # The backfill window is 7 days (facts.slurm.backfill_window, #735's probe results of 18 Nov 2026), longer than
   # every QOS wall, so Sano's time limit gets no cap for it (HBEP-7, Provisioning; #745). No field holds it.
