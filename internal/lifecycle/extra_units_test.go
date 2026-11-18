@@ -584,3 +584,54 @@ func TestAnUnresolvedReplacementHedgesMembersCountOnTheirOwnProvider(t *testing.
 		})
 	}
 }
+
+// TestAnInFlightPrimarysOwnAllocationIsChargedToTheCapsBesideItsFutureReplacement (D3, point 3): a GPU cap of 3 on provider-a. md-e
+// (ends at 09:30) has its primary pe, Pending and listed. md-o (no end time) has its primary po in flight: its Instance, made,
+// has no Allocation yet and no expectation sizes it. By hand: listed pe 1 + the extra 1 = 2, po's own Allocation at its recorded
+// launch's 1 GPU, which no list shows, and po's future replacement 1 = 4 > 3, refused; admitted at cap 4. The old reader charged
+// the in-flight primary's replacement alone and counted 3 <= 3: admitted at cap 3, and once po's Allocation appeared the extra
+// left too few GPUs for the two to overlap.
+func TestAnInFlightPrimarysOwnAllocationIsChargedToTheCapsBesideItsFutureReplacement(t *testing.T) {
+	end := hoT(9, 30, 0)
+	f := &unitFx{}
+	f.md("md-e", &end)
+	f.md("md-o", nil)
+	f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	f.alloc("md-e", "pe", provA, false)
+	f.inst("md-o", "po", provA, "uid-po", hoT(8, 0, 10), v1alpha1.InstancePending, nil) // no Allocation: in flight
+	for _, c := range []struct {
+		gpus int32
+		ok   bool
+	}{{3, false}, {4, true}} {
+		if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(c.gpus), rigNS+"/md-e", "")); a.ok != c.ok {
+			t.Fatalf("cap %d: ok %v with a count of %d, want %v: po's own Allocation counts beside its future replacement", c.gpus, a.ok, a.count, c.ok)
+		}
+	}
+}
+
+// TestAnInFlightPrimarysOwnAllocationIsCountedOnceWhenAnExpectationSizesIt (D3): the same world, but po's reservation asked the
+// caps, so the table holds its Allocation's size as an expectation. The caps then count it from the expectation and not again from
+// the unit: expected po 1 + listed pe 1 + the extra 1 + po's future replacement 1 = 4, admitted at cap 4 and refused at cap 3.
+// Counted twice it is 5 > 4: refused at cap 4.
+func TestAnInFlightPrimarysOwnAllocationIsCountedOnceWhenAnExpectationSizesIt(t *testing.T) {
+	end := hoT(9, 30, 0)
+	f := &unitFx{}
+	f.md("md-e", &end)
+	f.md("md-o", nil)
+	f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	f.alloc("md-e", "pe", provA, false)
+	f.inst("md-o", "po", provA, "uid-po", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	for _, c := range []struct {
+		gpus int32
+		ok   bool
+	}{{3, false}, {4, true}} {
+		tab := newSlotTable()
+		size := oneGPU()
+		if a := ask(t, tab, f.reader(t), slotAsk{provider: provA, key: rigNS + "/alloc-po", params: &size, caps: v1alpha1.QOSLimits{MaxGPUsPerUser: i32(c.gpus)}}); !a.ok {
+			t.Fatalf("po's reservation refused at cap %d: %s", c.gpus, a.capsWhy)
+		}
+		if a := ask(t, tab, f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(c.gpus), rigNS+"/md-e", "")); a.ok != c.ok {
+			t.Fatalf("cap %d: ok %v with a count of %d, want %v: po's size is counted once", c.gpus, a.ok, a.count, c.ok)
+		}
+	}
+}

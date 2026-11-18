@@ -127,8 +127,8 @@ type handoverReads struct {
 // winner are the reserved slots of kind slotForReplacement, read as they are; a pending or in-flight one holds no slot yet,
 // so it is counted beside them.
 //
-// 4. A unit's size depends on whether its Instance exists. An Instance that exists, an in-flight replacement (roleOwn,
-// until its Allocation is listed), is charged at its OWN recorded launch (Launch.GPUs and workers, immutable), the size
+// 4. A unit's size depends on whether its Instance exists. An Instance that exists, an in-flight replacement or a chosen
+// primary in flight (roleOwn, until its Allocation is listed), is charged at its OWN recorded launch (Launch.GPUs and workers, immutable), the size
 // ensureAllocation will request; once its Allocation is listed it is no unit, the listed Allocation counts. ONLY a
 // replacement that does not exist yet, a handing-over primary's next one (roleHandover), is charged at the CURRENT spec's
 // size on THIS Provider (checkServed's plan through the Provider's partition), never the replaced Allocation's, so a spec
@@ -202,9 +202,15 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		if judged == nil {
 			// In flight: its own Allocation is not made yet, and its drain start is read from the time limit its
 			// recorded launch is sized for.
-			own, _ := a.recorded(md, m)
+			own, ogpus := a.recorded(md, m)
 			judged = &v1alpha1.Allocation{}
 			judged.Spec.ForProvider.Batch = &own
+			if primary {
+				// A chosen primary in flight is an Instance that exists: its own Allocation, which no list shows yet, is
+				// charged to the caps at its recorded launch's size, beside its future replacement's, unless an expectation
+				// already sizes it (unitTerms). Its slot is held by that expectation, so it asks for none (reserved).
+				add(extraUnit{uid: m.UID, role: roleOwn, deployment: key, key: m.Namespace + "/" + m.Spec.AllocationRef.Name, reserved: true, size: own, gpus: ogpus})
+			}
 		}
 		if !holdsSlotOnceRunning(md, m, judged, *r.profile, time.Time{}) {
 			return
