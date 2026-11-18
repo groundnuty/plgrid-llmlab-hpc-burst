@@ -34,6 +34,18 @@ type target struct {
 type Resolution struct {
 	Namespace, Name string
 	serving         map[string]bool // namespace/name of each ModelDeployment of the serving set, served or managed-source
+	// charge is the Workload's c when it resolved: its typical context plus its typical output, which every attempt of the request reserves against
+	// an Instance's token budget (HBEP-5, Workloads, The count in tokens). A request keeps the definition it came with, so an edit of the Workload
+	// changes no request already resolved (the science agent's Q15 ruling on #764).
+	charge int64
+}
+
+// load is the charge a choice reserves for a request with this resolution: the Workload's c, named, or the zero value for a request that named none.
+func (res *Resolution) load() balancer.Charge {
+	if res == nil {
+		return balancer.Charge{}
+	}
+	return balancer.Charge{Named: true, Tokens: res.charge}
 }
 
 // key is the target's name for pauses and exclusion.
@@ -213,7 +225,8 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution
 		r.beforePick()
 	}
 
-	tg, wait := r.chooseServed(serving, ring, groups, n, key, exclude)
+	ch := res.load()
+	tg, wait := r.chooseServed(serving, ring, groups, n, key, exclude, ch)
 	if tg != nil {
 		tg.workload, tg.wres = wname, res
 		return tg, nil
@@ -226,7 +239,7 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution
 	if wait == nil {
 		return nil, errNoReadyTarget(n.Model).forWorkload(wname)
 	}
-	tg, rerr := r.waitServed(ctx, wait, groups[wait.Key], m, n, key, exclude)
+	tg, rerr := r.waitServed(ctx, wait, groups[wait.Key], m, n, key, exclude, ch)
 	if tg != nil {
 		tg.workload, tg.wres = wname, res
 	}
@@ -261,7 +274,7 @@ func servingSet(m *inventory.Model, wl *inventory.Workload) ([]*inventory.Deploy
 
 // newResolution records the serving set a Workload resolved to.
 func newResolution(wl *inventory.Workload, served []*inventory.Deployment, sources []*inventory.ManagedSource) *Resolution {
-	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, serving: map[string]bool{}}
+	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, serving: map[string]bool{}, charge: wl.Charge}
 	for _, d := range served {
 		res.serving[d.Key] = true
 	}
@@ -332,6 +345,10 @@ func resolveWorkload(v *inventory.View, n naming.Name, header string) (*inventor
 // first deployment on the walk that has an eligible Instance, all at their
 // caps.
 //
+// ch is the request's charge against each Instance's token budget: its Workload's
+// c, or none (Resolution.load); a member that does not admit it is skipped as one
+// at its cap is.
+//
 // serving are the deployments the request may resolve to: all of the model's, or
 // a Workload's (servingSet). The ring is the model's one ring, over every
 // Instance of it. An Instance of a deployment outside serving is skipped, as one
@@ -340,7 +357,7 @@ func resolveWorkload(v *inventory.View, n naming.Name, header string) (*inventor
 // where they sit whatever else is on the ring (HBEP-5, Workloads, Pinning; the
 // science agent's ruling on #764, Q7; the fork's own ring is the oracle in
 // pin_workload_test.go).
-func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key string, exclude []string) (*target, *inventory.Deployment) {
+func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key string, exclude []string, ch balancer.Charge) (*target, *inventory.Deployment) {
 	if ring == nil || len(serving) == 0 {
 		return nil, nil
 	}
@@ -369,7 +386,7 @@ func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ri
 		if g == nil {
 			continue
 		}
-		res, err := g.TryPick(key, match)
+		res, err := g.TryPickFor(key, match, ch)
 		switch {
 		case err == nil:
 			// The group is live and the view this request read is not: a
@@ -394,7 +411,7 @@ func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ri
 
 // waitServed holds the request in the deployment's FIFO for at most
 // queueTimeout (HBEP-5, Load bound and cap).
-func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *balancer.Group, m *inventory.Model, n naming.Name, key string, exclude []string) (*target, *routeError) {
+func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *balancer.Group, m *inventory.Model, n naming.Name, key string, exclude []string, ch balancer.Charge) (*target, *routeError) {
 	byInst := map[string]*inventory.Instance{}
 	for _, i := range d.Members {
 		byInst[i.Key] = i
@@ -402,7 +419,7 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 	match := levelMatch(n, exclude)
 	qctx, cancel := context.WithTimeout(ctx, r.cfg.QueueTimeout.D())
 	defer cancel()
-	res, err := g.PickOrWait(qctx, key, match)
+	res, err := g.PickOrWaitFor(qctx, key, match, ch)
 	if err == nil {
 		inst := byInst[res.Member]
 		if inst == nil {
