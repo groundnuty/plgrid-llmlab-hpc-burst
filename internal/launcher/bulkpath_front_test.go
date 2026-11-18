@@ -24,7 +24,8 @@ func TestFrontArgsWithoutTheBulkPathAreUnchanged(t *testing.T) {
 		Controllers: &ControllerConfig{Binary: "/opt/hpcburst-controller"},
 		FrontRun:    &FrontRunConfig{Binary: "/opt/hpcburst-front", Config: "/etc/front.json"},
 	}
-	want := []string{"--config", "/etc/front.json", "--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29224", "--mode", "host-dialed"}
+	want := []string{"--config", "/etc/front.json", "--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29224",
+		"--kubeconfig", "/run/st/identities/system/hpcburst-front.kubeconfig", "--mode", "host-dialed"}
 	for _, bulk := range []bool{false, true} {
 		st.BulkPath = bulk
 		set, err := st.supervisedSet(layout{"/run/st"})

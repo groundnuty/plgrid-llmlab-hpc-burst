@@ -81,9 +81,10 @@ func remotePlatforms(r slurm.Runner) providerctl.PlatformFactory {
 }
 
 // childArgs is f as the command line main parses: the arguments of a copy that
-// hpcburst up would start. The kubeconfig is the default, <state-dir>/kubeconfig.
+// hpcburst up would start: its two identities' kubeconfigs, as the launcher passes them.
 func childArgs(f flags) []string {
-	args := []string{"--state-dir", f.host.StateDir, "--port-base", strconv.Itoa(f.host.PortBase), "--health-addr", f.healthAddr}
+	args := []string{"--state-dir", f.host.StateDir, "--port-base", strconv.Itoa(f.host.PortBase), "--health-addr", f.healthAddr,
+		"--kubeconfig", f.kubeconfig, "--provider-kubeconfig", f.providerKubeconfig}
 	if f.frontMode != "" {
 		args = append(args, "--front-mode", f.frontMode)
 		if f.frontAddr != "" { // host-dialed mode has none

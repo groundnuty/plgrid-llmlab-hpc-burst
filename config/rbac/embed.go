@@ -18,3 +18,11 @@ var Agents []byte
 //
 //go:embed agents-narrow.yaml
 var AgentsNarrow []byte
+
+// Controllers is controllers.yaml: the ServiceAccounts of the three processes that call the API server
+// (hpcburst-lifecycle, hpcburst-provider and hpcburst-front, in hpcburst-system), each one's ClusterRole,
+// which grants exactly what that process calls, and the ClusterRoleBinding that gives it to its
+// ServiceAccount (HBEP-10, Audit; issue #660).
+//
+//go:embed controllers.yaml
+var Controllers []byte
