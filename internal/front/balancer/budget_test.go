@@ -179,8 +179,8 @@ func newTokFix(t *testing.T) *tokFix {
 	return f
 }
 
-// load puts the row's requests in flight on member m, under no cap and no budget, so every one is taken.
-func (f *tokFix) load(m string, loads []int64, u int) {
+// occupy puts the row's requests in flight on member m, under no cap and no budget, so every one is taken.
+func (f *tokFix) occupy(m string, loads []int64, u int) {
 	f.t.Helper()
 	for _, c := range loads {
 		r, err := f.g.TryPickFor(f.keyOnM, onlyMember(m), workload(c))
@@ -228,9 +228,9 @@ func TestTheTruthTableOnEveryPathToAMember(t *testing.T) {
 		for _, mode := range []pickMode{direct, filtered, spilled} {
 			t.Run(row.name+"/"+mode.String(), func(t *testing.T) {
 				f := newTokFix(t)
-				f.load("m", row.loads, row.u)
+				f.occupy("m", row.loads, row.u)
 				if mode == spilled {
-					f.load("o", nil, 1)
+					f.occupy("o", nil, 1)
 				}
 				f.g.Update(probeState(row, mode))
 				key := f.keyOnM
@@ -517,7 +517,7 @@ func TestWithNoWorkloadRequestInFlightAnUnnamedRequestMeetsTheCountRuleThroughTh
 		u := rng.IntN(cap + 1)
 		known := rng.IntN(2) == 0
 		f := newTokFix(t)
-		f.load("m", nil, u)
+		f.occupy("m", nil, u)
 		row := tokRow{cap: cap, partial: false}
 		if known {
 			row.b = 1 + rng.Int64N(math.MaxInt64)
