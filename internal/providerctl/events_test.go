@@ -288,7 +288,12 @@ func TestARefusedNoteIsCountedInTheUnloggedSeries(t *testing.T) {
 	}
 	counter := eventcount.New()
 	pub := eventcount.NewPublisher(eventcount.PublisherOptions{Addr: "127.0.0.1:1", Token: strings.Repeat("a", 64)})
-	t.Cleanup(func() { pub.Shutdown(context.Background()) })
+	// The publisher keeps its default budget (100 s) on purpose: the last assertion needs a note that is not refused
+	// to stay un-lost while it is read, so a short budget would make that read a race. A Shutdown that waits
+	// (context.Background) would instead sit out the whole budget on the one note queued toward a port where nothing
+	// listens, so the cleanup hands it a context that has already ended (t.Context is cancelled before cleanups
+	// run): the publisher stops at once and counts the note lost, after every assertion has read the series.
+	t.Cleanup(func() { pub.Shutdown(t.Context()) })
 	controller := eventcount.ControllerProvider(testProvider)
 	e.ctl.shared.o.TypedRecorder = eventcount.Events(events.NewFakeRecorder(10), counter, controller, pub.Option(scheme, v1alpha1.FieldManagerProvider, nil))
 	if v, exists := counter.Unlogged(controller); !exists || v != 0 {
