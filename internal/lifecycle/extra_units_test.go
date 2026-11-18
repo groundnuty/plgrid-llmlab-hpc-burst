@@ -75,7 +75,10 @@ func (f *unitFx) alloc(mdName, name, prov string, running bool) {
 	f.objs = append(f.objs, a)
 }
 
-func (f *unitFx) reader(t *testing.T) client.Reader {
+func (f *unitFx) reader(t *testing.T) client.Reader { return f.client(t) }
+
+// client is the fixtures' fake client, which a hook may add objects to.
+func (f *unitFx) client(t *testing.T) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -139,13 +142,15 @@ func ask(t *testing.T, tab *slotTable, r client.Reader, q slotAsk) slotAnswer {
 	return a
 }
 
-// TestAnExtraLeavesThePrimarysHandoverSlotWhoseAllocationAppearsBetweenTheReads (A1): limit 3 on provider-a. md-e (k = 1, ends
-// at 09:30: no handover of its own) has its primary pe, listed. md-o has no end time, so its primary po will hold a slot for its
-// replacement once Running. po's reservation is in the table (an expectation: one slot), and its Allocation appears between
-// the lock's Provider-wide list, which does not show it, and the reads by label, which do. The extra's check: listed 1 (pe)
-// + expected 1 (po) + po's future slot 1 + the extra 1 = 4 > 3, refused; the old reader dropped po (its Allocation absent
-// from the Provider's list) and counted 3 <= 3. With a limit of 4 the extra is admitted (3 <= 4), and when md-o ends at 09:30
-// (po never hands over) it is admitted at 3.
+// TestAnExtraLeavesThePrimarysHandoverSlotWhoseAllocationAppearsBetweenTheReads (A1; re-anchored by #751's delta, D1): limit 3 on
+// provider-a. md-e (k = 1, ends at 09:30: no handover of its own) has its primary pe, listed. md-o has no end time, so its
+// primary po will hold a slot for its replacement once Running. po's reservation is in the table (an expectation: one slot),
+// and its Allocation is made AFTER the snapshot's Allocation list, which does not show it, while its Instance is in the
+// snapshot's Instance list (the hidden Reader hides the one Allocation from the one Allocation list; it once hid it from the
+// Provider-wide list only, beside the by-label lists that showed it). An Instance with no Allocation in the snapshot is in
+// flight, so its handover counts. The extra's check: listed 1 (pe) + expected 1 (po) + po's future slot 1 + the extra 1 = 4 >
+// 3, refused; the first reader dropped po (its Allocation absent from the Provider's list) and counted 3 <= 3. With a limit of
+// 4 the extra is admitted (3 <= 4), and when md-o ends at 09:30 (po never hands over) it is admitted at 3.
 func TestAnExtraLeavesThePrimarysHandoverSlotWhoseAllocationAppearsBetweenTheReads(t *testing.T) {
 	end := hoT(9, 30, 0)
 	for _, c := range []struct {

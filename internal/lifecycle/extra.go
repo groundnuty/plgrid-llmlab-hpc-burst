@@ -6,7 +6,6 @@ import (
 	"slices"
 
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -98,7 +97,7 @@ type extraAsk struct {
 	sizeOf       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
 	sizeRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
 	// headroom is the admission headroom (headroomOf), read under the Provider's lock by the reservation.
-	headroom func(context.Context) (int, error)
+	headroom func(context.Context, slotSnapshot) (int, error)
 }
 
 // extraChecks are the extra's checks on a Provider, in ONE place for createExtras, which makes the extra, and
@@ -133,18 +132,19 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (ask ex
 // checks, admission headroom; the science agent's ruling on #708's delta reviews, amendment #711): the number of missing
 // PRIMARIES, counted as primaries, of the OTHER deployments that the Provider allows, at the time of the check, and 0 when
 // there are none, so an extra never takes a slot a primary needs at the time, and nothing is cancelled to make room. It is the callback a reservation calls under the Provider's lock
-// (slotAsk.headroom), reading through the uncached Reader: one List of the Providers and one of the ModelDeployments of
+// (slotAsk.headroom), reading through the uncached Reader one List of the Providers and one of the ModelDeployments of
 // every namespace, and, for each deployment that allows the Provider, its Instances and Allocations by its model-deployment
-// label. A deployment with a missing primary may have NO Instance on this Provider, so no view of the Provider's own
-// Instances (deploymentViews) can tell. A deployment counts when it is not this one, not being deleted, serves, wants
+// label FROM THE RESERVATION'S SNAPSHOT (slotSnapshot), the one the count's reads and the extra's unit set are derived from,
+// so a primary seen there has its Allocation counted as the count counted it. A deployment with a missing primary may have
+// NO Instance on this Provider, so no view of the Provider's own Instances can tell. A deployment counts when it is not this one, not being deleted, serves, wants
 // Instances, has not passed its end time (by the clock read under the lock), allows the Provider (selectedProviderNames, as its own pass reads it) and its
 // shortage by Allocation presence (shortageOfDeployment) is above zero.
 //
-// Each other deployment is read ONCE, under the Provider's lock, from the API. A spec edit that lands between that read and
+// Each other deployment is read ONCE, under the Provider's lock. A spec edit that lands between that read and
 // the deployment's own pass (its instances raised, its providers or end time changed) is not seen by this count: the next
 // pass reads it afresh, which bounds the error to one pass, and nothing is cancelled for it (#725, from #708's review).
-func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
-	return func(ctx context.Context) (int, error) {
+func (p *pass) headroomOf(pv *providerView) func(context.Context, slotSnapshot) (int, error) {
+	return func(ctx context.Context, snap slotSnapshot) (int, error) {
 		var mds v1alpha1.ModelDeploymentList
 		if err := p.r.Reader.List(ctx, &mds); err != nil {
 			return 0, fmt.Errorf("list ModelDeployments for the extra's headroom: %w", err)
@@ -170,11 +170,7 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 			if err != nil || !slices.Contains(allowed, pv.name) {
 				continue
 			}
-			short, err := shortageOfDeployment(ctx, p.r.Reader, md)
-			if err != nil {
-				return 0, err
-			}
-			h += short
+			h += shortageOfDeployment(snap, md)
 		}
 		return h, nil
 	}
@@ -202,25 +198,12 @@ func shortageOf(sel selection, desired int) int {
 // shortage is shortageOf this pass's Instances and Allocations.
 func (p *pass) shortage() int { return shortageOf(p.selection(nil), p.desiredCount()) }
 
-// shortageOfDeployment is shortageOf the deployment's own Instances and Allocations, read through the Reader by its
-// model-deployment label in its namespace, as its own pass reads them (selectionOfView).
-func shortageOfDeployment(ctx context.Context, r client.Reader, md *v1alpha1.ModelDeployment) (int, error) {
-	v := deploymentView{key: md.Namespace + "/" + md.Name, allocs: map[string]*v1alpha1.Allocation{}}
-	var il v1alpha1.InstanceList
-	if err := r.List(ctx, &il, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
-		return 0, fmt.Errorf("list Instances of %s for the extra's headroom: %w", v.key, err)
-	}
-	for i := range il.Items {
-		v.insts = append(v.insts, &il.Items[i])
-	}
-	var al v1alpha1.AllocationList
-	if err := r.List(ctx, &al, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
-		return 0, fmt.Errorf("list Allocations of %s for the extra's headroom: %w", v.key, err)
-	}
-	for i := range al.Items {
-		v.allocs[al.Items[i].Name] = &al.Items[i]
-	}
-	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances)), nil
+// shortageOfDeployment is shortageOf the deployment's own Instances and Allocations, from the reservation's snapshot by its
+// model-deployment label in its namespace (slotSnapshot.deploymentView), as its own pass reads them (selectionOfView).
+func shortageOfDeployment(snap slotSnapshot, md *v1alpha1.ModelDeployment) int {
+	v := snap.deploymentView(md.Namespace, v1alpha1.LabelValue(md.Name))
+	v.key = md.Namespace + "/" + md.Name
+	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances))
 }
 
 // notYetRunning reports whether the Allocation has not started and still may: its phase is none, Submitting,

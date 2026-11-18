@@ -107,17 +107,22 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 	return reserved, err
 }
 
-// reservedAndReadsOn is reservedOn and, from the same reads, those reads themselves (handoverReads), which an extra's unit
-// set is made from under the same lock (extraUnits, #725): the extra's checks read no more of the API than the count does.
+// reservedAndReadsOn is reservedOn from a snapshot of its own (readSlotSnapshot) and, from the same reads, those reads
+// themselves (handoverReads). A reservation passes the snapshot its count is made from (reservedAndReadsFrom).
 func reservedAndReadsOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) (reserved []reservedSlot, reads handoverReads, err error) {
-	var il v1alpha1.InstanceList
-	if err := r.List(ctx, &il, client.MatchingLabels{v1alpha1.LabelProvider: provider}); err != nil {
-		return nil, handoverReads{}, fmt.Errorf("list Instances for Provider %s's reserved slots: %w", provider, err)
-	}
-	views, err := deploymentViews(ctx, r, il.Items)
+	snap, err := readSlotSnapshot(ctx, r, provider, true)
 	if err != nil {
 		return nil, handoverReads{}, err
 	}
+	return reservedAndReadsFrom(ctx, r, snap, provider, profile, allocs)
+}
+
+// reservedAndReadsFrom is reservedOn, and the reads an extra's unit set is made from under the same lock (handoverReads,
+// extraUnits, #725), all derived from ONE snapshot: the Instances on the Provider, every deployment's Instances and
+// Allocations, and so the selection. The extra's checks read no more of the API than the count does. Only the
+// ModelDeployments are read here, one Get each, after the snapshot (deploymentOf).
+func reservedAndReadsFrom(ctx context.Context, r client.Reader, snap slotSnapshot, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) (reserved []reservedSlot, reads handoverReads, err error) {
+	views := snap.deploymentViews(snap.onProvider(provider))
 	// Every read below but the slots' own is of the deployments' Instances on every Provider (#617): a primary
 	// whose replacement or hedge member is on another Provider is replaced all the same, and a gap's chain and a
 	// hedge's members may span Providers. Only the Instances on this Provider hold slots here.
@@ -238,59 +243,6 @@ type deploymentView struct {
 	// what the selection reads (a hedge's representative, an Instance's job start). Empty for a view of one
 	// Instance that has no label.
 	allocs map[string]*v1alpha1.Allocation
-}
-
-// deploymentViews reads, for each deployment with an Instance among onProvider, its Instances on every Provider
-// and its Allocations, each by its model-deployment label in its namespace, one List per deployment each (#617;
-// shared with #616's selection, which reads both).
-// An Instance of onProvider that its deployment's List does not show (one with no label, or a cache between the
-// two Lists) is kept as listed, so the reserved count never reads fewer Instances than the Provider's own List.
-// The views come in the order of their deployments' first Instance in onProvider.
-func deploymentViews(ctx context.Context, r client.Reader, onProvider []v1alpha1.Instance) ([]deploymentView, error) {
-	at := map[string]int{}
-	var out []deploymentView
-	for i := range onProvider {
-		in := &onProvider[i]
-		label := in.Labels[v1alpha1.LabelModelDeployment]
-		key := in.Namespace + "/" + label
-		if label == "" {
-			key = in.Namespace + "//" + in.Name // no deployment to read: a view of itself
-		}
-		j, ok := at[key]
-		if !ok {
-			j = len(out)
-			at[key] = j
-			v := deploymentView{key: key, allocs: map[string]*v1alpha1.Allocation{}}
-			if label != "" {
-				var il v1alpha1.InstanceList
-				if err := r.List(ctx, &il, client.InNamespace(in.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: label}); err != nil {
-					return nil, fmt.Errorf("list Instances of deployment %s for the reserved slots: %w", key, err)
-				}
-				for k := range il.Items {
-					v.insts = append(v.insts, &il.Items[k])
-				}
-				var al v1alpha1.AllocationList
-				if err := r.List(ctx, &al, client.InNamespace(in.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: label}); err != nil {
-					return nil, fmt.Errorf("list Allocations of deployment %s for the reserved slots: %w", key, err)
-				}
-				for k := range al.Items {
-					v.allocs[al.Items[k].Name] = &al.Items[k]
-				}
-			}
-			out = append(out, v)
-		}
-		found := false
-		for _, o := range out[j].insts {
-			if o.Namespace == in.Namespace && o.Name == in.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			out[j].insts = append(out[j].insts, in)
-		}
-	}
-	return out, nil
 }
 
 // surplusOf returns the Instances the deployment's selection leaves out: every member of each hedge that

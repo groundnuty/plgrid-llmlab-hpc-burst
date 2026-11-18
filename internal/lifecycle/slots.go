@@ -70,23 +70,28 @@ const listTimeout = 30 * time.Second
 // Backend.mu, the identity cache, the Hub cache, the metrics views, the
 // secrets sweep) is taken while either is held, and neither is taken while one
 // of those is held. The Provider's lock is held across the count's reads from
-// the API and no other call: one List of the Allocations of every namespace,
-// and, for a Provider with a submit limit, one List of the Instances that carry
-// the Provider's label, one List of the Instances of each deployment with an
-// Instance among them and one List of its Allocations (deploymentViews, each by
-// its model-deployment label, in its namespace; the Allocations are what the
-// selection that reservedOn applies reads, #616 PR 4) and one Get of the
-// ModelDeployment of each deployment among them (reservedOn), all under one
-// context bounded by listTimeout. An extra's reservation (slotAsk.deployment) makes the same reads on a
+// the API and no other call, in THIS order (#751's delta review): ONE snapshot
+// (slot_snapshot.go), the Allocations of every namespace FIRST and, for a
+// Provider with a submit limit, the Instances of every namespace SECOND, each
+// listed once; then one Get of the ModelDeployment of each deployment with an
+// Instance on the Provider (reservedOn); then, for an extra, the Provider and its
+// PlatformProfile (its sizing) and the headroom's Providers and
+// ModelDeployments. EVERY view is derived from the snapshot and none has a list
+// of its own: the Provider's Allocations and Instances (by label), the
+// deployments' views the selection reads (deploymentViews, #616 PR 4), the
+// headroom's per-deployment Instances and Allocations, and the extra's unit set.
+// An Allocation the snapshot shows has its Instance in it, and an Instance it
+// shows without an Allocation is in flight. All reads share one context bounded by
+// listTimeout. An extra's reservation (slotAsk.deployment) makes the same reads on a
 // Provider with no submit limit too, since its caps check counts every handing-over primary's future replacement
 // (#725). slotTable.mu is never held across any of them. The handovers an extra must leave room for, of every
 // deployment, its own included (its slot check and its caps check), are one unit set read under the lock from those
-// same reads, with no read of its own (extra_units.go, extraUnits; reservedAndReadsOn).
+// same reads, with no read of its own (extra_units.go, extraUnits; reservedAndReadsFrom).
 //
 // The extra's admission headroom (extra.go, headroomOf; #616 PR 4) adds reads under the same lock, by slotAsk.headroom,
-// for an extra's reservation alone, made after the count's: one List of the Providers and one of the ModelDeployments of
-// every namespace, and, for each other deployment that allows the Provider, one List of its Instances and one of its
-// Allocations (by its model-deployment label, in its namespace), all through the uncached Reader, and none under
+// for an extra's reservation alone, made after the snapshot: one List of the Providers and one of the ModelDeployments of
+// every namespace, through the uncached Reader, and, for each other deployment that allows the Provider, its Instances and
+// Allocations from the snapshot (no list), none under
 // slotTable.mu. The count's reads and the headroom's share ONE deadline, listTimeout from the lock's acquisition. They take
 // no lock of this package and write nothing, so the order above holds.
 //
@@ -219,9 +224,10 @@ type slotAsk struct {
 	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
 	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
 	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
-	// deployments that the Provider allows, and 0 when there are none. It reads through the uncached Reader and adds to
-	// alsoLeave.
-	headroom func(ctx context.Context) (int, error)
+	// deployments that the Provider allows, and 0 when there are none. It reads the other deployments' Instances and
+	// Allocations from the reservation's snapshot, its Providers and ModelDeployments through the uncached Reader, and adds
+	// to alsoLeave.
+	headroom func(ctx context.Context, snap slotSnapshot) (int, error)
 }
 
 // slotAnswer is a reservation's answer.
@@ -274,7 +280,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	// headroom scan is still counted by its expectation, which the scan's own time cannot lapse.
 	at := now()
 	if q.headroom != nil && q.limit != nil {
-		h, err := q.headroom(sctx)
+		h, err := q.headroom(sctx, rd.snap)
 		if err != nil {
 			return slotAnswer{}, err
 		}
@@ -426,8 +432,10 @@ type slotReads struct {
 	allocs       map[string]*v1alpha1.Allocation
 	// reserved are the Provider's reserved slots (reservedOn).
 	reserved []reservedSlot
-	// handovers are the reads an extra's unit set is made from (reservedAndReadsOn).
+	// handovers are the reads an extra's unit set is made from (reservedAndReadsFrom).
 	handovers handoverReads
+	// snap is the snapshot every other read is derived from, the headroom's included.
+	snap slotSnapshot
 }
 
 // readBounded makes the count's reads under one context bounded by the table's
@@ -437,11 +445,12 @@ func (t *slotTable) readBounded(ctx context.Context, r client.Reader, provider s
 	defer cancel()
 	var rd slotReads
 	var err error
-	if rd.seen, rd.listed, rd.allocs, err = listProviderAllocations(ctx, r, provider); err != nil {
+	if rd.snap, err = readSlotSnapshot(ctx, r, provider, withReserved); err != nil {
 		return slotReads{}, err
 	}
+	rd.seen, rd.listed, rd.allocs = rd.snap.providerAllocations(provider)
 	if withReserved {
-		if rd.reserved, rd.handovers, err = reservedAndReadsOn(ctx, r, provider, profile, rd.allocs); err != nil {
+		if rd.reserved, rd.handovers, err = reservedAndReadsFrom(ctx, r, rd.snap, provider, profile, rd.allocs); err != nil {
 			return slotReads{}, err
 		}
 	}
@@ -472,23 +481,11 @@ func holdsSlot(a *v1alpha1.Allocation) bool {
 // that hold a slot (holdsSlot), and allocs the Allocations themselves. A
 // deleting Allocation counts until its deletion completes.
 func listProviderAllocations(ctx context.Context, r client.Reader, provider string) (seen, listed map[string]bool, allocs map[string]*v1alpha1.Allocation, err error) {
-	var al v1alpha1.AllocationList
-	if err := r.List(ctx, &al); err != nil {
-		return nil, nil, nil, fmt.Errorf("list Allocations for Provider %s's submit limit: %w", provider, err)
+	snap, err := readSlotSnapshot(ctx, r, provider, false)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	seen, listed, allocs = map[string]bool{}, map[string]bool{}, map[string]*v1alpha1.Allocation{}
-	for i := range al.Items {
-		a := &al.Items[i]
-		if ref := a.Spec.ProviderConfigReference; ref == nil || ref.Name != provider {
-			continue
-		}
-		k := a.Namespace + "/" + a.Name
-		seen[k] = true
-		allocs[k] = a
-		if holdsSlot(a) {
-			listed[k] = true
-		}
-	}
+	seen, listed, allocs = snap.providerAllocations(provider)
 	return seen, listed, allocs, nil
 }
 
