@@ -287,9 +287,51 @@ func (e *opsEnv) step(t *testing.T, f *opFixture, now time.Time) {
 	t.Helper()
 	p := f.pass()
 	p.key.Namespace = rigNS // the Operations of this test live in the rig's namespace
-	p.r, p.ctx, p.now = &Reconciler{Client: e.admin.c, Reader: e.admin.c, Backend: &Backend{}}, e.ctx, now
+	p.r, p.ctx, p.now = &Reconciler{Client: e.admin.c, Reader: e.admin.c, Clock: SystemClock{}, Backend: &Backend{}, Recorder: &MemoryRecorder{}}, e.ctx, now
+	p.mem = p.r.memory()
 	if err := p.operations(); err != nil {
 		t.Fatalf("the Operations step: %v", err)
+	}
+}
+
+// stepErr is step for a pass whose Operations step is expected to fail. This test's ModelDeployment is a hand-made state
+// the control plane does not hold, so an Operation that reaches its commit commits (the status write is real) and then
+// fails at the spec write; the execution itself is the rig's (opexec_rig_test.go).
+func (e *opsEnv) stepErr(t *testing.T, f *opFixture, now time.Time) error {
+	t.Helper()
+	_, err := e.stepRec(t, f, now)
+	return err
+}
+
+// stepRec is stepErr that also returns the events the step raised.
+func (e *opsEnv) stepRec(t *testing.T, f *opFixture, now time.Time) (*MemoryRecorder, error) {
+	t.Helper()
+	p := f.pass()
+	p.key.Namespace = rigNS
+	rec := &MemoryRecorder{}
+	p.r, p.ctx, p.now = &Reconciler{Client: e.admin.c, Reader: e.admin.c, Clock: SystemClock{}, Backend: &Backend{}, Recorder: rec}, e.ctx, now
+	p.mem = p.r.memory()
+	return rec, p.operations()
+}
+
+// committedTo asserts that every approval is in and the Operation was committed to its whole plan: the approvals are
+// counted by the API server's objects, and the commit's status write is the control plane's own. It then finishes the
+// Operation as the executor would, with a status write by the admin: this test's deployment is a hand-made state that the
+// control plane does not hold, so the Operation's spec write fails on every pass, and an Operation left Executing would
+// fail the steps of the cases after it. The execution itself is the rig's (opexec_rig_test.go).
+func (e *opsEnv) committedTo(t *testing.T, name string, err error) {
+	t.Helper()
+	op := e.get(t, name)
+	if op.Status.Phase != v1alpha1.OperationPhaseExecuting || op.Status.Plan == nil || len(op.Status.Committed) != len(op.Status.Plan.Targets) || len(op.Status.Committed) == 0 {
+		t.Errorf("every approval in: phase %q, %d committed of %v planned, want Executing with the whole plan committed", op.Status.Phase, len(op.Status.Committed), op.Status.Plan)
+	}
+	if err == nil || !strings.Contains(err.Error(), "set spec.instances to 1") {
+		t.Errorf("the pass failed with %v, want the spec write of a deployment this control plane does not hold", err)
+	}
+	now := metav1.NewTime(time.Now())
+	op.Status.Phase, op.Status.FinishedAt = v1alpha1.OperationPhaseDone, &now
+	if uerr := e.admin.c.Status().Update(e.ctx, op); uerr != nil {
+		t.Fatalf("finish %s: %v", name, uerr)
 	}
 }
 
@@ -472,10 +514,8 @@ func TestOperationsOnAControlPlaneWithTwoAgents(t *testing.T) {
 		if err := e.approval(t, e.admin, "ap-person", op, id, e.admin); err != nil {
 			t.Fatalf("the person's Approval: %v", err)
 		}
-		done := step(4)
-		if c := condOf(done, v1alpha1.ConditionExecutable); done.Status.Phase != v1alpha1.OperationPhaseAwaitingApproval || c.Reason != v1alpha1.ReasonExecutionNotBuilt {
-			t.Errorf("every approval in: phase %q, Executable %+v, want ExecutionNotBuilt", done.Status.Phase, c)
-		}
+		err := e.stepErr(t, f, opAt.Add(4*time.Minute))
+		e.committedTo(t, "scale-4", err)
 	})
 
 	t.Run("a plan that needs the person's approval alone is not approved by an agent", func(t *testing.T) {
@@ -499,11 +539,86 @@ func TestOperationsOnAControlPlaneWithTwoAgents(t *testing.T) {
 		if err := e.approval(t, e.admin, "ap5-person", op, id, e.admin); err != nil {
 			t.Fatal(err)
 		}
-		e.step(t, f, opAt.Add(3*time.Minute))
-		if got := e.get(t, "scale-5"); condOf(got, v1alpha1.ConditionExecutable).Reason != v1alpha1.ReasonExecutionNotBuilt {
-			t.Errorf("the person's Approval did not count under global: %+v", condOf(got, v1alpha1.ConditionExecutable))
-		}
+		err := e.stepErr(t, f, opAt.Add(3*time.Minute))
+		e.committedTo(t, "scale-5", err)
 	})
+
+	// Stale plans (HBEP-10, Approval and execution): between the approval and the execution, each change the plan covers turns
+	// the Operation Stale: nothing is committed, a PlanStale event goes out, and an approval added afterwards changes
+	// nothing. The policy edit is the API server's own: it moves the policy's generation, which the plan's ID covers.
+	for _, tc := range []struct {
+		name   string
+		slug   string
+		change func(t *testing.T, f *opFixture)
+	}{
+		{"the pending Allocation started", "started", func(t *testing.T, f *opFixture) {
+			a := f.allocs["alloc-p"]
+			a.Status.AtProvider.Phase, a.Status.AtProvider.StartTime, a.Status.AtProvider.HardEnd = v1alpha1.AllocationRunning, opTime(opT0), opTime(opHardEnd)
+		}},
+		{"another Instance became ready", "ready", func(t *testing.T, f *opFixture) {
+			f.insts[1].Status.Phase = v1alpha1.InstanceReady // p, which the Scale was to cancel
+		}},
+		{"the policy that applies was edited", "policy", func(t *testing.T, f *opFixture) {
+			var pol v1alpha1.ApprovalPolicy
+			if err := e.admin.c.Get(e.ctx, types.NamespacedName{Name: "global"}, &pol); err != nil {
+				t.Fatal(err)
+			}
+			gen := pol.Generation
+			pol.Spec.Approvers = append(pol.Spec.Approvers, v1alpha1.Approver{Group: "operators"}) // the person stays an approver
+			if err := e.admin.c.Update(e.ctx, &pol); err != nil {
+				t.Fatal(err)
+			}
+			if pol.Generation <= gen {
+				t.Fatalf("the API server left the policy's generation at %d: the edit does not move what the plan covers", pol.Generation)
+			}
+		}},
+	} {
+		t.Run("stale: "+tc.name, func(t *testing.T) {
+			e.setPolicies(t, globalFor(e.person))
+			f := opsFixture(t)
+			name := "stale-" + tc.slug
+			op := e.request(t, e.a, name, scaleOp(1))
+			e.step(t, f, opAt)
+			id := e.get(t, name).Status.Plan.ID
+			e.confirmAs(t, e.a, name, id)
+			e.step(t, f, opAt.Add(time.Minute))
+			if err := e.approval(t, e.admin, "ap-"+name, op, id, e.admin); err != nil {
+				t.Fatal(err)
+			}
+			tc.change(t, f)
+			rec, err := e.stepRec(t, f, opAt.Add(2*time.Minute))
+			if err != nil {
+				t.Fatalf("the step: %v", err)
+			}
+			got := e.get(t, name)
+			if got.Status.Phase != v1alpha1.OperationPhaseStale || len(got.Status.Committed) != 0 || got.Status.FinishedAt == nil {
+				t.Fatalf("phase %q, %d committed, finishedAt %v: want Stale, nothing committed, finished", got.Status.Phase, len(got.Status.Committed), got.Status.FinishedAt)
+			}
+			if c := condOf(got, v1alpha1.ConditionExecutable); c == nil || c.Reason != v1alpha1.ReasonPlanStale {
+				t.Errorf("Executable %+v, want PlanStale", c)
+			}
+			stale := 0
+			for _, ev := range rec.Events() {
+				if ev.Code == v1alpha1.ReasonPlanStale && ev.Name == name {
+					stale++
+				}
+			}
+			if stale != 1 {
+				t.Errorf("%d PlanStale events, want one", stale)
+			}
+			// An approval added afterwards changes nothing.
+			rv := got.ResourceVersion
+			if err := e.approval(t, e.admin, "ap-late-"+name, op, id, e.admin); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.stepErr(t, f, opAt.Add(3*time.Minute)); err != nil {
+				t.Fatalf("the step after a late approval: %v", err)
+			}
+			if later := e.get(t, name); later.Status.Phase != v1alpha1.OperationPhaseStale || later.ResourceVersion != rv {
+				t.Errorf("after a late approval: phase %q, resourceVersion %s -> %s: a Stale Operation is never written again", later.Status.Phase, rv, later.ResourceVersion)
+			}
+		})
+	}
 }
 
 // confirmAs confirms an Operation as the identity, from a fresh read.

@@ -248,3 +248,65 @@ func TestSupervisorStopsEveryManagerAtOnce(t *testing.T) {
 		t.Fatal("the supervisor did not stop within 30 s: it waits for one manager before it stops the next")
 	}
 }
+
+// orderedMgr is a manager that records when it starts and stops.
+type orderedMgr struct {
+	manager.Manager
+	log  func(string)
+	name string
+}
+
+func (m orderedMgr) Start(ctx context.Context) error {
+	m.log("start " + m.name)
+	<-ctx.Done()
+	m.log("stop " + m.name)
+	return nil
+}
+
+// The order the durable log's event counter relies on (PR E2, #625): one supervisor never has two managers of
+// one Provider name. A manager that is no longer wanted is stopped, and waited for, and its Dropped hook (the
+// counter's Forget) runs before a manager for a Provider of the same name is set up again, so the registration
+// of the one is gone when the next one's begins. A change to pass that started a new manager before the old one
+// had stopped, or set it up before Dropped, would let Forget retire the route and the series under the live one.
+func TestSupervisorNeverRunsTwoManagersOfOneNameAtOnce(t *testing.T) {
+	c := supWorld(t, supProfile("pp", v1alpha1.PlatformBatch), supProvider("p1", "pp"))
+	var mu sync.Mutex
+	var log []string
+	add := func(s string) { mu.Lock(); log = append(log, s); mu.Unlock() }
+	got := func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), log...) }
+	s := newTestSupervisor(c, "", &builds{})
+	s.NewManager = func(name string) (manager.Manager, error) { return orderedMgr{log: add, name: name}, nil }
+	s.Setup = func(_ manager.Manager, name string) error { add("setup " + name); return nil }
+	s.Dropped = func(name string) { add("dropped " + name) }
+	ctx := context.Background()
+	waitFor := func(n int) {
+		t.Helper()
+		for end := time.Now().Add(10 * time.Second); len(got()) < n; time.Sleep(time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatalf("log %v, want %d entries", got(), n)
+			}
+		}
+	}
+	if err := s.pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(2) // setup, start
+	if err := c.Delete(ctx, supProvider("p1", "pp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(ctx, supProvider("p1", "pp")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pass(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(6)
+	want := []string{"setup p1", "start p1", "stop p1", "dropped p1", "setup p1", "start p1"}
+	if g := got(); len(g) != len(want) || g[0] != want[0] || g[1] != want[1] || g[2] != want[2] || g[3] != want[3] || g[4] != want[4] || g[5] != want[5] {
+		t.Errorf("the order was %v, want %v: the old manager stops, then Dropped, then the new one is set up", g, want)
+	}
+	s.stopAll()
+}

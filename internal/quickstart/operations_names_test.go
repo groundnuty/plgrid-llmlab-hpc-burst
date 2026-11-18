@@ -15,6 +15,7 @@ import (
 	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
@@ -137,9 +138,22 @@ var guideNames = map[string]string{
 	// Reasoning models): pkg/agentapi's, as the agent reports it.
 	"ReasoningBudgetExhausted": agentapi.ReasonReasoningBudgetExhausted,
 
+	// An Operation's phase, and the reason of its degraded event (HBEP-10, Approval and execution; HBEP-8,
+	// Reasons in alpha).
+	"Stale":                 string(v1alpha1.OperationPhaseStale),
+	"PlanStale":             v1alpha1.ReasonPlanStale,
+	"PartlyFailed":          string(v1alpha1.OperationPhasePartlyFailed),
+	"Done":                  string(v1alpha1.OperationPhaseDone),
+	"NotStarted":            string(v1alpha1.TargetStateNotStarted),
+	"OperationPartlyFailed": v1alpha1.ReasonOperationPartlyFailed,
+
 	// Retention modes (HBEP-7, Retention).
 	"Keep":            string(v1alpha1.RetentionKeep),
 	"ReleaseWhenIdle": string(v1alpha1.RetentionReleaseWhenIdle),
+
+	// The event the durable log's publisher raises when the log did not take an event (HBEP-8, The
+	// durable log, When it is down).
+	"EventsNotLogged": eventcount.ReasonEventsNotLogged,
 
 	// The audit policy's levels, and the stage it omits (HBEP-10, Audit): the API server's own, from the audit API of
 	// k8s.io/apiserver, which the policy's evaluator test (config/audit) uses too. RequestReceived is a stage, not a level.
@@ -167,6 +181,10 @@ var unexportedNames = map[string]struct{ dir, ident string }{
 	"JobLost":          {"internal/providerctl", "evJobLost"},
 	"ObservationGap":   {"internal/lifecycle", "reasonObservationGap"},
 	"PathProbeFailing": {"internal/front", "reasonPathProbeFailing"},
+	// HBEP-10, The report, as amended by #665 and #666: the final failures of a committed target.
+	"JobStartedSinceCommit":  {"internal/lifecycle", "reasonJobStartedSinceCommit"},
+	"SpecChangedSinceCommit": {"internal/lifecycle", "reasonSpecChangedSinceCommit"},
+	"LastReadySinceCommit":   {"internal/lifecycle", "reasonLastReadySinceCommit"},
 }
 
 // notCodeNames are capitalised names the guide gives that no code of the framework defines, each
@@ -179,6 +197,8 @@ var notCodeNames = map[string]string{
 	// 'hpcburst-capacity-guard' ... denied request"), and the guide quotes that wording.
 	"ValidatingAdmissionPolicy": "a Kubernetes kind",
 	"Warning":                   "a Kubernetes event type",
+	"Synced":                    "crossplane's condition type on a managed resource",
+	"ReconcileError":            "crossplane's reason of a Synced condition that is false",
 	"MISSING":                   "a build state hpcburst status prints",
 	"UNREADABLE":                "a build state hpcburst status prints",
 	"WRONG":                     "a build state hpcburst status prints",

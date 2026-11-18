@@ -86,6 +86,14 @@ type deps struct {
 	// controller-runtime v0.23.1 from an address, with no listener to hand over
 	// (HBEP-15 pins the version), so they do not go through listen.
 	listen func(addr string) (net.Listener, error)
+	// eventPublisher builds the process's publisher to the durable log from the flags; nil means
+	// newEventPublisher. A test of the wiring gives one that keeps the publisher, to ask which recorders
+	// were built with it.
+	eventPublisher func(flags) (*eventcount.Publisher, error)
+	// wrapConfig, when set, changes the lifecycle manager's client configuration after it is read from its
+	// kubeconfig: a test puts a transport on it that faults one request (identities_operation_test.go). The Provider
+	// managers' configuration is not touched. nil leaves it as read.
+	wrapConfig func(*rest.Config)
 }
 
 // listeners binds through deps.listen and remembers each listener it bound, so
@@ -367,7 +375,10 @@ type wiring struct {
 	// events is the copy's raised-events counter: each Provider manager's
 	// recorder counts into it under provider-<name> (HBEP-8, Raised events).
 	events *eventcount.Counter
-	log    logr.Logger
+	// eventLog is the process's publisher to the durable log (beta; HBEP-8), nil without
+	// --event-log-token-file: each Provider manager's typed recorder publishes through it.
+	eventLog *eventcount.Publisher
+	log      logr.Logger
 	// keeperSocket is the relay keeper's socket in beta's keeper mode, ""
 	// in alpha (--relay-keeper-socket).
 	keeperSocket string
@@ -463,7 +474,10 @@ func (w wiring) setupBatch(pm manager.Manager, provider string) error {
 		// events.k8s.io recorder, counted under the same controller label with the
 		// type in the action, beside the legacy one above, which keeps the
 		// Provider's untyped diagnostics.
-		TypedRecorder: eventcount.Events(pm.GetEventRecorder(v1alpha1.FieldManagerProvider), w.events, controller),
+		TypedRecorder: eventcount.Events(pm.GetEventRecorder(v1alpha1.FieldManagerProvider), w.events, controller,
+			w.eventLog.OptionFor(func() (*runtime.Scheme, string, eventcount.LeaseFunc) {
+				return pm.GetScheme(), v1alpha1.FieldManagerProvider, eventcount.LeaseOf(pm.GetAPIReader(), v1alpha1.ControllerNamespace, v1alpha1.ProviderLeaseName(provider))
+			})),
 		// The typed series are created at 0 under provider-<name> once the Provider's
 		// controller is set up, and deleted by the batch supervisor's Dropped hook
 		// (providerctl.ForgetSeries).
@@ -548,7 +562,7 @@ func mount(mgr manager.Manager, w wiring, backend agentapi.Backend) error {
 		Log:     logging.NewLogrLogger(w.log.WithName("providers-batch")),
 	}
 	catalog := &providerctl.Supervisor{
-		Kind: v1alpha1.PlatformManaged, Client: mgr.GetClient(), NewManager: w.newProviderManager, Setup: managed.Setup(w.events),
+		Kind: v1alpha1.PlatformManaged, Client: mgr.GetClient(), NewManager: w.newProviderManager, Setup: managed.SetupWithLog(w.events, w.eventLog),
 		Dropped: managed.Forget(w.events),
 		Log:     logging.NewLogrLogger(w.log.WithName("providers-managed")),
 	}
