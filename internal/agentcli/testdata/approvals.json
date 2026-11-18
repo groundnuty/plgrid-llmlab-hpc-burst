@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "operations": [
+    {
+      "namespace": "team",
+      "name": "scale-m",
+      "action": "Scale",
+      "modelDeployment": "m",
+      "owner": "system:serviceaccount:hpcburst-agents:agent-b",
+      "planID": "0123456789abcdef",
+      "targets": [
+        {"kind": "Allocation", "name": "alloc-p", "effect": "CancelPending", "policies": ["provider.sano"]},
+        {"kind": "Instance", "name": "inst-r", "effect": "DrainLastReady", "policies": ["provider.sano"]}
+      ],
+      "approveWith": "hpcburst approve scale-m --plan 0123456789abcdef -n team"
+    }
+  ]
+}

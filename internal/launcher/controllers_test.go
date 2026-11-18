@@ -174,6 +174,9 @@ func newCtlFixture(t *testing.T, front Front) *ctlFixture {
 	if err := l.saveState(f.st); err != nil {
 		t.Fatal(err)
 	}
+	// What up issues before it starts the supervisor (controller_identities.go), as placeholders: the
+	// children are told these paths, and startSupervisor refuses a record whose files are not there.
+	writePlaceholderKubeconfigs(t, l, "placeholder-token")
 	t.Setenv("FAKECTRL_DIR", f.ctl)
 	// Runs after the test's own clean-ups (it is registered first): whatever still has the state
 	// directory as its working directory is a supervisor or controller the test left behind.
@@ -381,27 +384,36 @@ func healthzCode(addr string) (int, error) {
 }
 
 // TestFakeControllerFlags: the fake accepts exactly the controller's command line and refuses the
-// earlier one, so a launcher that still passes --kubeconfig, --credentials-dir or
-// --agent-builds-dir fails its start in every test. "always-exit" 0 is read only after the flags
-// parse: exit 0 means the command line was accepted, exit 2 that it was refused.
+// earlier one, so a launcher that still passes --credentials-dir or --agent-builds-dir, or leaves out an
+// identity's kubeconfig (HBEP-10, Audit; #660), fails its start in every test. "always-exit" 0 is read
+// only after the flags parse: exit 0 means the command line was accepted, exit 2 that it was refused.
 func TestFakeControllerFlags(t *testing.T) {
 	bin := fakeControllerBin(t)
+	base := []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}
+	kube := []string{"--kubeconfig", "/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/st/identities/system/hpcburst-provider.kubeconfig"}
+	with := func(parts ...[]string) []string {
+		var out []string
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
 	cases := []struct {
 		name string
 		args []string
 		want int
 	}{
-		{"the contract", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}, 0},
-		{"the contract with a front", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
-			"--front-mode", "direct", "--front-addr", "front.example.test:8443"}, 0},
+		{"the contract", with(base, kube), 0},
+		{"the contract with a front", with(base, kube, []string{"--front-mode", "direct", "--front-addr", "front.example.test:8443"}), 0},
 		{"the earlier command line", []string{"--kubeconfig", "/st/kubeconfig", "--credentials-dir", "/st/controller/credentials", "--health-addr", "127.0.0.1:29226"}, 2},
-		{"the contract and --kubeconfig", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--kubeconfig", "/st/kubeconfig"}, 2},
-		{"the contract and --credentials-dir", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--credentials-dir", "/st/credentials"}, 2},
-		{"the contract and --agent-builds-dir", []string{"--state-dir", "/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--agent-builds-dir", "/b"}, 2},
-		{"no state directory", []string{"--port-base", "29220", "--health-addr", "127.0.0.1:29226"}, 2},
-		{"no port base", []string{"--state-dir", "/st", "--health-addr", "127.0.0.1:29226"}, 2},
-		{"a port base that is not a number", []string{"--state-dir", "/st", "--port-base", "base", "--health-addr", "127.0.0.1:29226"}, 2},
-		{"no health address", []string{"--state-dir", "/st", "--port-base", "29220"}, 2},
+		{"no kubeconfig", with(base, kube[2:]), 2},
+		{"no provider kubeconfig", with(base, kube[:2]), 2},
+		{"the contract and --credentials-dir", with(base, kube, []string{"--credentials-dir", "/st/credentials"}), 2},
+		{"the contract and --agent-builds-dir", with(base, kube, []string{"--agent-builds-dir", "/b"}), 2},
+		{"no state directory", with([]string{"--port-base", "29220", "--health-addr", "127.0.0.1:29226"}, kube), 2},
+		{"no port base", with([]string{"--state-dir", "/st", "--health-addr", "127.0.0.1:29226"}, kube), 2},
+		{"a port base that is not a number", with([]string{"--state-dir", "/st", "--port-base", "base", "--health-addr", "127.0.0.1:29226"}, kube), 2},
+		{"no health address", with([]string{"--state-dir", "/st", "--port-base", "29220"}, kube), 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

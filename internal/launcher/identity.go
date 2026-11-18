@@ -58,8 +58,12 @@ func ValidIdentityName(name string) error {
 }
 
 // IdentityUsername is the user name the API server reports for the identity called name.
-func IdentityUsername(name string) string {
-	return "system:serviceaccount:" + AgentsNamespace + ":" + name
+func IdentityUsername(name string) string { return serviceAccountUsername(AgentsNamespace, name) }
+
+// serviceAccountUsername is the user name the API server reports for a ServiceAccount: the agents' and the
+// controllers' alike.
+func serviceAccountUsername(namespace, name string) string {
+	return "system:serviceaccount:" + namespace + ":" + name
 }
 
 // IdentityOptions are the inputs of AddIdentity and RenewIdentity.
@@ -152,7 +156,7 @@ func IssueIdentity(ctx context.Context, cfg *rest.Config, identitiesDir, name st
 		created = true
 		logf(log, "created ServiceAccount %s in %s", name, AgentsNamespace)
 	}
-	res, err := issueToken(ctx, cs, cfg, identitiesDir, name, renew)
+	res, err := issueToken(ctx, cs, cfg, tokenTarget{Namespace: AgentsNamespace, Name: name, Seconds: IdentityTokenSeconds, Dir: identitiesDir}, renew)
 	if err != nil && created {
 		// With a context of its own: the failure may be that ctx ended.
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -168,29 +172,41 @@ func IssueIdentity(ctx context.Context, cfg *rest.Config, identitiesDir, name st
 	return res, nil
 }
 
-// issueToken requests the token and writes the kubeconfig.
-func issueToken(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, dir, name string, renew bool) (*IdentityResult, error) {
-	secs := IdentityTokenSeconds
-	tr, err := cs.CoreV1().ServiceAccounts(AgentsNamespace).CreateToken(ctx, name, &authenticationv1.TokenRequest{
+// tokenTarget names the ServiceAccount a token is for, how long it should live, and the directory its
+// kubeconfig goes into, as <Dir>/<Name>.kubeconfig. It is the one shape of the agents' identities
+// (IssueIdentity: the agents' namespace, 30 days) and of the controllers' (issueControllerIdentity: hpcburst-system,
+// a year), so the two write their credential the same way.
+type tokenTarget struct {
+	Namespace string
+	Name      string
+	Seconds   int64
+	Dir       string
+}
+
+// issueToken requests the token and writes the kubeconfig. The token goes into the file and nowhere else:
+// not into the result, an error or a log.
+func issueToken(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, t tokenTarget, renew bool) (*IdentityResult, error) {
+	secs := t.Seconds
+	tr, err := cs.CoreV1().ServiceAccounts(t.Namespace).CreateToken(ctx, t.Name, &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{ExpirationSeconds: &secs},
 	}, metav1.CreateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("request a token for the ServiceAccount %s: %w", name, err)
+		return nil, fmt.Errorf("request a token for the ServiceAccount %s: %w", t.Name, err)
 	}
 	if tr.Status.Token == "" || tr.Status.ExpirationTimestamp.IsZero() {
-		return nil, fmt.Errorf("the API server answered the token request for %s without a token or an expiry", name)
+		return nil, fmt.Errorf("the API server answered the token request for %s without a token or an expiry", t.Name)
 	}
-	b, err := identityKubeconfigBytes(cfg, name, tr.Status.Token)
+	b, err := identityKubeconfigBytes(cfg, t.Name, tr.Status.Token)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(t.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil { // set explicitly, so a umask or an older directory cannot loosen it
+	if err := os.Chmod(t.Dir, 0o700); err != nil { // set explicitly, so a umask or an older directory cannot loosen it
 		return nil, err
 	}
-	path := identityFile(dir, name)
+	path := identityFile(t.Dir, t.Name)
 	if err := writeFileAtomic(path, b, 0o600); err != nil {
 		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
@@ -200,7 +216,7 @@ func issueToken(ctx context.Context, cs kubernetes.Interface, cfg *rest.Config, 
 		return nil, fmt.Errorf("%s has mode %v, want 0600", path, fi.Mode().Perm())
 	}
 	return &IdentityResult{
-		Name: name, Username: IdentityUsername(name), Kubeconfig: path, Expires: tr.Status.ExpirationTimestamp.UTC(), Renewed: renew,
+		Name: t.Name, Username: serviceAccountUsername(t.Namespace, t.Name), Kubeconfig: path, Expires: tr.Status.ExpirationTimestamp.UTC(), Renewed: renew,
 	}, nil
 }
 

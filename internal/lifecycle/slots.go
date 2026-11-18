@@ -72,10 +72,24 @@ const listTimeout = 30 * time.Second
 // the API and no other call: one List of the Allocations of every namespace,
 // and, for a Provider with a submit limit, one List of the Instances that carry
 // the Provider's label, one List of the Instances of each deployment with an
-// Instance among them (deploymentViews, by its model-deployment label, in its
-// namespace) and one Get of the ModelDeployment of each primary among them
-// (reservedOn), all under one context bounded by listTimeout. slotTable.mu is
-// never held across any of them.
+// Instance among them and one List of its Allocations (deploymentViews, each by
+// its model-deployment label, in its namespace; the Allocations are what the
+// selection that reservedOn applies reads, #616 PR 4) and one Get of the
+// ModelDeployment of each deployment among them (reservedOn), all under one
+// context bounded by listTimeout. slotTable.mu is never held across any of
+// them. The extra's alsoLeave (slotAsk) is counted by the asking pass from its
+// own deployment's objects before it asks, so nothing under the lock reads it.
+//
+// The extra's admission headroom (extra.go, headroomOf; #616 PR 4) adds reads under the same lock, by slotAsk.headroom,
+// for an extra's reservation alone, made after the count's: one List of the Providers and one of the ModelDeployments of
+// every namespace, and, for each other deployment that allows the Provider, one List of its Instances and one of its
+// Allocations (by its model-deployment label, in its namespace), all through the uncached Reader, and none under
+// slotTable.mu. The count's reads and the headroom's share ONE deadline, listTimeout from the lock's acquisition. They take
+// no lock of this package and write nothing, so the order above holds.
+//
+// A primary placed on a warm Allocation creates no Allocation to reserve, yet the Instance it makes reserves a handover
+// slot and ends its deployment's missing primary: so placeOnWarm (provision.go) creates it under this same lock, with two
+// API writes and no other lock of this package, and a count and a headroom read in one reservation never straddle it.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
@@ -185,6 +199,19 @@ type slotAsk struct {
 	// member asks it (HBEP-7, Hedging (beta), Which Provider is next).
 	params *v1alpha1.BatchParameters
 	caps   v1alpha1.QOSLimits
+	// alsoLeave is how many slots the reservation leaves free beside the new Allocation, for the asking
+	// deployment's own chosen primaries that hold no reserved slot yet but will once Running (the extra's
+	// slot beyond its own handovers: HBEP-7, Over-allocation and qualification (beta), Its checks). The
+	// reservation then succeeds only when listed + expected + reserved + alsoLeave + 1 is within the limit.
+	// The pass counts it from its own objects (extraAlsoLeave); it adds to what reservedOn reads from the
+	// other deployments' and the Running primaries' own slots. Zero for every other ask.
+	alsoLeave int
+	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
+	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
+	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
+	// deployments that the Provider allows, and 0 when there are none. It reads through the uncached Reader and adds to
+	// alsoLeave.
+	headroom func(ctx context.Context) (int, error)
 }
 
 // slotAnswer is a reservation's answer.
@@ -220,7 +247,11 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	l := t.slotLock(q.provider)
 	l.Lock()
 	defer l.Unlock()
-	rd, err := t.readBounded(ctx, r, q.provider, q.limit != nil, q.profile)
+	// ONE deadline for every read made under the lock, the count's and the headroom's: a long count leaves the headroom
+	// what remains of listTimeout, so no primary of this Provider waits for two timeouts.
+	sctx, cancel := context.WithTimeout(ctx, t.listTimeout)
+	defer cancel()
+	rd, err := t.readBounded(sctx, r, q.provider, q.limit != nil, q.profile)
 	if err != nil {
 		return slotAnswer{}, err
 	}
@@ -228,7 +259,17 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if q.limit == nil && q.params == nil {
 		return slotAnswer{ok: true, holds: holds}, nil
 	}
+	// Read once the lock is held and the count's reads are back, as the reservation always did, and BEFORE the headroom's:
+	// the expectations expire against the moment the Allocations were listed, so an Allocation created during a long
+	// headroom scan is still counted by its expectation, which the scan's own time cannot lapse.
 	at := now()
+	if q.headroom != nil && q.limit != nil {
+		h, err := q.headroom(sctx)
+		if err != nil {
+			return slotAnswer{}, err
+		}
+		q.alsoLeave += h
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(q.provider, rd.seen, rd.listed, at)
@@ -246,7 +287,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	if q.limit != nil {
 		n, by = counted(rd.reserved, q.key, q.takers, t.expect[q.provider])
 		total += n
-		if total >= int(*q.limit) {
+		if total+q.alsoLeave >= int(*q.limit) {
 			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
 		}
 	}
@@ -453,8 +494,14 @@ func submitLimitText(pv *providerView) string {
 // condition: a hedge's member that finds no room is extra capacity, and the
 // Provider passed over sets no reason (HBEP-7, Hedging (beta)).
 func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool) (ok, holds bool, err error) {
+	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, 0, nil)
+}
+
+// reserveSlotWith is reserveSlotFor leaving alsoLeave slots free beside the new Allocation (slotAsk.alsoLeave), and,
+// with headroom, the admission headroom of an extra (slotAsk.headroom).
+func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, alsoLeave int, headroom func(context.Context) (int, error)) (ok, holds bool, err error) {
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits}
+		params: params, caps: pv.limits, alsoLeave: alsoLeave, headroom: headroom}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}

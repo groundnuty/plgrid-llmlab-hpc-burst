@@ -124,9 +124,12 @@ func ServedDeploymentAs(d Served, tm Timing, engineEnv ...v1alpha1.EnvVar) *v1al
 				Flags: []v1alpha1.EngineFlag{{Name: "max-model-len", Value: d.MaxModelLen}},
 				Env:   engineEnv,
 			}},
-			Instances:  1,
-			Providers:  v1alpha1.ProviderSelection{Names: []string{d.Provider}},
-			LeaseLimit: Dur(tm.Lease),
+			Instances: 1,
+			// k = 0: the rehearsal's scenarios count Allocations and jobs, and over-allocation's extra (k defaults to 1,
+			// #616 PR 4) would be one more of each. Beta's over-allocation live criterion is a row of its own.
+			OverAllocation: Ptr(int32(0)),
+			Providers:      v1alpha1.ProviderSelection{Names: []string{d.Provider}},
+			LeaseLimit:     Dur(tm.Lease),
 			// The Allocations end at scale 0: the default, Keep, would hold a
 			// warm Allocation until its hard end. 10 s is the scaled idle limit.
 			RetentionPolicy: &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: Dur("10s")},

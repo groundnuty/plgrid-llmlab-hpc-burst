@@ -1,0 +1,6 @@
+[
+  {"state": "pending", "advisory": true},
+  {"state": "unknown", "unknown": "no estimate within 60 s", "advisory": true},
+  {"state": "unknown", "unknown": "sbatch gave no start time", "observedAt": "2026-11-20T10:00:05Z", "advisory": true},
+  {"state": "known", "time": "2026-11-23T08:00:00Z", "observedAt": "2026-11-20T10:00:10Z", "age": "1m0s", "advisory": true}
+]

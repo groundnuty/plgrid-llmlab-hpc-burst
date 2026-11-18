@@ -152,6 +152,9 @@ type rigSetup struct {
 	// instanceRouter runs up with --instance-router envoy and places Envoy's build beside the agent's
 	// (#454, router_test.go). Unset, up's arguments and the builds are as before.
 	instanceRouter bool
+	// eventLog runs up with --event-log, with a test floor and small caps (#710, eventlog_test.go). Unset, up's
+	// arguments and the block are as before.
+	eventLog bool
 	// bins, when set, changes the binaries up runs, given the rig's directory: the upgrade test (#552)
 	// runs its own copies of the controller and the front, which it replaces in place.
 	bins func(b stack.Binaries, dir string) stack.Binaries

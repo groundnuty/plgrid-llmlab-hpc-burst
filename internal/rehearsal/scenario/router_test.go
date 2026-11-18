@@ -28,7 +28,8 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// portsRouter: #454's block is 28360-28379; hpcburst up takes base to base+12.
+// portsRouter: #454's block is 28360-28379; hpcburst up takes base to base+12, and with --event-log (#710)
+// base+16 and base+17, 28376 and 28377: the front's client and dial-home listeners are 28373 and 28374.
 var portsRouter = stack.Ports{Base: 28360, ClientAddr: "127.0.0.1:28373", DialHomeListen: "127.0.0.1:28374"}
 
 // pinnedEnvoy is Envoy 1.40.2's published release sum for this machine's architecture, written out as
@@ -116,7 +117,7 @@ func envoyRequests(t *testing.T, admin string) int {
 //
 //livecheck:none CI's rehearsal job runs it (hack/rehearsal.sh)
 func TestRehearsalInstanceRouter(t *testing.T) {
-	r := startRigWith(t, rigSetup{mode: "direct", ports: portsRouter, instanceRouter: true})
+	r := startRigWith(t, rigSetup{mode: "direct", ports: portsRouter, instanceRouter: true, eventLog: true})
 	r.engineEnv = []v1alpha1.EnvVar{{Name: "HB_ENGINE_DOUBLE", Value: "token-delay=" + tokenDelay.String()}}
 	in := r.stepStart()
 	if in.Spec.Launch.Router != v1alpha1.InstanceRouterEnvoy {
@@ -209,4 +210,8 @@ func TestRehearsalInstanceRouter(t *testing.T) {
 	if reply := r.fc.Send("/v1/chat/completions", stack.ChatBody(stack.Model, 32, 8, false, ""), key); reply.Status != http.StatusOK {
 		t.Errorf("a request after the worker's restart: %d %.200q", reply.Status, reply.Body)
 	}
+
+	// The durable log (#710): up ran with --event-log, and the controller and the front, the real
+	// binaries, have written their events to HB_EVENTS.
+	r.stepEventLog(in)
 }

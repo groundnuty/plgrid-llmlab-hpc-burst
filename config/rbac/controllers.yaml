@@ -1,0 +1,325 @@
+# The controllers' own identities (HBEP-10, Audit; HBEP-11, Single-user host; issue #660, PR A): a
+# ServiceAccount, a ClusterRole and its ClusterRoleBinding, and a Role and its RoleBinding in hpcburst-system
+# for the Lease, for each of the three processes that call the API server, so that the audit log tells a
+# controller's write from a person's.
+#
+#   hpcburst-lifecycle  the lifecycle controller's manager (the lifecycle and verification controllers,
+#                       the observers, the metrics collectors, the agent API's Allocation lookup, the
+#                       frps plugin's feed and the tunnel-state writer), and the two Provider
+#                       supervisors' reads. hpcburst-controller --kubeconfig.
+#   hpcburst-provider   every Provider manager (providerctl, and the managed catalog's). hpcburst-controller
+#                       --provider-kubeconfig.
+#   hpcburst-front      hpcburst-front --kubeconfig. The relay keeper and the durable log build no API client.
+#
+# hpcburst up installs every object here on every start (after k3s is ready, before the supervisor), and
+# resets each to this file: a role's rules (ClusterRole or Role), a binding's subjects (a binding whose roleRef differs is deleted
+# and made again, since roleRef cannot change). It then issues one token per ServiceAccount, written into
+# <state>/identities/system/<name>.kubeconfig. hpcburst upgrade does the same before it starts the
+# supervisor again. This file is written by hand. hack/generate.sh does not touch it. The launcher embeds it
+# (config/rbac/embed.go), so what up installs is this file.
+#
+# EACH ROLE GRANTS EXACTLY WHAT ITS COMPONENT CALLS (the science agent, 17 Nov 2026, #660: S2). It was
+# enumerated from the code, call site by call site, never from a test's list. What PROVES a rule, and what does
+# not (the measured table is in the PR body):
+#   - cmd/hpcburst-controller's harness runs the real controller binary on envtest under the identities and
+#     fails any test on a 403 in the API server's audit log. It proves the rules it exercises: the leader Leases,
+#     the watches of the cached kinds, the Provider controller's Allocation, Provider and record writes, the
+#     tunnel state's Instance status write, events create. It does NOT exercise the lifecycle's ModelDeployment,
+#     Operation, Instance and Allocation reads and writes, the events patch, or the front.
+#   - Those are proved by the rehearsals and the alpha stand-in (internal/alpha), which run the whole stack through
+#     `up` and so under the identities. They are not required checks.
+#   - CI's launcher-k3s starts a FAKE controller and the real front: it proves the identities are issued and usable
+#     (a SelfSubjectReview through each file, the audit log's user names) and that the real front's startup
+#     paths run under its role, and nothing of the real controller.
+# A controller change that adds an API call extends its role in the same change. The rules of one resource
+# carry the reason in the comment above them. Three things that follow from how the clients are built:
+#   - A read through a manager's cached client (mgr.GetClient()) is a LIST and a WATCH of the kind: the
+#     informer's. client-go v0.35.3's reflector streams the initial state with a watch and falls back to a
+#     list (tools/cache/reflector.go:414-439, "expected if watchlist is not supported or disabled in
+#     kube-apiserver"), so a role without `list` would break against such a server; against envtest 1.36.2
+#     only the watch is seen. A read through its API reader (mgr.GetAPIReader()) or a typed clientset is a
+#     GET or a LIST on its own. So a kind that is only ever read from the cache has no `get` below.
+#   - Both Kubernetes event recorders write only CREATE and PATCH (client-go tools/record and tools/events),
+#     the first into core/v1 events, the second into events.k8s.io events.
+#   - A leader-election Lease lock is GET, CREATE and UPDATE (client-go resourcelock leaselock.go). Every
+#     controller's Lease lives in hpcburst-system only, so the Lease verbs are a Role and a RoleBinding in that
+#     namespace for each identity (below the ClusterRoles), never a ClusterRole's: a controller's Lease write in
+#     any other namespace is Forbidden. The fixed-name Leases (the lifecycle's and the front's) are narrowed further
+#     by resourceNames; the Provider managers' are one per Provider, made at run time, and stay namespace-wide.
+#     Events stay in the ClusterRoles, since a deployment, and so the events about it, can be in any namespace.
+# Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
+# would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it, and were it set,
+# the Forbidden would surface as a reconcile error, not silently); the Operation's get and delete of the 7-day
+# removal (internal/lifecycle/opttl.go, which no manager wires yet: #660's PR B adds both verbs with its wiring);
+# impersonation, RBAC, CRDs, admission objects, namespaces, nodes, tokens.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpcburst-lifecycle
+  namespace: hpcburst-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpcburst-provider
+  namespace: hpcburst-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hpcburst-front
+  namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-lifecycle
+rules:
+  # Its cache holds the nine kinds of internal/lifecycle's manager.go lifecycleWatches (and readiness): the
+  # ModelDeployments it is For, and each kind it Watches. A cached read is a list and a watch. The API
+  # reader (Reconciler.Reader) adds a GET of a ModelDeployment (a pass), an Allocation (a hedge), an
+  # Instance (the tunnel-state writer's fresh read) and an Operation (opexec.go afterCommitError: the read
+  # that recovers a commit whose status write returned an error).
+  # An approved Operation writes the ModelDeployment (#664, #589 PR 5; opexec.go): UPDATE for a Scale's
+  # spec.instances and an End's spec.endTime (writeSpec) and for the kept-warm finalizer's add and removal
+  # (holdDeletionForKeptWarm, releaseKeptWarmFinalizer), DELETE for an End that deletes (deleteDeployment,
+  # with UID and resourceVersion preconditions).
+  # The ModelDeployment's own owner-hash label, kept true to its owner annotation (#662, owner.go syncOwnerLabel): a
+  # JSON merge PATCH of that one label key, every pass that finds it wrong. A refusal only joins the pass's error and
+  # provisioning goes on, so nothing but a test that looks for the label shows a missing verb.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments"]
+    verbs: ["get", "list", "watch", "patch", "update", "delete"]
+  # An Operation carries the operation-unfinished finalizer from its commit to its finish (#707; opexec.go
+  # keepOperationUntilFinished and releaseOperationFinalizer): added and removed by a metadata UPDATE of the
+  # Operation object, which is a PUT on operations, not on operations/status.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["operations"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers", "platformprofiles", "approvals", "approvalpolicies"]
+    verbs: ["list", "watch"]
+  # Instances: created by provision.go, their metadata updated by setMeta, deleted when one ends. Their
+  # status: setStatus, provision.go and the tunnel-state writer.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["instances"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["instances/status"]
+    verbs: ["update"]
+  # Allocations: created by provision.go, the release cause and the idle-since annotation updated, deleted by
+  # deleteAllocation (the only delete of an Allocation). No status: the Provider controller writes it.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["allocations"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments/status", "operations/status"]
+    verbs: ["update"]
+  # The DialHomeUnreachable condition of a Provider, by server-side apply (setDialHome): a PATCH.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers/status"]
+    verbs: ["patch"]
+  # The identity and verification records (ControllerRevisions): watched, read by the API reader, listed by
+  # label, created once.
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["get", "list", "watch", "create"]
+  # The typed events (events.k8s.io) of the lifecycle controller, the observers and the tunnel state.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-provider
+rules:
+  # A Provider manager's cache holds the Allocations its controller is For, the Instances it indexes by
+  # allocationRef and lists to see a drain, and the Providers and PlatformProfiles its profile reader reads
+  # (a cached read is a list and a watch). Its API reader adds a GET of a fresh Allocation, of the Provider,
+  # and of the managed catalog's PlatformProfile.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["instances"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers", "platformprofiles"]
+    verbs: ["get", "list", "watch"]
+  # The Allocation's finalizer, tags, create-pending and critical annotations, and the release record: an
+  # UPDATE (crossplane-runtime's managed reconciler and providerctl's record.go). Its status: UPDATE by the
+  # reconciler, PATCH by the keeper's and the relay-failed writers. It never creates or deletes one.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["allocations"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["allocations/status"]
+    verbs: ["update", "patch"]
+  # The Provider's status: the status loop, the Ready write and the managed catalog's.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["providers/status"]
+    verbs: ["update"]
+  # The accounting record of a deleted Allocation and the managed catalog's identity records.
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["get", "create"]
+  # The legacy events (core/v1) of crossplane-runtime's recorder, and the typed ones (events.k8s.io).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hpcburst-front
+rules:
+  # The four kinds its dynamic informers watch (internal/front/inventory watch.go): the router's inventory.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["modeldeployments", "instances", "providers", "platformprofiles"]
+    verbs: ["list", "watch"]
+  # The record fetch: the identity and verification records of a deployment, listed by label, uncached.
+  - apiGroups: ["apps"]
+    resources: ["controllerrevisions"]
+    verbs: ["list"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-lifecycle
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-lifecycle
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-provider
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-provider
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-provider
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hpcburst-front
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hpcburst-front
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-front
+    namespace: hpcburst-system
+---
+# The Lease verbs, in hpcburst-system alone, narrowed to the Lease NAMES each identity touches where the names are
+# fixed. `create` cannot be narrowed by name: the name of a Lease that does not exist yet is not known to the
+# authorizer, so a rule with resourceNames never matches a create, and each identity's create is a rule of its own
+# with no names (a controller can create a Lease in hpcburst-system, and nothing else there).
+#
+# hpcburst-lifecycle: the lifecycle Lease (leader election: get, create, update; v1alpha1.LeaseLifecycle) and its
+# READ of the front's (v1alpha1.LeaseFront), by the observer (observers.go), the gap emitter (gap.go) and the
+# tunnel state's events (tunnel_state.go, tunnel_bulk.go). It never writes the front's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hpcburst-lifecycle
+  namespace: hpcburst-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["lifecycle"]
+    verbs: ["get", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["front"]
+    verbs: ["get"]
+---
+# hpcburst-provider: its Provider's Lease, provider-<name> (leader election), and the gap emitter's read of it. The
+# names are NOT fixed: there is one Lease per Provider, Providers are made at run time, and a Role cannot name a
+# Lease that does not exist yet, so this one stays namespace-wide in hpcburst-system: get, create and update of any
+# Lease there, the other identities' included. That is the limit of what a role can say here (a Role cannot
+# match a name by prefix).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hpcburst-provider
+  namespace: hpcburst-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+# hpcburst-front: its own Lease, its heartbeat (v1alpha1.LeaseFront; internal/front/lease.go): get and update, and
+# the create of the first take.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hpcburst-front
+  namespace: hpcburst-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["front"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hpcburst-lifecycle
+  namespace: hpcburst-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hpcburst-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-lifecycle
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hpcburst-provider
+  namespace: hpcburst-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hpcburst-provider
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-provider
+    namespace: hpcburst-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hpcburst-front
+  namespace: hpcburst-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hpcburst-front
+subjects:
+  - kind: ServiceAccount
+    name: hpcburst-front
+    namespace: hpcburst-system

@@ -133,12 +133,24 @@ func TestScaleDownLeavesUpToKAndNamesTheCause(t *testing.T) {
 		// X-repl is taken before X, pending, cancelled; X's Allocation is kept.
 		wantTargets(t, "targets", p.scaleDownTargets(p.primaries(), 0), "X-repl:cancelPending:overAllocationTrim", "X:endKeepAllocation:overAllocationTrim")
 	})
-	t.Run("a hedge of several members is never left alone: it goes whole", func(t *testing.T) {
+	t.Run("a hedge of several members is left alone member by member where each Provider has room (D9)", func(t *testing.T) {
+		// Before D9 a surplus hedge was never left alone: it went whole, losing its queue age. The science agent's ruling
+		// on #616 (17 Nov 2026): k is per Provider, so H on prov-a and H-b on prov-b each take one unit of their own
+		// Provider's room and both stay. The per-Provider rows are in hedge_trim_test.go.
 		f := newSelFx()
 		f.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
 		f.add("H", v1alpha1.InstancePending, createdAt(hoT(9, 5, 0)))
 		f.add("H-b", v1alpha1.InstanceStarting, createdAt(hoT(9, 6, 0)), inHedge("H"), jobStartedAt(hoT(10, 5, 0)), onProv("prov-b"))
 		p := f.pass(1, 1)
+		wantTargets(t, "targets", p.scaleDownTargets(p.primaries(), 0))
+	})
+	t.Run("a hedge of several members goes whole when no member's Provider has room", func(t *testing.T) {
+		// k = 0: no Provider has room, so both members are taken, each by its own state, with the trim cause.
+		f := newSelFx()
+		f.add("P", v1alpha1.InstanceReady, hardEnd(hoT(12, 10, 0)))
+		f.add("H", v1alpha1.InstancePending, createdAt(hoT(9, 5, 0)))
+		f.add("H-b", v1alpha1.InstanceStarting, createdAt(hoT(9, 6, 0)), inHedge("H"), jobStartedAt(hoT(10, 5, 0)), onProv("prov-b"))
+		p := f.pass(1, 0)
 		wantTargets(t, "targets", p.scaleDownTargets(p.primaries(), 0), "H:cancelPending:overAllocationTrim", "H-b:endKeepAllocation:overAllocationTrim")
 	})
 }

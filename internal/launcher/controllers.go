@@ -147,6 +147,11 @@ func startSupervisor(ctx context.Context, l layout, st *State, argv []string, ti
 	if st.Controllers == nil {
 		return errors.New("no controllers are configured")
 	}
+	// Each child is told the path of its identity's kubeconfig: a path that start forgot to issue is refused
+	// here, by name, instead of being a controller that fails to read it and restarts with backoff.
+	if err := checkControllerKubeconfigs(l, st); err != nil {
+		return err
+	}
 	// The supervisor reads its configuration from state.json.
 	if err := l.saveState(st); err != nil {
 		return err
