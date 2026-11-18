@@ -1,0 +1,33 @@
+# DO NOT MERGE. A throwaway that proves the Sano runners' job-started hook locks a runner out, in a real run.
+#
+# The runner it is pinned to (the label hooktest-r2, added to one runner for the experiment) has SANO_CI_HOOK_TEST_REFUSE=1 in its
+# .env, which makes its hook refuse every job. A refused job must run NO step: not the plain one, and not the three that run
+# even after a failure or a cancel, which is how a fork's workflow could otherwise still reach the login node. PASS: none of
+# the four markers below ever appears in the job's log, the job dies, and the runner stays locked out (a LOCKOUT file in its
+# directory; the keepalive stops it). With the flag and the LOCKOUT cleared the same workflow prints all four: that is the
+# control, which shows the markers can appear.
+name: ci-sano-hooktest
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  refused:
+    name: hooktest refused
+    runs-on: [self-hosted, sano, hooktest-r2]
+    timeout-minutes: 10
+    steps:
+      - name: always
+        if: always()
+        run: echo "HOOKTEST-ALWAYS-RAN-7f3a91"
+      - name: on failure
+        if: failure()
+        run: echo "HOOKTEST-FAILURE-RAN-7f3a91"
+      - name: on cancel
+        if: cancelled()
+        run: echo "HOOKTEST-CANCELLED-RAN-7f3a91"
+      - name: plain
+        run: echo "HOOKTEST-PLAIN-RAN-7f3a91"
