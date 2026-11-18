@@ -509,7 +509,7 @@ An Instance runs several workers behind a router in beta (HBEP-3, HBEP-5). This 
   - **A restarted worker** warms up on its socket while the readiness port still answers 503 for it, so it's never live during warm-up (Notes). Its new process starts only once Envoy holds the worker unhealthy, read from `/clusters`, or at the latest one check interval plus its timeout after the death. Until then Envoy can still route to the worker it last saw healthy, and the new process would take that traffic unverified.
 - **Becoming ready.** An Instance enters `ready` the first time when every worker has passed and the router's probe passes, within `health.startTimeout` of its start instruction. The router's probe is the agent's: one `GET /health` through the router's socket, with no `x-session-id`, every report, reported as the router part's health. The front's own probe gates routing only (HBEP-5).
   - It then stays `ready` while the router holds at least one worker healthy, with the front's cap scaled by healthy workers (HBEP-5).
-  - The controller writes the router's healthy count to `status.healthyWorkers`, from the agent's report of Envoy's `/clusters`, taking it only from a report whose router part echoes the desired router generation. A worker that fails its active check, or that Envoy has ejected, isn't counted, since Envoy routes to neither.
+  - The controller writes the router's healthy count to `status.healthyWorkers`, from the agent's report of Envoy's `/clusters`, taking it only from a report whose router part echoes the desired router generation. A worker that fails its active check, or that Envoy has ejected, isn't counted, since Envoy routes to neither. A worker counts as healthy only on a router read taken after its current process started and at most two probe intervals old at the report; one failed read inside that window changes nothing, and past it no worker counts, so the Instance is skipped and keeps its count (HBEP-5, Load bound and cap).
   - With none healthy it's not eligible, and stays `ready` until the ladder acts.
 - **Health and restarts with several workers** (Health and restarts):
   - **A worker's own signal:**
@@ -1147,6 +1147,7 @@ The controller applies by policy what www-2027 operators did per job: holder bat
 - 2026-11-18: Sano's backfill window, read at 7 days, exceeds its 3-day QOS walls, so it gets no cap (#735).
 - 2026-11-18: where a Provider's jobs run under several QOSes (`qosByGpus`), each QOS limit is counted over that QOS's Allocations (#745).
 - 2026-11-18: amendment from HBEP-764: a ModelDeployment's `workloads`, and the Instance's `status.kvCacheTokens` from the engine's KV cache size.
+- 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764): the workers a router holds healthy are joined to their current process (by its identity, not its name) and read at most two probe intervals ago.
 
 ## Amendments
 
