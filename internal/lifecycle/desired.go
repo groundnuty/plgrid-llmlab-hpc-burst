@@ -337,6 +337,7 @@ func (r *Reconciler) setDialHome(ctx context.Context, provider string, unreachab
 	if err != nil {
 		return err
 	}
+	//rbac:resources hpcburst.groundnuty.github.io/providers
 	if err := r.Client.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(v1alpha1.FieldManagerLifecycle), client.ForceOwnership); err != nil {
 		return fmt.Errorf("apply DialHomeUnreachable to Provider %s: %w", provider, err)
 	}
