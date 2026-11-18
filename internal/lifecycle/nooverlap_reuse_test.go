@@ -19,13 +19,19 @@ import (
 
 // TestNoOverlapWarmAllocationTakesTheReplacement: with maxSubmitPerUser 2, a
 // running primary and a retained warm Allocation take both slots. The warm
-// Allocation is the second Instance of a deployment scaled up to two at 09:00
-// and back to one while it was still starting, so its job started at 09:00:20
-// and its hard end, 13:00:20, is an hour later than the primary's, 12:00:20.
-// The primary's replacement, planned at 09:19:30, goes onto the warm
-// Allocation: no third job is submitted, nothing is marked as a no-overlap
-// successor, and the handover is the ordinary one (the replacement serves at
-// the drain start, 09:50:20; NoOverlapSlot never). Without the check for warm
+// Allocation is the second Instance of a deployment scaled up to two at 11:50
+// and back to one while it was still starting, so its job started at 11:50:20.
+// The partition allows 12 h, since a warm Allocation takes a replacement only
+// when it drains at least the lead an Instance needs later than its
+// predecessor (HBEP-7, amendment #711: the drain window 2 h 10 min + the
+// handover margin 30 min + health.startTimeout 1 h = 3 h 40 min): the primary's
+// job, started 08:00:20, ends 20:00:20 and drains from 17:50:20, and the warm
+// Allocation's, 23:50:20, from 21:40:20, 3 h 50 min later. (The row was a 4 h
+// partition and a warm Allocation an hour later before the lead.) The
+// primary's replacement, planned at 17:19:30 (17:50:20 - (0 + 50 s + 30 min)),
+// goes onto the warm Allocation: no third job is submitted, nothing is marked
+// as a no-overlap successor, and the handover is the ordinary one (the
+// replacement serves at the drain start, 17:50:20; NoOverlapSlot never). Without the check for warm
 // capacity, the full count put the deployment in the mode: no replacement
 // before the drain start, and NoOverlapSlot from it.
 func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
@@ -35,9 +41,9 @@ func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
 	// made, and 2 from then on, as an operator's edit would, so the primary's and the warm Allocation take both
 	// slots, the state this test is about.
 	qos := []v1alpha1.QOSProfile{{Name: "example-s2", MaxSubmitPerUser: i32(3)}}
-	rg := newRig(t, append(qosOpts(qos, "", "example-s2"), withMaxTime(4*time.Hour), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 2 }))...)
-	p := *hoStart(rg, nil)
-	hoStepTo(rg, hoT(9, 0, 0), 5*time.Minute, nil)
+	rg := newRig(t, append(qosOpts(qos, "", "example-s2"), withMaxTime(12*time.Hour), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 2 }))...)
+	p := *hoStartLease(rg, nil, hoT(20, 0, 20))
+	hoStepTo(rg, hoT(11, 50, 0), 5*time.Minute, nil)
 	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 2 })
 	var warm string
 	rg.until(5*time.Minute, 10*time.Second, "the second Allocation started", func() bool {
@@ -69,8 +75,8 @@ func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
 			t.Fatalf("at %s Degraded = %s/%s %q: the warm Allocation takes the replacement, so there is no gap", rg.clock.Now().Format(time.TimeOnly), c.Status, c.Reason, c.Message)
 		}
 	}
-	hoStepTo(rg, hoT(9, 19, 20), 5*time.Minute, noGap)
-	hoStepTo(rg, hoT(9, 19, 40), 10*time.Second, noGap)
+	hoStepTo(rg, hoT(17, 19, 20), 5*time.Minute, noGap)
+	hoStepTo(rg, hoT(17, 19, 40), 10*time.Second, noGap)
 	reps := hoRepl(rg, p.Name)
 	if len(reps) != 1 || reps[0].Spec.AllocationRef.Name != warm {
 		t.Fatalf("replacements %+v, want one, on the warm Allocation %s", reps, warm)
@@ -82,16 +88,16 @@ func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
 		t.Fatalf("%d submissions, want no job for the replacement", rg.submissions())
 	}
 	repl := reps[0].Name
-	hoStepUntil(rg, hoT(9, 49, 0), 10*time.Second, func() bool { return rg.instance(repl).Status.Phase == v1alpha1.InstanceReady }, noGap)
-	hoStepTo(rg, hoT(9, 51, 0), 10*time.Second, noGap)
+	hoStepUntil(rg, hoT(17, 49, 0), 10*time.Second, func() bool { return rg.instance(repl).Status.Phase == v1alpha1.InstanceReady }, noGap)
+	hoStepTo(rg, hoT(17, 51, 0), 10*time.Second, noGap)
 	if ph := hoPhase(rg, p.Name); ph != v1alpha1.InstanceDraining && ph != v1alpha1.InstanceEnded {
-		t.Fatalf("at 09:51:00 the primary is %s, want drained", ph)
+		t.Fatalf("at 17:51:00 the primary is %s, want drained", ph)
 	}
 	if got := rg.instance(repl); got.Status.Phase != v1alpha1.InstanceReady {
-		t.Fatalf("at 09:51:00 the replacement is %s, want ready", got.Status.Phase)
+		t.Fatalf("at 17:51:00 the replacement is %s, want ready", got.Status.Phase)
 	}
 	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
-		t.Fatalf("at 09:51:00 Degraded = %s/%s %q after an ordinary handover, want False", c.Status, c.Reason, c.Message)
+		t.Fatalf("at 17:51:00 Degraded = %s/%s %q after an ordinary handover, want False", c.Status, c.Reason, c.Message)
 	}
 }
 
@@ -103,20 +109,26 @@ func TestNoOverlapWarmAllocationTakesTheReplacement(t *testing.T) {
 // mode: the replacement goes there at its planned time, and there is no gap.
 //
 // The timeline: the deployment first runs on the second Provider alone (its
-// partition allows 6 h) and is scaled to zero at 08:30, which keeps its
-// Allocation; at 09:00 it is scaled to one Instance and allowed on both
-// Providers. The first takes it: the job starts at 09:00:20 with a hard end of
+// partition allows 12 h) and is scaled to zero at 08:30, which keeps its
+// Allocation; at 09:00 it is scaled to one Instance and allowed on the first
+// Provider alone (a missing primary goes to a warm Allocation before a new
+// submission, #604 PR 3), and on both once the primary is ready. The first
+// takes it: the job starts at 09:00:20 with a hard end of
 // 13:00:20 (the rig's 4 h), so the drain start is 10:50:20 and the
 // replacement's planned time 10:50:20 - (0 + 50 s + 30 min) = 10:19:30. The
-// warm Allocation's hard end, 14:00:20, leaves more than the 2h11m40s that a
-// replacement needs.
+// warm Allocation's hard end, 20:00:20, leaves more than the 2h11m40s that a
+// replacement needs, and its drain start, 17:50:20, is 7 h after the
+// primary's: at least the lead (2 h 10 min + 30 min + 1 h = 3 h 40 min) that
+// a warm Allocation must drain later than its predecessor (HBEP-7, amendment
+// #711). The partition allowed 6 h before the lead, and the warm Allocation
+// then drained one hour after the primary, which the lead no longer accepts.
 func TestNoOverlapWarmAllocationOnAnotherProviderTakesTheReplacement(t *testing.T) {
 	qos := []v1alpha1.QOSProfile{
 		{Name: "example-a1", MaxSubmitPerUser: i32(1)},
 		{Name: "example-b1", MaxSubmitPerUser: i32(1)},
 	}
 	rg := newRig(t, append(qosOpts(qos, "", "example-a1"), withMaxTime(4*time.Hour), withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser = 1 }))...)
-	b := rg.addProvider("example-b", "gpu-long", 6*time.Hour, func(pp *v1alpha1.PartitionProfile) { pp.QOS = "example-b1" }, func(c *pfake.Config) { c.MaxSubmitPerUser = 1 })
+	b := rg.addProvider("example-b", "gpu-long", 12*time.Hour, func(pp *v1alpha1.PartitionProfile) { pp.QOS = "example-b1" }, func(c *pfake.Config) { c.MaxSubmitPerUser = 1 })
 	md := mdSpec(hoMD)
 	md.Spec.Providers.Names = []string{"example-b"}
 	rg.create(md)
@@ -130,11 +142,15 @@ func TestNoOverlapWarmAllocationOnAnotherProviderTakesTheReplacement(t *testing.
 	}
 
 	hoStepTo(rg, hoT(9, 0, 0), 5*time.Minute, nil)
+	// A alone first: a missing primary goes to a warm Allocation of its deployment before a new submission (HBEP-7,
+	// Provisioning, Where; #604 PR 3), so with B allowed, B's warm Allocation would take the primary and the row's
+	// replacement could not be the one that goes there. B is allowed once the primary is ready.
 	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) {
 		m.Spec.Instances = 1
-		m.Spec.Providers.Names = []string{rigProvider, "example-b"}
+		m.Spec.Providers.Names = []string{rigProvider}
 	})
 	rg.until(5*time.Minute, 10*time.Second, "the primary is ready", func() bool { return rg.readyCount(hoMD) == 1 })
+	rg.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{rigProvider, "example-b"} })
 	live := rg.liveInstances(hoMD)
 	if len(live) != 1 || live[0].Labels[v1alpha1.LabelProvider] != rigProvider {
 		t.Fatalf("live Instances %+v, want one, on %s", live, rigProvider)

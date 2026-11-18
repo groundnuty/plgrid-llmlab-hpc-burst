@@ -255,8 +255,11 @@ func TestQuickstartHeliosRequestIsAcceptedUnderNow(t *testing.T) {
 func TestQuickstartHeliosRequestControls(t *testing.T) {
 	t.Run("without qos the limit is the partition's 48h, which the check accepts", func(t *testing.T) {
 		plan := planQuickstart(t, func(p *v1alpha1.Provider, _ *v1alpha1.ModelDeployment) { p.Spec.QOS = "" })
-		if len(plan.allocs) != 1 || plan.allocs[0].Spec.ForProvider.Batch.TimeLimit != "48h0m0s" {
-			t.Fatalf("want one Allocation with a 48h0m0s limit, got %d (%v)", len(plan.allocs), plan.degraded)
+		// Two Allocations, each with a 48h0m0s limit: with no QOS the Provider has no submit limit, so the over-allocation
+		// extra (k is 1 by default, the quickstart's value: #616 PR 4) is made beside the primary. Under QOS now's limit of 1
+		// it is refused, which the tests above see.
+		if len(plan.allocs) != 2 || plan.allocs[0].Spec.ForProvider.Batch.TimeLimit != "48h0m0s" || plan.allocs[1].Spec.ForProvider.Batch.TimeLimit != "48h0m0s" {
+			t.Fatalf("want the primary's and the extra's Allocations, each with a 48h0m0s limit, got %d (%v)", len(plan.allocs), plan.degraded)
 		}
 		if plan.profileOK != nil || plan.checkErr != nil {
 			t.Errorf("the request without qos is refused: %v %v", plan.profileOK, plan.checkErr)

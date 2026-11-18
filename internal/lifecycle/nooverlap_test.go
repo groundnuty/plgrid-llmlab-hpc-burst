@@ -86,9 +86,17 @@ func releaseWhenIdle5m(md *v1alpha1.ModelDeployment) *v1alpha1.ModelDeployment {
 }
 
 // noOverlapStart is hoStart with the deployment releasing when idle.
-func noOverlapStart(rg *rig) *v1alpha1.Instance {
+func noOverlapStart(rg *rig) *v1alpha1.Instance { return noOverlapStartK(rg, nil) }
+
+// noOverlapStartK is noOverlapStart with overAllocation k when it is given: on a Provider whose limit is one, PR 4's
+// extra is refused at the first pass (1 + 1 + 1 > 1), so the deployment starts with its primary alone as at k = 0.
+func noOverlapStartK(rg *rig, k *int32) *v1alpha1.Instance {
 	rg.t.Helper()
-	rg.create(releaseWhenIdle5m(mdSpec(hoMD)))
+	md := releaseWhenIdle5m(mdSpec(hoMD))
+	if k != nil {
+		md.Spec.OverAllocation = k
+	}
+	rg.create(md)
 	for range 7 {
 		rg.clock.Advance(10 * time.Second)
 		rg.Step()
@@ -135,8 +143,16 @@ func streamNotCut(t *testing.T, rg *rig, p string) {
 // the effective submit limit is 1; the fake user's QOS is the same (one job,
 // one GPU).
 func TestNoOverlapOneSlotPath(t *testing.T) {
+	// At k = 1 too (the successor's pass, which makes the primary's successor in step 7's loop, tries an extra beside
+	// it, and the counts refuse it: HBEP-7, No-overlap mode admits no extra): the same row, and no job beyond the
+	// primary's and its successor's.
+	t.Run("k 0", func(t *testing.T) { noOverlapOneSlotPath(t, nil) })
+	t.Run("k 1: the successor's pass makes no extra and records nothing", func(t *testing.T) { noOverlapOneSlotPath(t, ptrTo(int32(1))) })
+}
+
+func noOverlapOneSlotPath(t *testing.T, k *int32) {
 	rg := noOverlapRig(t, oneSlotOpts(withBatchConfig(func(c *pfake.Config) { c.MaxSubmitPerUser, c.MaxGPUsPerUser = 1, 1 }))...)
-	p := noOverlapStart(rg)
+	p := noOverlapStartK(rg, k)
 	pAlloc := p.Spec.AllocationRef.Name
 	// Before the drain start: no replacement Allocation, not at the planned
 	// time 09:19:30 nor after; no ReplacementLate at the lateness deadline
@@ -241,6 +257,9 @@ func TestNoOverlapOneSlotPath(t *testing.T) {
 	}
 	if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
 		t.Fatalf("Degraded = %s/%s %q once the successor is ready, want False", c.Status, c.Reason, c.Message)
+	}
+	if n := rg.submissions(); n != 2 {
+		t.Fatalf("%d jobs in all, want the primary's and its successor's: no extra was made beside either", n)
 	}
 }
 

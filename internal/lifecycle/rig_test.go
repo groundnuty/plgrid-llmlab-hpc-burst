@@ -324,7 +324,9 @@ func mdSpec(name string) *v1alpha1.ModelDeployment {
 				Flags:      []v1alpha1.EngineFlag{{Name: "max-model-len", Value: "32768"}},
 			}},
 			Instances: 1,
-			Providers: v1alpha1.ProviderSelection{Names: []string{rigProvider}},
+			// k = 0: the rig's deployments are about other behaviour; over-allocation's rows set k.
+			OverAllocation: ptrTo(int32(0)),
+			Providers:      v1alpha1.ProviderSelection{Names: []string{rigProvider}},
 			Workload: &v1alpha1.Workload{
 				ContextTokens:  v1alpha1.ContextTokens{Typical: 4096},
 				OutputTokens:   v1alpha1.OutputTokens{Typical: 512},

@@ -188,8 +188,10 @@ func (p *pass) startSignal(in *v1alpha1.Instance, av agentView, st settings) str
 		p.at(deadline)
 		return ""
 	}
-	if p.waitingAtRankingPoint(in) {
-		return "" // a surplus Instance that passed waits for its ranking, which health.startTimeout does not judge
+	if p.waitingAtRankingPoint(in) || p.readyThisPass(in, av) {
+		// A surplus Instance that passed waits for its ranking, which health.startTimeout does not judge, and one that
+		// passed and is chosen becomes ready in this pass, whatever its deadline (readyThisPass).
+		return ""
 	}
 	return v1alpha1.ReasonStartTimeout
 }
