@@ -27,30 +27,30 @@ type Charge struct {
 //
 // c is read only when named. It is in int64 with every sum and product checked: a value that would overflow refuses
 // the request, never wraps into an admit. A negative input is refused too, since none can come from the counts.
-func tokenFits(cap, b, n, u, c int64, named bool) bool {
-	if cap < 0 || b < 0 || n < 0 || u < 0 || c < 0 {
+func tokenFits(limit, b, n, u, c int64, named bool) bool {
+	if limit < 0 || b < 0 || n < 0 || u < 0 || c < 0 {
 		return false
 	}
-	rhs, ok := mulChecked(cap, b)
+	rhs, ok := mulChecked(limit, b)
 	if !ok {
 		return false
 	}
 	var lhs int64
 	if named {
-		lhs, ok = workloadLeft(cap, b, n, u, c)
+		lhs, ok = workloadLeft(limit, b, n, u, c)
 	} else {
-		lhs, ok = unnamedLeft(cap, b, n, u)
+		lhs, ok = unnamedLeft(limit, b, n, u)
 	}
 	return ok && lhs <= rhs
 }
 
-// workloadLeft is cap * (n + c) + u * B, and false when any step overflows.
-func workloadLeft(cap, b, n, u, c int64) (int64, bool) {
+// workloadLeft is limit * (n + c) + u * B, and false when any step overflows.
+func workloadLeft(limit, b, n, u, c int64) (int64, bool) {
 	nc, ok := addChecked(n, c)
 	if !ok {
 		return 0, false
 	}
-	own, ok := mulChecked(cap, nc)
+	own, ok := mulChecked(limit, nc)
 	if !ok {
 		return 0, false
 	}
@@ -61,9 +61,9 @@ func workloadLeft(cap, b, n, u, c int64) (int64, bool) {
 	return addChecked(own, others)
 }
 
-// unnamedLeft is cap * n + (u + 1) * B, and false when any step overflows.
-func unnamedLeft(cap, b, n, u int64) (int64, bool) {
-	charged, ok := mulChecked(cap, n)
+// unnamedLeft is limit * n + (u + 1) * B, and false when any step overflows.
+func unnamedLeft(limit, b, n, u int64) (int64, bool) {
+	charged, ok := mulChecked(limit, n)
 	if !ok {
 		return 0, false
 	}
