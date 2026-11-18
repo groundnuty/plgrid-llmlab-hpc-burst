@@ -51,9 +51,10 @@ parses each, and writes, for each, whether it parsed and the values of the
 named dests, to --out. --probe-expect is a JSON object of dest values that
 every parse must show. --check validates a data file without importing vllm.
 
-The parser is built on vLLM's CPU platform (VLLM_TARGET_DEVICE=cpu, set here):
-building it runs VllmConfig's default factories, and those infer a device type
-and fail on a node with no GPU. The flags do not depend on the platform: the
+The parser is built on vLLM's CPU platform (VLLM_TARGET_DEVICE=cpu, set here,
+and ensure_a_platform for a version that ignores it): building it runs
+VllmConfig's default factories, and those infer a device type and fail on a node
+with no GPU. The flags do not depend on the platform: the
 in-tree platforms' pre_register_and_update(parser) hook adds none, and the
 options come from dataclass field types and explicit add_argument calls. The
 probe below checks the result against the same parser it was built from.
@@ -167,9 +168,29 @@ def walk(serve):
     return rows
 
 
+def ensure_a_platform():
+    """Make sure vLLM has a platform, the CPU one on a node with no GPU; returns its name.
+
+    VLLM_TARGET_DEVICE=cpu does it in v0.32.0; an older vLLM ignores it and
+    finds no platform. Then the CPU platform is put in place as vLLM's own
+    `vllm bench` does on a node with no GPU (vllm/entrypoints/cli/main.py). It
+    must be in place before the CLI modules are imported.
+    """
+    from vllm import platforms
+
+    current = platforms.current_platform
+    if getattr(current, "device_type", ""):
+        return type(current).__name__
+    from vllm.platforms.cpu import CpuPlatform
+
+    platforms.current_platform = CpuPlatform()
+    return "CpuPlatform (put in place, as `vllm bench` does)"
+
+
 def capture_top_parser():
     """Run vllm's own CLI main() up to its first parse_args and return the top-level parser."""
     holder = {}
+    holder["platform"] = ensure_a_platform()
     orig = argparse.ArgumentParser.parse_args
 
     def capture(self, args=None, namespace=None):
@@ -191,6 +212,7 @@ def capture_top_parser():
         sys.argv = saved_argv
     if "top" not in holder:
         raise Failure("vllm's main() returned without parsing: the CLI parser was not captured")
+    print("dump.py: the parser was built on the platform %s" % holder["platform"], file=sys.stderr)
     return holder["top"]
 
 

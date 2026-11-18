@@ -439,3 +439,74 @@ func TestTheLoaderRefusesWhatTheGeneratorWouldNotHaveWritten(t *testing.T) {
 		mustLoadBooleanDumps(fstest.MapFS{"d/a.json": {Data: []byte("{")}}, "d")
 	})
 }
+
+// shippedDumpDigests are the engine images whose dump files this build ships,
+// by the vLLM version each holds, typed here from the brief (Docker Hub's index
+// digests of the version tags). A new file must be listed here too.
+var shippedDumpDigests = map[string]string{
+	"0.32.0": testPinnedDigest,
+	"0.26.0": "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
+}
+
+// TestEveryShippedDumpIsItsImageAndSaysHowItWasMade: each file holds the digest
+// and version the list above says, a file other than the pinned image's says
+// that its digest is Docker Hub's and not confirmed as the site's pin, and none
+// is shipped without a line here.
+func TestEveryShippedDumpIsItsImageAndSaysHowItWasMade(t *testing.T) {
+	if len(engineBooleanDumps.byDigest) != len(shippedDumpDigests) {
+		t.Errorf("%d dump files are shipped, %d are listed in this test", len(engineBooleanDumps.byDigest), len(shippedDumpDigests))
+	}
+	for version, digest := range shippedDumpDigests {
+		d := engineBooleanDumps.byDigest[digest]
+		if d == nil {
+			t.Errorf("no dump file for vLLM %s (%s)", version, digest)
+			continue
+		}
+		if d.Version != version || d.ImageDigest != digest || d.Image != "docker.io/vllm/vllm-openai" {
+			t.Errorf("the file for %s holds version %q, digest %q, image %q", version, d.Version, d.ImageDigest, d.Image)
+		}
+		if digest == testPinnedDigest {
+			continue
+		}
+		if want := "Docker Hub's v" + version + " index digest, not confirmed as Cyfronet's pin"; d.Note != want {
+			t.Errorf("vLLM %s: note %q, want %q", version, d.Note, want)
+		}
+		if want := "apptainer pull by digest; file sha256 checked against the puller's record"; d.Provenance != want {
+			t.Errorf("vLLM %s: provenance %q, want %q", version, d.Provenance, want)
+		}
+		if d.SourceCommit != "" {
+			t.Errorf("vLLM %s: sourceCommit %q, but no source checkout of this version was used", version, d.SourceCommit)
+		}
+	}
+}
+
+// TestTheV0260DumpIsSelectedByItsDigest: the 0.26.0 image's own file decides
+// for a spec on that image. The kinds of the flags a DeepSeek deployment sets
+// are those the generator's per-flag probe saw in that image on 18 Nov 2026
+// (--x and --no-x parse, --x=true is refused), typed here by hand. A name only
+// that version has (calculate-kv-scales, gone from v0.32.0) is a boolean there
+// and no boolean on the pinned image's list, and "false" renders by that file.
+func TestTheV0260DumpIsSelectedByItsDigest(t *testing.T) {
+	const v0260 = "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
+	d := engineBooleanDumps.byDigest[v0260]
+	if d == nil {
+		t.Fatal("no dump for the 0.26.0 image")
+	}
+	for _, name := range []string{"trust-remote-code", "enable-prefix-caching", "enable-chunked-prefill", "enable-auto-tool-choice", "disable-custom-all-reduce"} {
+		if d.kinds[name] != kindOptionalBoolean {
+			t.Errorf("0.26.0: %s has kind %q, want BooleanOptionalAction", name, d.kinds[name])
+		}
+	}
+	for _, name := range []string{"disable-log-stats", "headless"} {
+		if d.kinds[name] != kindStoreTrue {
+			t.Errorf("0.26.0: %s has kind %q, want store_true", name, d.kinds[name])
+		}
+	}
+	got := boolArgs(t, boolMD(v0260, specFlag("disable-custom-all-reduce", "true"), specFlag("enable-chunked-prefill", "false"), specFlag("disable-log-stats", "false"), specFlag("calculate-kv-scales", "true")))
+	if want := []string{"--disable-custom-all-reduce", "--no-enable-chunked-prefill", "--calculate-kv-scales"}; !slices.Equal(got, want) {
+		t.Errorf("on the 0.26.0 image: %q, want %q", got, want)
+	}
+	if got := boolArgs(t, boolMD(testPinnedDigest, specFlag("calculate-kv-scales", "true"))); !slices.Equal(got, []string{"--calculate-kv-scales=true"}) {
+		t.Errorf("on the pinned image: %q, want the unclassified form --calculate-kv-scales=true", got)
+	}
+}
