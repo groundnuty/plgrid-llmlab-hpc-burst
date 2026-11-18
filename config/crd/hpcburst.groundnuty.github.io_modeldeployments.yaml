@@ -108,6 +108,10 @@ spec:
                 maxLength: 256
                 minLength: 1
                 type: string
+                x-kubernetes-validations:
+                - message: 'a model name never contains ''#'': a request''s model
+                    name splits a Workload off at its only ''#'' (HBEP-3, Grammar)'
+                  rule: '!self.contains(''#'')'
               overAllocation:
                 default: 1
                 description: |-
@@ -827,6 +831,26 @@ spec:
                 - outputTokens
                 - targetSessions
                 type: object
+              workloads:
+                description: |-
+                  Workloads names the Workloads in this ModelDeployment's namespace that it
+                  serves; empty serves every Workload of its model (HBEP-7; HBEP-5, Workloads).
+                  A name that is no Workload of its model in this namespace serves nothing and
+                  sets no condition, a stated limit. It is a routing input only: warm-up and
+                  qualification keep spec.workload, so an edit releases nothing, and the capacity
+                  guard accepts an agent's edit of it (HBEP-11). Each name once; a CEL rule refuses a
+                  repeated name. The list is atomic (`@hpc-burst-science-agent`, 18 Nov 2026, #764 Q2).
+                items:
+                  maxLength: 63
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                  type: string
+                maxItems: 64
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: spec.workloads lists each Workload once (HBEP-7; HBEP-5,
+                    Workloads)
+                  rule: self.all(x, self.exists_one(y, y == x))
             required:
             - instances
             - model

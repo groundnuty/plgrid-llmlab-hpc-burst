@@ -1,7 +1,7 @@
 # The NARROW form of the ClusterRole hpcburst-agent: read-only (HBEP-10, Identities and roles; issue
 # #589, PR 3). It is the role of config/rbac/agents.yaml without the writes that the admission policies
 # bound (ModelDeployment create, update and patch; modeldeployments/scale; Operation create, update and
-# patch; Approval create).
+# patch; Approval create), and the Workload writes (create, update and patch; HBEP-764).
 #
 # hpcburst up applies this form first, with the policies and before the wait for their enforcement,
 # so that no moment of up lets an agent's role grant a write before the policy that bounds it is
@@ -16,7 +16,7 @@ metadata:
   name: hpcburst-agent
 rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
-    resources: ["modeldeployments", "allocations", "instances", "operations", "approvals"]
+    resources: ["modeldeployments", "allocations", "instances", "operations", "approvals", "workloads"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]

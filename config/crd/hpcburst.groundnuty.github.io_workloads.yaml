@@ -1,0 +1,175 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: workloads.hpcburst.groundnuty.github.io
+spec:
+  group: hpcburst.groundnuty.github.io
+  names:
+    categories:
+    - hpcburst
+    kind: Workload
+    listKind: WorkloadList
+    plural: workloads
+    singular: workload
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .spec.routeOrder
+      name: Route order
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Workload declares one class of a study's requests (HBEP-3; HBEP-5, Workloads; HBEP-764).
+          ModelDeployments in its namespace name the ones they serve in spec.workloads, and a
+          request names one by the front's workloadHeader or a "#<name>" suffix on its model
+          name. A Workload is a routing input only: warm-up and qualification keep each
+          ModelDeployment's own spec.workload, so no edit of a Workload releases capacity.
+          It has no status.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: WorkloadSpec is what a Workload declares (HBEP-5, Workloads).
+            properties:
+              managedSessions:
+                description: |-
+                  ManagedSessions bounds the Workload's requests in flight on managed targets. It
+                  is required with ManagedFirst, and refused until the front routes it.
+                format: int32
+                maximum: 1024
+                minimum: 1
+                type: integer
+              model:
+                description: |-
+                  Model is the model name the Workload's requests name, as a ModelDeployment's
+                  spec.model is. It never contains '#', which separates a Workload in a request's
+                  model name (HBEP-3, Grammar).
+                maxLength: 256
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: 'a model name never contains ''#'': a request''s model
+                    name splits a Workload off at its only ''#'' (HBEP-3, Grammar)'
+                  rule: '!self.contains(''#'')'
+              routeOrder:
+                default: OwnFirst
+                description: |-
+                  RouteOrder is which route takes the Workload's requests first. OwnFirst, the
+                  default, is HBEP-5's order: LLMLab takes overflow only. ManagedFirst comes with
+                  its routing (HBEP-764, merging in steps).
+                enum:
+                - OwnFirst
+                type: string
+              sessions:
+                description: |-
+                  Sessions is how many sessions the study expects in parallel. It is informational
+                  until planning for pre-staging reads it (HBEP-764, R6).
+                format: int32
+                maximum: 1024
+                minimum: 1
+                type: integer
+              shape:
+                description: |-
+                  Shape is the Workload's typical and longest context and output, in tokens. The
+                  front charges each of its requests contextTokens.typical plus outputTokens.typical
+                  against an Instance's token budget (HBEP-5, Workloads, The count in tokens).
+                properties:
+                  contextTokens:
+                    description: ContextTokens are the context lengths, in tokens.
+                    properties:
+                      longest:
+                        description: |-
+                          Longest is the longest context length. Absent, it is the resolved
+                          context limit (the max-model-len the engine reports) minus
+                          outputTokens.typical minus the chat template's overhead, so it is fixed
+                          at verification (HBEP-7).
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      short:
+                        default: 512
+                        description: Short is the short context length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      typical:
+                        description: Typical is the typical context length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - typical
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'contextTokens.typical must not exceed contextTokens.longest:
+                        the behaviour check runs at the longest context and never
+                        below the typical one, so contradictory bounds are refused'
+                      rule: '!has(self.longest) || self.typical <= self.longest'
+                  outputTokens:
+                    description: OutputTokens are the output lengths, in tokens.
+                    properties:
+                      longest:
+                        default: 4096
+                        description: Longest is the longest output length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      typical:
+                        description: Typical is the typical output length.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                    - typical
+                    type: object
+                required:
+                - contextTokens
+                - outputTokens
+                type: object
+            required:
+            - model
+            - shape
+            type: object
+            x-kubernetes-validations:
+            - message: managedSessions takes effect with routeOrder ManagedFirst,
+                which the front does not route yet; it is refused until then (HBEP-764,
+                merging in steps, @hpc-burst-science-agent's ruling Q12, 18 Nov 2026)
+              rule: '!has(self.managedSessions)'
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: 'a Workload name must be a DNS-1123 label: lowercase letters, digits
+            and ''-'', starting and ending with a letter or digit, at most 63 characters,
+            since a request names it after ''#'' in a model name (HBEP-3, Grammar)'
+          rule: self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name)
+            <= 63
+    served: true
+    storage: true
+    subresources: {}

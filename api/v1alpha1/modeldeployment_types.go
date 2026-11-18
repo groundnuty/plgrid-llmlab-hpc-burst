@@ -298,6 +298,7 @@ type ModelDeploymentSpec struct {
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="!self.contains('#')",message="a model name never contains '#': a request's model name splits a Workload off at its only '#' (HBEP-3, Grammar)"
 	Model string `json:"model"`
 
 	// Source says what is served: a checkpoint on our engine, or a catalog
@@ -393,6 +394,22 @@ type ModelDeploymentSpec struct {
 	//
 	// +optional
 	Workload *DeploymentWorkload `json:"workload,omitempty"`
+
+	// Workloads names the Workloads in this ModelDeployment's namespace that it
+	// serves; empty serves every Workload of its model (HBEP-7; HBEP-5, Workloads).
+	// A name that is no Workload of its model in this namespace serves nothing and
+	// sets no condition, a stated limit. It is a routing input only: warm-up and
+	// qualification keep spec.workload, so an edit releases nothing, and the capacity
+	// guard accepts an agent's edit of it (HBEP-11). Each name once; a CEL rule refuses a
+	// repeated name. The list is atomic (`@hpc-burst-science-agent`, 18 Nov 2026, #764 Q2).
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y == x))",message="spec.workloads lists each Workload once (HBEP-7; HBEP-5, Workloads)"
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Workloads []string `json:"workloads,omitempty"`
 
 	// Routing holds the front's settings for this deployment (HBEP-5,
 	// Configuration; HBEP-11, API). Absent, it takes its defaults, so the

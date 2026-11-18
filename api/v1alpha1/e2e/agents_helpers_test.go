@@ -265,12 +265,16 @@ func expectedAgentMatrix() []accessRow {
 	}
 	// hpcburst-agent in its WIDE form (PR 3; HBEP-10, Identities and roles): create and update
 	// ModelDeployments, their scale subresource included; create Operations, and update them to confirm;
-	// create Approvals. Each write is bounded by an admission policy (admission_*_test.go), which up
-	// enforces before it applies the wide role. The narrow form, which up applies before, has none of
-	// these; allocations, instances and every */status stay read-only or closed whatever the form.
+	// create Approvals; create and edit Workloads. Each write but the Workloads' is bounded by an admission
+	// policy (admission_*_test.go), which up enforces before it applies the wide role. The narrow form, which
+	// up applies before, has none of these; allocations, instances and every */status stay read-only or closed
+	// whatever the form.
 	add(G, "modeldeployments", "", "default", "get", "list", "watch", "create", "update", "patch")
 	add(G, "operations", "", "default", "get", "list", "watch", "create", "update", "patch")
 	add(G, "approvals", "", "default", "get", "list", "watch", "create")
+	// A Workload (HBEP-764) is a routing input that releases no capacity: an agent creates and edits it, by update or
+	// patch, and never deletes it. It has no status subresource, so there is no workloads/status row below.
+	add(G, "workloads", "", "default", "get", "list", "watch", "create", "update", "patch")
 	for _, r := range []string{"allocations", "instances"} {
 		add(G, r, "", "default", read...)
 	}
