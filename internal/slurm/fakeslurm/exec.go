@@ -34,6 +34,9 @@ type shell struct {
 	// runErr is a runner error that a command decided on after it had done
 	// its work (a lost sbatch reply); the line then returns it with no result.
 	runErr error
+	// timeFormat is SLURM_TIME_FORMAT as "env" set it for the one sbatch it runs
+	// ("" when the command had no prefix).
+	timeFormat string
 }
 
 // command is a simple command's implementation: the arguments after the
@@ -41,6 +44,7 @@ type shell struct {
 type command func(sh *shell, args []string) int
 
 var commands = map[string]command{
+	"env":       (*shell).env,
 	"sbatch":    (*shell).sbatch,
 	"srun":      (*shell).srun,
 	"squeue":    (*shell).squeue,

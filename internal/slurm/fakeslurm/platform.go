@@ -138,6 +138,7 @@ type Platform struct {
 	script   []SubmitStep
 	late     []lateJob
 	gates    map[string][]*Gate
+	to       testOnlyControls // sbatch --test-only's answer (testonly.go)
 
 	inflight, maxInflight int
 }
@@ -254,7 +255,7 @@ func (s *Session) Run(ctx context.Context, cmd slurm.Command) (slurm.Result, err
 		return slurm.Result{Stderr: []byte("bash: " + perr.Error() + "\n"), ExitCode: 2}, nil
 	}
 	if len(cmds) > 0 {
-		if err := p.waitGate(ctx, cmds[0].words[0]); err != nil {
+		if err := p.waitGate(ctx, commandWords(cmds[0].words)[0]); err != nil {
 			return slurm.Result{}, err
 		}
 	}
@@ -287,7 +288,10 @@ func (p *Platform) MaxConcurrent() int {
 }
 
 // ctxErr turns an ended context into the runner error the plugin reads: a
-// deadline is slurm.ErrTimeout, a cancellation slurm.ErrTransport.
+// deadline is slurm.ErrTimeout, a cancellation slurm.ErrTransport. It differs from the
+// real runner, which returns ErrTimeout only for the command's own time-out and
+// ErrTransport, with the context's error as text, for any end of the CALLER's context
+// (internal/slurm/sshrun, runClient); the test-only hang (testonly.go) uses that shape.
 func ctxErr(ctx context.Context) error {
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("%w: %v", slurm.ErrTimeout, ctx.Err())
@@ -317,7 +321,7 @@ func (p *Platform) CountFor(user, word string) int {
 	defer p.mu.Unlock()
 	n := 0
 	for _, c := range p.calls {
-		if c.Words[0] == word && (user == "" || c.User == user) {
+		if c.Command()[0] == word && (user == "" || c.User == user) {
 			n++
 		}
 	}

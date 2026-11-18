@@ -26,10 +26,9 @@ const estimateWindow = 60 * time.Second
 // noEstimateReason is the reason of an estimate that did not come within the window.
 const noEstimateReason = "no estimate within 60 s"
 
-// estimateEntry mirrors the entry of status.estimates[] that the Provider's controller writes (#661),
-// which is not in the API yet: provider, plan ID, the targets it covers by UID, and a start, either a time
-// or an unknown reason, with when it was read. estimateEntries maps the field into this, and nothing else
-// reads the API's own shape.
+// estimateEntry is the entry of status.estimates[] that the Provider's controller writes (#661): provider,
+// plan ID, the targets it covers by UID, and a start, either a time or an unknown reason, with when it was
+// read. estimateEntries maps the API's field into this, and nothing else reads the API's own shape.
 type estimateEntry struct {
 	Provider string
 	PlanID   string
@@ -46,9 +45,28 @@ type estimateStart struct {
 	ObservedAt time.Time
 }
 
-// estimateEntries reads the estimates of an Operation. The field does not exist yet, so there are none:
-// every estimate reads pending, then unknown. #661 maps status.estimates[] here, in a few lines.
-func estimateEntries(_ *v1alpha1.Operation) []estimateEntry { return nil }
+// estimateEntries reads the estimates of an Operation from status.estimates[]. An Operation the Provider's
+// controller has not written to has none, and every estimate then reads pending, then unknown. An entry's
+// shape (the hash that tells two submissions apart) is not read: a target has one shape, so the entries that
+// cover it are told by the plan ID, the Provider and the target's UID.
+func estimateEntries(op *v1alpha1.Operation) []estimateEntry {
+	out := make([]estimateEntry, 0, len(op.Status.Estimates))
+	for _, e := range op.Status.Estimates {
+		entry := estimateEntry{Provider: e.Provider, PlanID: e.PlanID, Start: estimateStart{Unknown: e.Start.Unknown}}
+		for _, uid := range e.Targets {
+			entry.Targets = append(entry.Targets, types.UID(uid))
+		}
+		if e.Start.Time != nil {
+			t := e.Start.Time.Time
+			entry.Start.Time = &t
+		}
+		if e.Start.ObservedAt != nil {
+			entry.Start.ObservedAt = e.Start.ObservedAt.Time
+		}
+		out = append(out, entry)
+	}
+	return out
+}
 
 type estimateKind string
 

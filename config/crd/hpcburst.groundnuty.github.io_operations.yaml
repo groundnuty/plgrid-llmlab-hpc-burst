@@ -446,6 +446,94 @@ spec:
                 - message: 'status.countGivenBack is set once: it cannot be changed
                     (HBEP-10, The report)'
                   rule: self == oldSelf
+              estimates:
+                description: |-
+                  Estimates are the Provider controllers' advisory start estimates for the
+                  plan's targets: Slurm's estimate for the same job submitted now (HBEP-10,
+                  The release cost; HBEP-4, Core operations, Estimate). Only a Provider's
+                  controller writes them, by server-side apply, one entry per Provider, plan
+                  ID and submission shape, each Provider under its own field manager
+                  (FieldManagerProviderEstimate). The lifecycle controller carries them over
+                  untouched and never reads them into a plan, so an estimate never changes
+                  the plan's id (`@hpc-burst-science-agent`, 17 Nov 2026, #661). An entry
+                  names the plan it was made for: a new plan's entries sit beside the old
+                  plan's, and a reader shows only the current plan's. A target with none
+                  reads as pending until 60 s after the plan's observedAt, then as unknown;
+                  an estimate that failed is an entry whose start is unknown, with its reason.
+                items:
+                  description: |-
+                    OperationEstimate is one Provider's estimate for the plan's targets of one
+                    submission shape (HBEP-10, The release cost).
+                  properties:
+                    planID:
+                      description: PlanID is status.plan.id as read when the estimate
+                        was asked for.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    provider:
+                      description: Provider is the Provider whose controller made
+                        the estimate.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    shape:
+                      description: |-
+                        Shape is opaque: 16 hex characters of SHA-256 over the canonical form of
+                        the submission parameters the estimate ran with (partition, QOS, GPUs,
+                        CPUs, memory, time limit, constraints and account, never the tag, the
+                        hold or the script). Clients compare it and never parse it. Targets of one
+                        shape share one estimate.
+                      maxLength: 64
+                      minLength: 1
+                      type: string
+                    start:
+                      description: |-
+                        Start is the estimate, or unknown with its reason, and the time it was
+                        read in observedAt. It is always advisory.
+                      properties:
+                        advisory:
+                          description: |-
+                            Advisory marks a figure that is an estimate, not a fact: Slurm's estimates
+                            swing by hours (HBEP-4, Risks).
+                          type: boolean
+                        observedAt:
+                          description: ObservedAt is when the inputs were read.
+                          format: date-time
+                          type: string
+                        time:
+                          description: Time is the value, when known.
+                          format: date-time
+                          type: string
+                        unknown:
+                          description: Unknown is why the value is not known.
+                          maxLength: 1024
+                          type: string
+                      type: object
+                    targets:
+                      description: Targets are the UIDs of the plan's targets the
+                        estimate covers.
+                      items:
+                        maxLength: 64
+                        type: string
+                      maxItems: 256
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: set
+                  required:
+                  - planID
+                  - provider
+                  - shape
+                  - start
+                  - targets
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - provider
+                - planID
+                - shape
+                x-kubernetes-list-type: map
               finishedAt:
                 description: |-
                   FinishedAt is when the Operation became Done, Stale or Refused, or
@@ -536,8 +624,10 @@ spec:
                             estimateNow:
                               description: |-
                                 EstimateNow is Slurm's estimate for the same job submitted now. It is
-                                advisory, and unknown until the estimate operation exists (HBEP-10, The
-                                release cost; Graduation, beta step 4).
+                                advisory. It is superseded by status.estimates, which the Provider's
+                                controller fills in: the lifecycle controller writes it as unknown and
+                                nothing reads a time from it (HBEP-10, The release cost;
+                                `@hpc-burst-science-agent`, 17 Nov 2026, #661).
                               properties:
                                 advisory:
                                   description: |-

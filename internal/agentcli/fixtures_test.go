@@ -37,7 +37,7 @@ func scalePlan() *v1alpha1.OperationPlan {
 					QueueWaits:    waits,
 					StartToReady:  &v1alpha1.DurationFigure{Unknown: "not measured yet; the controller plans with 30 min", ObservedAt: mt(t0)},
 					// The plan's placeholder: it is never shown, the target's estimate replaces it.
-					EstimateNow: &v1alpha1.TimeFigure{Unknown: "the estimate operation is beta step 4", ObservedAt: mt(t0), Advisory: true},
+					EstimateNow: &v1alpha1.TimeFigure{Unknown: "the estimate is in status.estimates, filled in by the Provider's controller", ObservedAt: mt(t0), Advisory: true},
 				}},
 			{Kind: v1alpha1.TargetKindInstance, Name: "inst-r", UID: "uid-inst-r", Provider: "sano", Effect: v1alpha1.PlanEffectDrainLastReady,
 				NeedsApproval: true, ApprovalRule: "drain the last ready Instance", Policies: policies(),

@@ -1,11 +1,15 @@
 package v1alpha1
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // Field managers (docs/development.md, Single writer). Every write names its
@@ -23,6 +27,78 @@ const (
 	// ConditionDialHomeUnreachable, which it keeps as it found it.
 	FieldManagerProvider = "hpcburst-provider"
 )
+
+// FieldManagerProviderEstimate is the field manager under which one Provider's
+// controller applies its entries of an Operation's status.estimates
+// (EstimateApply): "hpcburst-provider-" plus the Provider's name, so at most 81
+// characters. Server-side apply removes the entries that a manager owned and its
+// next apply leaves out, so a manager shared by every Provider would let one
+// Provider's apply erase another's entries; one manager per Provider keeps each
+// Provider's entries its own (`@hpc-burst-science-agent`, 17 Nov 2026, #661).
+// It is for this apply only: Provider status stays under FieldManagerProvider.
+func FieldManagerProviderEstimate(provider string) string {
+	return FieldManagerProvider + "-" + provider
+}
+
+// EstimateApply returns the server-side apply object with which a Provider's
+// controller writes its estimates onto an Operation's status. It holds the
+// Operation's name and namespace and the entries, and nothing else, so the apply
+// owns only those list entries (status.estimates is a map list
+// keyed by provider, planID and shape). Apply it to the status subresource
+// under FieldManagerProviderEstimate(provider), with forced ownership:
+//
+//	c.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
+//		client.FieldOwner(FieldManagerProviderEstimate(provider)), client.ForceOwnership)
+//
+// An apply removes the entries its manager owns that it omits. So entries must
+// be ALL of the Provider's entries for the Operation's current plan, every shape,
+// finished or failed, never one entry at a time: applying shape B alone would
+// drop shape A, and an older plan's entries go the same way, which is meant.
+// Each entry must name provider, hold a plan ID, a shape and at least one
+// target, and carry either a time or the reason it is unknown, never both and
+// never neither; its figure is always advisory, whatever the caller set.
+func EstimateApply(namespace, name, provider string, entries []OperationEstimate) (*unstructured.Unstructured, error) {
+	switch {
+	case namespace == "" || name == "":
+		return nil, fmt.Errorf("estimate apply: no Operation name")
+	case provider == "":
+		return nil, fmt.Errorf("estimate apply: no Provider name")
+	case len(entries) == 0:
+		return nil, fmt.Errorf("estimate apply: no entries: an apply of none would remove this Provider's entries")
+	}
+	sorted := make([]OperationEstimate, len(entries))
+	for i, e := range entries {
+		switch {
+		case e.Provider != provider:
+			return nil, fmt.Errorf("estimate apply: entry %d names Provider %q, not %q", i, e.Provider, provider)
+		case e.PlanID == "" || e.Shape == "":
+			return nil, fmt.Errorf("estimate apply: entry %d has no plan ID or no shape", i)
+		case len(e.Targets) == 0:
+			return nil, fmt.Errorf("estimate apply: entry %d covers no target", i)
+		case (e.Start.Time == nil) == (e.Start.Unknown == ""):
+			return nil, fmt.Errorf("estimate apply: entry %d must carry a time or the reason it is unknown, and not both", i)
+		}
+		e.Start.Advisory = true
+		sorted[i] = *e.DeepCopy()
+	}
+	slices.SortFunc(sorted, func(a, b OperationEstimate) int {
+		return cmp.Or(strings.Compare(a.PlanID, b.PlanID), strings.Compare(a.Shape, b.Shape))
+	})
+	list := make([]any, len(sorted))
+	for i := range sorted {
+		m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&sorted[i])
+		if err != nil {
+			return nil, fmt.Errorf("estimate apply: entry %d: %w", i, err)
+		}
+		list[i] = m
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": GroupVersion.String(),
+		"kind":       "Operation",
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"status":     map[string]any{"estimates": list},
+	}}, nil
+}
 
 // DialHomeUnreachableApply returns the server-side apply object with which the
 // lifecycle controller sets ConditionDialHomeUnreachable on a Provider's

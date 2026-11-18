@@ -153,6 +153,10 @@ func Setup(mgr manager.Manager, o Options) error {
 	if err != nil {
 		return err
 	}
+	// The Provider's start estimates, written into the Operations that plan a target on it (beta; #661).
+	if err := setupEstimates(mgr, c); err != nil {
+		return fmt.Errorf("estimate controller: %w", err)
+	}
 	if r := c.shared.relays; r != nil {
 		// The epoch is this copy's own acquisition's, and the relays stop by
 		// PID before any release of the Provider's Lease (HBEP-6, Fencing):
