@@ -254,7 +254,7 @@ func newTunnelRig(t *testing.T) *tunnelRig {
 	frps, frpc := testenv.FrpBinaries(t)
 	api := startAPIServer(t)
 	ctx := context.Background()
-	for _, ns := range []string{v1alpha1.ControllerNamespace, tunnelNS} {
+	for _, ns := range []string{tunnelNS} {
 		if err := api.client.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil {
 			t.Fatal(err)
 		}
