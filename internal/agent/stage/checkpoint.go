@@ -46,7 +46,7 @@ func (s *Stager) Checkpoint(ctx context.Context, req agent.CheckpointRequest) (a
 	}
 	if !req.RehashOnly {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return res, err
+			return res, stepFailed("creating the checkpoint directory under the staging directory", err)
 		}
 		s.removeStaleParts(dir)
 	}

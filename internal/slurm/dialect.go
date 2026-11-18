@@ -56,15 +56,24 @@ func bootstrap(agentPath, digest, allocDir string) string {
 
 // bootstrapIn is bootstrap with the partition's tmpDir: it sets and exports
 // TMPDIR first (setTmpDir), then checks the digest, then runs the agent, as
-// HBEP-4's Submission orders them. With no tmpDir it is bootstrap's line, byte
-// for byte, and the job keeps its own TMPDIR.
+// HBEP-4's Submission orders them. With no tmpDir the job keeps its own TMPDIR.
+//
+// The staging directory is account data (HBEP-4, Provider settings; #757), and
+// the job's standard error, job.err, is read by people and carried by tools, so
+// no failure here names the binary's path. sha256sum's own error is silenced
+// (given the path as an argument, so that no redirection of the shell can
+// fail and print it), a binary that is not executable is found by a test
+// before the exec, and a failure ends the job, with exit status 1, after one
+// fixed line. The agent's own standard error is untouched: exec is not
+// redirected.
 func bootstrapIn(agentPath, digest, allocDir, tmpDir string) string {
-	check := "[ $(sha256sum " + agentPath + " | cut -c1-64) = " + digest + " ]"
-	run := "exec " + agentPath + " " + allocDir
+	check := `[ "$(sha256sum ` + agentPath + ` 2>/dev/null | cut -c1-64)" = ` + digest + ` ] && [ -x ` + agentPath + ` ]`
+	run := `if ` + check + `; then exec ` + agentPath + ` ` + allocDir +
+		`; else echo "hb: the staged agent binary is missing, changed or not executable" >&2; exit 1; fi`
 	if tmpDir == "" {
-		return check + " && " + run
+		return run
 	}
-	return setTmpDir(tmpDir) + " && " + check + " && " + run
+	return setTmpDir(tmpDir) + " && " + run
 }
 
 // setTmpDir sets TMPDIR to the partition's tmpDir, expanded by the job's own
@@ -253,12 +262,15 @@ func slurmMessage(stderr string) string {
 	return "no error text"
 }
 
-// What redactPaths removes from Slurm's own error text: an absolute path (a
-// "/" at the start of a word, so "account/partition" and "send/recv" stay),
+// What redactPaths removes from Slurm's own error text: an absolute path, whole
+// (a "/" at the start of a word, so "account/partition" and "send/recv" stay;
+// the word runs to white space, a quote or the end, so a path with a colon, an
+// equals sign or a comma, which stagingDir's pattern allows, goes in one piece,
+// and a colon that ends the path is Slurm's own punctuation and stays),
 // Slurm's "host:<name>[:<port>]", an IPv4 address, and a dotted host name
 // whose last label is letters (so "v0.0.42" and "23.11" stay).
 var (
-	absPath   = regexp.MustCompile(`(^|[\s'"(=:])/[^\s:'"]*`)
+	absPath   = regexp.MustCompile(`(^|[\s'"(=:])/(?:[^\s'"]*[^\s'":])?`)
 	hostPort  = regexp.MustCompile(`\bhost:[^\s:]+(:[0-9]+)?`)
 	ipv4      = regexp.MustCompile(`\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b`)
 	dottedFQN = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)

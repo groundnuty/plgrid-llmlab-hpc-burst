@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -93,7 +94,8 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 	}
 
 	v := Validated{Settings: provider.Settings{
-		Provider: prov.Name, Account: prov.Spec.Account, Grant: prov.Spec.Grant, QOS: prov.Spec.QOS, Labels: prov.Labels,
+		Provider: prov.Name, Account: prov.Spec.Account, Grant: prov.Spec.Grant, QOS: prov.Spec.QOS, StagingDir: prov.Spec.StagingDir,
+		Labels: prov.Labels,
 	}}
 	if ref := prov.Spec.CredentialsRef; ref != nil {
 		v.Settings.CredentialsFile = ref.File
@@ -138,6 +140,7 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 			}
 		}
 		checkProfile(s, bad)
+		checkStagingDir(s, v.Settings.StagingDir, bad)
 		checkQOS(s, v.Settings.QOS, bad)
 	}
 
@@ -287,8 +290,21 @@ func checkProfile(s v1alpha1.PlatformProfileSpec, bad func(string, string, ...an
 			bad(field, "is not a positive duration")
 		}
 	}
-	if s.StagingDir == "" {
-		bad("spec.stagingDir", "is required for a batch platform: the agent and the Allocation's files are staged there")
+}
+
+// checkStagingDir checks that a batch platform has a staging directory: the
+// Provider's own stagingDir, which wins, or else the profile's (HBEP-4,
+// Provider settings and Core operations, ReadProfile; #757). With neither it
+// refuses, naming both fields. A Provider's value is held to the form the
+// profile's CRD rule gives (no ".." segment, which agent.json refuses). No
+// message holds the value: a literal cluster path carries a user name, so,
+// like the account, it never reaches a status, an event or a log.
+func checkStagingDir(s v1alpha1.PlatformProfileSpec, providerDir string, bad func(string, string, ...any)) {
+	if providerDir != "" && slices.Contains(strings.Split(providerDir, "/"), "..") {
+		bad("provider.spec.stagingDir", "must not contain a '..' segment: agent.json refuses one")
+	}
+	if providerDir == "" && s.StagingDir == "" {
+		bad("spec.stagingDir", "is required for a batch platform: set provider.spec.stagingDir or the PlatformProfile's spec.stagingDir; the agent and the Allocation's files are staged there")
 	}
 }
 
