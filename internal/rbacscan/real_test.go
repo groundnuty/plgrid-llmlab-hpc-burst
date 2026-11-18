@@ -94,22 +94,22 @@ func TestTheScanSeesEachIdentityAtWork(t *testing.T) {
 			t.Errorf("the manifest has no rules for %s", id)
 		}
 	}
-	for _, want := range []struct{ ident, file, fn string }{
-		{lifecycle, "internal/lifecycle/owner.go", "syncOwnerLabel"},
-		{lifecycle, "internal/lifecycle/opexec.go", "afterCommitError"},
-		{lifecycle, "internal/lifecycle/opexec.go", "keepOperationUntilFinished"},
-		{lifecycle, "cmd/hpcburst-controller/tunnel.go", "pluginFeed"}, // GetInformer, through the interface tunnel.go declares
-		{provider, "internal/providerctl/keeper.go", ""},
-		{front, "internal/front/records.go", "listRecords"},
+	for _, want := range []struct{ ident, file, fn, what string }{
+		{lifecycle, "internal/lifecycle/owner.go", "syncOwnerLabel", ""},
+		{lifecycle, "internal/lifecycle/opexec.go", "afterCommitError", ""},
+		{lifecycle, "internal/lifecycle/opexec.go", "keepOperationUntilFinished", ""},
+		{lifecycle, "cmd/hpcburst-controller/tunnel.go", "pluginFeed", "cache.GetInformer"}, // through the interface tunnel.go declares
+		{provider, "internal/providerctl/keeper.go", "", ""},
+		{front, "internal/front/records.go", "listRecords", ""},
 	} {
 		found := false
 		for _, st := range res.Sites {
-			if st.Ident == want.ident && strings.HasPrefix(st.Pos, want.file+":") && strings.Contains(st.Func, want.fn) {
+			if st.Ident == want.ident && strings.HasPrefix(st.Pos, want.file+":") && strings.Contains(st.Func, want.fn) && strings.Contains(st.What, want.what) {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("the scan found no site of %s in %s %s", want.ident, want.file, want.fn)
+			t.Errorf("the scan found no site of %s in %s %s %s", want.ident, want.file, want.fn, want.what)
 		}
 	}
 	t.Logf("%d sites (%d for %s, %d for %s, %d for %s), %d library entries, %d call sites in code nothing calls", len(res.Sites),
