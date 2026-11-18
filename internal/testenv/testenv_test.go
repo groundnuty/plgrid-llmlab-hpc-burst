@@ -49,6 +49,7 @@ func TestPortBase(t *testing.T) {
 		want  int
 	}{
 		{"", 29200}, {"29200", 29200}, {"29208", 29208}, {"29216", 29216}, // 29216+3 = 29219, the last port
+		{"28560", 28560}, {"28564", 28564}, {"28570", 28570}, {"28576", 28576}, // the second range: 28576+3 = 28579
 	} {
 		got, err := portBase(tc.value)
 		if err != nil || got != tc.want {
@@ -60,6 +61,9 @@ func TestPortBase(t *testing.T) {
 		"29217", "29218", "29219", // the block would run past 29219
 		"29220",                                     // #41's block
 		"29240", "0", "-1", "6443", "6444", "10250", // the root k3s's ports and others
+		"28559",                   // one below the second range
+		"28577", "28578", "28579", // the block would run past 28579
+		"28580", "28540", "28520", // above it, and the neighbours' blocks (#659 P1's, #660's k3s tests')
 		"abc", "29200.5", " 29200", "29200 ", "0x7210",
 	} {
 		if got, err := portBase(v); err == nil {
