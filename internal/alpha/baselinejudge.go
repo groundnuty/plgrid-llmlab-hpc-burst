@@ -631,9 +631,34 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		if !o.Detached {
 			f("the managed ModelDeployment was not seen detached at the front before the phase")
 		}
-		// The waiting requests are served after waiting: by the records the front held more requests than the cap at once.
-		if peak, _, _ := inFlightStats(rowsOn(joined, managed, RouteServed), -1); len(joined) > 0 && peak <= cap && len(invalid) == 0 {
-			inv("no request waited: by the usage records no more than the cap of %d was in the front at once, so the cap never bound", cap)
+		// The waits are witnessed by the FRONT's own count of requests waiting in its FIFO (its /healthz "waiting", read every 250 ms), never inferred from the
+		// engine's peaks or the records' overlap (the science agent's ruling on #764, #776's review, point 6). The phase passes only if ALL hold: the count
+		// reaches 2 (two requests in the FIFO at once); it is back at 0 when the phase ends, and no 503 capacity answer occurred (above), so both waiters were
+		// PLACED from the FIFO and did not time out; no request reached LLMLab after the detach (above); and all 13 sessions' first turns ended with 200.
+		switch {
+		case !po.ServedOfModelRead:
+			f("the number of served ModelDeployments of the model could not be read, so the front's waiting count could not be taken for one deployment's")
+		case po.ServedOfModel != 1:
+			f("the front's waiting count sums every group, and is one deployment's only with ONE served deployment of the model, and the front holds %d", po.ServedOfModel)
+		}
+		if len(po.Waiting) == 0 {
+			f("the front's waiting count (/healthz) was not read in the detach phase, so the waits were not witnessed")
+		} else {
+			maxWaiting := 0
+			for _, s := range po.Waiting {
+				maxWaiting = max(maxWaiting, s.N)
+			}
+			if maxWaiting < LLMLabK {
+				inv("the front's own waiting count reached at most %d, want %d: two requests in its FIFO at once were not witnessed, so the detach showed no wait", maxWaiting, LLMLabK)
+			}
+			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 {
+				f("the front's waiting count was %d when the phase ended: requests were still in its FIFO, so the waiters were not placed", last)
+			}
+		}
+		// All 13 sessions' first turns must have run and ended with 200: a first turn that was sent and failed is a failed request above (a 503 makes the phase
+		// INVALID, any other failure fails it), so what is counted here is a session that has none.
+		if n := len(sessionsWithFirstTurn(joined)); n < cap+LLMLabK {
+			f("only %d of the %d sessions' first turns ended with 200: the others were never sent or never answered", n, cap+LLMLabK)
 		}
 	}
 
@@ -907,10 +932,67 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 	return b.String()
 }
 
-// waitsLine is the phase's waits at the front. Today the front has no wait series and no per-request wait (HBEP-5, Usage records; #769 proposes
-// hpcburst_front_waiting), so with LLMLab attached, whose overflow is unbounded (internal/front/route.go:119-129), a wait is 0 by construction and the
-// line says so; the detach phase's are measured by the usage records against the engine: the most requests in the front at once less the most running at the
-// engine.
+// sessionsWithFirstTurn are the distinct sessions that have a first turn among the joined requests, answered whole or not.
+func sessionsWithFirstTurn(joined []joinedRow) map[string]bool {
+	out := map[string]bool{}
+	for _, j := range joined {
+		if j.Gen.Turn == 1 {
+			out[j.Gen.Session] = true
+		}
+	}
+	return out
+}
+
+// longestWaitingStretch is the longest time between the first and the last of consecutive reads of the front's waiting count above 0: a LOWER bound on the
+// longest stretch with a request in the FIFO, since the reads are a poll apart. Zero for a count above 0 in one read alone.
+func longestWaitingStretch(samples []WaitSample) time.Duration {
+	var best time.Duration
+	var from time.Time
+	in := false
+	for _, s := range samples {
+		switch {
+		case s.N > 0 && !in:
+			from, in = s.At, true
+			fallthrough
+		case s.N > 0:
+			best = max(best, s.At.Sub(from))
+		default:
+			in = false
+		}
+	}
+	return best
+}
+
+// indirectWaitWitness is the INDIRECT witness of waiting, from the front's records: the first-token times of the sessions' first turns that were over the cap
+// (the k largest), and the shortest service time of the others'. A request that waited for a held one to complete cannot have a first token before that one
+// completed, so its first token comes after the shortest service time of the held ones. It is posted beside the count, never in place of it, and is no pass
+// condition. False when there are too few first turns with a first-token time.
+func indirectWaitWitness(joined []joinedRow, managed string, k int) (overCap []int64, heldShortest int64, ok bool) {
+	type t1 struct{ first, dur int64 }
+	var rows []t1
+	for _, j := range joined {
+		if j.Gen.Turn == 1 && j.route(managed) == RouteServed && !j.failed() && j.Front.FirstTokenMs != nil {
+			rows = append(rows, t1{*j.Front.FirstTokenMs, j.Front.DurationMs})
+		}
+	}
+	if len(rows) <= k {
+		return nil, 0, false
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].first > rows[j].first })
+	heldShortest = rows[k].dur
+	for _, r := range rows[k:] {
+		heldShortest = min(heldShortest, r.dur)
+	}
+	for _, r := range rows[:k] {
+		overCap = append(overCap, r.first)
+	}
+	return overCap, heldShortest, true
+}
+
+// waitsLine is the phase's waits at the front. The front keeps no per-request wait (HBEP-5, Usage records) and no wait series until #769 (R7,
+// hpcburst_front_waiting), so with LLMLab attached, whose overflow is unbounded (internal/front/route.go:119-129), a wait is 0 by construction and the line
+// says so. The detach phase's are WITNESSED by the front's own count of requests waiting in its FIFO: posted as what it is, a count read every 250 ms, with the
+// longest stretch above 0 as a LOWER bound and the indirect first-token witness beside it; the per-request wait durations are NOT witnessed.
 func waitsLine(o BaselineObs, po PhaseObs, joined []joinedRow) string {
 	capped := 0
 	for _, j := range joined {
@@ -921,11 +1003,19 @@ func waitsLine(o BaselineObs, po PhaseObs, joined []joinedRow) string {
 	if po.Phase.Kind != KindDetach {
 		return fmt.Sprintf("  - waits at the front: 0 by construction with LLMLab attached (its overflow is unbounded, so the front never queues; the front has no wait series yet, #769 proposes one); 503 capacity answers: %d\n", capped)
 	}
-	peak, _, _ := inFlightStats(rowsOn(joined, o.LLMLabProvider, RouteServed), -1)
-	running := 0.0
-	for _, s := range po.Engine {
-		running = max(running, s.Running)
+	maxWaiting := 0
+	for _, s := range po.Waiting {
+		maxWaiting = max(maxWaiting, s.N)
 	}
-	return fmt.Sprintf("  - waits at the front, MEASURED (LLMLab detached): at most %d requests in the front at once by the usage records, at most %.0f running at the engine, so at most %.0f waited in the front's FIFO, served after waiting (time to first token above includes the wait); 503 answers: %d\n",
-		peak, running, float64(peak)-running, capped)
+	last := -1
+	if n := len(po.Waiting); n > 0 {
+		last = po.Waiting[n-1].N
+	}
+	line := fmt.Sprintf("  - waits at the front, WITNESSED by the front's own count of requests in its FIFO (its /healthz waiting, %d reads %s apart, a COUNT and not a per-request wait): at most %d at once, %d when the phase ended; 503 capacity answers: %d; the longest stretch with a request in the FIFO was at least %s (a LOWER bound, one poll apart)\n",
+		len(po.Waiting), BaselineWaitingPoll, maxWaiting, last, capped, longestWaitingStretch(po.Waiting))
+	if over, held, ok := indirectWaitWitness(joined, o.LLMLabProvider, LLMLabK); ok {
+		line += fmt.Sprintf("  - the INDIRECT witness, from the front's records: the first-token times of the %d over-cap first turns were %v ms, against %d ms, the shortest service time of a held first turn: a request that waited cannot have a first token before the one it waited for completed (posted beside the count, no pass condition)\n", LLMLabK, over, held)
+	}
+	line += fmt.Sprintf("  - the per-request wait DURATIONS are NOT witnessed until the front's waiting series (#769, PR 5); the count sums every group and is one deployment's here because the front held %d served deployment(s) of the model (it must be exactly one)\n", po.ServedOfModel)
+	return line
 }

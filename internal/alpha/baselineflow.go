@@ -17,6 +17,9 @@ const (
 	// BaselineP0Wait bounds everything before the GPU job: the managed ModelDeployment's catalog read (the Provider's controller lists LLMLab's
 	// catalog once a minute) until the managed target answers, and P0's request.
 	BaselineP0Wait = 4 * time.Minute
+	// BaselineWaitingPoll is how often the detach phase reads the front's own count of requests waiting in its FIFO (/healthz, local, cheap), so that two waits
+	// of about one request's time are not missed between the guard's looks.
+	BaselineWaitingPoll = 250 * time.Millisecond
 	// BaselinePoll is how often a running phase looks at LLMLab's request count, the Instance's eligibility and the engine.
 	BaselinePoll = 2 * time.Second
 	// BaselineDetachWait bounds the wait, after the managed ModelDeployment is deleted, for the front to drop its target, and BaselineDetachEvery is how
@@ -57,6 +60,12 @@ type BaselineWorld interface {
 	LoggedKV(ctx context.Context) (int64, bool)
 	// Gate is one request at model@<provider>, which only the served Instance answers.
 	Gate(ctx context.Context) (GateObs, error)
+	// FrontWaiting is the front's own count of requests waiting in its FIFO, read from its /healthz ("waiting", internal/front/server.go:554): it sums every
+	// group's queue (router.go:609). False when it could not be read.
+	FrontWaiting(ctx context.Context) (int, bool)
+	// ServedDeploymentsOfModel is how many served ModelDeployments of the row's model the stack holds: the front's waiting count is one deployment's only when
+	// there is exactly one. False when it could not be read.
+	ServedDeploymentsOfModel(ctx context.Context) (int, bool)
 	// LLMLabCount is the front's request metric for the managed Provider, hpcburst_front_requests_total{provider}, summed over its codes.
 	LLMLabCount(ctx context.Context) (float64, bool)
 	// ServedEligible says the served Instance is ready and eligible: its phase ready and AgentUnreachable not true.
@@ -83,8 +92,8 @@ type BaselineSettings struct {
 	// OmitMinTokens is the run-wide min_tokens switch, recorded in the observation.
 	OmitMinTokens bool
 	// Poll, FitMargin, DetachWait and DetachEvery are BaselinePoll, BaselineFitMargin, BaselineDetachWait and BaselineDetachEvery unless a test sets them.
-	Poll, FitMargin, DetachWait, DetachEvery time.Duration
-	Logf                                     func(format string, args ...any)
+	Poll, FitMargin, DetachWait, DetachEvery, WaitingPoll time.Duration
+	Logf                                                  func(format string, args ...any)
 	// lastRead is the agent's read time of the last engine read taken anywhere in the run, shared by every phase (RunBaseline sets it).
 	lastRead *time.Time
 }
@@ -135,6 +144,9 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 	}
 	if s.DetachEvery <= 0 {
 		s.DetachEvery = BaselineDetachEvery
+	}
+	if s.WaitingPoll <= 0 {
+		s.WaitingPoll = BaselineWaitingPoll
 	}
 	s.lastRead = new(time.Time)
 	o := BaselineObs{Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
@@ -243,8 +255,16 @@ func runPhase(ctx context.Context, w BaselineWorld, s BaselineSettings, ph Phase
 	if err != nil {
 		return po, fmt.Errorf("%s: the generator could not start: %w", ph.Name, err)
 	}
-	tick := time.NewTicker(s.Poll)
+	// The detach phase reads the front's own waiting count at its own, faster cadence, and does the guard's looks every Poll/WaitingPoll ticks of it.
+	detach := ph.Kind == KindDetach
+	interval, slowEvery := s.Poll, 1
+	if detach {
+		po.ServedOfModel, po.ServedOfModelRead = w.ServedDeploymentsOfModel(ctx)
+		interval, slowEvery = s.WaitingPoll, max(1, int(s.Poll/s.WaitingPoll))
+	}
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
+	ticks := 0
 	deadline := po.Start.Add(ph.Bound)
 loop:
 	for {
@@ -256,6 +276,14 @@ loop:
 			<-gen.Done()
 			return po, ctx.Err()
 		case <-tick.C:
+		}
+		if detach {
+			if n, ok := w.FrontWaiting(ctx); ok {
+				po.Waiting = append(po.Waiting, WaitSample{At: w.Now(), N: n})
+			}
+			if ticks++; ticks%slowEvery != 0 {
+				continue
+			}
 		}
 		n, ok := w.LLMLabCount(ctx)
 		if !ok {
@@ -287,6 +315,12 @@ loop:
 		return po, fmt.Errorf("%s: the generator's run broke: %w", ph.Name, err)
 	}
 	po.End = w.Now()
+	if detach {
+		// One more read once the generator has ended: the waiters must have been placed by then.
+		if n, ok := w.FrontWaiting(ctx); ok {
+			po.Waiting = append(po.Waiting, WaitSample{At: w.Now(), N: n})
+		}
+	}
 	if smp, ok := w.EngineSample(ctx); ok {
 		s.takeRead(&po, smp)
 	}

@@ -1240,6 +1240,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
+  # #776's review, point 6: the detach phase passes only on the front's own waiting count reaching 2 and returning to 0.
+  'baselinejudge.go@@			if maxWaiting < LLMLabK {@@			if maxWaiting < 1 {'
+  'baselinejudge.go@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 {@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 && false {'
   # #776's review, point 3: the control and the long phase need all N sessions, N requests in flight at once on the Instance, and N of them in the long range.
   'baselinejudge.go@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < cap {@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < 0 {'
   'baselinejudge.go@@			if peak, _, _ := inFlightStats(served, -1); peak < cap {@@			if peak, _, _ := inFlightStats(served, -1); peak < 0 {'

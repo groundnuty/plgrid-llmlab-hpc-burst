@@ -5,6 +5,7 @@ package alpha
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -205,6 +206,52 @@ func (b *liveBaseline) LLMLabCount(ctx context.Context) (float64, bool) {
 	var n float64
 	for _, s := range obscheck.Find(ss, "hpcburst_front_requests_total", map[string]string{"provider": LLMLabProviderName}) {
 		n += s.Value
+	}
+	return n, true
+}
+
+// FrontWaiting reads the front's /healthz (the same local port as its /metrics, base + 4) for its own count of requests waiting in its FIFO ("waiting",
+// internal/front/server.go:554). It sums every group's queue (router.go:609), so it is one deployment's only while the front holds one served deployment of
+// the model (ServedDeploymentsOfModel). A body or a status it cannot read is no sample.
+func (b *liveBaseline) FrontWaiting(ctx context.Context) (int, bool) {
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, b.r.h.Ports.URL(4, "/healthz"), nil)
+	if err != nil {
+		return 0, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var body struct {
+		Waiting *int `json:"waiting"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil || body.Waiting == nil || *body.Waiting < 0 {
+		return 0, false
+	}
+	return *body.Waiting, true
+}
+
+// ServedDeploymentsOfModel counts the served ModelDeployments of the row's model in the run's namespace: the managed one is not served (it names a catalog
+// entry), so with it gone and the row's own left it is 1.
+func (b *liveBaseline) ServedDeploymentsOfModel(ctx context.Context) (int, bool) {
+	r := b.r
+	cctx, cancel := stack.CallCtx(r.t)
+	defer cancel()
+	var l v1alpha1.ModelDeploymentList
+	if err := r.c.List(cctx, &l, client.InNamespace(r.w.md.Namespace)); err != nil {
+		return 0, false
+	}
+	n := 0
+	for _, md := range l.Items {
+		if md.Spec.Model == BaselineModel && md.Spec.Source.Served != nil {
+			n++
+		}
 	}
 	return n, true
 }

@@ -284,7 +284,7 @@ func TestTheBaselinePostCarriesWhatTheIssueAsks(t *testing.T) {
 		"  - the served Instance (Sano): 264 requests, 11 sessions (distinct), 11 at most in flight; spills in 0, out 48; errors 0; time to first token p50 50 ms, p95 50 ms;",
 		"  - LLMLab (managed): 48 requests, 2 sessions (distinct), 2 at most in flight; spills in 48, out 0; errors 0; time to first token p50 300 ms, p95 300 ms;",
 		"waits at the front: 0 by construction with LLMLab attached",
-		"waits at the front, MEASURED (LLMLab detached): at most 13 requests in the front at once by the usage records, at most 11 running at the engine, so at most 2 waited",
+		"waits at the front, WITNESSED by the front's own count of requests in its FIFO (its /healthz waiting,",
 		"- the cap is 11, a constant fixed before the run: floor(0.95 x 389120 / 32768)",
 		"R4's declared charge for comparison: the typical shape's 1,152 tokens against KV 389120 is 337 sessions, capped at max-num-seqs 256, where the baseline's cap is 11",
 		"- the mapping to #769 (hbep-764-amend at 9cc8368d)",
@@ -824,5 +824,76 @@ func TestKVIsPostedAsAtTheCapOnlyFromReadsInsideTheStretch(t *testing.T) {
 	// One request short of the cap for the whole phase: no stretch, no read at the cap.
 	if got := readsAtTheCap(po, joined[:CapSano-1], LLMLabProviderName, CapSano); len(got) != 0 {
 		t.Errorf("%d reads at the cap with %d requests in flight", len(got), CapSano-1)
+	}
+}
+
+// The detach phase's waits are WITNESSED by the front's own count of requests in its FIFO (its /healthz waiting), never inferred from the engine's peaks (the
+// science agent's ruling on #764, #776's review, point 6). It passes only if the count reaches 2, is back at 0 when the phase ends (and no 503 capacity answer
+// occurred, so both waiters were placed), no request reached LLMLab after the detach, and all 13 sessions' first turns ended with 200; the front holds ONE served
+// deployment of the model, since the count sums every group. The post labels what it holds: a COUNT, a lower bound on the stretch, an indirect witness beside
+// it, and the per-request durations as not witnessed.
+func TestTheDetachPhaseIsWitnessedByTheFrontsOwnWaitingCount(t *testing.T) {
+	out, failures, err, st := runBaselineDry(t, "")
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("failures %v, err %v", failures, err)
+	}
+	post, _ := os.ReadFile(filepath.Join(out, PostsFile))
+	for _, w := range []string{
+		"waits at the front, WITNESSED by the front's own count of requests in its FIFO (its /healthz waiting,",
+		"a COUNT and not a per-request wait): at most 2 at once, 0 when the phase ended; 503 capacity answers: 0; the longest stretch with a request in the FIFO was at least",
+		"(a LOWER bound, one poll apart)",
+		"the INDIRECT witness, from the front's records: the first-token times of the 2 over-cap first turns were [2500 2500] ms, against 2000 ms, the shortest service time of a held first turn",
+		"(posted beside the count, no pass condition)",
+		"the per-request wait DURATIONS are NOT witnessed until the front's waiting series (#769, PR 5)",
+		"because the front held 1 served deployment(s) of the model (it must be exactly one)",
+	} {
+		if !strings.Contains(string(post), w) {
+			t.Errorf("the text to post lacks %q:\n%s", w, post)
+		}
+	}
+	if strings.Contains(string(post), "waits at the front, MEASURED") {
+		t.Errorf("the text to post still says MEASURED about waits:\n%s", post)
+	}
+	// The count was read at the detach phase's look and nowhere else.
+	if n := st.baseline.waitCalls; n < 6 {
+		t.Errorf("the front's waiting count was read %d times in the detach phase, want at least 6", n)
+	}
+}
+
+// longestWaitingStretch is a lower bound, by hand: reads 250 ms apart with counts 0, 2, 2, 1, 0 hold a request from the second read to the fourth, 500 ms; a count above
+// 0 in one read alone is 0; of two runs the longer counts.
+func TestTheLongestWaitingStretchIsALowerBound(t *testing.T) {
+	t0 := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	for _, c := range []struct {
+		name string
+		s    []WaitSample
+		want time.Duration
+	}{
+		{"none", []WaitSample{{at(0), 0}, {at(250), 0}}, 0},
+		{"2, 2, 1 between zeros", []WaitSample{{at(0), 0}, {at(250), 2}, {at(500), 2}, {at(750), 1}, {at(1000), 0}}, 500 * time.Millisecond},
+		{"one read alone", []WaitSample{{at(0), 0}, {at(250), 1}, {at(500), 0}}, 0},
+		{"two runs, the longer counts", []WaitSample{{at(0), 1}, {at(250), 1}, {at(500), 0}, {at(750), 1}, {at(1000), 1}, {at(1250), 1}, {at(1500), 0}}, 500 * time.Millisecond},
+		{"still waiting at the last read", []WaitSample{{at(0), 0}, {at(250), 2}, {at(500), 2}}, 250 * time.Millisecond},
+	} {
+		if got := longestWaitingStretch(c.s); got != c.want {
+			t.Errorf("%s: %s, want %s", c.name, got, c.want)
+		}
+	}
+	// The indirect witness, by hand: 13 first turns, the 2 largest first tokens are the over-cap ones, and the shortest service time of the 11 others is 1,900 ms.
+	var joined []joinedRow
+	for i := 0; i < 13; i++ {
+		first, dur := int64(40+i), int64(1900+i*10)
+		if i >= 11 {
+			first, dur = int64(2500+i), int64(4500)
+		}
+		joined = append(joined, joinedRow{Gen: GenRow{Session: fmt.Sprintf("s%d", i), Turn: 1}, Front: FrontRow{Emitter: "instance", Status: 200, FirstTokenMs: &first, DurationMs: dur}})
+	}
+	over, held, ok := indirectWaitWitness(joined, LLMLabProviderName, 2)
+	if !ok || held != 1900 || len(over) != 2 || over[0] != 2512 || over[1] != 2511 {
+		t.Errorf("over-cap %v, held %d, %t; want [2512 2511], 1900, true", over, held, ok)
+	}
+	if _, _, ok := indirectWaitWitness(joined[:2], LLMLabProviderName, 2); ok {
+		t.Error("an indirect witness was made of two first turns")
 	}
 }

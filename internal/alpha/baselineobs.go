@@ -104,6 +104,18 @@ type PhaseObs struct {
 	Engine []EngineSample `json:"engine"`
 	// Stopped says why the generator was stopped before it ended: StopGuard, StopIneligible or StopBound; empty when it ended by itself.
 	Stopped string `json:"stopped,omitempty"`
+	// Waiting are the reads of the front's OWN count of requests waiting in its FIFO (its /healthz "waiting"), taken every BaselineWaitingPoll in the detach
+	// phase and once more when the generator had ended. It sums every group, so it is read as the count of one deployment's FIFO only because the front holds
+	// ONE served deployment of the model: ServedOfModel counts them, read when the phase began.
+	Waiting           []WaitSample `json:"waiting,omitempty"`
+	ServedOfModel     int          `json:"servedOfModel,omitempty"`
+	ServedOfModelRead bool         `json:"servedOfModelRead,omitempty"`
+}
+
+// WaitSample is one read of the front's count of requests waiting in its FIFO.
+type WaitSample struct {
+	At time.Time `json:"at"`
+	N  int       `json:"n"`
 }
 
 // GateObs is the gate: one request at model@<provider> for the served Instance, answered by it.

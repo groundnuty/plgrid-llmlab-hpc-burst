@@ -25,6 +25,11 @@ var baselineCases = []dryCase{
 	{"llmlab-spill-below-the-cap", "arrived while the Instance was below its cap of 11"},
 	{"llmlab-over-its-guard", "LLMLab was asked for more than 144 requests in one phase, so the generator was stopped"},
 	{"llmlab-after-the-detach", "request(s) after it was detached"},
+	// The rest of the detach phase's conditions: the count back at 0 when the phase ends, the count read, ONE served deployment, all 13 first turns 200.
+	{"waiting-not-returning", "the front's waiting count was 2 when the phase ended"},
+	{"waiting-unread", "the front's waiting count (/healthz) was not read in the detach phase"},
+	{"two-served-mds", "the front holds 2"},
+	{"detach-session-missing", "only 12 of the 13 sessions' first turns ended with 200: the others were never sent or never answered"},
 	{"detach-not-seen", "the managed ModelDeployment was not seen detached at the front before the phase"},
 	{"instance-ineligible", "the served Instance became ineligible, so the generator was stopped"},
 	{"engine-over-the-cap", "the engine ran more than the cap of 11 requests"},
@@ -89,7 +94,9 @@ var baselineCases = []dryCase{
 var baselineInvalidCases = []struct{ fault, why string }{
 	{"cap-never-binds", "the cap never bound: LLMLab was asked for no request, so no spill was shown"},
 	{"detach-503", "a request was answered 503 (emitter \"front\"): the detach phase's waiting requests must be served after waiting under queueTimeout, never refused"},
-	{"detach-no-wait", "no request waited: by the usage records no more than the cap of 11 was in the front at once"},
+	{"detach-no-wait", "the front's own waiting count reached at most 0, want 2"},
+	// The detach phase passes only if the front's own waiting count reaches 2 (#776's review, point 6; the science agent's ruling).
+	{"waiting-never-two", "the front's own waiting count reached at most 1, want 2"},
 	{"kv-below-the-cap", "the engine's logged KV is 100000 tokens, below the cap's need of 11 x 32768 = 360448"},
 	{"llmlab-fails", "a request LLMLab answered failed (status 500)"},
 	{"p0-llmlab-fails", "P0's request failed and LLMLab answered it (status 500)"},
@@ -185,6 +192,8 @@ type dryBaseline struct {
 	calls            []string
 	configs          map[string][]byte
 	preBumped        bool
+	waitCalls        int
+	phaseWaits       bool
 	phaseCalls       int
 	readSeq          int
 	phaseT0          time.Time
@@ -401,6 +410,39 @@ func (w *dryBaseline) genDone() bool {
 	}
 }
 
+// FrontWaiting is the front's own count of requests in its FIFO: while the detach phase's generator runs, none, then two for two reads, then one, then none; at
+// the end of the phase none. The faults change that pattern; a phase in which nobody waited reads none throughout.
+func (w *dryBaseline) FrontWaiting(context.Context) (int, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.d.fault("waiting-unread") {
+		return 0, false
+	}
+	w.waitCalls++
+	if !w.phaseWaits {
+		return 0, true
+	}
+	i := w.waitCalls
+	switch {
+	case w.d.fault("waiting-not-returning"):
+		if i >= 2 {
+			return 2, true // the FIFO still holds two requests when the phase ends
+		}
+		return 0, true
+	case w.d.fault("waiting-never-two"):
+		return []int{0, 1, 1, 0}[min(i-1, 3)], true
+	}
+	return []int{0, 2, 2, 1, 0}[min(i-1, 4)], true
+}
+
+// ServedDeploymentsOfModel is 1 in the row's stack, 2 in the fault where another served deployment of the model sits beside the row's.
+func (w *dryBaseline) ServedDeploymentsOfModel(context.Context) (int, bool) {
+	if w.d.fault("two-served-mds") {
+		return 2, true
+	}
+	return 1, true
+}
+
 func (w *dryBaseline) ServedEligible(context.Context) bool {
 	return !(w.d.fault("instance-ineligible") && w.phase.Name == PhaseP1Long)
 }
@@ -543,7 +585,7 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 	}
 	w.generated++
 	w.phase, w.reads = ph, 0
-	w.phaseT0, w.phaseCalls = w.d.now(), 0
+	w.phaseT0, w.phaseCalls, w.waitCalls = w.d.now(), 0, 0
 	gen, rows, llm, instance, length := w.build(ph)
 	w.rows = append(w.rows, rows...)
 	w.phaseLLM, w.running = llm, float64(min(instance, w.cap))
@@ -555,6 +597,9 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 	w.phaseSamples = 0
 	if w.waitingFault() && ph.Name == PhaseP2 {
 		g.needed = 6 // five looks of the engine in the phase, to show a run of consecutive samples
+	}
+	if ph.Kind == KindDetach {
+		g.needed = 9 // the front's waiting count is read at every look of the phase: seven reads show it rise, hold and fall
 	}
 	if w.d.fault("engine-waiting-cached") && ph.Name == PhaseP2 {
 		g.needed = 10 // twelve scrapes: three reads, one of them with requests waiting
@@ -595,6 +640,11 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		if w.d.fault("detach-no-wait") {
 			waiting = 0
 		}
+		if w.d.fault("detach-session-missing") {
+			instanceSessions-- // one session never ran
+			waiting = max(waiting-1, 0)
+		}
+		w.phaseWaits = waiting > 0
 	}
 	if w.d.fault("llmlab-in-the-control") && ph.Name == PhaseP1 {
 		instanceSessions, llmSessions = ph.Sessions-1, 1
