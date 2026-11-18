@@ -281,9 +281,14 @@ func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 		"a failed attempt, then a retry's":             {[]string{start(0), failed, imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried }},
 		"a failed image check, then staged by another": {[]string{start(0), "stage: image " + digest + ": " + StagedFailedCheck + " (the sandbox's manifest does not match): staging it again", imageLine(StagedByAnother, digest), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried }},
 		"a silent cancel, then a retry (two images)":   {[]string{start(0), imageLine(StagedAlreadyVerified, digest), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried }},
-		"no start line":                            {append([]string{pre}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"a start line with restartCount 1":         {append([]string{start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"a line nobody accounted for before it":    {append([]string{"slurmstepd: something", start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"no start line":                    {append([]string{pre}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a start line with restartCount 1": {append([]string{start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		// A line of the agent's own that the check was not taught, or a staging line, before the start is no first execution (a foreign line, one that
+		// is not the agent's, is not: see TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine).
+		"an agent line nobody listed before it":    {append([]string{`time=2026-11-11T10:00:00Z level=INFO msg="an agent message the list does not know"`, start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a staging line before the start":          {append([]string{imageLine(StagedAlreadyVerified, digest), start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"foreign lines, then a restarted agent":    {append([]string{"scheduler: an invented notice", start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"foreign lines and no start line":          {append([]string{"scheduler: an invented notice", pre}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
 		"a read that ends before the first worker": {append([]string{start(0)}, warmLines...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
 		"no image line":                            {[]string{start(0), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown && e.FilesShown == 2 }},
 		"a checkpoint file missing":                {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.ImageShown && e.FilesShown == 1 && e.FilesOf == 2 }},
@@ -612,5 +617,66 @@ func TestTheWorkerRestartWaitConsultsTheLadderWhereItFails(t *testing.T) {
 		if n := strings.Count(string(src), want); n != 1 {
 			t.Errorf("live_flows_test.go has %q %d times, want once: the wait for the worker restart must name a climb of the ladder where it fails", want, n)
 		}
+	}
+}
+
+// Sano's job standard error opens with lines that are not the agent's, written before it runs (issue #735, the serve row of 18 Nov 2026: the agent's log
+// was read, 37 lines, its rehash line said 14 of 14 files, and the check judged the read "not the whole of the agent's first start" because two lines
+// stood before its first pre-start line). The reader skips lines that are not in slog's text form and not stager lines before the agent's first line,
+// since the read is the file's head from its first byte and the staging window is anchored at the restartCount-0 start line; a slog line it was not
+// taught, a staging line, a restarted agent's start or no start at all there still fail (TestTheWarmStartIsShownOnlyByTheAgentsOwnLines's table). The
+// log below has the SHAPE of that run, with invented text and values: two foreign lines, a pre-start line, the start, agent lines of other messages among
+// pre-start lines, the staging, one more agent line, the worker's start and agent lines after it.
+func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	files := []string{"config.json", "model.safetensors"}
+	slog := func(level, msg string, kv ...string) string {
+		return fmt.Sprintf("time=2026-11-11T10:00:00Z level=%s msg=%q %s", level, msg, strings.Join(kv, " "))
+	}
+	pre := slog("INFO", "host-dialed: listening for the relays", "control=1", "serving=2")
+	start := slog("INFO", AgentStartMsg, "version=x", "mode=host-dialed", "restartCount=0")
+	worker := slog("INFO", AgentWorkerMsg, "worker=worker-0", "pid=1")
+	other := func(n int) string { return slog("INFO", fmt.Sprintf("an agent message of no interest %d", n)) }
+	foreign := []string{"scheduler: an invented notice about a directory", "scheduler: an invented notice about a directory"}
+	body := []string{pre, start, other(1), other(2), slog("WARN", "relay session up"), other(3), other(4),
+		"stage: image " + digest + ": " + StagedAlreadyVerified,
+		"stage: checkpoint file config.json: " + StagedPresentMatching, "stage: checkpoint file model.safetensors: " + StagedPresentMatching,
+		other(5), worker, other(6), other(7)}
+	judge := func(lines ...string) (*WarmUnshownError, []AgentLogLine) {
+		log := ParseAgentLog([]byte(strings.Join(lines, "\n") + "\n"))
+		return warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: log}), log
+	}
+	// The shape of the run: shown, and two leading lines are counted for the post.
+	e, log := judge(append(slices.Clone(foreign), body...)...)
+	if e != nil {
+		t.Fatalf("a log that opens with two lines that are not the agent's is not shown: %+v", e)
+	}
+	if n := LeadingForeign(log); n != 2 {
+		t.Errorf("LeadingForeign = %d, want 2", n)
+	}
+	// With none, it is shown as before, and counts none.
+	if e, log := judge(body...); e != nil || LeadingForeign(log) != 0 {
+		t.Errorf("a log that opens with the agent's own lines: %+v, %d leading lines", e, LeadingForeign(log))
+	}
+	// Foreign lines among the pre-start lines are skipped too; foreign lines after the start are agent-side noise and are not counted as leading.
+	if e, log := judge(foreign[0], pre, foreign[1], start, other(1), foreign[0], "stage: image "+digest+": "+StagedAlreadyVerified, "stage: checkpoint file config.json: "+StagedPresentMatching,
+		"stage: checkpoint file model.safetensors: "+StagedPresentMatching, worker); e != nil || LeadingForeign(log) != 2 {
+		t.Errorf("foreign lines among and after: %+v, %d leading lines, want shown and 2", e, LeadingForeign(log))
+	}
+	// What is and is not foreign, by the parser: a plain line is; a slog line of a message the check was not taught, a stager line and a start line are not.
+	for line, want := range map[string]bool{
+		"scheduler: an invented notice": true, "": true,
+		slog("INFO", "an agent message of no interest 1"):                    false,
+		"stage: image " + digest + ": a stager line of a form nobody listed": false,
+		start: false, pre: false,
+	} {
+		if got := parseAgentLine(line).Foreign; got != want {
+			t.Errorf("Foreign(%.40q) = %t, want %t", line, got, want)
+		}
+	}
+	// The text to post says how many, never what.
+	post := nowServePost(SanoServeRow(), NowServeObs{Warm: WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: log}}, nil)
+	if !strings.Contains(post, "opened with 2 line(s) that are not the agent's") || strings.Contains(post, "invented notice") {
+		t.Errorf("the text to post does not say how many lines came first, or names them:\n%s", post)
 	}
 }

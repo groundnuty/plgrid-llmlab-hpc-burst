@@ -306,6 +306,9 @@ func nowServePost(row Row, o NowServeObs, failures []string) string {
 	} else {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: NOT shown (%s): NOT RUN, never a pass\n", warm.counts())
 	}
+	if n := LeadingForeign(o.Warm.Log); n > 0 {
+		fmt.Fprintf(&b, "- the job's standard error opened with %d line(s) that are not the agent's (the scheduler's or the shell's), before the agent's first line; the agent's own log is judged from its first line on\n", n)
+	}
 	b.WriteString(rehashLine("the job", o.Warm))
 	return b.String()
 }
@@ -345,6 +348,21 @@ const (
 	// sound, so it is no warm start, and a following StagedByAnother would otherwise read as one.
 	StagedFailedCheck = "failed its check"
 )
+
+// LeadingForeign is how many lines of the agent's log before its first start line are not the agent's (AgentLogLine.Foreign): counted for the text to
+// post, which says it, and never judged beyond that. It names no line.
+func LeadingForeign(log []AgentLogLine) int {
+	n := 0
+	for _, l := range log {
+		if l.Kind == LineStart {
+			break
+		}
+		if l.Foreign {
+			n++
+		}
+	}
+	return n
+}
 
 // The agent's own messages the warm start's check reads, each the msg of one slog line of the agent (pinned to their
 // call sites in warmpin_test.go): its start (cmd/hb-agent/main.go), an image build and a failed staging attempt
@@ -443,7 +461,12 @@ const (
 // restartCount (-1 when it has none), and a stager line's reason and tokens, among which it names its digest or file.
 // The record keeps these, not the line: an Apptainer line can name a path.
 type AgentLogLine struct {
-	Kind         string   `json:"kind"`
+	Kind string `json:"kind"`
+	// Foreign is set on an "other" line that is not the agent's: not in slog's text form, and not a stager line ("stage: ..."). A job's standard
+	// error can open with such lines, written by the scheduler or the shell before the agent runs (Sano's, issue #735), which are no part of the
+	// agent's first execution and say nothing against its log being whole (warmStartShownByTheAgentsOwnLog). A slog line the agent's messages do
+	// not list is NOT foreign: it is an agent line the check was not taught, and the log is then not accounted for.
+	Foreign      bool     `json:"foreign,omitempty"`
 	RestartCount int      `json:"restartCount,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Tokens       []string `json:"tokens,omitempty"`
@@ -514,7 +537,7 @@ func parseAgentLine(l string) AgentLogLine {
 		}
 	}
 	if kind == "" {
-		return AgentLogLine{Kind: LineOther}
+		return AgentLogLine{Kind: LineOther, Foreign: msg == "" && !strings.HasPrefix(strings.TrimSpace(l), "stage: ")}
 	}
 	var toks []string
 	for _, w := range strings.Fields(l) {
@@ -584,8 +607,11 @@ func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
 	if !w.LogRead {
 		return e
 	}
+	// The log opens with the agent's pre-start lines and, before or among them, any lines that are not the agent's (the scheduler's or the shell's:
+	// the read is the file's head from its first byte, agentLogLine, so what comes first is the job's own first output). The first line of the agent's
+	// that is neither must be its start, restartCount 0: a staging line, an unlisted agent line or a restarted agent's start there is no first execution.
 	i := 0
-	for i < len(w.Log) && w.Log[i].Kind == LinePreStart {
+	for i < len(w.Log) && (w.Log[i].Kind == LinePreStart || w.Log[i].Foreign) {
 		i++
 	}
 	if i == len(w.Log) || w.Log[i].Kind != LineStart || w.Log[i].RestartCount != 0 {
