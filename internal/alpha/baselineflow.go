@@ -152,9 +152,19 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 	if o.Gate, err = w.Gate(ctx); err != nil {
 		return o, err
 	}
+	// A gate the served Instance did not answer stops the row here, before any phase: the generator is never started, so LLMLab is exposed to none of the load.
+	// It is a FAIL, never an INVALID: the gate's request is model@<provider> for the served Provider, which LLMLab can never answer, so its failure is the front's
+	// or the Instance's own (an INVALID is for a request LLMLab answered and failed).
+	if !gateAnswered(o.Gate) {
+		o.StoppedBefore = "the gate"
+		return o, nil
+	}
 	phases, err := resolveLongShape(ctx, w, s, &o)
 	if err != nil {
 		return o, err
+	}
+	if o.StoppedBefore != "" {
+		return o, nil
 	}
 	for _, ph := range phases {
 		if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {
@@ -268,6 +278,16 @@ loop:
 	return po, nil
 }
 
+// gateAnswered says the gate's request was answered whole by the served Instance: sent, status 200, no cut, emitter instance.
+func gateAnswered(g GateObs) bool {
+	return g.Sent && g.Row.Status == 200 && g.Row.CutBy == "" && g.Row.Emitter == "instance"
+}
+
+// ratioAnswered says the ratio probe's request was answered whole by the served Instance: it has a record, status 200, no cut, emitter instance.
+func ratioAnswered(r RatioObs) bool {
+	return r.Sent && r.Row.Status == 200 && r.Row.CutBy == "" && r.Row.Emitter == "instance"
+}
+
 // BaselineProbeBound bounds the ratio probe's one request.
 const BaselineProbeBound = 3 * time.Minute
 
@@ -297,6 +317,12 @@ func resolveLongShape(ctx context.Context, w BaselineWorld, s BaselineSettings, 
 			o.Ratio.PromptTokens = *row.PromptTokens
 			o.Ratio.TokensPerWord = float64(*row.PromptTokens) / RatioProbeWords
 		}
+	}
+	// A probe the served Instance did not answer is the gate's hole by a second door: the row stops before any phase, as a FAIL. A probe it answered whole with
+	// no prompt tokens only leaves the long shape unset (INVALID, P1-long not run).
+	if !ratioAnswered(o.Ratio) || po.Stopped != "" {
+		o.StoppedBefore = "the ratio probe"
+		return phases, nil
 	}
 	out := phases[:0]
 	for _, ph := range phases {

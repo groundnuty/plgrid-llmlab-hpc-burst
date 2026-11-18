@@ -655,3 +655,52 @@ func TestTheRatioSetsTheLongContextsWords(t *testing.T) {
 		t.Errorf("failures %v, err %v, calls %v: with the words given no probe is sent", failures, err, st.baseline.calls)
 	}
 }
+
+// A gate the served Instance did not answer stops the row BEFORE any phase (the science agent's ruling, #776's review, point 2): the generator is never started,
+// so LLMLab is exposed to none of the load, and the served job is ended by the normal cleanup (the sequencer's EndServed; the live Close for an error). Its
+// verdict is FAIL and never INVALID: the gate's request is model@<provider> for the served Provider, which LLMLab can never answer, so a failure there is the
+// front's or the Instance's own. A ratio probe the served Instance did not answer is the same hole by a second door and stops the row the same way; one it
+// answered whole with no prompt tokens only leaves the long shape unset.
+func TestAFailedGateStopsTheRowBeforeAnyPhase(t *testing.T) {
+	noLoad := func(t *testing.T, calls []string) {
+		t.Helper()
+		for _, c := range calls {
+			if strings.HasPrefix(c, "StartGenerator ") && c != "StartGenerator ratio" || c == "DetachManaged" {
+				t.Errorf("the calls were %v: %q ran after a failed gate", calls, c)
+			}
+		}
+	}
+	for _, fault := range []string{"no-gate", "gate-503", "gate-engine-500", "gate-cut-200", "ratio-probe-fails"} {
+		t.Run(fault, func(t *testing.T) {
+			out, failures, err, st := runBaselineDry(t, fault)
+			if err != nil || len(failures) == 0 || errors.Is(err, ErrBaselineInvalid) {
+				t.Fatalf("failures %v, err %v: want a FAIL, never an INVALID", failures, err)
+			}
+			noLoad(t, st.baseline.calls)
+			if n := st.plat.CountSubmits(); n != 1 {
+				t.Errorf("%d submissions, want the served job alone", n)
+			}
+			if last := st.baseline.calls[len(st.baseline.calls)-1]; last != "EndServed" {
+				t.Errorf("the calls ended with %q, want the served job's end", last)
+			}
+			o := obsOfRecord(t, out)
+			if len(o.Phases) != 0 || o.StoppedBefore == "" {
+				t.Errorf("%d phase(s) and stoppedBefore %q: want none and the step that stopped the row", len(o.Phases), o.StoppedBefore)
+			}
+			for _, f := range failures {
+				if strings.Contains(f, "was not run") {
+					t.Errorf("a failure names a phase that was not run, which is the stop's mark and no failure of its own: %q", f)
+				}
+			}
+		})
+	}
+	// An error at the gate (no answer at all) ends the scenario at once: no phase, and the live Close ends the job by its tag.
+	_, failures, err, st := runBaselineDry(t, "gate-error")
+	if err == nil || len(failures) != 0 {
+		t.Errorf("failures %v, err %v: want the scenario's error", failures, err)
+	}
+	noLoad(t, st.baseline.calls)
+	if slices.Contains(st.baseline.calls, "StartGenerator ratio") {
+		t.Errorf("the ratio probe ran after a gate that gave an error: %v", st.baseline.calls)
+	}
+}

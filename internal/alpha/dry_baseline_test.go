@@ -7,6 +7,7 @@ package alpha
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -46,6 +47,10 @@ var baselineCases = []dryCase{
 	{"no-record", "request(s) the generator sent have no usage record at the front"},
 	{"over-the-cap-in-flight", "the Instance had more than its cap of 11 requests in flight"},
 	{"no-gate", "the gate was not sent"},
+	// A gate the served Instance did not answer stops the row before any phase (TestAFailedGateStopsTheRowBeforeAnyPhase).
+	{"gate-503", "the gate's request at model@<provider> was not answered by the served Instance (status 503"},
+	{"gate-engine-500", "the gate's request at model@<provider> was not answered by the served Instance (status 500"},
+	{"gate-cut-200", "the gate's request at model@<provider> was not answered by the served Instance (status 200"},
 	{"p0-not-sent", "P0 was not sent"},
 	{"p0-answered-by-an-instance", "P0 was not answered by LLMLab"},
 	// A stream that asked for no usage has null counts and the front's own count of content events: a completed stream with tokens, so no failure.
@@ -100,6 +105,8 @@ func init() {
 	for _, c := range baselineInvalidCases {
 		faults = append(faults, c.fault)
 	}
+	// Faults that end the scenario with an error and so have no row of the table (TestAFailedGateStopsTheRowBeforeAnyPhase).
+	faults = append(faults, "gate-error")
 	dryFaults["baseline"] = append(faults, "pend-past-bound")
 	dryCases[BetaBaselineName] = baselineCases
 }
@@ -304,10 +311,21 @@ func (w *dryBaseline) LoggedKV(context.Context) (int64, bool) {
 
 func (w *dryBaseline) Gate(context.Context) (GateObs, error) {
 	w.call("Gate")
-	if w.d.fault("no-gate") {
+	r := w.row("gate", dryServedProvider, "instance", 200, w.d.now(), time.Second, 9, 1, 40)
+	switch {
+	case w.d.fault("no-gate"):
 		return GateObs{}, nil
+	case w.d.fault("gate-error"):
+		return GateObs{}, errors.New("the gate's request got no answer from the front")
+	case w.d.fault("gate-503"):
+		// The front's final answer after its wait: no served Instance routable.
+		r.Emitter, r.Provider, r.Instance, r.InstanceUID, r.Status, r.Finish = "front", "", "", "", 503, nil
+	case w.d.fault("gate-engine-500"):
+		r.Status, r.Finish = 500, nil
+	case w.d.fault("gate-cut-200"):
+		r.CutBy = "tunnel"
 	}
-	return GateObs{Sent: true, Row: w.row("gate", dryServedProvider, "instance", 200, w.d.now(), time.Second, 9, 1, 40)}, nil
+	return GateObs{Sent: true, Row: r}, nil
 }
 
 // LLMLabCount is the front's metric for the managed Provider: the earlier phases' requests, and the current phase's, all of them at each look, or, for

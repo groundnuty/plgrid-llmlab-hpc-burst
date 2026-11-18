@@ -344,8 +344,8 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	}
 	if !o.Gate.Sent {
 		f("the gate was not sent: no request showed the served Instance routable before the phases")
-	} else if o.Gate.Row.Status != 200 || o.Gate.Row.Emitter != "instance" {
-		f("the gate's request at model@<provider> was not answered by the served Instance (status %d, emitter %q)", o.Gate.Row.Status, o.Gate.Row.Emitter)
+	} else if o.Gate.Row.Status != 200 || o.Gate.Row.CutBy != "" || o.Gate.Row.Emitter != "instance" {
+		f("the gate's request at model@<provider> was not answered by the served Instance (status %d, emitter %q), so the row stopped before any phase", o.Gate.Row.Status, o.Gate.Row.Emitter)
 	}
 	if o.DidNotFit != "" {
 		inv("%s did not fit before the Instance's drain start, so the phases that follow were not run", o.DidNotFit)
@@ -357,7 +357,7 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 		case !o.Ratio.Sent:
 			f("the ratio probe's request has no usage record at the front, so the long shape was not measured")
 		case o.Ratio.Row.Status != 200 || o.Ratio.Row.CutBy != "" || o.Ratio.Row.Emitter != "instance":
-			f("the ratio probe was not answered by the served Instance (status %d, emitter %q)", o.Ratio.Row.Status, o.Ratio.Row.Emitter)
+			f("the ratio probe was not answered by the served Instance (status %d, emitter %q), so the row stopped before any phase", o.Ratio.Row.Status, o.Ratio.Row.Emitter)
 		case o.Ratio.Invalid:
 			inv("the ratio probe read %d prompt tokens for %d words (%.4f a word), at which no word count reaches %d to %d tokens: P1-long's shape could not be set and it was not run",
 				o.Ratio.PromptTokens, o.Ratio.Words, o.Ratio.TokensPerWord, LongPromptMin, LongPromptMax)
@@ -376,7 +376,7 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	for _, ph := range o.Plan {
 		if _, ok := done[ph.Name]; !ok && o.DidNotFit == "" && !(o.Ratio.Invalid && ph.TargetTokens > 0 && ph.Context < 1) {
 			// A phase after one that was stopped is no more than the stop's mark: the stop is named by that phase.
-			stopped := false
+			stopped := o.StoppedBefore != ""
 			for _, po := range o.Phases {
 				stopped = stopped || po.Stopped != ""
 			}

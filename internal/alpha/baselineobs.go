@@ -161,6 +161,9 @@ type BaselineObs struct {
 	Phases []PhaseObs `json:"phases"`
 	// Ratio is the ratio probe: what P1-long's contexts were set from.
 	Ratio RatioObs `json:"ratio"`
+	// StoppedBefore names the step that ended the run before any phase because the served Instance did not answer it: "the gate" or "the ratio probe".
+	// No generator was started for a phase, so LLMLab saw none of the load; the served job is ended by the normal cleanup.
+	StoppedBefore string `json:"stoppedBefore,omitempty"`
 	// DidNotFit names the phase the time left before the drain start could not hold, which ended the run INVALID.
 	DidNotFit string `json:"didNotFit,omitempty"`
 	// Detached says the managed ModelDeployment was deleted and the front dropped its target before the detach phase ran.
