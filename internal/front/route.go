@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/balancer"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
@@ -18,6 +19,9 @@ type target struct {
 	dep     *inventory.Deployment
 	res     *balancer.Reservation
 	managed *inventory.ManagedTarget
+	// workload is the name of the Workload the request resolved to, "" when it
+	// named none (HBEP-5, Workloads); the usage record carries it.
+	workload string
 }
 
 // key is the target's name for pauses and exclusion.
@@ -44,10 +48,37 @@ type routeError struct {
 	retryAfter string
 	dep        *inventory.Deployment // the ModelDeployment named by a capacity error
 	cutBy      string                // the front's cut, for a request cut while it waited
+	// workload is the Workload the request had resolved to when it was refused,
+	// "" when it named none or the refusal came before one resolved: the three
+	// Workload 400s never carry one.
+	workload string
+}
+
+// forWorkload sets the Workload the refused request had resolved to.
+func (e *routeError) forWorkload(name string) *routeError {
+	e.workload = name
+	return e
 }
 
 func errUnknownProvider(p string) *routeError {
 	return &routeError{status: http.StatusBadRequest, code: codeInvalidModelName, detail: "unknown_provider", message: "the model name names an unknown provider: " + echoedName(p)}
+}
+
+// The three 400s of a request that names a Workload wrongly (HBEP-5, Errors; Workloads, Naming it). Each is a refusal, never a fallback to no
+// Workload.
+func errUnknownWorkload(model, name string) *routeError {
+	return &routeError{status: http.StatusBadRequest, code: codeInvalidModelName, detail: "unknown_workload",
+		message: "the model " + echoedName(model) + " has no Workload named " + echoedName(name)}
+}
+
+func errWorkloadAmbiguous(model, name string, keys []string) *routeError {
+	return &routeError{status: http.StatusBadRequest, code: codeInvalidModelName, detail: "workload_ambiguous",
+		message: "the model " + echoedName(model) + " has a Workload named " + echoedName(name) + " in more than one namespace: " + strings.Join(keys, ", ")}
+}
+
+func errWorkloadConflict(header, bySuffix, byHeader string) *routeError {
+	return &routeError{status: http.StatusBadRequest, code: codeInvalidModelName, detail: "workload_conflict",
+		message: "the model name's #" + echoedName(bySuffix) + " and the " + echoedName(header) + " header name different Workloads: " + echoedName(byHeader)}
 }
 
 func errNotAttached(model string) *routeError {
@@ -94,20 +125,39 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 		r.mu.Unlock()
 		return nil, errUnknownProvider(n.Provider)
 	}
+	// The Workload the request names, if it names one, is found before the model's attachment is read: the errors come in HBEP-5's order,
+	// grammar, unknown_provider, the Workload's three, then not_attached and no_ready_target (the science agent's ruling on #764, Q9).
+	var wl *inventory.Workload
+	if n.Workload != "" || n.HeaderWorkload != "" {
+		var rerr *routeError
+		if wl, rerr = resolveWorkload(v, n, r.cfg.WorkloadHeader); rerr != nil {
+			r.mu.Unlock()
+			return nil, rerr
+		}
+	}
+	wname := ""
+	if wl != nil {
+		wname = wl.Name
+	}
 	m := v.Models[n.Model]
-	if m == nil {
+	var serving []*inventory.Deployment
+	var sources []*inventory.ManagedSource
+	if m != nil {
+		serving, sources = servingSet(m, wl)
+	}
+	if m == nil || (wl != nil && len(serving)+len(sources) == 0) {
 		r.mu.Unlock()
-		return nil, errNotAttached(n.Model)
+		return nil, errNotAttached(n.Model).forWorkload(wname)
 	}
 	ring := r.rings[m.Name]
-	groups := make(map[string]*balancer.Group, len(m.Served))
-	for _, d := range m.Served {
+	groups := make(map[string]*balancer.Group, len(serving))
+	for _, d := range serving {
 		groups[d.Key] = r.groups[d.Key]
 	}
 	now := r.clk.Now()
 	var managed []*inventory.ManagedTarget
 	for _, t := range m.Managed {
-		if withManaged && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
+		if withManaged && (wl == nil || t.Serves(wl)) && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
 			managed = append(managed, t)
 		}
 	}
@@ -116,17 +166,87 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 		r.beforePick()
 	}
 
-	tg, wait := r.chooseServed(m, ring, groups, n, key, exclude)
+	tg, wait := r.chooseServed(serving, ring, groups, n, key, exclude)
 	if tg != nil {
+		tg.workload = wname
 		return tg, nil
 	}
 	if len(managed) > 0 {
-		return chooseManaged(managed, key), nil
+		tg := chooseManaged(managed, key)
+		tg.workload = wname
+		return tg, nil
 	}
 	if wait == nil {
-		return nil, errNoReadyTarget(n.Model)
+		return nil, errNoReadyTarget(n.Model).forWorkload(wname)
 	}
-	return r.waitServed(ctx, wait, groups[wait.Key], m, n, key, exclude)
+	tg, rerr := r.waitServed(ctx, wait, groups[wait.Key], m, n, key, exclude)
+	if tg != nil {
+		tg.workload = wname
+	}
+	if rerr != nil {
+		rerr.workload = wname
+	}
+	return tg, rerr
+}
+
+// servingSet is the ModelDeployments a request may resolve to: all of the
+// model's when it names no Workload, else those in the Workload's namespace that
+// list it or list none, served and managed-source alike (HBEP-5, Workloads, Who
+// serves it).
+func servingSet(m *inventory.Model, wl *inventory.Workload) ([]*inventory.Deployment, []*inventory.ManagedSource) {
+	if wl == nil {
+		return m.Served, m.ManagedSources
+	}
+	var served []*inventory.Deployment
+	for _, d := range m.Served {
+		if d.Serves(wl) {
+			served = append(served, d)
+		}
+	}
+	var sources []*inventory.ManagedSource
+	for _, s := range m.ManagedSources {
+		if s.Serves(wl) {
+			sources = append(sources, s)
+		}
+	}
+	return served, sources
+}
+
+// resolveWorkload finds the Workload a request names, by the name's suffix, the
+// header, or both, among the Workloads whose spec.model is the request's model.
+// The three refusals come in the order HBEP-5 lists them: a name no Workload has
+// (a header that is no DNS label has none), a name two namespaces have, and a
+// suffix and a header that name different Workloads. It returns nil, nil for a
+// request that names none.
+func resolveWorkload(v *inventory.View, n naming.Name, header string) (*inventory.Workload, *routeError) {
+	var names []string
+	for _, name := range []string{n.Workload, n.HeaderWorkload} {
+		if name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	byName := v.Workloads[n.Model]
+	for _, name := range names {
+		if len(byName[name]) == 0 {
+			return nil, errUnknownWorkload(n.Model, name)
+		}
+	}
+	for _, name := range names {
+		if ws := byName[name]; len(ws) > 1 {
+			keys := make([]string, len(ws))
+			for i, w := range ws {
+				keys[i] = w.Namespace
+			}
+			return nil, errWorkloadAmbiguous(n.Model, name, keys)
+		}
+	}
+	if len(names) > 1 {
+		return nil, errWorkloadConflict(header, n.Workload, n.HeaderWorkload)
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+	return byName[names[0]][0], nil
 }
 
 // chooseServed walks our own ModelDeployments in the order the key's ring over
@@ -134,13 +254,22 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 // Instance), and takes the first that can place the request. wait is the
 // first deployment on the walk that has an eligible Instance, all at their
 // caps.
-func (r *Router) chooseServed(m *inventory.Model, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key string, exclude []string) (*target, *inventory.Deployment) {
-	if ring == nil || len(m.Served) == 0 {
+//
+// serving are the deployments the request may resolve to: all of the model's, or
+// a Workload's (servingSet). The ring is the model's one ring, over every
+// Instance of it. An Instance of a deployment outside serving is skipped, as one
+// of a deployment with no group is, so the walk visits the serving deployments
+// in the order a ring of only their Instances would: each Instance's points sit
+// where they sit whatever else is on the ring (HBEP-5, Workloads, Pinning; the
+// science agent's ruling on #764, Q7; the fork's own ring is the oracle in
+// pin_workload_test.go).
+func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key string, exclude []string) (*target, *inventory.Deployment) {
+	if ring == nil || len(serving) == 0 {
 		return nil, nil
 	}
 	byInst := map[string]*inventory.Instance{}
 	byDep := map[string]*inventory.Deployment{}
-	for _, d := range m.Served {
+	for _, d := range serving {
 		byDep[d.Key] = d
 		for _, i := range d.Members {
 			byInst[i.Key] = i

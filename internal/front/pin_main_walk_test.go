@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/third_party/forked/kubeai/loadbalancer"
@@ -44,11 +46,23 @@ func pwHome(t *testing.T, names []string, key string) string {
 }
 
 // pwDep is one served ModelDeployment of a pwFix: its Instances' names, and
-// its routing.instanceCap (0: the default, maxNumSeqs).
+// its routing.instanceCap (0: the default, maxNumSeqs). ns is its namespace
+// ("" is "ns"), and workloads its spec.workloads; only the Workload tests set
+// them, never the pinning tests of main's walk.
 type pwDep struct {
 	name      string
 	instances []string
 	cap       int32
+	ns        string
+	workloads []string
+}
+
+// space is the deployment's namespace.
+func (d pwDep) space() string {
+	if d.ns == "" {
+		return "ns"
+	}
+	return d.ns
 }
 
 // pwFix is a front with several served ModelDeployments of scModel on one
@@ -57,6 +71,7 @@ type pwFix struct {
 	*harness
 	deps    []pwDep
 	engines map[string]*enginetest.Engine // by the Instance's key, "ns/<name>"
+	uids    map[string]types.UID          // by the Instance's key
 }
 
 // pwNames is the keys of every Instance of the given deployments, in the order
@@ -65,7 +80,7 @@ func pwNames(deps ...pwDep) []string {
 	var out []string
 	for _, d := range deps {
 		for _, i := range d.instances {
-			out = append(out, "ns/"+i)
+			out = append(out, d.space()+"/"+i)
 		}
 	}
 	return out
@@ -73,21 +88,28 @@ func pwNames(deps ...pwDep) []string {
 
 func newPwFix(t *testing.T, deps ...pwDep) *pwFix {
 	t.Helper()
-	h := newHarness(t, nil)
-	f := &pwFix{harness: h, deps: deps, engines: map[string]*enginetest.Engine{}}
+	return newPwFixOn(t, nil, deps...)
+}
+
+// newPwFixOn is newPwFix on a front whose configuration edit changes.
+func newPwFixOn(t *testing.T, edit func(*Config), deps ...pwDep) *pwFix {
+	t.Helper()
+	h := newHarness(t, edit)
+	f := &pwFix{harness: h, deps: deps, engines: map[string]*enginetest.Engine{}, uids: map[string]types.UID{}}
 	h.profile("helios-gh200", v1alpha1.PlatformBatch, "", "")
 	h.batchProvider("helios-a", "helios-gh200")
 	for _, d := range deps {
-		md := h.servedMD(d.name, scModel, int32(len(d.instances)), "helios-a")
+		md := h.servedMDIn(d.space(), d.name, scModel, int32(len(d.instances)), "helios-a")
 		if d.cap > 0 {
 			c := d.cap
 			md.Spec.Routing = &v1alpha1.Routing{InstanceCap: &c}
 		}
+		md.Spec.Workloads = d.workloads
 		for _, in := range d.instances {
 			key := newKey(t)
 			e := enginetest.Start(t, enginetest.Options{PortLo: testPortLo, PortHi: testPortHi, Key: key, Clock: h.clk})
-			h.instance(d.name, in, "helios-a", e, key, instanceOpts{})
-			f.engines["ns/"+in] = e
+			f.uids[d.space()+"/"+in] = h.instance(d.name, in, "helios-a", e, key, instanceOpts{})
+			f.engines[d.space()+"/"+in] = e
 		}
 	}
 	h.apply()

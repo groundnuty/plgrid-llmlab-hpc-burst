@@ -421,6 +421,9 @@ func (p *Proxy) reportOutcome(t *target, x *exchange) {
 
 // setTarget records the chosen target and applies its deadline and lease end.
 func (p *Proxy) setTarget(x *exchange, t *target) {
+	if t.workload != "" {
+		x.rec.Workload = strp(t.workload)
+	}
 	if t.managed != nil {
 		x.attr = forTarget(x.id, t, emitterProvider)
 		x.rec.Emitter, x.rec.Provider, x.rec.ModelDeployment = emitterProvider, t.managed.Provider, t.managed.Deployment
@@ -580,6 +583,9 @@ func (p *Proxy) unreachable(w http.ResponseWriter, x *exchange, t *target) {
 func (p *Proxy) routeFail(w http.ResponseWriter, x *exchange, e *routeError) {
 	if e.dep != nil {
 		x.rec.ModelDeployment = e.dep.Key
+	}
+	if e.workload != "" {
+		x.rec.Workload = strp(e.workload)
 	}
 	if e.status == statusClientClosed {
 		x.rec.Status, x.rec.Finish, x.rec.CutBy = e.status, strp("cut"), strp(cutClient)
