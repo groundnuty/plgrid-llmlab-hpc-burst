@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -204,6 +205,10 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		"HPCBURST_CONF_STAGING": "$SCRATCH/hpc-burst-conformance", "HPCBURST_CONF_HOST_LOCK": filepath.Join(dir, "lock"),
 		"HPCBURST_CONF_CONTROL_DIR": filepath.Join(dir, "ctl"), "HPCBURST_CONF_OUT": out, "HPCBURST_CONF_QOS": r.QOS,
 	}
+	if r.ProviderStaging {
+		// A profile with no stagingDir (Sano's): the Provider's own root, on the fake cluster's $SCRATCH, and the run below it (#735).
+		vars["HPCBURST_CONF_STAGING_ROOT"], vars["HPCBURST_CONF_STAGING"] = "$SCRATCH/hb-sano-stage", "$SCRATCH/hb-sano-stage/hpc-burst-conformance"
+	}
 	if r.StartWait > 0 {
 		vars["HPCBURST_CONF_START_WAIT"] = r.StartWait.String()
 	} else {
@@ -251,6 +256,11 @@ func dryWorld(t *testing.T, r alpha.Row, fault, out string, shape dryShape, agen
 		if q != "" {
 			cfg.QOS = append(cfg.QOS, fakeslurm.QOS{Name: q, MaxGPUsPerUser: fakeslurm.Cap(1)})
 		}
+	}
+	// A partition that chooses its QOS by GPU count (Sano's qosByGpus) submits under it, so the fake lists it, with no cap of its own: the cap is
+	// per job on Sano, which a fake that models only per-user caps leaves out (#735).
+	if q, err := v1alpha1.QOSForGPUs(s.part, s.qos, s.gpus); err == nil && q != "" && !slices.ContainsFunc(cfg.QOS, func(x fakeslurm.QOS) bool { return x.Name == q }) {
+		cfg.QOS = append(cfg.QOS, fakeslurm.QOS{Name: q})
 	}
 	plat := fakeslurm.New(slurm.RealClock, cfg)
 	t.Cleanup(func() {

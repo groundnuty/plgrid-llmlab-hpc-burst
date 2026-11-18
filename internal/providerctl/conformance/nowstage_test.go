@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,6 +47,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -348,11 +350,11 @@ func stageBody(t testing.TB, w *world, rowName string) {
 
 // dryStageHelper is the helper built for this machine with the Hub double's checkpoint and an image of the right shape
 // compiled in, once per process, into a directory of the test's own.
-func dryStageHelper(t testing.TB, dir string) []byte {
+func dryStageHelper(t testing.TB, dir, imageFormat string) []byte {
 	t.Helper()
 	out := filepath.Join(dir, "stagehelper")
 	flags := "-X main.image=example.org/engine/server -X main.imageDigest=sha256:" + strings.Repeat("ab", 32) +
-		" -X main.checkpointRepo=" + stack.CheckpointRepo + " -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto -X main.imageFormat=sandbox"
+		" -X main.checkpointRepo=" + stack.CheckpointRepo + " -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto -X main.imageFormat=" + imageFormat
 	cmd := exec.Command("go", "build", "-ldflags", flags, "-o", out, "./internal/providerctl/conformance/stagehelper")
 	cmd.Dir = filepath.Join("..", "..", "..")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -379,7 +381,7 @@ func TestTheStageRowsDryRunStagesWhereTheAgentStages(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := stack.StartHub(t)
-	helper := dryStageHelper(t, t.TempDir())
+	helper := dryStageHelper(t, t.TempDir(), "sandbox")
 	r := alpha.NowStageRow()
 	jobEnv := map[string]string{"HPCBURST_APPTAINER": filepath.Join(bin, "apptainer"), "HF_ENDPOINT": hub.URL}
 	// The fake cluster's $SCRATCH, with what a cleanup must keep laid out in it (nowstage_alloc_test.go).
@@ -555,4 +557,99 @@ func dryHubFiles(t testing.TB, hubURL string) []agentapi.FileDigest {
 		t.Fatalf("the Hub double lists %d files", len(files))
 	}
 	return files
+}
+
+// The Sano pre-staging row's dry run (issue #735): the helper, built to stage a SIF as Sano's partition reads, is the agent build of a job of the
+// fake Slurm in run mode, on a gpu partition whose QOS the profile chooses by GPU count (gpu1), through the Provider's controller with the
+// Provider's OWN stagingDir (the profile ships none), which is kept. The run passes, and a fresh real stager configured as the agent is, asking for a
+// SIF, then finds the image staged and verified and every listed file present and matching, and builds nothing: what the serve row's agent would
+// read. The SIF, its record and the checkpoint are where the agent looks (agentapi.StagedImagePath), and no sandbox was staged.
+//
+//livecheck:none a dry test on this host, no cluster
+func TestTheSanoStageRowDryRunStagesASIFInTheProvidersOwnDirectory(t *testing.T) {
+	bin := t.TempDir()
+	if err := enginedouble.Install(bin); err != nil {
+		t.Fatal(err)
+	}
+	hub := stack.StartHub(t)
+	helper := dryStageHelper(t, t.TempDir(), "sif")
+	r := alpha.SanoStageRow()
+	jobEnv := map[string]string{"HPCBURST_APPTAINER": filepath.Join(bin, "apptainer"), "HF_ENDPOINT": hub.URL}
+	jobs, err := os.MkdirTemp("", "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(jobs) })
+	out := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w, plat := dryWorld(t, r, "", out, dryShape{cpus: "11", memory: "135904Mi"}, helper, jobEnv, dryExtra{
+		run: func(rm *fakeslurm.RunMode) { rm.JobDir = jobs },
+		kit: func(k *worldKit) { k.keepStaging = true },
+		// Staged where the agent stages: the Provider's own root, not a run's directory below it (TestSanoStage).
+		settings: func(s settings) settings { s.runStaging = s.stagingRoot; return s },
+	})
+	if got := conformanceProvider(w.s).Spec.StagingDir; got == "" || got != w.s.stagingRoot {
+		t.Fatalf("the Provider's own stagingDir is not the root the run stages in")
+	}
+	scratch := filepath.Join(w.artefacts[len(w.artefacts)-1], "root", "scratch", "hb-sano-stage")
+	rec, tag := runStageExit(t, w, r.Name)
+	if rec.failed != "" || rec.skipped != "" || len(rec.errors) != 0 {
+		t.Fatalf("the dry run did not pass: failed %q, skipped %q, errors %q", rec.failed, rec.skipped, rec.errors)
+	}
+	rec.finish()
+	if len(rec.errors) != 0 {
+		t.Errorf("the cleanup reported %q", rec.errors)
+	}
+	if _, err := os.Stat(filepath.Join(scratch, agentapi.AllocationDir(tag))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the run's Allocation directory is still in the Provider's staging directory (%v)", err)
+	}
+	noRunJobLive(t, plat)
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	for _, c := range []struct {
+		path string
+		want bool
+	}{{agentapi.StagedImagePath(digest, agentapi.ImageFormatSIF), true}, {agentapi.StagedImagePath(digest, agentapi.ImageFormatSIF) + ".sha256", true},
+		{agentapi.StagedImagePath(digest, agentapi.ImageFormatSandbox), false}} {
+		if _, err := os.Stat(filepath.Join(scratch, c.path)); (err == nil) != c.want {
+			t.Errorf("%s: present %t, want %t (%v)", filepath.Base(c.path), err == nil, c.want, err)
+		}
+	}
+	run, err := os.MkdirTemp("", "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(run) })
+	var log bytes.Buffer
+	st, err := stage.New(stage.Config{StagingDir: scratch, Apptainer: filepath.Join(bin, "apptainer"), TmpDir: run, HubEndpoint: hub.URL, BaseEnv: os.Environ(), Log: &log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := false
+	ctx := agent.WithImageBuild(context.Background(), func(string) { built = true })
+	if _, err := st.Image(ctx, "example.org/engine/server", digest, agentapi.ImageFormatSIF); err != nil {
+		t.Fatal(err)
+	}
+	files := dryHubFiles(t, hub.URL)
+	if _, err := st.Checkpoint(ctx, agent.CheckpointRequest{Repository: stack.CheckpointRepo, Revision: stack.CheckpointRev, Files: files}); err != nil {
+		t.Fatal(err)
+	}
+	text := log.String()
+	if built || !strings.Contains(text, "image "+digest+": "+alpha.StagedAlreadyVerified) {
+		t.Errorf("the agent's stager would stage the SIF again (built %t):\n%s", built, text)
+	}
+	skip := stage.SkippedFiles(files, "")
+	for i, f := range files {
+		if !skip[i] && !strings.Contains(text, "checkpoint file "+f.Path+": "+alpha.StagedPresentMatching) {
+			t.Errorf("the agent's stager does not find %s present and matching:\n%s", f.Path, text)
+		}
+	}
+	posts, err := os.ReadFile(filepath.Join(out, alpha.PostsFile))
+	if err != nil || !strings.Contains(string(posts), r.Name+": PASS") || !strings.Contains(string(posts), "qos gpu1") || !strings.Contains(string(posts), "the SIF image: built true") {
+		t.Errorf("the dry run's text to post does not say a cold SIF staging passed under gpu1 (%v):\n%s", err, posts)
+	}
+	if regexp.MustCompile(`/|sha256|hb-sano-stage`).Match(posts) {
+		t.Errorf("the text to post names a path or a digest:\n%s", posts)
+	}
 }
