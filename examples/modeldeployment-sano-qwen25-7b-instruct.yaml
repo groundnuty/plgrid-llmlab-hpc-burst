@@ -1,0 +1,53 @@
+# A served ModelDeployment: a 7B instruct model on one A100 80 GB of Sano's gpu partition
+# (HBEP-3, HBEP-7; issue #735, beta). It is Sano's reference model, the one its live rows serve and
+# its expected-performance entry is measured on. Clients ask the front for it by its plain name,
+# spec.model.
+#
+# The checkpoint is pinned by a full commit ID and the engine by an image digest, because they
+# make up the deployment ID (HBEP-3, Deployment ID). A branch name, a tag or an abbreviated ID is
+# refused. The revision is Qwen/Qwen2.5-7B-Instruct's (Apache-2.0, ungated, about 14 GiB in BF16);
+# the digest is the vLLM v0.32.0 multi-architecture index that the other examples use. The
+# engine's own defaults apply, including vLLM v0.32.0's --gpu-memory-utilization of 0.92.
+#
+# max-model-len is the 32768 tokens the live rows serve with, and the workload shapes fit it: the
+# longest context plus the longest output stay within it (HBEP-7). An expected-performance entry
+# is keyed on this deployment's ID, its capacity flags and its typical shape, so a client's copy
+# that changes one of them runs with the gate recording only until a reference run measures it.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: sano-qwen25-7b-instruct
+  namespace: default
+spec:
+  model: Qwen/Qwen2.5-7B-Instruct
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen2.5-7B-Instruct
+        revision: a09a35458c702b33eeacc393d103063234e8bc28
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "32768"
+  instances: 1
+  providers:
+    names:
+      - sano-a100
+  # Release the Allocation when it has hosted no Instance for this long. The default, Keep,
+  # holds it until its hard end, which on a shared grant is rarely what a first trial wants.
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 256
+      typical: 1024
+      longest: 28672
+    outputTokens:
+      typical: 128
+      longest: 1024
+    targetSessions: 8

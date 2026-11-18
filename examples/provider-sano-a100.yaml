@@ -1,0 +1,31 @@
+# A batch Provider on Sano's A100 partition (HBEP-3, HBEP-4 Provider settings; issue #735, beta).
+# Replace every <placeholder> and the stagingDir below. Apply profiles/sano.yaml first. Sano's
+# compute nodes cannot reach the control plane and have no home directory, so the Provider runs in
+# host-dialed mode alone: the control plane reaches each job through the login node.
+#
+# spec.stagingDir is required here: Sano's profile names none, because the shared file system lies
+# at a cluster path that carries a user name. Give an absolute path on the shared file system that
+# the login node and the compute nodes both mount, in a directory of your own. The value below is
+# a stand-in that names nothing real. Like the account, the path is yours: it appears in no
+# profile, status, event or log. No QOS is set, because the profile chooses one by the Allocation's
+# GPU count (gpu1 for one A100), and reading a Provider that sets both is refused.
+#
+# credentialsRef.file is an ssh client configuration, mode 600, with a mode-600 key file (see
+# examples/provider-helios-gh200.yaml and docs/quickstart.md).
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Provider
+metadata:
+  name: sano-a100
+  labels:
+    hpcburst.groundnuty.github.io/organization: sano
+    hpcburst.groundnuty.github.io/platform: sano
+    hpcburst.groundnuty.github.io/partition: gpu
+spec:
+  platformProfileRef:
+    name: sano
+  account: <account>
+  allowedPartitions:
+    - gpu
+  stagingDir: /path/to/shared/hpcburst-staging
+  credentialsRef:
+    file: /home/<user>/.config/hpcburst/credentials/sano-a100.ssh

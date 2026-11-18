@@ -89,7 +89,7 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 	first, _ := FirstClock(r, pendingMax, r.Lease, dw)
 	lastLooks := GuardResultLooks * GuardEvery
 	switch r.Name {
-	case "alpha-athena-handover":
+	case "alpha-athena-handover", SanoHandoverName:
 		return StartupWait + first + (r.Lease - dw) + tm.MaxRequestDuration + dw + EndMargin + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-helios-nooverlap":
 		return StartupWait + first + r.Lease + SuccessorWait(tm, pendingMax) + lastLooks + 2*stack.CatchUpWorstCase + CloseTimeout
@@ -98,7 +98,7 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 	case BetaBulkName:
 		// The router row's sum, and the staging of the shipped agent the test shim execs, before the deployment (issue #521, option (A)).
 		return StartupWait + StageAgentWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
-	case "alpha-athena-now-serve":
+	case "alpha-athena-now-serve", SanoServeName:
 		return StartupWait + first + (r.Lease - dw) + stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-nooverlap":
 		return StartupWait + first + r.Lease + EndMargin + SuccessorAllocationWait + r.StartWait + tm.StartTimeout + ReadyMargin + lastLooks +

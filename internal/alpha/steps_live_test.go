@@ -155,7 +155,7 @@ func liveWorld(cfg Config) (world, error) {
 		return world{}, fmt.Errorf("the row's platform profile %s: %w", cfg.Profile, err)
 	}
 	var md v1alpha1.ModelDeployment
-	b, err = os.ReadFile(filepath.Join(repo, "examples", "modeldeployment-qwen25-instruct.yaml"))
+	b, err = os.ReadFile(filepath.Join(repo, "examples", cfg.Row.DeploymentFile()))
 	if err == nil {
 		err = yaml.UnmarshalStrict(b, &md)
 	}
@@ -181,11 +181,7 @@ func liveWorld(cfg Config) (world, error) {
 		}
 	}
 	hostOpts := hostOptionsFor(r.Name)
-	prov := &v1alpha1.Provider{Spec: v1alpha1.ProviderSpec{
-		PlatformProfileRef: v1alpha1.ObjectReference{Name: pp.Name}, Account: cfg.Account, AllowedPartitions: []string{r.Partition},
-		QOS: r.QOS, CredentialsRef: &v1alpha1.CredentialsReference{File: cfg.Credentials},
-	}}
-	prov.Name = r.Cluster
+	prov := liveProvider(cfg, pp.Name)
 	builds := filepath.Join(cfg.BuildDir, "agent-builds")
 	place := func(h *stack.Host) { copyBuilds(h, builds) }
 	matchEngine, notReported := MatchesCommand, obscheck.VLLMNotReported
@@ -221,6 +217,23 @@ func liveWorld(cfg Config) (world, error) {
 		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: matchEngine, gpuModel: gpuModel, notReported: notReported,
 		hostOpts: hostOpts, cpuArch: cpuArch, shim: shim, double: double,
 	}, nil
+}
+
+// liveProvider is the row's Provider on the real cluster: the row's shipped profile, the run's account and credentials, the row's own QOS (empty
+// where the partition chooses one by GPU count, qosByGpus, as Sano's does), and, for a row whose profile has no stagingDir (Row.ProviderStaging),
+// the run's own staging directory (#757), which wins over a profile's. It is a function of its own so that a test reads the Provider the run
+// would create and passes it through the real ReadProfile (liveprovider_test.go).
+func liveProvider(cfg Config, profile string) *v1alpha1.Provider {
+	r := cfg.Row
+	prov := &v1alpha1.Provider{Spec: v1alpha1.ProviderSpec{
+		PlatformProfileRef: v1alpha1.ObjectReference{Name: profile}, Account: cfg.Account, AllowedPartitions: []string{r.Partition},
+		QOS: r.QOS, CredentialsRef: &v1alpha1.CredentialsReference{File: cfg.Credentials},
+	}}
+	if r.ProviderStaging {
+		prov.Spec.StagingDir = cfg.StagingDir
+	}
+	prov.Name = r.Cluster
+	return prov
 }
 
 // copyBuilds puts every agent and frpc build hack/live-checks.sh made where the
@@ -660,7 +673,12 @@ func (r *liveRun) timeLimit() time.Duration {
 		}
 		maxT = &d
 	}
-	limits, err := v1alpha1.EffectiveQOSLimits(&r.w.profile, *part, r.w.qos)
+	// The job's QOS: the Provider's, or the one the partition's qosByGpus chooses for the row's GPUs, as the plugin and the plan choose it (QOSForGPUs).
+	jobQOS, err := v1alpha1.QOSForGPUs(*part, r.w.qos, int32(row.GPUs))
+	if err != nil {
+		t.Fatalf("the job's QOS: %v", err)
+	}
+	limits, err := v1alpha1.EffectiveQOSLimits(&r.w.profile, *part, jobQOS)
 	if err != nil {
 		t.Fatalf("the QOS limits: %v", err)
 	}
