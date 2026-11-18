@@ -211,10 +211,11 @@ type slotAsk struct {
 	// deployment, when set, marks an extra's reservation and names the asking deployment (namespace/name): the reservation
 	// reads, beside the reserved slots, the unit set of the handovers it must leave room for (extraUnits), for its slot check
 	// (alsoLeave) and its per-user caps check (the units' sizes). unitExclude is the asking Instance, left out of the set, and
-	// unitSize sizes a deployment's new Allocation on the Provider now.
-	deployment  string
-	unitExclude types.UID
-	unitSize    func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	// unitSize sizes a replacement that does not exist yet, and unitRecorded an existing Instance's Allocation, on the Provider.
+	deployment   string
+	unitExclude  types.UID
+	unitSize     func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	unitRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
 	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
 	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
 	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
@@ -290,8 +291,8 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	var future []v1alpha1.BatchParameters
 	if q.deployment != "" {
 		var leave int
-		leave, future = unitTerms(extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, sizeOf: q.unitSize}),
-			func(key string) bool { _, ok := t.params[q.provider][key]; return ok })
+		leave, future = unitTerms(extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, sizeOf: q.unitSize, sizeRecorded: q.unitRecorded}),
+			func(key string) bool { _, ok := t.params[q.provider][key]; return ok }, nil)
 		q.alsoLeave += leave
 	}
 	if q.params != nil {
@@ -522,10 +523,10 @@ func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []st
 }
 
 // reserveSlotWith is reserveSlotFor with an extra's ask: the admission headroom (slotAsk.headroom) and what the unit set of
-// the handovers it leaves room for needs (slotAsk.deployment, unitExclude, unitSize). The zero extraAsk is every other ask.
+// the handovers it leaves room for needs (slotAsk.deployment, unitExclude, unitSize, unitRecorded). The zero extraAsk is every other ask.
 func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, x extraAsk) (ok, holds bool, err error) {
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits, headroom: x.headroom, deployment: x.deployment, unitExclude: x.exclude, unitSize: x.sizeOf}
+		params: params, caps: pv.limits, headroom: x.headroom, deployment: x.deployment, unitExclude: x.exclude, unitSize: x.sizeOf, unitRecorded: x.sizeRecorded}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}

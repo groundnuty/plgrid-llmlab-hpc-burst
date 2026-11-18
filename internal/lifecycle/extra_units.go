@@ -38,9 +38,10 @@ type extraUnit struct {
 	// reserved is whether the unit's slot is already one of the reserved slots (a Running primary's, a winner's, an in-flight
 	// replacement's own), so the extra's slot check leaves none more for it; it still counts for the caps.
 	reserved bool
-	// size is what a new Allocation of that deployment on this Provider requests now, for the per-user caps; zero when the
-	// spec cannot be sized. gpus is its GPU count, beside it: a unit carries its GPU count, so a per-QOS count can group by it
-	// (unitTerms is the one place the units are summed).
+	// size is what the unit's Allocation requests, for the per-user caps: its own recorded launch's, for an Instance that
+	// exists (roleOwn), or the current spec's, for a replacement that does not exist yet (roleHandover); zero when it cannot
+	// be sized. gpus is its GPU count, beside it, from the same source even when the size is zero: a unit carries its GPU
+	// count, so the sums can be taken Provider-wide or per QOS (unitTerms is the one place the units are summed).
 	size v1alpha1.BatchParameters
 	gpus int32
 }
@@ -52,9 +53,39 @@ type unitAsk struct {
 	// exclude is the asking Instance, the cut-short extra that retries (zero for a new one): it is left out of its
 	// deployment's selection, so a retry never counts itself.
 	exclude types.UID
-	// sizeOf is the size a new Allocation of a deployment requests on this Provider now: its served plan and lease limit
-	// through the Provider's partition (partitionSizingFor). It reads nothing but its argument and the Provider's view.
-	sizeOf func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	// sizeOf is the size of a replacement that does not exist yet on this Provider, a handing-over primary's next one: the
+	// deployment's CURRENT served plan and lease limit through the Provider's partition (partitionSizingFor). sizeRecorded is
+	// the size of the Allocation of an Instance that exists, from the Instance's RECORDED launch (its GPUs a worker and its
+	// workers), as ensureAllocation will request it. Both read nothing but their arguments and the Provider's view.
+	sizeOf       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	sizeRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
+}
+
+// future is the size of a handing-over primary's next replacement, which does not exist yet: the CURRENT spec's, and its
+// GPU count (zero when the spec cannot be sized).
+func (a unitAsk) future(md *v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, int32) {
+	if md == nil || a.sizeOf == nil {
+		return v1alpha1.BatchParameters{}, 0
+	}
+	b, err := a.sizeOf(md)
+	if err != nil {
+		return v1alpha1.BatchParameters{}, 0
+	}
+	return b, b.GPUs
+}
+
+// recorded is the size of the Allocation of an Instance that exists, from its RECORDED launch, never the spec's now, and
+// its GPU count, which the launch gives even when the size cannot be computed.
+func (a unitAsk) recorded(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, int32) {
+	gpus := in.Spec.Launch.GPUs * v1alpha1.LaunchWorkers(in.Spec.Launch)
+	if md == nil || a.sizeRecorded == nil {
+		return v1alpha1.BatchParameters{}, gpus
+	}
+	b, err := a.sizeRecorded(md, in)
+	if err != nil {
+		return v1alpha1.BatchParameters{}, gpus
+	}
+	return b, gpus
 }
 
 // handoverReads are the reads an extra's unit set is made from, all made under the Provider's lock by the reserved count
@@ -85,21 +116,25 @@ type handoverReads struct {
 //
 // 3. A unit's slot is judged as the controller judges it for the replacement (servesPast): the deployment has no end
 // time, or one after the drain start of the Instance, its creation plus its Allocation's time limit (an in-flight
-// Instance's, the time limit of the size a new Allocation requests now) minus the drain window. A Running chosen primary
-// and a hedge winner are the reserved slots of kind slotForReplacement, read as they are; a pending or in-flight one holds
-// no slot yet, so it is counted beside them.
+// Instance's, the time limit its recorded launch is sized for) minus the drain window. A Running chosen primary and a hedge
+// winner are the reserved slots of kind slotForReplacement, read as they are; a pending or in-flight one holds no slot yet,
+// so it is counted beside them.
 //
-// 4. A unit's size is what a NEW Allocation of ITS deployment on THIS Provider requests now (sizeOf), never the size of the
-// Allocation it replaces, so a spec edited since (cpusPerGpu, workers, leaseLimit) is read as the replacement's launch
-// will read it.
+// 4. A unit's size depends on whether its Instance exists. An Instance that exists, an in-flight replacement (roleOwn,
+// until its Allocation is listed), is charged at its OWN recorded launch (Launch.GPUs and workers, immutable), the size
+// ensureAllocation will request; once its Allocation is listed it is no unit, the listed Allocation counts. ONLY a
+// replacement that does not exist yet, a handing-over primary's next one (roleHandover), is charged at the CURRENT spec's
+// size on THIS Provider (checkServed's plan through the Provider's partition), never the replaced Allocation's, so a spec
+// edited since (cpusPerGpu, workers, leaseLimit) is read as the replacement's launch will read it. Each unit carries the
+// GPU count of the same source.
 //
 // 5. It reads, under the lock, the deployments' Instances and Allocations by label and their ModelDeployments (the views
 // of reservedOn, which also feed its selection) and the reserved slots; it lists and gets nothing of its own.
 //
 // 6. Its callers are the extra's reservation (slotAsk.deployment set, reserveAsk): the slots its alsoLeave adds and the
 // sizes its caps check adds, summed by unitTerms, in this file, and nowhere else. A unit carries its GPU count beside its
-// size, so a per-QOS count can group by it there. The reserved slots every other ask counts, and the selection, are
-// unchanged.
+// size and unitTerms takes a filter over the units, so the same units are counted Provider-wide (no filter) or per QOS
+// (a filter by the unit's GPUs). The reserved slots every other ask counts, and the selection, are unchanged.
 func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 	var out []extraUnit
 	seen := map[struct {
@@ -117,28 +152,26 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		seen[k] = true
 		out = append(out, u)
 	}
-	size := func(md *v1alpha1.ModelDeployment) v1alpha1.BatchParameters {
-		if md == nil || a.sizeOf == nil {
-			return v1alpha1.BatchParameters{}
-		}
-		b, err := a.sizeOf(md)
-		if err != nil {
-			return v1alpha1.BatchParameters{}
-		}
-		return b
-	}
 	// The reserved slots that are units already: a Running chosen primary's or a winner's replacement, and an in-flight
 	// replacement's own Allocation.
 	for _, s := range r.reserved {
 		if (s.kind != slotForReplacement && s.kind != slotForOwnAllocation) || (a.exclude != "" && types.UID(s.uid) == a.exclude) {
 			continue
 		}
-		role := roleHandover
+		md := r.mds[s.deployment]
 		if s.kind == slotForOwnAllocation {
-			role = roleOwn
+			// An in-flight replacement exists: its own recorded launch sizes it.
+			var sz v1alpha1.BatchParameters
+			var gpus int32
+			if in := r.instanceOf(types.UID(s.uid)); in != nil {
+				sz, gpus = a.recorded(md, in)
+			}
+			add(extraUnit{uid: types.UID(s.uid), role: roleOwn, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: gpus})
+			continue
 		}
-		sz := size(r.mds[s.deployment])
-		add(extraUnit{uid: types.UID(s.uid), role: role, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: sz.GPUs})
+		// A Running primary's or a winner's replacement does not exist yet: the current spec sizes it.
+		sz, gpus := a.future(md)
+		add(extraUnit{uid: types.UID(s.uid), role: roleHandover, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: gpus})
 	}
 	// The chosen primaries that have not started, or have no Allocation yet.
 	for _, v := range r.views {
@@ -189,27 +222,48 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 				if al != nil && !notYetRunning(al) {
 					continue // Running: a reserved slot above; ended: it holds none
 				}
-				sz := size(md)
 				judged := al
 				if judged == nil {
+					// In flight: its own Allocation is not made yet, and its drain start is read from the time limit its
+					// recorded launch is sized for.
+					own, _ := a.recorded(md, m)
 					judged = &v1alpha1.Allocation{}
-					judged.Spec.ForProvider.Batch = &sz
+					judged.Spec.ForProvider.Batch = &own
 				}
 				if !holdsSlotOnceRunning(md, m, judged, *r.profile, time.Time{}) {
 					continue
 				}
-				add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: sz.GPUs})
+				// Its replacement does not exist yet: the current spec sizes it.
+				sz, gpus := a.future(md)
+				add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: gpus})
 			}
 		}
 	}
 	return out
 }
 
+// instanceOf is the Instance of the reads that has the UID, nil when none: the reserved slots name Instances by UID.
+func (r handoverReads) instanceOf(uid types.UID) *v1alpha1.Instance {
+	for _, v := range r.views {
+		for _, in := range v.insts {
+			if in.UID == uid {
+				return in
+			}
+		}
+	}
+	return nil
+}
+
 // unitTerms sums an extra's units into its two terms: how many slots it leaves free beside itself (the units whose slot is
 // not reserved yet) and the sizes its caps check adds as if already expected (every unit's, but an in-flight replacement's
-// own Allocation that an expectation already sizes: sized says so for its key). It is the one place the units are summed.
-func unitTerms(units []extraUnit, sized func(key string) bool) (alsoLeave int, sizes []v1alpha1.BatchParameters) {
+// own Allocation that an expectation already sizes: sized says so for its key). It is the one place the units are summed,
+// and counts only the units that in keeps, so the same set is summed Provider-wide (in nil: every unit) or per QOS (in by
+// the unit's GPUs, which each unit carries).
+func unitTerms(units []extraUnit, sized func(key string) bool, in func(extraUnit) bool) (alsoLeave int, sizes []v1alpha1.BatchParameters) {
 	for _, u := range units {
+		if in != nil && !in(u) {
+			continue
+		}
 		if !u.reserved {
 			alsoLeave++
 		}

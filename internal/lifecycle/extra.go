@@ -93,8 +93,10 @@ type extraAsk struct {
 	deployment string
 	// exclude is the asking Instance, the cut-short extra that retries (zero for a new one), left out of the unit set.
 	exclude types.UID
-	// sizeOf is the size a new Allocation of a deployment requests on the Provider now (extraUnits).
-	sizeOf func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	// sizeOf is the size of a replacement that does not exist yet on the Provider, from the deployment's current spec, and
+	// sizeRecorded the size of an existing Instance's Allocation, from its recorded launch (extraUnits).
+	sizeOf       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	sizeRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
 	// headroom is the admission headroom (headroomOf), read under the Provider's lock by the reservation.
 	headroom func(context.Context) (int, error)
 }
@@ -102,7 +104,7 @@ type extraAsk struct {
 // extraChecks are the extra's checks on a Provider, in ONE place for createExtras, which makes the extra, and
 // ensureAllocation, which retries one whose Allocation's create was cut short, so the two never drift (#708, finding 4):
 // the bound, the admission headroom (headroom) and what the unit set of the handovers needs of the reservation: the
-// asking deployment, the Instance to leave out, and how to size a deployment's new Allocation here. The slot beyond the
+// asking deployment, the Instance to leave out, and how to size a deployment's replacement and an Instance's Allocation here. The slot beyond the
 // handovers and the room the per-user caps keep for their replacements are read by the reservation itself, from the unit set
 // (extraUnits), and the caps and the silence are its own, asked with params and quiet. exclude is the Instance that retries
 // (nil for a new extra). ok is false when the bound refuses.
@@ -117,6 +119,9 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (ask ex
 				return v1alpha1.BatchParameters{}, err
 			}
 			return partitionSizingFor(pv, plan.gpus, plan.workers, md.Spec.LeaseLimit)
+		},
+		sizeRecorded: func(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
+			return partitionSizingFor(pv, in.Spec.Launch.GPUs, v1alpha1.LaunchWorkers(in.Spec.Launch), md.Spec.LeaseLimit)
 		}}
 	if exclude != nil {
 		ask.exclude = exclude.UID

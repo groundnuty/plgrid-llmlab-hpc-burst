@@ -49,7 +49,7 @@ func (f *unitFx) inst(mdName, name, prov string, uid string, created time.Time, 
 	in := &v1alpha1.Instance{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: name, UID: types.UID(uid), CreationTimestamp: metav1.NewTime(created), Annotations: ann,
 		Labels:          map[string]string{v1alpha1.LabelProvider: prov, v1alpha1.LabelModelDeployment: mdName},
 		OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "ModelDeployment", Name: mdName, UID: types.UID("uid-" + mdName), Controller: ptrTo(true)}}},
-		Spec: v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc-" + name}}}
+		Spec: v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc-" + name}, Launch: v1alpha1.Launch{GPUs: 1}}}
 	in.Status.Phase = phase
 	if phase == v1alpha1.InstanceReady {
 		rt, le := metav1.NewTime(hoT(8, 1, 10)), metav1.NewTime(hoT(12, 0, 20))
@@ -113,13 +113,21 @@ func (h hidden) List(ctx context.Context, list client.ObjectList, opts ...client
 	return nil
 }
 
+// recordedSize is what the Allocation of an Instance that exists requests: its recorded launch's GPUs and workers, the rest as
+// oneGPU (a fixture's Instance records one GPU a worker).
+func recordedSize(_ *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
+	b := oneGPU()
+	b.GPUs = in.Spec.Launch.GPUs * v1alpha1.LaunchWorkers(in.Spec.Launch)
+	return b, nil
+}
+
 // extraSlotAsk is the extra's reservation for a new Allocation of one GPU, on the Provider with a submit limit and a GPU cap
 // (nil: none), asked by the deployment, leaving the Instance out of it. sizeOf sizes a new Allocation of any deployment at one
 // GPU. THE ONLY CODE HERE THAT NAMES THE UNIT SET'S ASK FIELDS.
 func extraSlotAsk(provider, key string, limit, gpuCap *int32, asker string, exclude types.UID) slotAsk {
 	size := oneGPU()
 	return slotAsk{provider: provider, key: rigNS + "/" + key, limit: limit, params: &size, caps: v1alpha1.QOSLimits{MaxGPUsPerUser: gpuCap}, profile: unitProfile,
-		deployment: asker, unitExclude: exclude, unitSize: func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) { return oneGPU(), nil }}
+		deployment: asker, unitExclude: exclude, unitSize: func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) { return oneGPU(), nil }, unitRecorded: recordedSize}
 }
 
 func ask(t *testing.T, tab *slotTable, r client.Reader, q slotAsk) slotAnswer {
@@ -303,5 +311,132 @@ func TestAnUnresolvedHedgesMembersCountByTheRule(t *testing.T) {
 				t.Fatalf("C2: the hedge's own extra on provider-b: ok %v with a count of %d, want %v", a.ok, a.count, wantOK)
 			}
 		})
+	}
+}
+
+// unitsOf is the unit set an extra of the asking deployment would read from the fixtures on the provider, as the reservation
+// reads it (reservedAndReadsOn, then extraUnits), with the sizes of the stubs: a replacement that does not exist yet is one
+// GPU (oneGPU), an existing Instance's Allocation its recorded launch's (recordedSize).
+func unitsOf(t *testing.T, f *unitFx, prov, asker string) []extraUnit {
+	t.Helper()
+	r := f.reader(t)
+	var al v1alpha1.AllocationList
+	if err := r.List(context.Background(), &al); err != nil {
+		t.Fatal(err)
+	}
+	allocs := map[string]*v1alpha1.Allocation{}
+	for i := range al.Items {
+		allocs[al.Items[i].Namespace+"/"+al.Items[i].Name] = &al.Items[i]
+	}
+	_, reads, err := reservedAndReadsOn(context.Background(), r, prov, unitProfile, allocs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return extraUnits(reads, unitAsk{deployment: asker,
+		sizeOf:       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) { return oneGPU(), nil },
+		sizeRecorded: recordedSize})
+}
+
+// TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpecNow (U4, k616's precision to #751's fix round,
+// aligned with #756): md-a's primary p is Running, 1 GPU, and its replacement r, in flight (no Allocation yet), RECORDED a
+// 2-GPU launch (as an Instance made before md-a's spec changed would have). md-b's primary q is Running too, with no
+// replacement: its future one does not exist, so the current spec sizes it, 1 GPU. md-e's extra on provider-a, its primary pe
+// listed (md-e ends at 09:30): by hand, listed p 1 + q 1 + pe 1 + the extra 1 = 4, plus r's own Allocation at its recorded 2
+// = 6, plus q's future replacement at 1 = 7; p adds nothing (r is its replacement). So 7 <= 7 admitted at cap 7 and refused
+// at cap 6. Counted at the spec now (1 for r), the total is 6: admitted at cap 6 (what c88f8719 did). The units' GPU counts
+// are the same sources: r's 2 (recorded), q's replacement's 1 (spec).
+func TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpecNow(t *testing.T) {
+	end := hoT(9, 30, 0)
+	f := &unitFx{}
+	f.md("md-e", &end)
+	f.md("md-a", nil)
+	f.md("md-b", nil)
+	f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	f.alloc("md-e", "pe", provA, false)
+	f.inst("md-a", "p", provA, "uid-p", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
+	f.alloc("md-a", "p", provA, true)
+	f.inst("md-b", "q", provA, "uid-q", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
+	f.alloc("md-b", "q", provA, true)
+	r := f.inst("md-a", "r", provA, "uid-r", hoT(9, 19, 30), v1alpha1.InstancePending, map[string]string{v1alpha1.AnnotationPredecessor: "p"})
+	r.Spec.Launch.GPUs = 2
+	if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(7), rigNS+"/md-e", "")); !a.ok {
+		t.Fatalf("cap 7: refused (%s), want admitted: 4 listed or asked + r's 2 + q's future 1 = 7", a.capsWhy)
+	}
+	if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(6), rigNS+"/md-e", "")); a.ok {
+		t.Fatal("cap 6: admitted, want refused: r's Allocation is its recorded 2 GPUs, not the spec's 1 (7 > 6)")
+	}
+	got := map[string]int32{}
+	for _, u := range unitsOf(t, f, provA, rigNS+"/md-e") {
+		got[u.deployment+"/"+map[unitRole]string{roleHandover: "handover", roleOwn: "own"}[u.role]] = u.gpus
+	}
+	want := map[string]int32{rigNS + "/md-a/own": 2, rigNS + "/md-b/handover": 1}
+	if len(got) != len(want) || got[rigNS+"/md-a/own"] != 2 || got[rigNS+"/md-b/handover"] != 1 {
+		t.Fatalf("units' GPUs = %v, want %v", got, want)
+	}
+}
+
+// TestAnInFlightPrimarysSlotIsJudgedByItsRecordedLaunchsTimeLimit (U4): md-q ends at 09:30 and its primary q is in flight
+// (created 08:00:10, no Allocation yet). A 4 h limit puts q's drain start at 09:50:10, after the end: no handover, so none to
+// leave room for; a 1 h limit puts it at 06:50:10, before the end: one. md-e's extra on provider-a (limit 2; pe listed and
+// the extra, hand-counted 2): 2 <= 2 admitted without q's unit, 3 > 2 refused with it. The time limit comes from the Instance's recorded launch's
+// sizing (sizeRecorded), the same one ensureAllocation will request.
+func TestAnInFlightPrimarysSlotIsJudgedByItsRecordedLaunchsTimeLimit(t *testing.T) {
+	end := hoT(9, 30, 0)
+	for _, tc := range []struct {
+		limit string
+		ok    bool
+	}{{"4h", true}, {"1h", false}} {
+		t.Run(tc.limit, func(t *testing.T) {
+			f := &unitFx{}
+			f.md("md-e", &end)
+			f.md("md-q", &end)
+			f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+			f.alloc("md-e", "pe", provA, false)
+			f.inst("md-q", "q", provA, "uid-q", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+			q := extraSlotAsk(provA, "alloc-ex", i32(2), nil, rigNS+"/md-e", "")
+			q.unitRecorded = func(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
+				b, err := recordedSize(md, in)
+				b.TimeLimit = v1alpha1.Duration(tc.limit)
+				return b, err
+			}
+			if a := ask(t, newSlotTable(), f.reader(t), q); a.ok != tc.ok {
+				t.Fatalf("limit %s: ok %v with a count of %d, want %v", tc.limit, a.ok, a.count, tc.ok)
+			}
+		})
+	}
+}
+
+// TestAnExtrasUnitsAreSummedProviderWideOrPerQOSByOneFilter (#756's meeting point): four units, hand-worked. u1 a future
+// replacement's, not reserved, 1 GPU; u2 a Running primary's, reserved, 2; u3 an in-flight replacement's own Allocation,
+// reserved, 4, whose Allocation no expectation sizes; u4 a pending primary's, not reserved, 4. Provider-wide: the slots left
+// are u1 and u4, 2; the sizes every unit's, 4. Counting the units of 4 GPUs alone: 1 slot (u4), 2 sizes (u3, u4). With an
+// expectation sizing u3: Provider-wide 3 sizes, per QOS 1.
+func TestAnExtrasUnitsAreSummedProviderWideOrPerQOSByOneFilter(t *testing.T) {
+	sz := func(g int32) v1alpha1.BatchParameters { b := oneGPU(); b.GPUs = g; return b }
+	units := []extraUnit{
+		{uid: "u1", role: roleHandover, size: sz(1), gpus: 1},
+		{uid: "u2", role: roleHandover, reserved: true, size: sz(2), gpus: 2},
+		{uid: "u3", role: roleOwn, key: "ns/k3", reserved: true, size: sz(4), gpus: 4},
+		{uid: "u4", role: roleHandover, size: sz(4), gpus: 4},
+	}
+	four := func(u extraUnit) bool { return u.gpus == 4 }
+	none := func(string) bool { return false }
+	sizedK3 := func(k string) bool { return k == "ns/k3" }
+	for _, tc := range []struct {
+		name   string
+		sized  func(string) bool
+		in     func(extraUnit) bool
+		leave  int
+		counts int
+	}{
+		{"provider-wide", none, nil, 2, 4},
+		{"per QOS, 4 GPUs", none, four, 1, 2},
+		{"provider-wide, u3 sized by an expectation", sizedK3, nil, 2, 3},
+		{"per QOS, u3 sized by an expectation", sizedK3, four, 1, 1},
+	} {
+		leave, sizes := unitTerms(units, tc.sized, tc.in)
+		if leave != tc.leave || len(sizes) != tc.counts {
+			t.Fatalf("%s: slots %d and %d sizes, want %d and %d", tc.name, leave, len(sizes), tc.leave, tc.counts)
+		}
 	}
 }
