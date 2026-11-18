@@ -163,6 +163,8 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 | `modeldeployment-qwen3-reasoning.yaml` | a reasoning model, on the same Provider |
 | `provider-helios-gh200.yaml` | a batch Provider on Helios `plgrid-gpu-gh200` (beta) |
 | `modeldeployment-qwen25-instruct.yaml` | the same small instruct model, on the Helios Provider (beta) |
+| `workload-labelling.yaml` | a Workload of that model: one class of a study's requests, named by a header or a `#labelling` suffix (beta; [the operations guide](operations.md#workloads-beta)) |
+| `modeldeployment-qwen25-labelling.yaml` | that Helios deployment under another name, listing the Workload; apply it instead of the one above (beta) |
 | `provider-llmlab.yaml` | a managed Provider: LLMLab itself, read-only ([optional](#optional-attach-llmlab)) |
 | `modeldeployment-llmlab.yaml` | a model LLMLab already serves, attached to a plain name ([optional](#optional-attach-llmlab)) |
 

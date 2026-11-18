@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -146,6 +147,21 @@ func TestExamplesAgreeWithTheirProfilesAndEachOther(t *testing.T) {
 				if ns, _, _ := unstructured.NestedString(e.obj, "metadata", "namespace"); ns == "" {
 					t.Errorf("metadata.namespace is unset: ModelDeployments are namespaced, and the quickstart applies the file as it is")
 				}
+				// spec.workloads names Workloads of the deployment's model in its namespace, or it serves nothing and sets no condition.
+				listed, _, _ := unstructured.NestedStringSlice(e.obj, "spec", "workloads")
+				ns, _, _ := unstructured.NestedString(e.obj, "metadata", "namespace")
+				model, _, _ := unstructured.NestedString(e.obj, "spec", "model")
+				for _, w := range listed {
+					found := false
+					for _, other := range exs {
+						oNS, _, _ := unstructured.NestedString(other.obj, "metadata", "namespace")
+						oModel, _, _ := unstructured.NestedString(other.obj, "spec", "model")
+						found = found || (other.kind() == "Workload" && other.name() == w && oNS == ns && oModel == model)
+					}
+					if !found {
+						t.Errorf("spec.workloads lists %q, which is no example Workload of model %q in namespace %q", w, model, ns)
+					}
+				}
 				_, served, _ := unstructured.NestedMap(e.obj, "spec", "source", "served")
 				platform, managed, _ := unstructured.NestedString(e.obj, "spec", "source", "managed", "platform")
 				for _, n := range names {
@@ -165,8 +181,30 @@ func TestExamplesAgreeWithTheirProfilesAndEachOther(t *testing.T) {
 					}
 				}
 			})
+		case "Workload":
+			t.Run(e.label(), func(t *testing.T) {
+				ns, _, _ := unstructured.NestedString(e.obj, "metadata", "namespace")
+				model, _, _ := unstructured.NestedString(e.obj, "spec", "model")
+				if ns == "" {
+					t.Errorf("metadata.namespace is unset: Workloads are namespaced, and a ModelDeployment serves only the Workloads of its own namespace")
+				}
+				// HBEP-5, Workloads, Who serves it: the deployments of the Workload's namespace that list it. The pair of examples has one that
+				// lists it by name, for the same model, so that the example shows the listing and not only the empty list that serves all.
+				listing := 0
+				for _, md := range exs {
+					mdNS, _, _ := unstructured.NestedString(md.obj, "metadata", "namespace")
+					mdModel, _, _ := unstructured.NestedString(md.obj, "spec", "model")
+					listed, _, _ := unstructured.NestedStringSlice(md.obj, "spec", "workloads")
+					if md.kind() == "ModelDeployment" && mdNS == ns && mdModel == model && slices.Contains(listed, e.name()) {
+						listing++
+					}
+				}
+				if listing == 0 {
+					t.Errorf("no example ModelDeployment of model %q in namespace %q lists the Workload %q in spec.workloads: nothing in examples/ would serve it by name", model, ns, e.name())
+				}
+			})
 		default:
-			t.Errorf("%s: examples/ holds Providers and ModelDeployments; kind %q is neither", e.label(), e.kind())
+			t.Errorf("%s: examples/ holds Providers, ModelDeployments and Workloads; kind %q is none of them", e.label(), e.kind())
 		}
 	}
 }
