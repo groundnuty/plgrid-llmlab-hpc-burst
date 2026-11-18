@@ -350,17 +350,21 @@ func (r *faultRig) orphanEngine() int {
 	return engine
 }
 
-// slurmJobCgroupSegment is the classifier of workerfault.go's cgroup form j: a path segment job_<digits> in a
-// /proc/<pid>/cgroup listing, the segment last or followed by a slash.
-var slurmJobCgroupSegment = regexp.MustCompile(`(?m)/job_[0-9]+(/|$)`)
+// slurmJobCgroupSegment is a Slurm job's cgroup in a /proc/<pid>/cgroup listing: a path segment job_<digits> (the segment
+// last or followed by a slash) under a segment that starts with slurm or is <node>_slurmstepd.scope, as Slurm's own cgroup
+// plugins place it (/system.slice/<node>_slurmstepd.scope/job_<n>/step_0/user/task_0 under cgroup v2, as on Sano's nodes,
+// /slurm/uid_<u>/job_<n>/... under v1). workerfault.go's
+// classifier takes any job_<digits> segment; this is narrower on purpose, so that only a real Slurm job skips the test.
+var slurmJobCgroupSegment = regexp.MustCompile(`(?m)/(?:slurm[^/\n]*|[^/\n]+_slurmstepd\.scope)/(?:[^/\n]+/)*job_[0-9]+(?:/|$)`)
 
 // inASlurmJobCgroup reports whether the cgroup listing of this very process has a Slurm job's segment.
 func inASlurmJobCgroup(cgroups string) bool { return slurmJobCgroupSegment.MatchString(cgroups) }
 
 // The fake job's processes are this test's own children, so they share its cgroup. The shapes below name that cgroup
 // "other", which holds on a developer machine and on a hosted runner; inside a Slurm job (CI on Sano) the cgroup is the
-// job's, every process classifies as cgroup:job_<n>, and the test cannot hold. It is skipped there, visibly, on that
-// condition alone, and hosted CI keeps running it. It is not made to expect what it finds: that would be circular.
+// job's, every process classifies as cgroup:job_<n>, and the test cannot hold. It is skipped there, visibly, on one
+// condition alone: this process's own cgroup is a Slurm job's (a job_<n> segment under a slurm one). Hosted CI keeps
+// running it. It is not made to expect what it finds: that would be circular.
 func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
 	if b, err := os.ReadFile("/proc/self/cgroup"); err == nil && inASlurmJobCgroup(string(b)) {
 		t.Skip("SKIPPED, NOT TESTED: this process runs inside a Slurm job cgroup, so every process of the fake job classifies as cgroup:job_<n>, not the cgroup:other these shapes expect; hosted CI runs this test")
@@ -435,9 +439,17 @@ func TestASlurmJobCgroupIsRecognisedAndNothingLooserIs(t *testing.T) {
 		want          bool
 	}{
 		{"a Slurm task under cgroup v2", "0::/system.slice/slurmstepd.scope/job_29490/step_0/task_0\n", true},
+		{"a Slurm task as a node's cgroup shows it (the node's name before _slurmstepd.scope)", "0::/system.slice/node-x1_slurmstepd.scope/job_7654321/step_0/user/task_0\n", true},
 		{"a Slurm step under cgroup v1", "12:cpuacct:/slurm/uid_1000/job_7654321/step_batch\n11:memory:/slurm/uid_1000/job_7654321\n", true},
-		{"the job segment last, with no newline", "0::/a/job_12", true},
-		{"a job line among others", "1:name=systemd:/user.slice\n0::/x/job_5/y\n", true},
+		{"the job segment last, with no newline, under a slurm segment", "0::/slurm/job_12", true},
+		{"a job segment deeper under a slurm segment", "0::/slurm_node/x/y/job_5/z\n", true},
+		{"a job_<digits> segment with no slurm segment above it", "0::/a/job_12", false},
+		{"a job_<digits> segment under some other name", "0::/system.slice/mycluster.service/job_5/step_0\n", false},
+		{"a segment that only ends in slurm", "0::/x/myslurm/job_5/y\n", false},
+		{"a segment that ends in _slurmd.service, not slurmstepd.scope", "0::/system.slice/node-x1_slurmd.service/job_5/y\n", false},
+		{"a slurm segment with no job under it", "0::/system.slice/slurmstepd.scope/step_0\n", false},
+		{"a job segment above the slurm one", "0::/job_12/slurmstepd.scope\n", false},
+		{"a job line among others", "1:name=systemd:/user.slice\n0::/x/slurmd.slice/job_5/y\n", true},
 		{"a hosted runner's service", "0::/system.slice/hosted-runner.service\n", false},
 		{"a login session", "0::/user.slice/user-1000.slice/session-3.scope\n", false},
 		{"a segment that only starts with job_", "0::/job_12abc/step_0\n", false},
