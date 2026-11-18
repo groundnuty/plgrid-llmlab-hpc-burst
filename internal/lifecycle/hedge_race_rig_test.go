@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -223,6 +224,10 @@ func unwrap(err error) error {
 //   - NEITHER Instance is ended or deleted, and B holds one Allocation, the limit, never two.
 //
 // With the limit raised to 2 again, Y's Allocation is made on the next pass: Y waited, it was never cancelled.
+//
+// This holds for a REPLACEMENT hedge, whose members name a predecessor and so hold their slots. A missing primary's hedge
+// is a stated limit, bounded by the two rows below (HBEP-7, Hedging, Slots reserved atomically; the science agent's
+// ruling on #725, 18 Nov 2026).
 func TestTwoMembersOfAHedgeOnOneProviderFromTwoLeaders(t *testing.T) {
 	for _, order := range []struct {
 		name     string
@@ -355,5 +360,149 @@ func TestTheOlderWaitingHedgeMemberTakesTheSlot(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// fixedAllocs is fixedInstances that also shows the Allocations a test lists, as the Provider's Allocation list does.
+type fixedAllocs struct {
+	fixedInstances
+	allocs []v1alpha1.Allocation
+}
+
+func (f fixedAllocs) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if al, ok := list.(*v1alpha1.AllocationList); ok {
+		al.Items = f.allocs
+		return nil
+	}
+	return f.fixedInstances.List(ctx, list, opts...)
+}
+
+// TestAMissingPrimarysHedgeRaceIsBoundedByTheLimitPlusOne (#725's R2, ruled a stated limit, HBEP-7 Hedging, Slots reserved
+// atomically): the members of a MISSING PRIMARY's hedge name no predecessor, so they hold no slot of their own until
+// their Allocations exist, and two leaders' slot tables, each knowing nothing of the other's, can both reserve. The
+// race is bounded, by hand, at a limit of 1:
+//   - x, the older member, asks on leader A's table: ok, a count of 0; y, the younger, asks on leader B's: ok, a count
+//     of 0. Two reservations, the limit plus the one extra creation that Per-user limits accepts, never three;
+//   - z, a third member, asked on either table, is refused with a count of 1: each table holds its own expectation, and
+//     a table counts it, so a table never reserves a second past the limit;
+//   - once x's Allocation is listed (a pending one holds its slot), a fresh table, a third leader's, refuses y with a
+//     count of 1: past the race window, the older member's Allocation is what the count reads.
+func TestAMissingPrimarysHedgeRaceIsBoundedByTheLimitPlusOne(t *testing.T) {
+	md := &v1alpha1.ModelDeployment{ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: hoMD}}
+	member := func(name, hedge string, created time.Time, uid string) v1alpha1.Instance {
+		ann := map[string]string{}
+		if hedge != "" {
+			ann[v1alpha1.AnnotationHedgeGroup] = hedge
+		}
+		in := v1alpha1.Instance{
+			ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: name, UID: types.UID(uid), CreationTimestamp: metav1.NewTime(created),
+				Annotations: ann, Labels: map[string]string{v1alpha1.LabelProvider: rigProvider, v1alpha1.LabelModelDeployment: hoMD}},
+			Spec: v1alpha1.InstanceSpec{AllocationRef: v1alpha1.ObjectReference{Name: "alloc-" + name}},
+		}
+		in.Status.Phase = v1alpha1.InstancePending
+		return in
+	}
+	early := hoT(8, 0, 40)
+	r := fixedInstances{insts: []v1alpha1.Instance{member("x", "", early, "uid-a"), member("y", "x", hoT(8, 0, 50), "uid-b"), member("z", "x", hoT(8, 1, 0), "uid-c")}, md: md}
+	one := i32(1)
+	ask := func(tab *slotTable, rd client.Reader, name string) slotAnswer {
+		t.Helper()
+		a, err := tab.reserveAsk(context.Background(), rd, slotAsk{provider: rigProvider, key: rigNS + "/alloc-" + name, limit: one}, fixedAt(early))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	leaderA, leaderB := newSlotTable(), newSlotTable()
+	if a := ask(leaderA, r, "x"); !a.ok || a.count != 0 {
+		t.Fatalf("x on leader A: ok %v, count %d, want ok with a count of 0", a.ok, a.count)
+	}
+	if a := ask(leaderB, r, "y"); !a.ok || a.count != 0 {
+		t.Fatalf("y on leader B: ok %v, count %d, want ok with a count of 0: the stated limit, one past the limit of 1", a.ok, a.count)
+	}
+	for name, tab := range map[string]*slotTable{"A": leaderA, "B": leaderB} {
+		if a := ask(tab, r, "z"); a.ok || a.count != 1 {
+			t.Fatalf("z on leader %s: ok %v, count %d, want refused with a count of 1: a third reservation would pass the bound", name, a.ok, a.count)
+		}
+	}
+	listed := fixedAllocs{fixedInstances: r, allocs: []v1alpha1.Allocation{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: rigNS, Name: "alloc-x"},
+		Spec:       v1alpha1.AllocationSpec{ProviderConfigReference: providerRef(rigProvider)},
+		Status:     v1alpha1.AllocationStatus{AtProvider: v1alpha1.AllocationObservation{Phase: v1alpha1.AllocationPending}},
+	}}}
+	if a := ask(newSlotTable(), listed, "y"); a.ok || a.count != 1 {
+		t.Fatalf("y on a fresh table once x's Allocation is listed: ok %v, count %d, want refused with a count of 1", a.ok, a.count)
+	}
+}
+
+// TestAMissingPrimarysRefusedHedgeMemberWaitsAndEndsHedgeLostAtTheWin (the same R2 limit, its binding condition): of a
+// missing primary's hedge, M1 on A and M2 on B, Slurm's submit limit on A is held by a job outside the framework, so A
+// refuses M1's Allocation with QOSMaxSubmitJobPerUserLimit, code SubmitLimitReached, every minute. By hand:
+//   - M1's Allocation stays Submitting with a Rejected record carrying that code, and M1's Instance is NOT ended,
+//     cancelled or failed while the hedge has no winner: it waits;
+//   - M2's job starts on B and M2 becomes ready: the hedge is resolved, and M1, a pending loser, ends with HedgeLost, its
+//     pending Allocation cancelled;
+//   - HedgeLost is no failure: M1 is no failedEnd, the class's streak has no end time, and the deployment's status keeps
+//     one start outcome, M2's (Ready), none for M1's Allocation.
+func TestAMissingPrimarysRefusedHedgeMemberWaitsAndEndsHedgeLostAtTheWin(t *testing.T) {
+	h := newHedgeRig(t, withBatchConfig(oneJobUser))
+	h.batch.AddOutsideJob("example-other-project", rigPartition, 1, 4*time.Hour)
+	h.Step() // the Providers' first status
+	md := mdSpec(hoMD)
+	seededOnly(md)
+	h.create(md)
+	h.clock.Advance(10 * time.Second)
+	h.Step() // 08:00:10: M1 on A
+	firsts := h.onProvider(hoMD, rigProvider)
+	if len(firsts) != 1 {
+		t.Fatalf("%d Instances on A after the first pass, want the missing primary's one", len(firsts))
+	}
+	m1 := firsts[0].Name
+	m1Alloc := firsts[0].Spec.AllocationRef.Name
+	m2 := h.seedHedgeMember(hoMD, m1, "", hedgeB)
+	sawRefusal := false
+	h.until(3*time.Minute, 10*time.Second, "M2 ready", func() bool {
+		if a, ok := h.allocation(m1Alloc); ok {
+			if sub := a.Status.AtProvider.Submission; sub != nil && sub.State == v1alpha1.SubmissionRejected && sub.Code == v1alpha1.ReasonSubmitLimitReached {
+				sawRefusal = true
+			}
+		}
+		if h.mustInstance(m2).Status.Phase == v1alpha1.InstanceReady {
+			return true
+		}
+		if in := h.mustInstance(m1); ended(in) {
+			t.Fatalf("M1 ended (%s) at %s, before the hedge had a winner: a member refused for the limit waits", in.Status.EndReason, h.clock.Now().Format(time.TimeOnly))
+		}
+		return false
+	})
+	if !sawRefusal {
+		t.Fatal("M1's Allocation never showed a Rejected record with code SubmitLimitReached: the row proves nothing")
+	}
+	got := h.mustInstance(m1) // the pass in which M2 is ready resolved the hedge
+	if !ended(got) || got.Status.EndReason != v1alpha1.ReasonHedgeLost {
+		t.Fatalf("M1 is %s, ended for %q, want ended for HedgeLost", got.Status.Phase, got.Status.EndReason)
+	}
+	if !h.released(m1Alloc) {
+		t.Fatalf("M1's pending Allocation %s was not cancelled", m1Alloc)
+	}
+	if failedEnd(got) {
+		t.Fatal("M1's HedgeLost end counts as a failed end: a refused loser must be no failure")
+	}
+	if streak := h.passOf(hoMD).classStreak(h.passOf(hoMD).pvOf(got.Labels).class); len(streak) != 0 {
+		t.Fatalf("the class's failure streak is %v, want none", streak)
+	}
+	for _, c := range h.md(hoMD).Status.StartOutcomes {
+		for _, o := range c.Outcomes {
+			if o.Result != "Ready" {
+				t.Fatalf("a start outcome %+v is not M2's Ready one: M1's refused Allocation adds none", o)
+			}
+		}
+	}
+	var n int
+	for _, c := range h.md(hoMD).Status.StartOutcomes {
+		n += len(c.Outcomes)
+	}
+	if n != 1 {
+		t.Fatalf("%d start outcomes, want M2's alone", n)
 	}
 }
