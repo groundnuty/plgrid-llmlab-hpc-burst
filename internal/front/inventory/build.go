@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,7 +26,7 @@ const (
 
 // Build computes the routing view of a snapshot at in.Now.
 func Build(s Snapshot, in Inputs) *View {
-	v := &View{Models: map[string]*Model{}, Providers: map[string]*ProviderInfo{}, Joined: map[types.UID]bool{}}
+	v := &View{Models: map[string]*Model{}, Providers: map[string]*ProviderInfo{}, Joined: map[types.UID]bool{}, Workloads: map[string]map[string][]*Workload{}}
 	if in.HasTransport == nil {
 		in.HasTransport = func(types.UID) bool { return false }
 	}
@@ -42,6 +43,19 @@ func Build(s Snapshot, in Inputs) *View {
 			v.problemf("Provider %s names PlatformProfile %q, which does not exist", p.Name, p.Spec.PlatformProfileRef.Name)
 		}
 		v.Providers[p.Name] = info
+	}
+	for i := range s.Workloads {
+		o := &s.Workloads[i]
+		w := &Workload{Key: o.Namespace + "/" + o.Name, Namespace: o.Namespace, Name: o.Name, Model: o.Spec.Model}
+		if v.Workloads[w.Model] == nil {
+			v.Workloads[w.Model] = map[string][]*Workload{}
+		}
+		v.Workloads[w.Model][w.Name] = append(v.Workloads[w.Model][w.Name], w)
+	}
+	for _, byName := range v.Workloads {
+		for _, ws := range byName {
+			sort.Slice(ws, func(i, j int) bool { return ws[i].Key < ws[j].Key })
+		}
 	}
 	byOwner := instancesByOwner(s.Instances)
 	providers := map[string]*v1alpha1.Provider{}
@@ -60,6 +74,7 @@ func Build(s Snapshot, in Inputs) *View {
 	for _, m := range v.Models {
 		sort.Slice(m.Served, func(i, j int) bool { return m.Served[i].Key < m.Served[j].Key })
 		sort.Slice(m.Managed, func(i, j int) bool { return m.Managed[i].Key < m.Managed[j].Key })
+		sort.Slice(m.ManagedSources, func(i, j int) bool { return m.ManagedSources[i].Key < m.ManagedSources[j].Key })
 	}
 	v.checkDrainWindows(s.Providers, profiles, in.MaxRequestDuration)
 	return v
@@ -96,7 +111,7 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 	d := &Deployment{
 		Key: md.Namespace + "/" + md.Name, Namespace: md.Namespace, Name: md.Name, UID: md.UID,
 		ServedName: md.Spec.Model, Desired: int(md.Spec.Instances),
-		MaxRequestDuration: in.MaxRequestDuration,
+		MaxRequestDuration: in.MaxRequestDuration, Workloads: slices.Clone(md.Spec.Workloads),
 	}
 	var err error
 	if d.TightPercent, d.LoosePercent, err = bounds(md.Spec.Routing); err != nil {

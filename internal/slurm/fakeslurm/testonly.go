@@ -190,11 +190,18 @@ func (sh *shell) env(args []string) int {
 
 // sbatchTestOnly answers sbatch --test-only. It is read-only: it registers
 // nothing, takes no scripted step (a step belongs to a submission), and does not
-// register a late job. The partition and QOS refusals are a submission's, since
-// real sbatch applies them to a test too.
+// register a late job. The partition, job_submit and QOS refusals are a submission's, since
+// real sbatch applies them to a test too, in the order a submission meets them (sbatch.go): the
+// site's job_submit plugin runs in slurmctld on a --test-only request as on a real one, so a
+// test-only call that lacks what the plugin requires (Sano's --qos, --mem, --cpus-per-task and a
+// job name that is not generic, #735) is refused here as it is there (#735's checklist).
 func (sh *shell) sbatchTestOnly(spec sbatchSpec) int {
 	p := sh.p
 	if text := p.policyRefusal(sh.s.user, spec); text != "" {
+		sh.stderr.WriteString(text)
+		return 1
+	}
+	if text := p.jobSubmitRefusal(spec); text != "" {
 		sh.stderr.WriteString(text)
 		return 1
 	}

@@ -163,8 +163,14 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 | `modeldeployment-qwen3-reasoning.yaml` | a reasoning model, on the same Provider |
 | `provider-helios-gh200.yaml` | a batch Provider on Helios `plgrid-gpu-gh200` (beta) |
 | `modeldeployment-qwen25-instruct.yaml` | the same small instruct model, on the Helios Provider (beta) |
+| `provider-sano-a100.yaml` | a batch Provider on Sano `gpu` (beta), run host-dialed (its profile's only dial-home mode), with its own `stagingDir` |
+| `modeldeployment-sano-qwen25-7b-instruct.yaml` | a 7B instruct model, served on that Provider (beta) |
+| `modeldeployment-sano-qwen3-vl-8b-instruct.yaml` | Qwen3-VL-8B-Instruct, served on that Provider, with its own expected-performance entry (beta) |
+| `modeldeployment-sano-reference-qwen25-7b-instruct.yaml` | the same model under a name no client sends, with one Allocation, for the reference run behind Sano's expected-performance entry (beta) |
 | `provider-llmlab.yaml` | a managed Provider: LLMLab itself, read-only ([optional](#optional-attach-llmlab)) |
 | `modeldeployment-llmlab.yaml` | a model LLMLab already serves, attached to a plain name ([optional](#optional-attach-llmlab)) |
+| `workload-labelling.yaml` | a Workload of the Helios example's model: one class of a study's requests, named by a header or a `#labelling` suffix (beta; [the operations guide](operations.md#workloads-beta)) |
+| `modeldeployment-qwen25-labelling.yaml` | the Helios deployment under another name, listing that Workload; apply it instead of `modeldeployment-qwen25-instruct.yaml` (beta) |
 
 The profile ([`profiles/README.md`](../profiles/README.md)) holds what is true for everyone on a platform. A Provider holds what is yours. The rules for a ModelDeployment, such as the pinned checkpoint revision and engine digest, are in [HBEP-3](../hbep/0003-resource-model-and-naming/README.md) and [HBEP-7](../hbep/0007-lifecycle-controller/README.md). Admission refuses a value that breaks one and says which.
 

@@ -32,14 +32,17 @@ import (
 // count of content events is kept in ContentEvents (countsSource
 // front_events); ErrorCode holds a failed Responses stream's error.code.
 type Record struct {
-	Counter          uint64  `json:"counter"`
-	RequestID        string  `json:"requestID"`
-	StartTime        string  `json:"startTime"`
-	EndTime          string  `json:"endTime"`
-	ClientKeyID      string  `json:"clientKeyID"`
-	Path             string  `json:"path"`
-	RequestedModel   string  `json:"requestedModel"`
-	Level            string  `json:"level"`
+	Counter        uint64 `json:"counter"`
+	RequestID      string `json:"requestID"`
+	StartTime      string `json:"startTime"`
+	EndTime        string `json:"endTime"`
+	ClientKeyID    string `json:"clientKeyID"`
+	Path           string `json:"path"`
+	RequestedModel string `json:"requestedModel"`
+	Level          string `json:"level"`
+	// Workload is the Workload the request resolved to, or null when it named none or was refused before one resolved (beta, proposed;
+	// HBEP-5, Usage records). Never the client's raw header text.
+	Workload         *string `json:"workload"`
 	Provider         string  `json:"provider"`
 	ModelDeployment  string  `json:"modelDeployment"`
 	DeploymentID     string  `json:"deploymentID"`

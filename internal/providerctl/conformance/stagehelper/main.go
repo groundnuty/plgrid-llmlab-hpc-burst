@@ -1,4 +1,4 @@
-// Command stagehelper stages a model's sandbox image and checkpoint into a
+// Command stagehelper stages a model's image and checkpoint into a
 // Provider's persistent staging directory, in the place and by the code the
 // allocation agent (cmd/hb-agent) stages in, so that the agent, started
 // afterwards, finds both warm and does no work (issue #376). It runs as an
@@ -11,7 +11,7 @@
 // environment as the agent does (agent.LoadJob), finds Apptainer as the agent
 // does (HPCBURST_APPTAINER, else PATH), and makes its run directory under the
 // job's TMPDIR. Then it calls the real stager, stage.Stager, with the agent's
-// configuration: Image for the image in the sandbox format, and Checkpoint for
+// configuration: Image for the image in the partition's format (sandbox on Athena, a SIF on Sano), and Checkpoint for
 // the checkpoint with the file list the lifecycle controller records in the
 // identity record (pkg/hubfiles: Client.Files, then Inputs), without Restage
 // or RehashOnly, as the agent's first start calls it.
@@ -19,7 +19,11 @@
 // Its inputs that agent.json does not hold are compiled in, by whoever builds
 // it:
 //
-//	go build -ldflags "-X main.image=<repository> -X main.imageDigest=<sha256:...> -X main.checkpointRepo=<owner/name> -X main.checkpointRev=<40 hex> -X main.loadFormat=<format>" ./internal/providerctl/conformance/stagehelper
+//	go build -ldflags "-X main.image=<repository> -X main.imageDigest=<sha256:...> -X main.checkpointRepo=<owner/name> -X main.checkpointRev=<40 hex> -X main.loadFormat=<format> -X main.imageFormat=<sandbox|sif>" ./internal/providerctl/conformance/stagehelper
+//
+// imageFormat is the partition's image format (PartitionProfile.imageFormat): the helper stages the format the agent of that partition
+// stages and reads, sandbox for Athena and sif for Sano (issue #735), so that the serve row's agent finds the image warm. A value that
+// is neither is refused, like an empty one.
 //
 // loadFormat is the launch's --load-format. A launch that names none sends the
 // agent's request with "" (vLLM's default, auto), which the stager treats as
@@ -77,6 +81,8 @@ var (
 	checkpointRev string
 	// loadFormat is the launch's --load-format; "auto" for a launch with none.
 	loadFormat string
+	// imageFormat is the partition's image format, sandbox or sif (agentapi.ImageFormat).
+	imageFormat string
 )
 
 func main() {
@@ -90,5 +96,5 @@ func main() {
 
 // compiled is the inputs the build compiled in.
 func compiled() inputs {
-	return inputs{image: image, imageDigest: imageDigest, checkpointRepo: checkpointRepo, checkpointRev: checkpointRev, loadFormat: loadFormat}
+	return inputs{image: image, imageDigest: imageDigest, checkpointRepo: checkpointRepo, checkpointRev: checkpointRev, loadFormat: loadFormat, imageFormat: imageFormat}
 }

@@ -102,7 +102,7 @@ var wantControllerRules = map[string][]string{
 		"events.k8s.io events: create patch",
 	},
 	"hpcburst-front": {
-		"hpcburst.groundnuty.github.io modeldeployments instances providers platformprofiles: list watch",
+		"hpcburst.groundnuty.github.io modeldeployments instances workloads providers platformprofiles: list watch",
 		"apps controllerrevisions: list",
 		"events.k8s.io events: create patch",
 	},

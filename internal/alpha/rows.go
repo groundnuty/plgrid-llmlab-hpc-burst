@@ -225,10 +225,29 @@ type Row struct {
 	// (alpha-helios-nooverlap) or on plgrid-now's one-job slot (alpha-athena-now-nooverlap, issue #376's row B;
 	// HBEP-7, Handover). Row.Plan reads it; no row name does.
 	ReleaseWhenIdle bool
+	// Deployment is the example ModelDeployment the row serves, a file of examples/; empty for
+	// modeldeployment-qwen25-instruct.yaml, which the Athena and Helios rows serve. The Sano rows serve the 7B of
+	// modeldeployment-sano-qwen25-7b-instruct.yaml (DeploymentFile).
+	Deployment string
+	// ProviderStaging says the row's Provider gives its own spec.stagingDir, taken from HPCBURST_ALPHA_STAGING_DIR (HBEP-4, Provider
+	// settings; #757, #735): the row's shipped profile has none, since a Sano path carries a user name. TestEveryRowsProviderStagingFollowsItsProfile
+	// compares it with the profile, so the two cannot drift.
+	ProviderStaging bool
 	// PostsGlibcNotRun says the row writes a text to post when its run is NOT RUN on a compute node whose glibc is under the 2.30 Envoy
 	// needs (ErrGlibcTooOld): the version is the reading the row exists for. Only the Helios router row does (issue #566: its glibc is
 	// posted on any outcome); the Athena router row's NOT RUN posts nothing, as ruled on #521.
 	PostsGlibcNotRun bool
+}
+
+// DefaultDeployment is the example ModelDeployment a row with no Deployment of its own serves.
+const DefaultDeployment = "modeldeployment-qwen25-instruct.yaml"
+
+// DeploymentFile is the file of examples/ the row serves: Deployment, else DefaultDeployment.
+func (r Row) DeploymentFile() string {
+	if r.Deployment != "" {
+		return r.Deployment
+	}
+	return DefaultDeployment
 }
 
 // ProfileName is the row's shipped platform profile: Profile, else its cluster's.
@@ -384,6 +403,9 @@ var rows = []Row{
 	BetaBulkRow(),
 	// The router row on Helios's GH200 (issue #566): its compute node's glibc, read when Helios returns.
 	BetaHeliosRouterRow(),
+	// The Sano rows of issue #735 (sano.go): the handover row's shape on Sano's gpu partition under host-dialed mode, and row A's flow on it.
+	SanoHandoverRow(),
+	SanoServeRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).
@@ -433,7 +455,17 @@ var hostDialedRows = []Row{
 
 // stageRows are the pre-staging rows (issue #376; nowserve.go), which run in internal/providerctl/conformance: one job
 // whose agent build stages the image and the checkpoint where the agent stages, with no stack and no Instance.
-var stageRows = []Row{NowStageRow()}
+var stageRows = []Row{NowStageRow(), SanoStageRow()}
+
+// IsStageRow says whether name is a pre-staging row (StageRows): the Athena row of issue #376 or the Sano row of issue #735.
+func IsStageRow(name string) bool {
+	for _, r := range stageRows {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // StageRows returns a copy of the pre-staging rows.
 func StageRows() []Row { return append([]Row(nil), stageRows...) }

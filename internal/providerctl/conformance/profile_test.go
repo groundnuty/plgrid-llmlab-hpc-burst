@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 )
 
 // profilesDir is the repository's profiles directory, relative to this package.
@@ -44,9 +45,13 @@ type settings struct {
 	// start (HPCBURST_CONF_START_WAIT, startwait_test.go). Zero: the steps'
 	// own deadlines of 30 minutes.
 	startWait time.Duration
+	// stagingRoot is the Provider's own spec.stagingDir (HPCBURST_CONF_STAGING_ROOT), for a profile that has none (Sano's: #757, #735), or
+	// "" when the run takes the profile's. It wins when set, as a Provider's wins over a profile's, and it is then the root the run's staging
+	// is below, and the run's staging directory is the Provider's own stagingDir (conformanceProvider) while the profile stays as shipped.
+	stagingRoot string
 	// runStaging is this run's own staging directory, below staging
-	// (newRunStaging); the profile's stagingDir is it, and it is removed when the
-	// run ends.
+	// (newRunStaging); the profile's stagingDir is it (or, with a stagingRoot, the
+	// Provider's), and it is removed when the run ends.
 	runStaging string
 	gpus, cpus int32
 	memory     resource.Quantity
@@ -62,11 +67,21 @@ type settings struct {
 	part    v1alpha1.PartitionProfile
 }
 
-// loadProfile reads the shipped profile name from dir, finds partition in it
+// loadProfile is loadProfileWithRoot with no Provider root: the profile's own stagingDir is the root.
+func loadProfile(dir, name, partition, staging string) (*v1alpha1.PlatformProfile, v1alpha1.PartitionProfile, error) {
+	return loadProfileWithRoot(dir, name, partition, staging, "")
+}
+
+// loadProfileWithRoot reads the shipped profile name from dir, finds partition in it
 // and returns the profile with its stagingDir replaced by staging. staging
 // must be a directory below the profile's own stagingDir (a conformance run
 // never writes into the root of the user's scratch space).
-func loadProfile(dir, name, partition, staging string) (*v1alpha1.PlatformProfile, v1alpha1.PartitionProfile, error) {
+//
+// providerRoot is the Provider's own stagingDir (HPCBURST_CONF_STAGING_ROOT), "" for none. A profile that ships no stagingDir, as Sano's
+// does (a cluster path carries a user name), has its root from here, as the live conformance check's staging root (#735's checklist; #757):
+// with it the profile is returned as shipped and the run's directory is the Provider's own (conformanceProvider). Without it and without a
+// profile's, the run is refused, naming both.
+func loadProfileWithRoot(dir, name, partition, staging, providerRoot string) (*v1alpha1.PlatformProfile, v1alpha1.PartitionProfile, error) {
 	var none v1alpha1.PartitionProfile
 	if !profileName.MatchString(name) {
 		return nil, none, fmt.Errorf("profile %q: want the name of a file in profiles/ without its extension, for example helios", name)
@@ -95,8 +110,18 @@ func loadProfile(dir, name, partition, staging string) (*v1alpha1.PlatformProfil
 		sort.Strings(listed)
 		return nil, none, fmt.Errorf("profile %q lists no partition %q; it lists %s", name, partition, strings.Join(listed, ", "))
 	}
+	if providerRoot != "" {
+		// The Provider's own root wins. Nothing of it is in a message: it is account data.
+		if !strings.HasPrefix(staging, providerRoot+"/") || strings.HasSuffix(staging, "/") {
+			return nil, none, fmt.Errorf("HPCBURST_CONF_STAGING is not a directory below the Provider's stagingDir (HPCBURST_CONF_STAGING_ROOT)")
+		}
+		return &pp, *part, nil
+	}
 	root := pp.Spec.StagingDir
-	if root == "" || !strings.HasPrefix(staging, root+"/") || strings.HasSuffix(staging, "/") {
+	if root == "" {
+		return nil, none, fmt.Errorf("profile %q names no stagingDir, so HPCBURST_CONF_STAGING_ROOT, the Provider's own, must name the root", name)
+	}
+	if !strings.HasPrefix(staging, root+"/") || strings.HasSuffix(staging, "/") {
 		return nil, none, fmt.Errorf("HPCBURST_CONF_STAGING is not a directory below the profile's stagingDir %q", root)
 	}
 	pp.Spec.StagingDir = staging
@@ -132,7 +157,12 @@ func readSettings(env func(string) string) (settings, error) {
 		creds: get("HPCBURST_CONF_CREDENTIALS"), account: get("HPCBURST_CONF_ACCOUNT"), partition: get("HPCBURST_CONF_PARTITION"),
 		staging: get("HPCBURST_CONF_STAGING"), lock: get("HPCBURST_CONF_HOST_LOCK"), control: get("HPCBURST_CONF_CONTROL_DIR"),
 		out: get("HPCBURST_CONF_OUT"), gpus: num("HPCBURST_CONF_GPUS"), cpus: num("HPCBURST_CONF_CPUS"),
-		qos: env("HPCBURST_CONF_QOS"),
+		qos: env("HPCBURST_CONF_QOS"), stagingRoot: env("HPCBURST_CONF_STAGING_ROOT"),
+	}
+	if s.stagingRoot != "" {
+		if err := alpha.CheckStagingDir(s.stagingRoot); err != nil {
+			problems = append(problems, "HPCBURST_CONF_STAGING_ROOT "+err.Error())
+		}
 	}
 	if m := get("HPCBURST_CONF_MEMORY"); m != "" {
 		q, err := resource.ParseQuantity(m)
@@ -171,7 +201,7 @@ func readSettings(env func(string) string) (settings, error) {
 		return s, err
 	}
 	s.runStaging = runDir
-	pp, part, err := loadProfile(profilesDir(), profile, s.partition, s.runStaging)
+	pp, part, err := loadProfileWithRoot(profilesDir(), profile, s.partition, s.runStaging, s.stagingRoot)
 	if err != nil {
 		return s, err
 	}

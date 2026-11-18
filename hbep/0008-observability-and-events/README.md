@@ -400,7 +400,7 @@ No client key ID is a label: per-key usage is in the records.
 | Label or usage field (HBEP-5, Usage records) | OpenTelemetry attribute ([`docs/registry/attributes/gen-ai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/registry/attributes/gen-ai.md)) | Differences |
 |---|---|---|
 | the `endpoint` label; the field `path` | `gen_ai.operation.name`: `chat`, `text_completion` and `embeddings` for chat, completions and embeddings | `/v1/responses` has no value of its own; it maps to `chat` with `openai.api.type` `responses` ([`docs/gen-ai/openai.md`](https://github.com/open-telemetry/semantic-conventions-genai/blob/e6658f14c9d9ea0760825f029cb82e7673f48fab/docs/gen-ai/openai.md)), a choice of this HBEP; `models` and `other` have none |
-| `requestedModel` | `gen_ai.request.model` | as sent, cut at 1,291 bytes at a character boundary, with a marker (HBEP-5, Usage records) |
+| `requestedModel` | `gen_ai.request.model` | as sent, cut at 1,355 bytes (1,291 before Workloads) at a character boundary, with a marker (HBEP-5, Usage records) |
 | `promptTokens`, `completionTokens`, `cachedTokens` | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens` | ours are null when unknown (`countsSource: front_events`) |
 | `finish` | `gen_ai.response.finish_reasons` | ours is one value, theirs an array |
 | `firstTokenMs` | `gen_ai.response.time_to_first_chunk` | milliseconds; theirs is seconds |
@@ -408,6 +408,7 @@ No client key ID is a label: per-key usage is in the records.
 | `errorCode`, else `status` | `error.type` | |
 | the `provider` label | none: `hpcburst.provider` | below |
 | the `model_deployment` and `instance_uid` labels | none: `hpcburst.model_deployment` and `hpcburst.instance_uid` | |
+| the `workload` label | none: `hpcburst.workload` | beta, proposed. The resolved Workload's name, empty for a request that names none (HBEP-5, Workloads). The GenAI conventions have no attribute for a class of requests, so it is a custom one, as `hpcburst.provider` is |
 
 - **`gen_ai.provider.name` is not our `provider`.** The convention's attribute "acts as a discriminator that identifies the GenAI telemetry format flavor specific to that provider" (`gen-ai-metrics.md`, the client metric's note [4]), and its well-known values name vendors, such as `openai` and `aws.bedrock`. Our `provider` names a grant on a platform (HBEP-3), so it maps to `hpcburst.provider`. The server metrics require `gen_ai.provider.name`; neither vLLM nor LLMLab has a well-known value, so the collector's configuration sets it.
 - **The check** (Test plan): every `hpcburst_` name in the first table's first column is one the front or the lifecycle controller exports. The OpenTelemetry columns are re-read against the pinned commit whenever the pin moves, by an amendment; nothing in CI fetches them.
@@ -817,6 +818,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-17: erratum: the route and the `hpcburst_events_unlogged_total` series of a controller label end with the last manager of the label that is forgotten, not the first: a Provider that changes kind has a manager of each kind for a while, and a manager set up after the label was retired revives its route (#697).
 - 2026-11-17: erratum: the S2 ratios measured for #625's publisher (#697), recorded under Retention.
 - 2026-11-18: amendment from HBEP-764: the front's series gain a `workload` label, with in-flight and waiting gauges and a speed histogram per route.
+- 2026-11-18: erratum (the science agent's ruling Q8 on #764's stage-0 plan, 18 Nov 2026): the OpenTelemetry mapping maps the front's `workload` label to the custom attribute `hpcburst.workload`, which the export check requires; and the `requestedModel` row's bound is 1,355 bytes, as HBEP-5's Usage records has it since #769 (1,291 before Workloads).
 
 ## Amendments
 

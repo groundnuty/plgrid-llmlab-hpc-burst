@@ -264,7 +264,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		finding error
 	)
 	switch {
-	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-handover"):
+	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-handover"), IsSanoHandover(cfg.Row.Name):
 		o, serr := st.Handover(ctx, plan)
 		if stopsTheRun(serr) {
 			return nil, serr
@@ -356,12 +356,12 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		tags, obs = o.Tags, o
 		judge = func(j []provider.Job) []string { return VerifyBetaRouter(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return betaRouterPost(cfg.Row, o, f) }
-	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-serve"):
+	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-now-serve"), IsSanoServe(cfg.Row.Name):
 		o, serr := st.NowServe(ctx, plan)
 		if serr != nil {
 			return nil, serr
 		}
-		refused = nowServeNotRun(o)
+		refused = nowServeNotRun(cfg.Row.Name, o)
 		tags, obs = o.Tags, o
 		judge = func(j []provider.Job) []string { return VerifyNowServe(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return nowServePost(cfg.Row, o, f) }

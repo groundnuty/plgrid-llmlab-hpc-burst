@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"slices"
 	"sort"
 	"time"
 
@@ -23,6 +24,7 @@ func (v *View) addManaged(md *v1alpha1.ModelDeployment, providers map[string]*v1
 	key := md.Namespace + "/" + md.Name
 	src := md.Spec.Source.Managed
 	mm := v.model(md.Spec.Model) // the name is attached, even with no target
+	mm.ManagedSources = append(mm.ManagedSources, &ManagedSource{Key: key, Namespace: md.Namespace, Workloads: slices.Clone(md.Spec.Workloads)})
 	if c := findCondition(md.Status.Conditions, v1alpha1.ConditionReady); c != nil &&
 		c.Status == metav1.ConditionFalse && c.Reason == v1alpha1.ReasonProviderNotOnPlatform {
 		return
@@ -54,7 +56,7 @@ func (v *View) addManaged(md *v1alpha1.ModelDeployment, providers map[string]*v1
 		t := &ManagedTarget{
 			Key: key + "@" + name, Deployment: key, Namespace: md.Namespace, Name: md.Name, Provider: name,
 			CatalogName: src.CatalogName, ManagedID: string(entry.ManagedID), DisplayID: entry.ManagedID.Display(),
-			MaxRequestDuration: mrd,
+			MaxRequestDuration: mrd, Workloads: slices.Clone(md.Spec.Workloads),
 		}
 		if p.Spec.CredentialsRef != nil {
 			t.CredentialsFile = p.Spec.CredentialsRef.File

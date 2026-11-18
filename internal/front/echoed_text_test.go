@@ -2,8 +2,8 @@ package front
 
 // The bound on the client's text that an error message repeats (echoed_text.go; issue #647). What is checked, for each of the five messages that
 // repeat it (GET /v1/models/{id}, an unknown provider, a model that is not attached, a model with no ready target, an unknown deployment ID): an
-// over-long text draws the SAME status, code, detail, Retry-After and attribution as a short one, and a message whose repeated part is the first 1,291
-// bytes and the marker, in a body and a log within the bound; a text of exactly 1,291 bytes is repeated whole and one of 1,292 is cut. The usage
+// over-long text draws the SAME status, code, detail, Retry-After and attribution as a short one, and a message whose repeated part is the first 1,355
+// bytes and the marker, in a body and a log within the bound; a text of exactly 1,355 bytes is repeated whole and one of 1,356 is cut. The usage
 // record's own bound is recorded_text_test.go's.
 
 import (
@@ -115,18 +115,18 @@ func TestAnErrorMessageRepeatsABoundedCopyOfTheClientsText(t *testing.T) {
 			ascii := func(n int) string { return strings.Repeat("n", n) }
 			for name, c := range map[string]struct{ text, echoed string }{
 				"a short text":                               {"zz-short", "zz-short"},
-				"exactly the bound":                          {ascii(1291), ascii(1291)},
-				"one byte over the bound":                    {ascii(1292), ascii(1291) + cutMarker},
-				"the longest it can be sent, with a newline": {ascii(site.maxText-2) + "\n" + "n", ascii(1291) + cutMarker},
+				"exactly the bound":                          {ascii(1355), ascii(1355)},
+				"one byte over the bound":                    {ascii(1356), ascii(1355) + cutMarker},
+				"the longest it can be sent, with a newline": {ascii(site.maxText-2) + "\n" + "n", ascii(1355) + cutMarker},
 			} {
 				t.Run(name, func(t *testing.T) {
 					resp, body := site.do(s, c.text)
 					checkError(t, resp, body, site.want)
 					checkAttribution(t, resp, efFrontOnly)
 					if got, want := echoedMessage(t, body), site.before+c.echoed+site.after; got != want {
-						t.Errorf("the message has %d bytes (a text of %d was sent), want %d: the text whole up to 1,291 bytes, else its first 1,291 and the marker", len(got), len(c.text), len(want))
+						t.Errorf("the message has %d bytes (a text of %d was sent), want %d: the text whole up to 1,355 bytes, else its first 1,355 and the marker", len(got), len(c.text), len(want))
 					}
-					if len(body) > 4096 && len(c.echoed) <= 1291+len(cutMarker) {
+					if len(body) > 4096 && len(c.echoed) <= 1355+len(cutMarker) {
 						t.Errorf("the answer is %d bytes for a text of %d", len(body), len(c.text))
 					}
 					if n := s.longestLogLine(); n > 8192 {
@@ -143,7 +143,7 @@ func TestAnErrorMessageRepeatsABoundedCopyOfTheClientsText(t *testing.T) {
 // called with a long name: the status, code and detail are the same, and the message holds the bounded copy. The other two are checked the same way.
 func TestTheConstructorsOfTheEchoingErrorsBoundTheirCopy(t *testing.T) {
 	long := strings.Repeat("n", 5<<20)
-	want := strings.Repeat("n", 1291) + cutMarker
+	want := strings.Repeat("n", 1355) + cutMarker
 	for name, c := range map[string]struct {
 		e                  *routeError
 		status             int

@@ -21,6 +21,11 @@ func liveSettings(row string) map[string]string {
 	if strings.HasPrefix(row, "tunnel-hour-") {
 		m[envLease] = "137"
 	}
+	if r.ProviderStaging {
+		// The Sano rows: host-dialed alone (no address), and the Provider's own staging directory (#735).
+		m[envMode], m[envStagingDir] = "host-dialed", "/path/to/shared/example-stage"
+		delete(m, envAddr)
+	}
 	return m
 }
 

@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,6 +47,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/alpha"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm/fakeslurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -118,11 +120,12 @@ func stageRehashLine(r alpha.RehashObs) string {
 	return "- the checkpoint's rehash, from the stage helper's line (HBEP-9's rehash time; information, not a check): " + alpha.RehashWords(r) + "\n"
 }
 
-// stageExampleInputs are the served deployment's image and checkpoint, read as a ModelDeployment from the file row A
-// serves (examples/modeldeployment-qwen25-instruct.yaml), and its load format, auto when it names none.
-func stageExampleInputs(t testing.TB) (image, digest, repo, rev, load string) {
+// stageExampleInputs are the served deployment's image and checkpoint, read as a ModelDeployment from the file of examples/ the row's serve row
+// serves (Row.DeploymentFile: examples/modeldeployment-qwen25-instruct.yaml for the Athena row, the 7B's for Sano's), and its load format,
+// auto when it names none.
+func stageExampleInputs(t testing.TB, file string) (image, digest, repo, rev, load string) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "examples", "modeldeployment-qwen25-instruct.yaml"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "examples", file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +149,7 @@ func stageExampleInputs(t testing.TB) (image, digest, repo, rev, load string) {
 // stageHelperBinary is the helper build the script made, held to the example deployment: each of its compiled-in values
 // is in the binary, as -X writes them, so a build for another image or checkpoint is refused before anything is
 // submitted.
-func stageHelperBinary(t testing.TB, path string) []byte {
+func stageHelperBinary(t testing.TB, path, example string) []byte {
 	t.Helper()
 	if path == "" {
 		t.Fatalf("%s is not set: hack/live-checks.sh builds the helper (hack/build-stage-helper.sh) before the row takes its slot", stageHelperSetting)
@@ -155,7 +158,7 @@ func stageHelperBinary(t testing.TB, path string) []byte {
 	if err != nil || len(b) == 0 {
 		t.Fatalf("%s names no helper build: %v", stageHelperSetting, err)
 	}
-	image, digest, repo, rev, _ := stageExampleInputs(t)
+	image, digest, repo, rev, _ := stageExampleInputs(t, example)
 	for _, v := range []string{image, digest, repo, rev} {
 		if !bytes.Contains(b, []byte(v)) {
 			t.Fatal("the stage helper was not built with the example deployment's image and checkpoint (hack/build-stage-helper.sh)")
@@ -203,12 +206,37 @@ func TestNowStage(t *testing.T) {
 	if s.profile.Name != "athena-now" || s.part.Name != "plgrid-now" {
 		t.Fatalf("the pre-staging row runs under athena-now on plgrid-now, not %s on %s", s.profile.Name, s.part.Name)
 	}
-	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting))
+	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting), alpha.NowStageRow().DeploymentFile())
 	w := buildWorld(t, s, worldKit{agent: helper, keepStaging: true, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
 		ssh, err := sshrunNew(s, v)
 		return ssh, ssh, err
 	}})
 	stageBody(t, w, alpha.NowStageRow().Name)
+}
+
+// TestSanoStage is the pre-staging row on Sano's gpu partition (issue #735), the same body as TestNowStage over the same helper: the stage
+// helper as the Allocation's agent build, through the Provider's controller, staging the 7B deployment's image and checkpoint in the Provider's
+// own stagingDir (HPCBURST_CONF_STAGING_ROOT; Sano's profile has none), which the run keeps. The serve and handover rows then start warm from
+// it. It runs one gpu1 job: the framework cannot submit a CPU-only job on Sano's gpu partition (qosByGpus gives a count of 0 gpu1, alpha.SanoStageRow).
+//
+//livecheck:alpha-sano-stage
+func TestSanoStage(t *testing.T) {
+	if os.Getenv("HPCBURST_ALPHA_DRY") == "1" {
+		t.Fatal("the pre-staging row has no dry run through the script; its dry run is TestTheStageRowsDryRunStagesWhereTheAgentStages")
+	}
+	s := load(t)
+	row := alpha.SanoStageRow()
+	if s.profile.Name != row.ProfileName() || s.part.Name != row.Partition || s.stagingRoot == "" {
+		t.Fatalf("the Sano pre-staging row runs under %s on %s with the Provider's own stagingDir (HPCBURST_CONF_STAGING_ROOT), not %s on %s", row.ProfileName(), row.Partition, s.profile.Name, s.part.Name)
+	}
+	// Staged where the agent stages: the Provider's own root, not a run's directory below it, and kept.
+	s.runStaging = s.stagingRoot
+	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting), row.DeploymentFile())
+	w := buildWorld(t, s, worldKit{agent: helper, keepStaging: true, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
+		ssh, err := sshrunNew(s, v)
+		return ssh, ssh, err
+	}})
+	stageBody(t, w, row.Name)
 }
 
 // stageResultOf reads the helper's line from the Allocation's directory, its last bytes (the one read both a login node
@@ -239,8 +267,8 @@ func stageBody(t testing.TB, w *world, rowName string) {
 	t.Helper()
 	ctx := context.Background()
 	row, ok := alpha.RowByName(rowName)
-	if !ok || rowName != alpha.NowStageRow().Name {
-		t.Fatalf("%s is not the pre-staging row", rowName)
+	if !ok || !alpha.IsStageRow(rowName) {
+		t.Fatalf("%s is not a pre-staging row", rowName)
 	}
 	name := "stage"
 	w.timeLimit = stageTimeLimit
@@ -290,15 +318,14 @@ func stageBody(t testing.TB, w *world, rowName string) {
 	if !pass {
 		verdict = "FAIL"
 	}
-	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the cold staging on partition %s, qos %s, in the Provider's staging directory as the profile names it: the job ran %s of its %s lease\n",
-		row.Name, verdict, row.PostsTo, row.Partition, qosUsed(w.s.qos, w.s.part.QOS), ran.Round(time.Second), limit)
-	if res.ok {
-		posts += fmt.Sprintf("- the sandbox image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
-		posts += stageRehashLine(res.rehash)
+	// The QOS the job ran under: the Provider's or the partition's own, or, where the partition's qosByGpus chooses one by GPU count (Sano's), that one.
+	qos := qosUsed(w.s.qos, w.s.part.QOS)
+	if len(w.s.part.QOSByGPUs) > 0 {
+		if q, err := v1alpha1.QOSForGPUs(w.s.part, w.s.qos, w.s.gpus); err == nil {
+			qos = q
+		}
 	}
-	if !pass {
-		posts += "- " + why + "\n"
-	}
+	posts := stagePostText(row, verdict, qos, ran, limit, res, w.s.part.ImageFormat == v1alpha1.ImageFormatSIF, pass, why)
 	w.p.save(alpha.PostsFile, []byte(posts))
 	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"ranSeconds\": %d, \"result\": {\"present\": %t, \"ok\": %t, \"signalled\": %t, \"step\": %q, \"imageBuilt\": %t, \"imageSeconds\": %d, \"files\": %d, \"checkpointSeconds\": %d, \"mismatched\": %d, \"rehash\": {\"files\": %d, \"listed\": %d, \"bytes\": %d, \"ms\": %d}}}\n",
 		row.Name, verdict, int(ran.Seconds()), res.present, res.ok, res.signalled, res.step, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched,
@@ -309,13 +336,51 @@ func stageBody(t testing.TB, w *world, rowName string) {
 	t.Logf("%s passed; the text to post is in %s", row.Name, alpha.PostsFile)
 }
 
+// stageKind says what the helper's line shows the job did, from the image it built and the checkpoint files the stager found present and rehashed (the
+// agent's rehash line, issue #575): the cold staging the row measures (the image built and no checkpoint file present), a reuse of artifacts already in
+// the directory (no image built and files rehashed), or part of each. A rerun over a staged directory is no cold start, and the post must not say it is
+// (the review of PR 770). A line the helper did not give the rehash of says only that a cold start is not shown. A failed run is the row's usual cold staging
+// that did not finish, as before.
+func stageKind(res stageResult) string {
+	switch {
+	case !res.ok:
+		return "cold staging"
+	case !res.rehash.Read:
+		return "staging, whose checkpoint rehash the helper's line did not give, so that a cold start is not shown"
+	case res.imageBuilt && res.rehash.Files == 0:
+		return "cold staging"
+	case !res.imageBuilt && res.rehash.Files > 0:
+		return "reuse of artifacts already in the directory, not a cold start"
+	}
+	return fmt.Sprintf("partly cached staging, not a cold start (image built %t, %d of %d listed checkpoint files found present)", res.imageBuilt, res.rehash.Files, res.rehash.Listed)
+}
+
+// stagePostText is the stage row's text to post: the verdict, the job, what it staged and how, the rehash, and the reason for a FAIL. The row's cold-staging
+// words stand where the run was one, and where it was not they say what it was (stageKind).
+func stagePostText(row alpha.Row, verdict, qos string, ran, limit time.Duration, res stageResult, sif, pass bool, why string) string {
+	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the %s on partition %s, qos %s, in the Provider's staging directory where the agent stages: the job ran %s of its %s lease\n",
+		row.Name, verdict, row.PostsTo, stageKind(res), row.Partition, qos, ran.Round(time.Second), limit)
+	if res.ok {
+		kind := "sandbox"
+		if sif {
+			kind = "SIF"
+		}
+		posts += fmt.Sprintf("- the %s image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", kind, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
+		posts += stageRehashLine(res.rehash)
+	}
+	if !pass {
+		posts += "- " + why + "\n"
+	}
+	return posts
+}
+
 // dryStageHelper is the helper built for this machine with the Hub double's checkpoint and an image of the right shape
 // compiled in, once per process, into a directory of the test's own.
-func dryStageHelper(t testing.TB, dir string) []byte {
+func dryStageHelper(t testing.TB, dir, imageFormat string) []byte {
 	t.Helper()
 	out := filepath.Join(dir, "stagehelper")
 	flags := "-X main.image=example.org/engine/server -X main.imageDigest=sha256:" + strings.Repeat("ab", 32) +
-		" -X main.checkpointRepo=" + stack.CheckpointRepo + " -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto"
+		" -X main.checkpointRepo=" + stack.CheckpointRepo + " -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto -X main.imageFormat=" + imageFormat
 	cmd := exec.Command("go", "build", "-ldflags", flags, "-o", out, "./internal/providerctl/conformance/stagehelper")
 	cmd.Dir = filepath.Join("..", "..", "..")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -342,7 +407,7 @@ func TestTheStageRowsDryRunStagesWhereTheAgentStages(t *testing.T) {
 		t.Fatal(err)
 	}
 	hub := stack.StartHub(t)
-	helper := dryStageHelper(t, t.TempDir())
+	helper := dryStageHelper(t, t.TempDir(), "sandbox")
 	r := alpha.NowStageRow()
 	jobEnv := map[string]string{"HPCBURST_APPTAINER": filepath.Join(bin, "apptainer"), "HF_ENDPOINT": hub.URL}
 	// The fake cluster's $SCRATCH, with what a cleanup must keep laid out in it (nowstage_alloc_test.go).
@@ -480,8 +545,8 @@ func TestTheStageHelpersBuildIsTheExampleDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hack/build-stage-helper.sh --print: %v", err)
 	}
-	image, digest, repo, rev, load := stageExampleInputs(t)
-	want := fmt.Sprintf("-X main.image=%s -X main.imageDigest=%s -X main.checkpointRepo=%s -X main.checkpointRev=%s -X main.loadFormat=%s\n", image, digest, repo, rev, load)
+	image, digest, repo, rev, load := stageExampleInputs(t, alpha.NowStageRow().DeploymentFile())
+	want := fmt.Sprintf("-X main.image=%s -X main.imageDigest=%s -X main.checkpointRepo=%s -X main.checkpointRev=%s -X main.loadFormat=%s -X main.imageFormat=sandbox\n", image, digest, repo, rev, load)
 	if string(b) != want {
 		t.Errorf("the build's flags are %q, want %q", b, want)
 	}
@@ -518,4 +583,133 @@ func dryHubFiles(t testing.TB, hubURL string) []agentapi.FileDigest {
 		t.Fatalf("the Hub double lists %d files", len(files))
 	}
 	return files
+}
+
+// The Sano pre-staging row's dry run (issue #735): the helper, built to stage a SIF as Sano's partition reads, is the agent build of a job of the
+// fake Slurm in run mode, on a gpu partition whose QOS the profile chooses by GPU count (gpu1), through the Provider's controller with the
+// Provider's OWN stagingDir (the profile ships none), which is kept. The run passes, and a fresh real stager configured as the agent is, asking for a
+// SIF, then finds the image staged and verified and every listed file present and matching, and builds nothing: what the serve row's agent would
+// read. The SIF, its record and the checkpoint are where the agent looks (agentapi.StagedImagePath), and no sandbox was staged.
+//
+//livecheck:none a dry test on this host, no cluster
+func TestTheSanoStageRowDryRunStagesASIFInTheProvidersOwnDirectory(t *testing.T) {
+	bin := t.TempDir()
+	if err := enginedouble.Install(bin); err != nil {
+		t.Fatal(err)
+	}
+	hub := stack.StartHub(t)
+	helper := dryStageHelper(t, t.TempDir(), "sif")
+	r := alpha.SanoStageRow()
+	jobEnv := map[string]string{"HPCBURST_APPTAINER": filepath.Join(bin, "apptainer"), "HF_ENDPOINT": hub.URL}
+	jobs, err := os.MkdirTemp("", "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(jobs) })
+	out := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w, plat := dryWorld(t, r, "", out, dryShape{cpus: "11", memory: "135904Mi"}, helper, jobEnv, dryExtra{
+		run: func(rm *fakeslurm.RunMode) { rm.JobDir = jobs },
+		kit: func(k *worldKit) { k.keepStaging = true },
+		// Staged where the agent stages: the Provider's own root, not a run's directory below it (TestSanoStage).
+		settings: func(s settings) settings { s.runStaging = s.stagingRoot; return s },
+	})
+	if got := conformanceProvider(w.s).Spec.StagingDir; got == "" || got != w.s.stagingRoot {
+		t.Fatalf("the Provider's own stagingDir is not the root the run stages in")
+	}
+	scratch := filepath.Join(w.artefacts[len(w.artefacts)-1], "root", "scratch", "hb-sano-stage")
+	rec, tag := runStageExit(t, w, r.Name)
+	if rec.failed != "" || rec.skipped != "" || len(rec.errors) != 0 {
+		t.Fatalf("the dry run did not pass: failed %q, skipped %q, errors %q", rec.failed, rec.skipped, rec.errors)
+	}
+	rec.finish()
+	if len(rec.errors) != 0 {
+		t.Errorf("the cleanup reported %q", rec.errors)
+	}
+	if _, err := os.Stat(filepath.Join(scratch, agentapi.AllocationDir(tag))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the run's Allocation directory is still in the Provider's staging directory (%v)", err)
+	}
+	noRunJobLive(t, plat)
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	for _, c := range []struct {
+		path string
+		want bool
+	}{{agentapi.StagedImagePath(digest, agentapi.ImageFormatSIF), true}, {agentapi.StagedImagePath(digest, agentapi.ImageFormatSIF) + ".sha256", true},
+		{agentapi.StagedImagePath(digest, agentapi.ImageFormatSandbox), false}} {
+		if _, err := os.Stat(filepath.Join(scratch, c.path)); (err == nil) != c.want {
+			t.Errorf("%s: present %t, want %t (%v)", filepath.Base(c.path), err == nil, c.want, err)
+		}
+	}
+	run, err := os.MkdirTemp("", "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(run) })
+	var log bytes.Buffer
+	st, err := stage.New(stage.Config{StagingDir: scratch, Apptainer: filepath.Join(bin, "apptainer"), TmpDir: run, HubEndpoint: hub.URL, BaseEnv: os.Environ(), Log: &log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := false
+	ctx := agent.WithImageBuild(context.Background(), func(string) { built = true })
+	if _, err := st.Image(ctx, "example.org/engine/server", digest, agentapi.ImageFormatSIF); err != nil {
+		t.Fatal(err)
+	}
+	files := dryHubFiles(t, hub.URL)
+	if _, err := st.Checkpoint(ctx, agent.CheckpointRequest{Repository: stack.CheckpointRepo, Revision: stack.CheckpointRev, Files: files}); err != nil {
+		t.Fatal(err)
+	}
+	text := log.String()
+	if built || !strings.Contains(text, "image "+digest+": "+alpha.StagedAlreadyVerified) {
+		t.Errorf("the agent's stager would stage the SIF again (built %t):\n%s", built, text)
+	}
+	skip := stage.SkippedFiles(files, "")
+	for i, f := range files {
+		if !skip[i] && !strings.Contains(text, "checkpoint file "+f.Path+": "+alpha.StagedPresentMatching) {
+			t.Errorf("the agent's stager does not find %s present and matching:\n%s", f.Path, text)
+		}
+	}
+	posts, err := os.ReadFile(filepath.Join(out, alpha.PostsFile))
+	if err != nil || !strings.Contains(string(posts), r.Name+": PASS") || !strings.Contains(string(posts), "qos gpu1") || !strings.Contains(string(posts), "the SIF image: built true") {
+		t.Errorf("the dry run's text to post does not say a cold SIF staging passed under gpu1 (%v):\n%s", err, posts)
+	}
+	if regexp.MustCompile(`/|sha256|hb-sano-stage`).Match(posts) {
+		t.Errorf("the text to post names a path or a digest:\n%s", posts)
+	}
+}
+
+// The stage row's post says what the job did (stageKind): the cold staging the row measures, and not that for a rerun over artifacts already in the
+// directory, or for a run that found some of them (the review of PR 770). The expected words are written out here from the row's rule, one case for
+// each pair of (the image built, the checkpoint files found present), and the cold case keeps the sentence the row has always posted.
+//
+//livecheck:none a unit test of the stage row's post text over the helper's results, no cluster
+func TestTheStageRowsPostNamesWhatTheJobDid(t *testing.T) {
+	row, ok := alpha.RowByName(alpha.SanoStageName)
+	if !ok {
+		t.Fatal("no Sano stage row")
+	}
+	limit := 30 * time.Minute
+	res := func(ok, built bool, readRehash bool, files, listed int) stageResult {
+		return stageResult{present: true, ok: ok, imageBuilt: built, imageSeconds: 432, files: 14, checkpointSeconds: 144,
+			rehash: alpha.RehashObs{Read: readRehash, Files: files, Listed: listed, Bytes: int64(files) * 1000, MS: 5}}
+	}
+	for _, c := range []struct {
+		name         string
+		r            stageResult
+		want, reject string
+	}{
+		{"cold: the image built, no file present", res(true, true, true, 0, 14), "- the cold staging on partition gpu, qos gpu1, in the Provider's staging directory", "not a cold start"},
+		{"a rerun over everything staged: the image not built, files present", res(true, false, true, 14, 14), "- the reuse of artifacts already in the directory, not a cold start on partition gpu", "the cold staging"},
+		{"the image built over a cached checkpoint", res(true, true, true, 14, 14), "- the partly cached staging, not a cold start (image built true, 14 of 14 listed checkpoint files found present) on partition gpu", "the cold staging"},
+		{"the image cached over a fresh checkpoint", res(true, false, true, 0, 14), "- the partly cached staging, not a cold start (image built false, 0 of 14 listed checkpoint files found present) on partition gpu", "the cold staging"},
+		{"no rehash read", res(true, true, false, 0, 0), "- the staging, whose checkpoint rehash the helper's line did not give, so that a cold start is not shown on partition gpu", "the cold staging"},
+		{"a failed run is the cold staging that did not finish", res(false, false, false, 0, 0), "- the cold staging on partition gpu", "not a cold start"},
+	} {
+		got := stagePostText(row, "PASS", "gpu1", 9*time.Minute, limit, c.r, true, true, "")
+		if !strings.Contains(got, c.want) || strings.Contains(got, c.reject) {
+			t.Errorf("%s: the text to post is\n%s\nwant it to hold %q and not %q", c.name, got, c.want, c.reject)
+		}
+	}
 }

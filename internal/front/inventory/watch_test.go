@@ -33,7 +33,7 @@ func toUnstructured(t *testing.T, obj runtime.Object, kind string) *unstructured
 
 func newFakeDynamic(objs ...runtime.Object) *dynfake.FakeDynamicClient {
 	lists := map[schema.GroupVersionResource]string{
-		GVRModelDeployments: "ModelDeploymentList", GVRInstances: "InstanceList",
+		GVRModelDeployments: "ModelDeploymentList", GVRInstances: "InstanceList", GVRWorkloads: "WorkloadList",
 		GVRProviders: "ProviderList", GVRPlatformProfiles: "PlatformProfileList",
 	}
 	return dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), lists, objs...)

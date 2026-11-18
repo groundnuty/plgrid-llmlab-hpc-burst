@@ -53,7 +53,7 @@ func seedInstances(t *testing.T, insts ...v1alpha1.Instance) *dynfake.FakeDynami
 		objs = append(objs, u)
 	}
 	return dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList",
+		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList", inventory.GVRWorkloads: "WorkloadList",
 		inventory.GVRProviders: "ProviderList", inventory.GVRPlatformProfiles: "PlatformProfileList",
 	}, objs...)
 }

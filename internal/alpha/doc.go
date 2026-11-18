@@ -6,6 +6,8 @@
 //	alpha-helios-nooverlap  HBEP-7: no-overlap mode with the replacement queued ahead, the gap measured
 //	tunnel-hour-helios/-athena  HBEP-6: S1's one-hour run over this wiring, the path rate measured
 //	gpu-accounting-*        HBEP-8: the kept accounting record's GPU entry (internal/providerctl/conformance)
+//	alpha-sano-handover/-serve  issue #735: the handover and row A's serve flow on Sano's gpu partition (sano.go)
+//	alpha-sano-stage        issue #735: the pre-staging row that stages Sano's image and checkpoint (internal/providerctl/conformance)
 //
 // The package splits a run in two. The scenario, which starts the stack and
 // drives it, produces an observation (observe.go) through the Steps interface
