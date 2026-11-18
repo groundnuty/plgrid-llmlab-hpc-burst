@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-11-20T10:01:30Z",
+  "scope": {"namespace": "team"},
+  "modelDeployments": [
+    {
+      "namespace": "team", "name": "md-alice",
+      "owner": "system:serviceaccount:hpcburst-agents:agent-a", "purpose": "nightly run",
+      "instances": 2, "readyInstances": 1, "endTime": "2026-11-22T10:00:00Z",
+      "providers": ["sano"]
+    },
+    {
+      "namespace": "team", "name": "md-old",
+      "owner": {"unknown": "no owner annotation"}, "purpose": {"unknown": "no purpose annotation"},
+      "instances": 1, "readyInstances": {"unknown": "the controller has not reported on the ModelDeployment yet"},
+      "providers": ["helios"]
+    }
+  ],
+  "allocations": [
+    {
+      "namespace": "team", "name": "alloc-a1", "modelDeployment": "md-alice",
+      "owner": "system:serviceaccount:hpcburst-agents:agent-a", "purpose": "nightly run",
+      "phase": "Running", "provider": "sano", "hardEnd": "2026-11-20T13:00:00Z",
+      "retention": {"mode": "Keep", "profileMaxIdle": "1h0m0s"}
+    },
+    {
+      "namespace": "team", "name": "alloc-a2", "modelDeployment": "md-alice",
+      "owner": "system:serviceaccount:hpcburst-agents:agent-a", "purpose": "nightly run",
+      "phase": "Running", "provider": "sano", "hardEnd": "2026-11-20T12:00:00Z",
+      "retention": {"mode": "Keep", "until": "2026-11-21T10:00:00Z", "profileMaxIdle": "1h0m0s"},
+      "idleSince": "2026-11-20T09:30:00Z", "keptNoInstance": true
+    },
+    {
+      "namespace": "team", "name": "alloc-old", "modelDeployment": "md-old",
+      "owner": {"unknown": "no owner annotation"}, "purpose": {"unknown": "no purpose annotation"},
+      "phase": "Running", "provider": "helios", "hardEnd": "2026-11-20T11:00:00Z",
+      "retention": {"mode": "Keep"}
+    }
+  ],
+  "instances": [
+    {
+      "namespace": "team", "name": "inst-a1",
+      "owner": "system:serviceaccount:hpcburst-agents:agent-a", "purpose": "nightly run",
+      "phase": "ready", "allocation": "alloc-a1"
+    },
+    {
+      "namespace": "team", "name": "inst-old",
+      "owner": {"unknown": "no owner annotation"}, "purpose": {"unknown": "no purpose annotation"},
+      "phase": "ready", "allocation": "alloc-old"
+    }
+  ],
+  "providers": [
+    {"name": "helios", "lastSuccessfulStatusRead": {"unknown": "never read"}, "age": {"unknown": "never read"}},
+    {"name": "sano", "lastSuccessfulStatusRead": "2026-11-20T10:00:00Z", "age": "1m30s"}
+  ],
+  "operationsAwaitingApproval": [
+    {
+      "namespace": "team", "name": "op-wait", "modelDeployment": "md-alice", "action": "Scale", "planID": "plan-1",
+      "owner": "system:serviceaccount:hpcburst-agents:agent-a"
+    }
+  ]
+}
