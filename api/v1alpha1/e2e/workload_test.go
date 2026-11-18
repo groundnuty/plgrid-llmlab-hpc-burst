@@ -23,7 +23,7 @@ const (
 	workloadNameMessage = "a Workload name must be a DNS-1123 label"
 	modelHashMessage    = "a model name never contains '#'"
 	workloadsOnceMsg    = "spec.workloads lists each Workload once"
-	managedSessionsMsg  = "managedSessions takes effect with routeOrder ManagedFirst"
+	managedFirstMsg     = "routeOrder ManagedFirst needs managedSessions"
 )
 
 // newWorkload returns a Workload that admission accepts: its required fields only.
@@ -94,49 +94,61 @@ func TestWorkloadReadsBackItsDefaults(t *testing.T) {
 	}
 }
 
-// The enum admits OwnFirst only until the front routes ManagedFirst (HBEP-764, merging in steps; Q12). An
-// unknown order is refused as well. This is the schema's enum, not a CEL rule.
-func TestWorkloadRouteOrderAdmitsOnlyOwnFirst(t *testing.T) {
+// The enum admits OwnFirst and ManagedFirst (HBEP-764, PR 5: the front routes both; Q12). An unknown order is
+// refused as well, and so is a wrong-cased one. This is the schema's enum, not a CEL rule, so the cases that
+// are refused carry managedSessions, which keeps the spec rule below out of their message.
+func TestWorkloadRouteOrderAdmitsOwnFirstAndManagedFirst(t *testing.T) {
 	order := func(o v1alpha1.RouteOrder) func(*v1alpha1.Workload) {
-		return func(w *v1alpha1.Workload) { w.Spec.RouteOrder = o }
+		return func(w *v1alpha1.Workload) {
+			w.Spec.RouteOrder = o
+			w.Spec.ManagedSessions = ptr.To[int32](4)
+		}
 	}
 	runWorkloadCases(t, []workloadCase{
-		{"ManagedFirst", order(v1alpha1.RouteManagedFirst), "Unsupported value: \"ManagedFirst\""},
-		{"ManagedFirst with managedSessions", func(w *v1alpha1.Workload) {
-			w.Spec.RouteOrder = v1alpha1.RouteManagedFirst
-			w.Spec.ManagedSessions = ptr.To[int32](8)
-		}, "Unsupported value: \"ManagedFirst\""},
-		{"an unknown order", order("Anywhere"), "Unsupported value: \"Anywhere\""},
+		{"an unknown order", order("Elsewhere"), "Unsupported value: \"Elsewhere\""},
+		{"another unknown order", order("Anywhere"), "Unsupported value: \"Anywhere\""},
 		{"a lowercase order", order("ownfirst"), "Unsupported value: \"ownfirst\""},
+		{"a lowercase ManagedFirst", order("managedfirst"), "Unsupported value: \"managedfirst\""},
 	}, []workloadCase{
-		{"OwnFirst", order(v1alpha1.RouteOwnFirst), ""},
+		{"OwnFirst", func(w *v1alpha1.Workload) { w.Spec.RouteOrder = v1alpha1.RouteOwnFirst }, ""},
+		{"ManagedFirst with managedSessions", order(v1alpha1.RouteManagedFirst), ""},
 	})
 }
 
-// managedSessions is refused until the front routes it (Q12): it takes effect with ManagedFirst, which the
-// schema refuses too. This is the rule workloads:$.spec#0. The cases name no other invalid field, so the
-// spec rule is the only refusal.
-func TestWorkloadRefusesManagedSessionsUntilTheFrontRoutesIt(t *testing.T) {
-	sessions := func(n int32) func(*v1alpha1.Workload) {
-		return func(w *v1alpha1.Workload) { w.Spec.ManagedSessions = ptr.To(n) }
-	}
+// ManagedFirst needs managedSessions (HBEP-5, Workloads, Route order), and managedSessions is allowed with
+// OwnFirst too, where it bounds the overflow. This is the rule workloads:$.spec#0, whose mutant admits a
+// ManagedFirst Workload with no managedSessions. The cases name no other invalid field, so the spec rule is the
+// only refusal.
+func TestWorkloadManagedFirstNeedsManagedSessions(t *testing.T) {
 	runWorkloadCases(t, []workloadCase{
-		{"managedSessions with the default route order", sessions(8), managedSessionsMsg},
-		{"managedSessions with OwnFirst", func(w *v1alpha1.Workload) {
-			w.Spec.RouteOrder = v1alpha1.RouteOwnFirst
-			w.Spec.ManagedSessions = ptr.To[int32](1)
-		}, managedSessionsMsg},
-		{"the largest managedSessions", sessions(1024), managedSessionsMsg},
+		{"ManagedFirst without managedSessions", func(w *v1alpha1.Workload) { w.Spec.RouteOrder = v1alpha1.RouteManagedFirst }, managedFirstMsg},
+		{"ManagedFirst with only sessions", func(w *v1alpha1.Workload) {
+			w.Spec.RouteOrder = v1alpha1.RouteManagedFirst
+			w.Spec.Sessions = ptr.To[int32](16)
+		}, managedFirstMsg},
 	}, []workloadCase{
-		{"no managedSessions", func(*v1alpha1.Workload) {}, ""},
+		{"ManagedFirst with managedSessions 4", func(w *v1alpha1.Workload) {
+			w.Spec.RouteOrder = v1alpha1.RouteManagedFirst
+			w.Spec.ManagedSessions = ptr.To[int32](4)
+		}, ""},
+		{"OwnFirst with managedSessions 2", func(w *v1alpha1.Workload) {
+			w.Spec.RouteOrder = v1alpha1.RouteOwnFirst
+			w.Spec.ManagedSessions = ptr.To[int32](2)
+		}, ""},
+		{"OwnFirst without managedSessions", func(w *v1alpha1.Workload) { w.Spec.RouteOrder = v1alpha1.RouteOwnFirst }, ""},
+		{"the default order with managedSessions 8", func(w *v1alpha1.Workload) { w.Spec.ManagedSessions = ptr.To[int32](8) }, ""},
+		{"no routeOrder and no managedSessions", func(*v1alpha1.Workload) {}, ""},
 		{"sessions without managedSessions", func(w *v1alpha1.Workload) { w.Spec.Sessions = ptr.To[int32](16) }, ""},
 	})
-	// The bounds of the field itself: 0 and 1025 are refused by the schema (with the spec rule beside it).
+	// The bounds of the field itself, unchanged: 0 and 1025 are refused by the schema, with ManagedFirst and with OwnFirst.
 	ns := newNamespace(t)
-	for _, n := range []int32{0, 1025} {
-		w := newWorkload(ns, uniq("study"))
-		w.Spec.ManagedSessions = ptr.To(n)
-		requireRefused(t, c.Create(bg(), w), "spec.managedSessions")
+	for _, order := range []v1alpha1.RouteOrder{v1alpha1.RouteManagedFirst, v1alpha1.RouteOwnFirst} {
+		for _, n := range []int32{0, 1025} {
+			w := newWorkload(ns, uniq("study"))
+			w.Spec.RouteOrder = order
+			w.Spec.ManagedSessions = ptr.To(n)
+			requireRefused(t, c.Create(bg(), w), "spec.managedSessions")
+		}
 	}
 }
 
