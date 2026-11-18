@@ -13,6 +13,8 @@
 # the commit's own ci.yml by step name, so the commands are ci.yml's. It sanitises everything it prints, because
 # this log is public. No marketplace action is used: their logs print runner paths. The first line of each step
 # only refuses to run when the runner has no SANO_CI_JOB: bash's own error for that would print the runner's path.
+# The last line is an exec: a cancelled step is signalled through the step's own bash, which would otherwise die and
+# leave the script, and its Slurm job, running (checked on Sano: the job ran to its time limit).
 #
 # Only a pull request from this repository runs here. A fork's code never reaches the cluster.
 #
@@ -47,7 +49,7 @@ jobs:
       - name: go on Sano
         run: |
           [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
-          "$SANO_CI_JOB" go
+          exec "$SANO_CI_JOB" go
 
   go-own:
     name: sano go own-timeout
@@ -58,7 +60,7 @@ jobs:
       - name: go own-timeout on Sano
         run: |
           [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
-          "$SANO_CI_JOB" go-own
+          exec "$SANO_CI_JOB" go-own
 
   tidy:
     name: sano tidy
@@ -69,7 +71,7 @@ jobs:
       - name: tidy on Sano
         run: |
           [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
-          "$SANO_CI_JOB" tidy
+          exec "$SANO_CI_JOB" tidy
 
   crd-envtest:
     name: sano crd and envtest
@@ -80,4 +82,4 @@ jobs:
       - name: crd and envtest on Sano
         run: |
           [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
-          "$SANO_CI_JOB" crd-envtest
+          exec "$SANO_CI_JOB" crd-envtest
