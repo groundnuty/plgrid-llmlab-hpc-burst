@@ -94,8 +94,8 @@ var camelCase = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
 func TestEveryCRDFieldIsCamelCase(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(configDir("crd"), "*.yaml"))
 	must(t, err, "glob")
-	if len(files) != 8 {
-		t.Fatalf("want 8 CRD manifests, found %d", len(files))
+	if len(files) != 9 {
+		t.Fatalf("want 9 CRD manifests, found %d", len(files))
 	}
 	var walk func(path string, s *apiextensionsv1.JSONSchemaProps, n *int)
 	walk = func(path string, s *apiextensionsv1.JSONSchemaProps, n *int) {

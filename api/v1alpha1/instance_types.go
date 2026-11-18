@@ -345,6 +345,20 @@ type InstanceStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	HealthyWorkers *int32 `json:"healthyWorkers,omitempty"`
 
+	// KVCacheTokens is the Instance's KV cache size per worker, in tokens: vLLM's
+	// kv_cache_size_tokens, which the allocation agent reads once per engine process
+	// when the engine is ready and reports with the worker's health (HBEP-7, The KV
+	// cache size). With several workers it is the smallest among the workers its
+	// router holds healthy, the same set the front's cap counts. It is absent while no
+	// such worker has reported it (an engine run with disable-log-stats never does),
+	// and a worker's new generation unsets it until that worker reports again
+	// (`@hpc-burst-science-agent`, 18 Nov 2026, #764 Q4). The front's token budget is
+	// this times the workers its cap counts (HBEP-5, Workloads).
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	KVCacheTokens *int64 `json:"kvCacheTokens,omitempty"`
+
 	// Workers is the durable state of each of the Instance's workers (beta;
 	// HBEP-7, Several workers), one entry per worker of launch.workers, written by
 	// the lifecycle controller as each worker is verified, qualified and warmed

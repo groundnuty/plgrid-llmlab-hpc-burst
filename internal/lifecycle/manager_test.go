@@ -77,8 +77,8 @@ func installTestCRDs(ctx context.Context, cfg *rest.Config) error {
 	if err != nil {
 		return err
 	}
-	if len(crds) != 8 {
-		return fmt.Errorf("want the 8 committed CRDs in config/crd, found %d", len(crds))
+	if len(crds) != 9 {
+		return fmt.Errorf("want the 9 committed CRDs in config/crd, found %d", len(crds))
 	}
 	cl, err := crdinstall.NewClient(cfg)
 	if err != nil {
