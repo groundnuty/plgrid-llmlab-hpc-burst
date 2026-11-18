@@ -7,6 +7,8 @@ package lifecycle
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,9 +53,12 @@ func holdersOn(rg *rig, provider string) int {
 // primary there in the same moment. B holds E's primary and nothing reserved (E ends at 09:30, before its drain start
 // 09:50:20), so B's limit of 2 leaves ONE slot beyond what it holds: W needs it, and so does md-f's primary. Both passes
 // are reconciled AT ONCE (reconcileAtOnce) against a cache that never shows the first creation, and each interleaving is
-// forced by gates on the Allocation Lists of the passes (passGate): the pass that goes first waits at its gate until the
-// other has arrived at its own, so the two meet, and the pass that goes second is released only when the first's has
-// ended. Whichever reserves first creates, and the other is refused:
+// forced by a barrier BETWEEN the first pass's reservation and its Allocation's create (A7 of #751): the first pass runs on
+// to the create of its Allocation on B and waits there, in the window where the reservation is made and the Allocation is
+// not; the second pass, held at its first list of its own Allocations until the first arrives there, then runs its whole pass,
+// reads inside that window, and ends; and only then is the first pass's create released. A reservation that were recorded
+// only after the create would let the second pass take the same slot, so the row would then find three Allocations on B, not
+// two. Whichever reserves first creates, and the other is refused:
 //   - W first: 1 listed (E) + W's expectation = 2 >= 2 refuses md-f, which has no Instance and shows SubmitLimitReached
 //     naming B; D keeps R1 on A (in P's reserved slot, host-dialed) and has W;
 //   - md-f first: 1 listed + md-f's expectation = 2 >= 2 refuses W, silently (a member passed over sets no reason), so D has R1
@@ -64,16 +69,37 @@ func holdersOn(rg *rig, provider string) int {
 func TestAHedgeMemberAndAnotherDeploymentsPrimaryRaceForTheLastSlot(t *testing.T) {
 	for _, mode := range []struct {
 		name string
-		rig  func(t *testing.T) *hedgeRig
+		rig  func(t *testing.T, opts ...rigOption) *hedgeRig
 	}{
-		{"a submit limit of 2 on B", func(t *testing.T) *hedgeRig {
-			return newHedgeRigB(t, 4*time.Hour, &v1alpha1.QOSProfile{Name: "example-b2", MaxSubmitPerUser: i32(2)})
+		{"a submit limit of 2 on B", func(t *testing.T, opts ...rigOption) *hedgeRig {
+			return newHedgeRigB(t, 4*time.Hour, &v1alpha1.QOSProfile{Name: "example-b2", MaxSubmitPerUser: i32(2)}, opts...)
 		}},
-		{"host-dialed, 2 per Provider", func(t *testing.T) *hedgeRig { return newHedgeRig(t, withHostDialed()) }},
+		{"host-dialed, 2 per Provider", func(t *testing.T, opts ...rigOption) *hedgeRig {
+			return newHedgeRig(t, append([]rigOption{withHostDialed()}, opts...)...)
+		}},
 	} {
 		for _, first := range []string{hoMD, "md-f"} {
 			t.Run(mode.name+", "+first+" reserves first", func(t *testing.T) {
-				h := mode.rig(t)
+				second := map[string]string{hoMD: "md-f", "md-f": hoMD}[first]
+				atCreate := make(chan struct{})
+				ended := map[string]chan struct{}{hoMD: make(chan struct{}), "md-f": make(chan struct{})}
+				var armed atomic.Bool
+				var once sync.Once
+				barrier := interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if a, ok := obj.(*v1alpha1.Allocation); ok && armed.Load() && a.Spec.ProviderConfigReference != nil && a.Spec.ProviderConfigReference.Name == hedgeB &&
+						a.Labels[v1alpha1.LabelModelDeployment] == first {
+						reached := false
+						once.Do(func() { reached = true })
+						if reached {
+							close(atCreate) // the reservation is made and the Allocation is not: the second pass may read now
+							if err := waitOn(t, ended[second], second+"'s pass ending"); err != nil {
+								return err
+							}
+						}
+					}
+					return c.Create(ctx, obj, opts...)
+				}}
+				h := mode.rig(t, withInterceptors(barrier))
 				h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour}) // A: P starts at once, R1 pends
 				h.Step()                                                                 // the Providers' first status
 				e := mdSpec("md-e")
@@ -96,30 +122,19 @@ func TestAHedgeMemberAndAnotherDeploymentsPrimaryRaceForTheLastSlot(t *testing.T
 					t.Fatalf("B holds %d Allocations before the race, want E's alone", n)
 				}
 
-				second := map[string]string{hoMD: "md-f", "md-f": hoMD}[first]
-				atGate := map[string]chan struct{}{hoMD: make(chan struct{}), "md-f": make(chan struct{})}
-				ended := map[string]chan struct{}{hoMD: make(chan struct{}), "md-f": make(chan struct{})}
 				g := &passGate{Reader: newStaleReader(t, h.c), hold: map[string]func() error{}, done: map[string]bool{}}
-				g.hold[first] = func() error {
-					close(atGate[first])
-					return waitOn(t, atGate[second], second+"'s pass arriving at its gate")
-				}
-				g.hold[second] = func() error {
-					close(atGate[second])
-					return waitOn(t, ended[first], first+"'s pass ending")
-				}
+				g.hold[second] = func() error { return waitOn(t, atCreate, first+"'s pass reaching its Allocation's create") }
 				h.r.Reader = g
+				armed.Store(true)
 				for i, err := range h.reconcileAtOnceThen(h.r, func(name string) { close(ended[name]) }, hoMD, "md-f") {
 					if err != nil {
 						t.Fatalf("reconcile %d: %v", i, err)
 					}
 				}
-				for n, ch := range atGate {
-					select {
-					case <-ch:
-					default:
-						t.Fatalf("%s's pass never reached its gate: the two passes did not meet", n)
-					}
+				select {
+				case <-atCreate:
+				default:
+					t.Fatalf("%s's pass never reached its Allocation's create: the two passes did not meet", first)
 				}
 				var onB []v1alpha1.Instance
 				for _, in := range h.onProvider(hoMD, hedgeB) {
