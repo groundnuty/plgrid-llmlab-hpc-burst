@@ -121,13 +121,16 @@ func (r *evRig) withStagingDir(dir string) {
 
 // capturing rebuilds the rig's controller with a log that keeps every line (also the one in the context of a pass), over a
 // Batch whose runner answers an sbatch with Slurm's text of a refusal while the returned runner is armed.
-func (r *evRig) capturing() (*logSink, *echoSbatch) {
+func (r *evRig) capturing(mods ...func(*providerctl.Options)) (*logSink, *echoSbatch) {
 	r.t.Helper()
 	sink, echo := &logSink{}, &echoSbatch{inner: r.faults}
 	o := r.options()
 	o.Log = logging.NewLogrLogger(sink.logr())
 	o.NewPlatform = func(v slurm.Validated) (providerctl.Platform, io.Closer, error) {
 		return slurm.NewBatch(echo, v.Profile, v.Settings, slurm.Options{Clock: r.clock, PollInterval: 100 * time.Millisecond, BusyInterval: 100 * time.Millisecond}), io.NopCloser(nil), nil
+	}
+	for _, m := range mods {
+		m(&o)
 	}
 	ctl, err := providerctl.New(c, c, scheme(), o)
 	if err != nil {
@@ -271,12 +274,31 @@ func TestTheProvidersStagingDirNeverLeaks(t *testing.T) {
 	r.requireNoLeak(sink, "a", "b")
 }
 
-// A Provider whose stagingDir ReadProfile refuses (a ".." segment) has its reason in the Allocation's status and its event, and
-// that text names the field and never the value.
+// dotDotProvider is a client.Reader that serves the Provider with a stagingDir holding a ".." segment. The API server refuses
+// such a value at admission (the CEL rule of providers:$.spec.stagingDir#0), so the row reads the Provider through this wrapper,
+// as ReadProfile would read a stored object that predates the rule: it is never trusted blindly.
+type dotDotProvider struct {
+	client.Reader
+	dir string
+}
+
+func (d dotDotProvider) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := d.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if p, ok := obj.(*v1alpha1.Provider); ok {
+		p.Spec.StagingDir = d.dir
+	}
+	return nil
+}
+
+// A Provider whose stagingDir ReadProfile refuses (a ".." segment, which admission refuses first and which a stored object may
+// still hold) has its reason in the Allocation's status and its event, and that text names the field and never the value.
 func TestTheRefusalOfAStagingDirNeverEchoesIt(t *testing.T) {
 	r := newEvRig(t, rigOpts{})
-	r.withStagingDir(leakDotDir)
-	sink, _ := r.capturing()
+	sink, _ := r.capturing(func(o *providerctl.Options) {
+		o.Profiles = &slurm.ProfileReader{Reader: dotDotProvider{Reader: c, dir: leakDotDir}, Home: r.home}
+	})
 	r.newAlloc("a", "3h")
 	a := r.until("a", "Refused", 4, func(a *v1alpha1.Allocation) bool { return a.Status.AtProvider.Phase == v1alpha1.AllocationRefused })
 	if reason := a.Status.AtProvider.Reason; !strings.Contains(reason, "provider.spec.stagingDir") {

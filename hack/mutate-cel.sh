@@ -169,6 +169,7 @@ platformprofiles:$.spec.stagingDir#0|^TestStagingDirRefusesDotDotSegments$
 platformprofiles:$.spec.unknownBound#0|^TestDurationsArePositiveAndFit$
 providers:$#0|^TestProviderNamesAreDNS1123Labels$
 providers:$.spec.credentialsRef#0|^TestProviderCredentialsReferenceNamesExactlyOneSource$
+providers:$.spec.stagingDir#0|^TestProviderStagingDirRefusesDotDotSegments$
 TABLE
 )
 

@@ -159,6 +159,10 @@ spec:
                 minLength: 1
                 pattern: ^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$
                 type: string
+                x-kubernetes-validations:
+                - message: 'stagingDir must not contain a ''..'' segment: agent.json
+                    refuses one (agentapi.AgentConfig)'
+                  rule: '!self.split(''/'').exists(s, s == ''..'')'
             required:
             - platformProfileRef
             type: object

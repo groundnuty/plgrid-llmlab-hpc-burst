@@ -74,6 +74,7 @@ type ProviderSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=1024
 	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
+	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '..')",message="stagingDir must not contain a '..' segment: agent.json refuses one (agentapi.AgentConfig)"
 	StagingDir string `json:"stagingDir,omitempty"`
 
 	// CredentialsRef refers to the provider's credentials: a mode-600 file on
