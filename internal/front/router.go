@@ -330,13 +330,21 @@ func (r *Router) applyLocked(d *inventory.Deployment, prev *inventory.View, now 
 // are eligible now (the control plane's part and no pause), and the adaptive
 // bound (HBEP-5, open question 3, option 5): while the eligible Instances
 // meet spec.instances, the tight bound and each Instance's cap; below, the
-// loose bound and no cap.
+// loose bound and no cap (the count cap, and with it the token condition of a
+// request that names no Workload; a Workload request's token condition holds).
 func (r *Router) stateLocked(d *inventory.Deployment, now time.Time) (balancer.State, int) {
-	st := balancer.State{Eligible: map[string]bool{}, Attrs: map[string]balancer.Attrs{}}
+	st := balancer.State{Eligible: map[string]bool{}, Attrs: map[string]balancer.Attrs{}, CapValues: map[string]int{}, Budgets: map[string]int64{}}
 	ready := 0
 	for _, i := range d.Members {
 		st.Members = append(st.Members, i.Key)
 		st.Attrs[i.Key] = balancer.Attrs{Provider: i.Provider, DisplayID: i.DisplayID}
+		// The cap's value and the token budget are pushed at every membership, the count cap's presence not: below full membership a Workload request's
+		// token condition stays in force with the cap at the value it has when in force (HBEP-5, Workloads, The count in tokens). A member with no
+		// budget known has none in the state, so it meets the count rule alone.
+		st.CapValues[i.Key] = i.Cap
+		if b, ok := i.TokenBudget(); ok {
+			st.Budgets[i.Key] = b
+		}
 		if i.Eligible && !r.pausedLocked(i.Key, now) {
 			st.Eligible[i.Key] = true
 			ready++

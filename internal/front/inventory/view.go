@@ -7,6 +7,7 @@
 package inventory
 
 import (
+	"math"
 	"slices"
 	"time"
 
@@ -82,6 +83,10 @@ type Workload struct {
 	Namespace string
 	Name      string
 	Model     string // spec.model
+	// Charge is c, what one request of the Workload is charged against an Instance's token budget (HBEP-5, Workloads,
+	// The count in tokens): shape.contextTokens.typical plus shape.outputTokens.typical, as the Workload had it when
+	// this view was built.
+	Charge int64
 }
 
 // ManagedSource is a managed-source ModelDeployment that attaches a model.
@@ -142,14 +147,33 @@ type Instance struct {
 	DeploymentID string // full form
 	DisplayID    string
 	Cap          int // routing.instanceCap, else launch.maxNumSeqs x workers
-	LeaseEnd     time.Time
-	DrainStart   time.Time
+	// KVCacheTokens is status.kvCacheTokens, the engine's KV cache size per worker; nil when the Instance has none (an
+	// engine run with disable-log-stats, or before the agent reports it). TokenBudget reads it.
+	KVCacheTokens *int64
+	// CapWorkers is the workers Cap counts: the healthy workers behind a router, else Workers.
+	CapWorkers int
+	LeaseEnd   time.Time
+	DrainStart time.Time
 	// Eligible is the part of eligibility the control plane decides: phase
 	// ready, AgentUnreachable not true, a registered transport, and a Provider
 	// that the deployment's spec.providers selects now. A member whose Provider
 	// was deselected stays a member, not eligible, so its open requests keep
 	// their count. The router adds its pauses and the request's level.
 	Eligible bool
+}
+
+// TokenBudget is the Instance's token budget B (HBEP-5, Workloads, The count in tokens): kvCacheTokens times the
+// workers its cap counts. ok is false when B is unknown, and the Instance then meets the count rule alone: it has no
+// kvCacheTokens, or no worker counted, or the product would not fit an int64 (no engine reports such a size, and a
+// wrapped value must never become a budget).
+func (i *Instance) TokenBudget() (b int64, ok bool) {
+	if i.KVCacheTokens == nil || *i.KVCacheTokens < 1 || i.CapWorkers < 1 {
+		return 0, false
+	}
+	if *i.KVCacheTokens > math.MaxInt64/int64(i.CapWorkers) {
+		return 0, false
+	}
+	return *i.KVCacheTokens * int64(i.CapWorkers), true
 }
 
 // ManagedTarget is one attached managed catalog entry under one Provider.

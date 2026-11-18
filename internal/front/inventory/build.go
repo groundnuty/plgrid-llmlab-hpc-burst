@@ -46,7 +46,8 @@ func Build(s Snapshot, in Inputs) *View {
 	}
 	for i := range s.Workloads {
 		o := &s.Workloads[i]
-		w := &Workload{Key: o.Namespace + "/" + o.Name, Namespace: o.Namespace, Name: o.Name, Model: o.Spec.Model}
+		w := &Workload{Key: o.Namespace + "/" + o.Name, Namespace: o.Namespace, Name: o.Name, Model: o.Spec.Model,
+			Charge: int64(o.Spec.Shape.ContextTokens.Typical) + int64(o.Spec.Shape.OutputTokens.Typical)}
 		if v.Workloads[w.Model] == nil {
 			v.Workloads[w.Model] = map[string][]*Workload{}
 		}
@@ -196,14 +197,15 @@ func (v *View) routable(md *v1alpha1.ModelDeployment, d *Deployment, inst *v1alp
 	return &Instance{
 		Key: key, Namespace: inst.Namespace, Name: inst.Name, UID: inst.UID, Deployment: d.Key,
 		Provider: prov.Name, DeploymentID: string(inst.Spec.DeploymentID), DisplayID: inst.Spec.DeploymentID.Display(),
-		Cap: instanceCap(md.Spec.Routing, inst), LeaseEnd: inst.Status.LeaseEnd.Time, DrainStart: drain,
+		Cap: instanceCap(md.Spec.Routing, inst), KVCacheTokens: clonePtr(inst.Status.KVCacheTokens), CapWorkers: capWorkers(inst),
+		LeaseEnd: inst.Status.LeaseEnd.Time, DrainStart: drain,
 		Eligible: ready && transport && sel && !conditionTrue(inst.Status.Conditions, v1alpha1.ConditionAgentUnreachable),
 	}
 }
 
 func instanceCap(r *v1alpha1.Routing, inst *v1alpha1.Instance) int {
-	if h := inst.Status.HealthyWorkers; h != nil {
-		return routedCap(r, inst, int(*h))
+	if inst.Status.HealthyWorkers != nil {
+		return routedCap(r, inst, capWorkers(inst))
 	}
 	if r != nil && r.InstanceCap != nil && *r.InstanceCap > 0 {
 		return int(*r.InstanceCap)
@@ -212,7 +214,26 @@ func instanceCap(r *v1alpha1.Routing, inst *v1alpha1.Instance) int {
 	if seqs <= 0 {
 		seqs = v1alpha1.DefaultMaxNumSeqs
 	}
-	return seqs * Workers
+	return seqs * capWorkers(inst)
+}
+
+// capWorkers is the workers instanceCap counts: the healthy workers behind a router, which reports them, else Workers.
+// The token budget multiplies kvCacheTokens by this same number (Instance.TokenBudget), so B and the cap count one
+// set of workers.
+func capWorkers(inst *v1alpha1.Instance) int {
+	if h := inst.Status.HealthyWorkers; h != nil {
+		return int(*h)
+	}
+	return Workers
+}
+
+// clonePtr copies the value a pointer holds, so a view never shares a pointer with the snapshot it was built from.
+func clonePtr(p *int64) *int64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // bounds returns the tight and loose bounds as KubeAI percents.
