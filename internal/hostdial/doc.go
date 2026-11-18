@@ -8,10 +8,11 @@
 // relay, so control and the token tunnel never share a connection (HBEP-6,
 // Risks). A relay is one ssh process on the control-plane host, on a
 // connection of its own, running agentapi.RelayLine on the login node: an
-// "srun -u --overlap" step whose program is the agent binary's "relay
-// <channel> --dir <Allocation directory> --allocation <UID> --epoch <E> --seq
-// <N>". After the relay's preamble, one multiplexed session (yamux) runs over
-// the step's standard input and output.
+// "srun -u --overlap --chdir=<Allocation directory>" step (the step starts in
+// the Allocation's directory, for a compute node with no home) whose program
+// is the agent binary's "relay <channel> --dir <Allocation directory>
+// --allocation <UID> --epoch <E> --seq <N>". After the relay's preamble, one
+// multiplexed session (yamux) runs over the step's standard input and output.
 //
 // The three parts:
 //

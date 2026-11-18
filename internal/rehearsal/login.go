@@ -23,9 +23,9 @@
 //
 // A line whose first word is srun does not go as one request and one reply: it
 // streams (issue #298). The relay of HBEP-6's host-dialed mode runs "srun -u
-// --overlap --jobid=<id> --ntasks=1 <agent> relay <channel>" through this
-// login node and carries one multiplexed session over the step's standard
-// input and output for the job's whole life. The forced command copies
+// --overlap --jobid=<id> --ntasks=1 --chdir=<dir> <agent> relay <channel>"
+// through this login node and carries one multiplexed session over the step's
+// standard input and output for the job's whole life. The forced command copies
 // standard input to the server as it arrives, and the step's standard output
 // and error back as they arrive, in length-prefixed frames of at most 64 KiB
 // (wire.go, Streaming), and exits with the step's exit code. The end of

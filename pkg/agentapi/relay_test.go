@@ -9,17 +9,49 @@ var exampleRelay = RelayArgs{Channel: RelayServing, Dir: "/scratch/example/stage
 	Allocation: "0a1b2c3d-0000-4000-8000-000000000001", Epoch: 3, Seq: 7}
 
 // TestRelayLineIsTheHBEPsLine pins the line to HBEP-6's text (Dial-home modes,
-// host-dialed mode, at b12aa9f): "srun -u --overlap --jobid=<job> --ntasks=1
-// <the job's agent binary> relay <channel> --dir <Allocation directory>
-// --allocation <UID> --epoch <E> --seq <N>". The expected string is written
-// out here from the HBEP, not built with RelayLine's own parts.
+// host-dialed mode, as amended on 18 Nov 2026, #735): "srun -u --overlap
+// --jobid=<job> --ntasks=1 --chdir=<Allocation directory> <the job's agent
+// binary> relay <channel> --dir <Allocation directory> --allocation <UID>
+// --epoch <E> --seq <N>". The expected string is written out here from the
+// HBEP, not built with RelayLine's own parts.
 func TestRelayLineIsTheHBEPsLine(t *testing.T) {
 	agent := "/scratch/example/stage/agent/" + strings.Repeat("a", 64) + "/hb-agent"
-	want := "srun -u --overlap --jobid=4242 --ntasks=1 " + agent + " relay serving --dir /scratch/example/stage/alloc/hb-example-0123456789ab" +
+	want := "srun -u --overlap --jobid=4242 --ntasks=1 --chdir=/scratch/example/stage/alloc/hb-example-0123456789ab " + agent + " relay serving --dir /scratch/example/stage/alloc/hb-example-0123456789ab" +
 		" --allocation 0a1b2c3d-0000-4000-8000-000000000001 --epoch 3 --seq 7"
 	got, err := RelayLine("4242", agent, exampleRelay)
 	if err != nil || got != want {
 		t.Errorf("RelayLine = %q, %v\nwant %q", got, err, want)
+	}
+}
+
+// TestRelayLineChdirIsTheAllocationDirectory pins HBEP-6's amendment of
+// 18 Nov 2026 (#735): srun's --chdir is the relay's own --dir value, whatever
+// directory that is, so a step on a compute node with no home starts where the
+// agent's rendezvous file is. The expected words are written out by hand.
+func TestRelayLineChdirIsTheAllocationDirectory(t *testing.T) {
+	for dir, want := range map[string]string{
+		"/scratch/example/stage/alloc/hb-example-0123456789ab": "--chdir=/scratch/example/stage/alloc/hb-example-0123456789ab",
+		"/s/alloc/hb-x": "--chdir=/s/alloc/hb-x",
+	} {
+		a := exampleRelay
+		a.Dir = dir
+		line, err := RelayLine("4242", "/x/hb-agent", a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		words := strings.Fields(line)
+		var chdirs []string
+		for _, w := range words {
+			if strings.HasPrefix(w, "--chdir") {
+				chdirs = append(chdirs, w)
+			}
+		}
+		if len(chdirs) != 1 || chdirs[0] != want {
+			t.Errorf("the relay line %q has --chdir words %q, want exactly [%s]", line, chdirs, want)
+		}
+		if i := strings.Index(line, want); i < 0 || i > strings.Index(line, "/x/hb-agent") {
+			t.Errorf("the relay line %q has --chdir after the program, where srun would not read it", line)
+		}
 	}
 }
 
@@ -47,7 +79,7 @@ func TestRelayLineWithoutUnbufferedFails(t *testing.T) {
 		t.Fatalf("the relay line %q names no program", line)
 	}
 	opts := words[1:prog]
-	for _, need := range []string{"-u", "--overlap", "--jobid=4242", "--ntasks=1"} {
+	for _, need := range []string{"-u", "--overlap", "--jobid=4242", "--ntasks=1", "--chdir=" + exampleRelay.Dir} {
 		found := false
 		for _, o := range opts {
 			if o == need {
@@ -79,6 +111,8 @@ func TestRelayLineAndArgsRefuse(t *testing.T) {
 		"another channel":    {"12", "/x/hb-agent", func(a *RelayArgs) { a.Channel = "plugin" }},
 		"a relative dir":     {"12", "/x/hb-agent", func(a *RelayArgs) { a.Dir = "alloc/x" }},
 		"a dot-dot dir":      {"12", "/x/hb-agent", func(a *RelayArgs) { a.Dir = "/s/../x" }},
+		"a dir with a space": {"12", "/x/hb-agent", func(a *RelayArgs) { a.Dir = "/s/a b" }}, // it is also srun's --chdir value
+		"a dir with a quote": {"12", "/x/hb-agent", func(a *RelayArgs) { a.Dir = "/s/a'b" }},
 		"a UID with a space": {"12", "/x/hb-agent", func(a *RelayArgs) { a.Allocation = "a b" }},
 		"no UID":             {"12", "/x/hb-agent", func(a *RelayArgs) { a.Allocation = "" }},
 		"a negative epoch":   {"12", "/x/hb-agent", func(a *RelayArgs) { a.Epoch = -1 }},

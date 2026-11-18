@@ -96,7 +96,7 @@ var hostDialedFaultLines = map[string]string{
 var hostDialedOKLines = []string{
 	"- the control session: ok: up: the agent registered over the control relay (1 registration(s), the recorded job); the stop was served to its poll over the same session, it sent its last report, and the job ended COMPLETED",
 	"- the serving session: ok: up: a stream the job opened crossed it to the serving port",
-	"- srun -u: ok: every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent> relay <channel>",
+	"- srun -u: ok: every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 --chdir=<the Allocation directory> <the staged agent> relay <channel>",
 	"- the rendezvous: ok: socket under $TMPDIR: yes; fallback to /dev/shm: no; its path is ",
 	"- the preamble: ok: each relay's first line was hpcburst-relay/1 <the Allocation's UID>",
 	"- the epoch: ok: both relays carried epoch 7; a relay pair of epoch 6, each with a higher sequence than the kept relay's, was refused as superseded on both channels",

@@ -65,8 +65,9 @@ func TestHostDialedChannelsStayApart(t *testing.T) {
 		t.Errorf("the fake ran %d srun steps for job %s, want 2, one per channel: %q", n, j.id, w.sruns(j.id))
 	}
 	for _, line := range w.sruns(j.id) {
-		if !strings.HasPrefix(line, "srun -u --overlap --jobid="+j.id+" --ntasks=1 ") {
-			t.Errorf("a relay ran %q, not HBEP-6's srun -u --overlap line", line)
+		// HBEP-6's line, as amended on 18 Nov 2026 (#735): --chdir is the Allocation's directory, which the harness made.
+		if !strings.HasPrefix(line, "srun -u --overlap --jobid="+j.id+" --ntasks=1 --chdir="+j.allocDir+" "+w.agent+" relay ") {
+			t.Errorf("a relay ran %q, not HBEP-6's srun -u --overlap line with --chdir=%s", line, j.allocDir)
 		}
 	}
 }
