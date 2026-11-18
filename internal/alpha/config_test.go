@@ -26,6 +26,12 @@ func liveSettings(row string) map[string]string {
 		m[envMode], m[envStagingDir] = "host-dialed", "/path/to/shared/example-stage"
 		delete(m, envAddr)
 	}
+	if r.Studyload {
+		m[envStudyloadBin] = "/private/studyload"
+	}
+	if r.LLMLab {
+		m[envLLMLabCreds] = "/private/llmlab-creds.json"
+	}
 	return m
 }
 

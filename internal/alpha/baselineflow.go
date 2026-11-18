@@ -1,0 +1,257 @@
+package alpha
+
+// The baseline row's sequencer (baseline.go): the order of its steps, the guard on LLMLab's requests, the stop when the served Instance stops being
+// eligible, and the detach, over one small seam. The live run (baseline_live_test.go) and the dry run (dry_baseline_test.go) both implement the seam,
+// so the same code is what the dry faults and the mutants run; nothing of the order or the guard is written twice.
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/rehearsal/stack"
+)
+
+// The waits of the baseline row, named here because its worst case is added up from them (budget.go).
+const (
+	// BaselineP0Wait bounds everything before the GPU job: the managed ModelDeployment's catalog read (the Provider's controller lists LLMLab's
+	// catalog once a minute) until the managed target answers, and P0's request.
+	BaselineP0Wait = 4 * time.Minute
+	// BaselinePoll is how often a running phase looks at LLMLab's request count, the Instance's eligibility and the engine.
+	BaselinePoll = 2 * time.Second
+	// BaselineDetachWait bounds the wait, after the managed ModelDeployment is deleted, for the front to drop its target, and BaselineDetachEvery is how
+	// often it looks: each look is a request at the managed Provider's level, which LLMLab answers (one token) while the target is still attached.
+	BaselineDetachWait  = 2 * time.Minute
+	BaselineDetachEvery = 5 * time.Second
+	// BaselineFitMargin is what must remain before the Instance's drain start beyond a phase's bound: the wait for the front's records after it.
+	BaselineFitMargin = stack.WaitDeadline + time.Minute
+)
+
+// ServedReady is what the served ModelDeployment showed once its Instance was ready and registered at the front.
+type ServedReady struct {
+	ReadyAt, DrainStart time.Time
+	Deployment          DeploymentSpec
+	Served              ServedMD
+}
+
+// Generator is one phase's run of the load generator.
+type Generator interface {
+	// Done is closed when the generator has ended: by itself, or after Stop.
+	Done() <-chan struct{}
+	// Stop ends it early; its records so far stay.
+	Stop()
+	// Result is the generator's records, for the join, and an error when the run broke (exit status 2, records that cannot be read). Called after Done.
+	Result() ([]GenRow, error)
+}
+
+// BaselineWorld is the seam of the sequencer: what the row asks of the stack, the cluster and the generator.
+type BaselineWorld interface {
+	Now() time.Time
+	// AttachManaged brings the stack up, creates the managed ModelDeployment beside the managed Provider, and waits until the managed target answers.
+	AttachManaged(ctx context.Context) (ManagedMD, error)
+	// Probe is P0: one request of P0Tokens tokens at the plain model, with the front's usage record of it.
+	Probe(ctx context.Context) (ProbeObs, error)
+	// StartServed creates the served ModelDeployment and waits for its job to start and its Instance to be ready and registered at the front.
+	StartServed(ctx context.Context) (ServedReady, error)
+	// LoggedKV is the engine's logged kv_cache_size_tokens, read after ready; false when it could not be read.
+	LoggedKV(ctx context.Context) (int64, bool)
+	// Gate is one request at model@<provider>, which only the served Instance answers.
+	Gate(ctx context.Context) (GateObs, error)
+	// LLMLabCount is the front's request metric for the managed Provider, hpcburst_front_requests_total{provider}, summed over its codes.
+	LLMLabCount(ctx context.Context) (float64, bool)
+	// ServedEligible says the served Instance is ready and eligible: its phase ready and AgentUnreachable not true.
+	ServedEligible(ctx context.Context) bool
+	// EngineSample reads the served Instance's engine gauges.
+	EngineSample(ctx context.Context) (EngineSample, bool)
+	// StartGenerator runs the phase's generator.
+	StartGenerator(ctx context.Context, ph Phase) (Generator, error)
+	// FrontRows are the front's usage records written since a time, once every request ID in want has a record or the wait for them has run out.
+	FrontRows(ctx context.Context, since time.Time, want []string) ([]FrontRow, error)
+	// DetachManaged deletes the row's managed ModelDeployment, which releases no Allocation.
+	DetachManaged(ctx context.Context) error
+	// EndServed deletes the served ModelDeployment and waits until the cluster's record shows its job ended: the last step. The release removes the
+	// Allocation's directory, the engine's log with it, so nothing reads the directory after it.
+	EndServed(ctx context.Context) error
+	// ManagedDetached says the front no longer holds the managed target.
+	ManagedDetached(ctx context.Context) bool
+}
+
+// BaselineSettings are the sequencer's parameters.
+type BaselineSettings struct {
+	Phases []Phase
+	Cap    int
+	// OmitMinTokens is the run-wide min_tokens switch, recorded in the observation.
+	OmitMinTokens bool
+	// Poll, FitMargin, DetachWait and DetachEvery are BaselinePoll, BaselineFitMargin, BaselineDetachWait and BaselineDetachEvery unless a test sets them.
+	Poll, FitMargin, DetachWait, DetachEvery time.Duration
+	Logf                                     func(format string, args ...any)
+}
+
+func (s BaselineSettings) logf(f string, a ...any) {
+	if s.Logf != nil {
+		s.Logf(f, a...)
+	}
+}
+
+// RunBaseline runs Row 1: the managed leg and P0 before the GPU job; the served Instance ready; the logged KV as a check; the gate; then each phase,
+// the detach phase after the managed ModelDeployment is deleted. It returns what it saw. A phase the time left before the drain start cannot hold ends the
+// run (DidNotFit); a logged KV under the cap's need ends it with no phase run. An error is a run that broke: a scenario that could not go on.
+func RunBaseline(ctx context.Context, w BaselineWorld, s BaselineSettings) (BaselineObs, error) {
+	o, err := runBaselineSteps(ctx, w, s)
+	if err != nil {
+		return o, err
+	}
+	// Every read of the Allocation's directory is above: the engine's logged KV, while the Instance was up, after it was ready and before any phase.
+	if err := w.EndServed(ctx); err != nil {
+		return o, err
+	}
+	return o, nil
+}
+
+// runBaselineSteps is RunBaseline up to the end of the served deployment: it returns when a phase, the KV check or the clock ended the run.
+func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) (BaselineObs, error) {
+	if s.Poll <= 0 {
+		s.Poll = BaselinePoll
+	}
+	if s.FitMargin <= 0 {
+		s.FitMargin = BaselineFitMargin
+	}
+	if s.DetachWait <= 0 {
+		s.DetachWait = BaselineDetachWait
+	}
+	if s.DetachEvery <= 0 {
+		s.DetachEvery = BaselineDetachEvery
+	}
+	o := BaselineObs{Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
+	var err error
+	if o.Managed, err = w.AttachManaged(ctx); err != nil {
+		return o, err
+	}
+	if o.P0, err = w.Probe(ctx); err != nil {
+		return o, err
+	}
+	s.logf("P0 is sent: the managed leg answers before any Instance exists")
+	ready, err := w.StartServed(ctx)
+	if err != nil {
+		return o, err
+	}
+	o.ReadyAt, o.DrainStart, o.Deployment, o.Served = ready.ReadyAt, ready.DrainStart, ready.Deployment, ready.Served
+	// A check and never an input: the cap was fixed before the run. It is read here, while the Instance is up, and nowhere later: the Allocation's directory,
+	// with the engine's log, is removed once its job is released (internal/providerctl/delete.go:110, internal/slurm/files.go:109-113).
+	if o.LoggedKV, o.KVRead = w.LoggedKV(ctx); o.KVRead && o.LoggedKV < int64(s.Cap)*MaxModelLen {
+		return o, nil
+	}
+	if o.Gate, err = w.Gate(ctx); err != nil {
+		return o, err
+	}
+	for _, ph := range s.Phases {
+		if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {
+			o.DidNotFit = ph.Name
+			break
+		}
+		if ph.Kind == KindDetach {
+			if err := w.DetachManaged(ctx); err != nil {
+				return o, err
+			}
+			o.Detached = waitUntil(ctx, w, s.DetachWait, s.DetachEvery, w.ManagedDetached)
+			s.logf("%s: the managed ModelDeployment is deleted; the front dropped its target: %t", ph.Name, o.Detached)
+		}
+		po, perr := runPhase(ctx, w, s, ph)
+		o.Phases = append(o.Phases, po)
+		if perr != nil {
+			return o, perr
+		}
+		if po.Stopped != "" && po.Stopped != StopBound {
+			// A generator stopped for LLMLab's guard or the Instance's eligibility leaves nothing to run the next phase on.
+			break
+		}
+	}
+	return o, nil
+}
+
+// waitUntil polls until the condition holds, for at most d.
+func waitUntil(ctx context.Context, w BaselineWorld, d, every time.Duration, cond func(context.Context) bool) bool {
+	deadline := w.Now().Add(d)
+	for {
+		if cond(ctx) {
+			return true
+		}
+		if !w.Now().Before(deadline) || ctx.Err() != nil {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(every):
+		}
+	}
+}
+
+// runPhase runs one phase's generator and, every poll, looks: LLMLab's request count against the guard (past it the generator is stopped), the Instance's
+// eligibility (when it is not, the generator is stopped: its whole share would otherwise go to LLMLab), and the engine. Then it reads the front's records.
+func runPhase(ctx context.Context, w BaselineWorld, s BaselineSettings, ph Phase) (PhaseObs, error) {
+	po := PhaseObs{Phase: ph, Start: w.Now()}
+	before, beforeOK := w.LLMLabCount(ctx)
+	if smp, ok := w.EngineSample(ctx); ok {
+		po.Engine = append(po.Engine, smp)
+	}
+	gen, err := w.StartGenerator(ctx, ph)
+	if err != nil {
+		return po, fmt.Errorf("%s: the generator could not start: %w", ph.Name, err)
+	}
+	tick := time.NewTicker(s.Poll)
+	defer tick.Stop()
+	deadline := po.Start.Add(ph.Bound)
+loop:
+	for {
+		select {
+		case <-gen.Done():
+			break loop
+		case <-ctx.Done():
+			gen.Stop()
+			<-gen.Done()
+			return po, ctx.Err()
+		case <-tick.C:
+		}
+		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard {
+			po.Stopped = StopGuard
+			gen.Stop()
+			break loop
+		}
+		if !w.ServedEligible(ctx) {
+			po.Stopped = StopIneligible
+			gen.Stop()
+			break loop
+		}
+		if smp, ok := w.EngineSample(ctx); ok {
+			po.Engine = append(po.Engine, smp)
+		}
+		if w.Now().After(deadline) {
+			po.Stopped = StopBound
+			gen.Stop()
+			break loop
+		}
+	}
+	<-gen.Done()
+	if po.Gen, err = gen.Result(); err != nil {
+		return po, fmt.Errorf("%s: the generator's run broke: %w", ph.Name, err)
+	}
+	po.End = w.Now()
+	if smp, ok := w.EngineSample(ctx); ok {
+		po.Engine = append(po.Engine, smp)
+	}
+	if after, ok := w.LLMLabCount(ctx); ok && beforeOK {
+		po.LLMLabMetric, po.MetricRead = after-before, true
+	}
+	ids := make([]string, 0, len(po.Gen))
+	for _, g := range po.Gen {
+		if g.RequestID != "" {
+			ids = append(ids, g.RequestID)
+		}
+	}
+	if po.Rows, err = w.FrontRows(ctx, po.Start, ids); err != nil {
+		return po, fmt.Errorf("%s: the front's usage records could not be read: %w", ph.Name, err)
+	}
+	s.logf("%s: %d generator records, %d front records, stopped %q", ph.Name, len(po.Gen), len(po.Rows), po.Stopped)
+	return po, nil
+}

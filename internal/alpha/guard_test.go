@@ -636,6 +636,12 @@ func (f firstOnly) BetaRouter(_ context.Context, p Plan) (RouterObs, error) {
 	return RouterObs{}, err
 }
 
+func (f firstOnly) Baseline(_ context.Context, p Plan) (BaselineObs, error) {
+	err := f.firstJobStarted(p)
+	f.after()
+	return BaselineObs{}, err
+}
+
 // The first job's side of it, through Run: its deferred Close turns the NOT RUN into a failure that names the start, before any marker.
 func TestRunEndsAFailureWhenAFirstJobReadAsWaitingHadStartedByItsCancel(t *testing.T) {
 	row := rowOf("tunnel-hour-athena")

@@ -503,10 +503,10 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || [ "${SLOT[$n]:--}" != - ] || return 1'
   'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || return 1'
   'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  true'
-  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) false ;; *) false ;; esac'
-  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac@@  true'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) false ;; *) false ;; esac'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac@@  true'
   # #735: the Sano serve row's first clock is cut at its deployment's first end (one job, no start wait), so its NOT RUN at that bound is accepted like a tunnel row's; without it a queue wait reads as FAIL.
-  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac'
   'hack/live-checks.sh@@  [ "$CLEAN_LEFT" -eq 0 ] || verdict=1@@  [ "$CLEAN_LEFT" -eq 0 ] || [ "$NOT_RUN" = 1 ] || verdict=1'
   'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=1'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-'
@@ -1208,6 +1208,14 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'nowserve.go@@	b.WriteString(rehashLine("the job", o.Warm))@@	_ = rehashLine'
   'nownooverlap.go@@	b.WriteString(rehashLine("the successor'"'"'s job", o.WarmSuccessor))@@	_ = o.WarmSuccessor'
   'internal/agent/converge.go@@"bytes", r.Bytes, "ms", r.Duration.Milliseconds())@@"bytes", r.Bytes, "millis", r.Duration.Milliseconds())'
+  # HBEP-764 item 4, the baseline row (baseline.go, #764): the cap constant, the judge's source of a route, the LLMLab guard, the detach, and the routing block.
+  'baseline.go@@	CapSano   = 11@@	CapSano   = 12'
+  'baselinejudge.go@@func (j joinedRow) route(managed string) Route { return routeOfRow(j.Front, managed) }@@func (j joinedRow) route(managed string) Route {
+	return routeOfRow(FrontRow{Emitter: j.Gen.Emitter, Provider: j.Gen.Provider}, managed)
+}'
+  'baselineflow.go@@		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard {@@		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard && false {'
+  'baselineflow.go@@			if err := w.DetachManaged(ctx); err != nil {@@			if err := error(nil); err != nil {'
+  'steps_live_test.go@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration), InstanceCap: instanceCapOf(row)}@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration)}'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"

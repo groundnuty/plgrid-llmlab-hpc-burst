@@ -67,6 +67,8 @@ type drySteps struct {
 	// untaggedAt is the 1-based position of the tag the fault "untagged" does
 	// not write down: the successor's, or the only one of a one-job run.
 	untaggedAt int
+	// baseline is the baseline row's world of the last run, for a test to read what the sequencer called.
+	baseline *dryBaseline
 	// watchResets is the count the run reports: a dry run has no watch, so none
 	// unless a test sets one.
 	watchResets int
@@ -104,7 +106,7 @@ func newDrySteps(t *testing.T, cfg Config, family string) *drySteps {
 	}
 	plat := fakeslurm.New(clock, fcfg)
 	d := &drySteps{t: t, cfg: cfg, clock: clock, plat: plat, root: root, untaggedAt: 2}
-	if family == "tunnel" || family == "nowserve" || family == "betarouter" || family == "betakeeper" || family == "betabulk" {
+	if family == "tunnel" || family == "nowserve" || family == "betarouter" || family == "betakeeper" || family == "betabulk" || family == "baseline" {
 		d.untaggedAt = 1
 	}
 	d.sess = plat.Login(fakeslurm.Login{User: "example-user", Env: map[string]string{"HOME": home, "SCRATCH": scratch}})

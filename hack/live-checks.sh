@@ -127,13 +127,20 @@
 #   LIVE_OUT_DIR                 absolute path of a private directory for logs and records (always)
 #   LIVE_LOCK_DIR                absolute path of the directory with the hosts' lock files (cluster tests)
 #   LIVE_BUILD_LOCK              optional absolute path of the shared build lock; builds, never test runs, take it
-#   LIVE_LLMLAB_CREDENTIALS      absolute path of the managed credentials file, mode 600 (llmlab-smoke)
-#   LIVE_LLMLAB_MODEL            optional model override (llmlab-smoke)
+#   LIVE_LLMLAB_CREDENTIALS      absolute path of the managed credentials file, mode 600 (llmlab-smoke, llmlab-min-tokens, and the
+#                                baseline row beta-sano-llmlab-baseline, whose managed Provider reads it)
+#   LIVE_STUDYLOAD_BIN           absolute path of #768's load generator binary (hack/studyload), an executable file, for the baseline row
+#                                (issue #764): the row runs it with a mode-600 config and key file in its record directory and imports none of it
+#   LIVE_STUDYLOAD_OMIT_MIN_TOKENS  optional, 1 or 0: the min_tokens probe's verdict (llmlab-min-tokens). 1 leaves min_tokens out of every
+#                                request of the baseline row, on every route. The row's P0 is INVALID when LLMLab does not honour it and this is 0
+#   LIVE_BASELINE_PHASES         optional JSON object from a phase's name (P1, P1-long, P2, P3) to the fields it replaces (sessions, turns,
+#                                contextTokens, turnTokens, outputTokens, thinkTime, startStagger, bound): the baseline row's phases are config
+#   LIVE_LLMLAB_MODEL            optional model override (llmlab-smoke, llmlab-min-tokens)
 #   LIVE_CONF_CREDENTIALS_HELIOS, LIVE_CONF_CREDENTIALS_ATHENA, LIVE_CONF_CREDENTIALS_SANO
 #                                the ssh credentials files of the conformance runs, mode 600
 #   ACCOUNT_HELIOS_CPU, ACCOUNT_HELIOS_GH200, ACCOUNT_ATHENA_A100, ACCOUNT_SANO_GPU
 #                                the grant account of each job kind
-#   LIVE_SANO_STAGING_DIR        the Sano rows' (alpha-sano-*, issue #735) Provider's own spec.stagingDir: an absolute path on Sano's
+#   LIVE_SANO_STAGING_DIR        the Sano rows' (alpha-sano-*, beta-sano-*, issue #735) Provider's own spec.stagingDir: an absolute path on Sano's
 #                                shared file system, in a directory of its own (the profile has none: a cluster path carries a user
 #                                name). Account data, never printed or posted. The stage row stages into it and keeps it; the serve
 #                                and handover rows read it warm
@@ -220,6 +227,7 @@ live_table() {
   cat <<'TABLE'
 # BEGIN LIVE TESTS
 llmlab-smoke|local|internal/front|^TestLLMLabThroughTheFront$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
+llmlab-min-tokens|local|internal/front|^TestLLMLabMinTokens$|HPCBURST_LLMLAB_CREDENTIALS|-|host|ready
 hub-golden|local|pkg/hubfiles|^TestGoldenHub$|HPCBURST_TEST_HUB|spikes/s7/checkpoints.env,spikes/s7/results/run1/hub,spikes/s7/results/run1/hash-*.jsonl|host|ready
 rehearsal-part3|local|internal/rehearsal/scenario|^TestRehearsalPart3$|HPCBURST_REHEARSAL|hack/rehearsal.sh,config/crd|host|ready
 conformance-helios|cluster|internal/providerctl/conformance|^TestConformance$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
@@ -235,6 +243,7 @@ alpha-athena-now-stage|cluster|internal/providerctl/conformance|^TestNowStage$|H
 alpha-sano-stage|cluster|internal/providerctl/conformance|^TestSanoStage$|HPCBURST_CONFORMANCE|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml,hack/build-stage-helper.sh|host|ready
 alpha-sano-serve|cluster|internal/alpha|^TestAlphaSanoServe$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml|host|ready
 alpha-sano-handover|cluster|internal/alpha|^TestAlphaSanoHandover$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml|host|ready
+beta-sano-llmlab-baseline|cluster|internal/alpha|^TestBetaSanoLLMLabBaseline$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,profiles/llmlab.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml,examples/provider-llmlab.yaml,examples/modeldeployment-llmlab.yaml|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 gpu-accounting-athena-now|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml|host|ready
@@ -329,6 +338,7 @@ alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 alpha-sano-stage|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|00:30:00|60|--qos=gpu1 -J hb-estimate
 alpha-sano-serve|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
 alpha-sano-handover|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
+beta-sano-llmlab-baseline|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
@@ -363,6 +373,7 @@ alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
 alpha-sano-stage|internal/providerctl/conformance/stagehelper
 alpha-sano-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-sano-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-sano-llmlab-baseline|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
@@ -389,6 +400,7 @@ alpha-athena-now-stage|1
 alpha-sano-stage|1
 alpha-sano-serve|1
 alpha-sano-handover|2
+beta-sano-llmlab-baseline|1
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
 beta-athena-now-keeper|1
@@ -490,6 +502,7 @@ alpha-athena-now-serve
 alpha-athena-now-nooverlap
 alpha-sano-serve
 alpha-sano-handover
+beta-sano-llmlab-baseline
 beta-athena-now-router
 beta-athena-now-keeper
 beta-athena-now-bulk
@@ -653,7 +666,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|LIVE_CONF_CREDENTIALS_SANO|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|ACCOUNT_SANO_GPU|LIVE_SANO_STAGING_DIR|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_OWNER_GO_ATHENA_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_STUDYLOAD_BIN|LIVE_STUDYLOAD_OMIT_MIN_TOKENS|LIVE_BASELINE_PHASES|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|LIVE_CONF_CREDENTIALS_SANO|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|ACCOUNT_SANO_GPU|LIVE_SANO_STAGING_DIR|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_OWNER_GO_ATHENA_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -669,7 +682,7 @@ check_settings() {
   fi
   for name in "$@"; do
     case $name in
-      llmlab-smoke) need LIVE_LLMLAB_CREDENTIALS && { private_file LIVE_LLMLAB_CREDENTIALS "${S[LIVE_LLMLAB_CREDENTIALS]}" || bad=1; } ;;
+      llmlab-smoke|llmlab-min-tokens) need LIVE_LLMLAB_CREDENTIALS && { private_file LIVE_LLMLAB_CREDENTIALS "${S[LIVE_LLMLAB_CREDENTIALS]}" || bad=1; } ;;
       hub-golden) ;;
       rehearsal-part3) check_rehearsal_settings || bad=1 ;;
       *)
@@ -840,6 +853,21 @@ check_sano_settings() {
   fi
 }
 
+# check_baseline_settings: what the baseline row (beta-sano-llmlab-baseline, issue #764) takes besides the Sano settings: the LLMLab credentials file
+# (a private file: the managed Provider reads it), the generator's binary (an absolute path to an executable file, never built here: #768 is not merged,
+# and the row imports none of it), the min_tokens switch (1 or 0), and the phases' override (a JSON object). Each refusal names the setting, never its value.
+check_baseline_settings() {
+  local bad=0 v
+  if [ -n "${S[LIVE_LLMLAB_CREDENTIALS]:-}" ]; then private_file LIVE_LLMLAB_CREDENTIALS "${S[LIVE_LLMLAB_CREDENTIALS]}" || bad=1
+  else say "live-checks: setting LIVE_LLMLAB_CREDENTIALS is missing"; bad=1; fi
+  v=${S[LIVE_STUDYLOAD_BIN]:-}
+  if [ -z "$v" ]; then say "live-checks: setting LIVE_STUDYLOAD_BIN is missing"; bad=1
+  elif [ "${v#/}" = "$v" ]; then say "live-checks: LIVE_STUDYLOAD_BIN must be an absolute path"; bad=1
+  elif [ ! -f "$v" ] || [ -L "$v" ] || [ ! -x "$v" ]; then say "live-checks: LIVE_STUDYLOAD_BIN is not an executable regular file"; bad=1; fi
+  case ${S[LIVE_STUDYLOAD_OMIT_MIN_TOKENS]:-0} in 0|1) ;; *) say "live-checks: LIVE_STUDYLOAD_OMIT_MIN_TOKENS must be 1 or 0"; bad=1 ;; esac
+  return $bad
+}
+
 check_alpha_settings() {
   local name=$1 bad=0 mode host_dialed=0
   alpha_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
@@ -863,11 +891,15 @@ check_alpha_settings() {
   # The Sano rows (issue #735): host-dialed alone, since Sano's compute nodes cannot reach this host and have no home for ssh mode's key
   # (profiles/sano.yaml lists no other mode), and the Provider's own staging directory.
   case $name in
-    alpha-sano-*)
+    alpha-sano-*|beta-sano-*)
       if [ "$host_dialed" != 1 ]; then
         say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): Sano's profile lists no other dial-home mode"; bad=1
       fi
       check_sano_settings || bad=1 ;;
+  esac
+  # The baseline row (issue #764): LLMLab's credentials for its managed Provider, #768's generator binary, and the optional switch and phases.
+  case $name in
+    beta-sano-llmlab-baseline) check_baseline_settings || bad=1 ;;
   esac
   if [ "$host_dialed" = 1 ]; then
     # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
@@ -1210,12 +1242,13 @@ not_run_verdict() {
   ! glibc_marker || case $n in beta-athena-now-router|beta-helios-now-router) true ;; *) false ;; esac || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
+  ! baseline_invalid_marker || [ "$n" = beta-sano-llmlab-baseline ] || return 1
   ! staged_image_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap|alpha-sano-handover) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
-  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac
+  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac
 }
 
 # row_a_marker: the run's NOT RUN marker says a plgrid-now row's run that did start was not put to the test (internal/alpha,
@@ -1231,6 +1264,10 @@ glibc_marker() { grep -q "the compute node's glibc is older than the 2.30 Envoy 
 # invalid_marker: the marker says the bulk row's run has no saturation witness, so its reading measures nothing (internal/alpha, ErrInvalid and
 # InvalidNote; the science agent's ruling on #521): an INVALID, not a NOT RUN, which not_run_verdict holds to that row and judge prints as INVALID.
 invalid_marker() { grep -q "the run has no saturation witness, so its reading measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# baseline_invalid_marker: the marker says the baseline row's run measured nothing (internal/alpha, ErrBaselineInvalid and BaselineInvalidNote; issue #764): a
+# failed request LLMLab answered, a cap that never bound, a 503 in the detach phase, an engine whose KV is below the cap's need. An INVALID, not a NOT RUN, which
+# not_run_verdict holds to that row and judge prints as INVALID.
+baseline_invalid_marker() { grep -q "the baseline run's reading is invalid, so it measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
 # finding_marker: the bulk row's FINDING marker beside its passing test (internal/alpha, ErrFinding and FindingNote; #584): a regular file, not a
 # link, in this run's record directory, in its fixed words. finding_present is any file of that name, which judge holds to the bulk row alone.
 finding_present() { [ -n "$REC_DIR" ] && { [ -e "$REC_DIR/finding.txt" ] || [ -L "$REC_DIR/finding.txt" ]; }; }
@@ -1346,6 +1383,9 @@ judge() {
     if invalid_marker; then
       # Exit 3 like a NOT RUN, its own word: the run happened and measured nothing (NOT_RUN=1 carries the exit code).
       say "$n: INVALID (not a NOT RUN: the job started, ran and spent the slot, and the run was put to the test; but it has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
+    elif baseline_invalid_marker; then
+      # Exit 3 like a NOT RUN, its own word: the run happened, nothing failed, and its reading measures nothing (NOT_RUN=1 carries the exit code).
+      say "$n: INVALID (not a NOT RUN: the job started and ran, and the run was put to the test; but its reading measures nothing, whether LLMLab failed a request, the cap never bound, P3 answered a 503 or the engine's KV is below the cap's need; the text to post says which; the run's other checks passed; not a failure, not a pass)"
     elif second_job_marker; then
       say "$n: NOT RUN (the first job ran and the second never started $(second_job_bound "$n"), and was cancelled by its tag; not a failure)"
       late=$(sed -n -E 's/.*ReplacementLate for its deployment: (raised|not raised|unknown);.*/\1/p' "$REC_DIR/not-run.txt" 2>/dev/null | head -1)
@@ -1502,7 +1542,16 @@ env_alpha() {
   esac
   unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN HPCBURST_ALPHA_STAGING_DIR
   # The Sano rows' Provider gives its own staging directory (issue #735); no other row takes one.
-  case $n in alpha-sano-*) export HPCBURST_ALPHA_STAGING_DIR=${S[LIVE_SANO_STAGING_DIR]} ;; esac
+  case $n in alpha-sano-*|beta-sano-*) export HPCBURST_ALPHA_STAGING_DIR=${S[LIVE_SANO_STAGING_DIR]} ;; esac
+  # The baseline row's own settings (issue #764), never passed to another row, which refuses them: the generator's binary, LLMLab's credentials, the
+  # min_tokens switch and the phases' override.
+  unset HPCBURST_ALPHA_STUDYLOAD_BIN HPCBURST_ALPHA_LLMLAB_CREDENTIALS HPCBURST_ALPHA_OMIT_MIN_TOKENS HPCBURST_ALPHA_BASELINE_PHASES
+  case $n in
+    beta-sano-llmlab-baseline)
+      export HPCBURST_ALPHA_STUDYLOAD_BIN=${S[LIVE_STUDYLOAD_BIN]} HPCBURST_ALPHA_LLMLAB_CREDENTIALS=${S[LIVE_LLMLAB_CREDENTIALS]}
+      [ "${S[LIVE_STUDYLOAD_OMIT_MIN_TOKENS]:-0}" != 1 ] || export HPCBURST_ALPHA_OMIT_MIN_TOKENS=1
+      [ -z "${S[LIVE_BASELINE_PHASES]:-}" ] || export HPCBURST_ALPHA_BASELINE_PHASES=${S[LIVE_BASELINE_PHASES]} ;;
+  esac
   [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
   # Host-dialed mode has no address: the host dials the jobs, so none is passed.
   [ "${S[LIVE_DIALHOME_MODE]}" = host-dialed ] || export HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
@@ -1513,7 +1562,7 @@ env_alpha() {
 run_local() { # <name>
   local n=$1 bin="$OUT/$1.test" setup
   case $n in rehearsal-part3) run_rehearsal "$n"; return ;; esac
-  case $n in llmlab-smoke) setup=env_llmlab ;; hub-golden) setup=env_hub ;; esac
+  case $n in llmlab-smoke|llmlab-min-tokens) setup=env_llmlab ;; hub-golden) setup=env_hub ;; esac
   build_test_binary "$n" "$bin" || return 1
   [ -z "$INTERRUPTED" ] || { say "$n: FAIL (interrupted before the run started)"; return 1; }
   run_binary "$n" "$bin" "$LOCAL_TIMEOUT_MIN" "$setup"

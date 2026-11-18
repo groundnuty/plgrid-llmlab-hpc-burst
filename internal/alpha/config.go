@@ -38,11 +38,20 @@ const (
 	// envStagingDir is the Provider's own spec.stagingDir, for the rows whose profile has none (Row.ProviderStaging; #757, #735). It is account
 	// data: a cluster path carries a user name, so no message or log of this package names its value.
 	envStagingDir = "HPCBURST_ALPHA_STAGING_DIR"
+	// envStudyloadBin is the load generator's binary, an absolute path (the baseline row's Studyload; #768's hack/studyload, built by the script or named by
+	// the operator: the row imports none of it). envLLMLabCreds is the managed LLMLab credentials file, mode 600 (the row's LLMLab; HBEP-4, Provider
+	// settings). Both are live settings: a dry run refuses them.
+	envStudyloadBin = "HPCBURST_ALPHA_STUDYLOAD_BIN"
+	envLLMLabCreds  = "HPCBURST_ALPHA_LLMLAB_CREDENTIALS"
+	// envOmitMinTokens is the min_tokens probe's verdict (internal/front, TestLLMLabMinTokens): 1 leaves min_tokens out of every request, on every route.
+	// envBaselinePhases overrides the baseline phases' fields (PhasesFromEnv). Neither is a live-only setting.
+	envOmitMinTokens  = "HPCBURST_ALPHA_OMIT_MIN_TOKENS"
+	envBaselinePhases = "HPCBURST_ALPHA_BASELINE_PHASES"
 )
 
 // liveEnv are the settings only a live run has. A dry run refuses to start
 // when any is set: a dry pass must never stand for a live one.
-var liveEnv = []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envKey, envListen, envStagingDir}
+var liveEnv = []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envKey, envListen, envStagingDir, envStudyloadBin, envLLMLabCreds}
 
 // Config is a run's settings. The account, the credentials file and the
 // dial-home key are paths and names that never reach a log.
@@ -79,6 +88,11 @@ type Config struct {
 	// tag of the run (TagPrefix): hack/live-checks.sh draws it and cleans up
 	// by it.
 	RunID string
+	// StudyloadBin and LLMLabCredentials are the baseline row's live settings (Row.Studyload, Row.LLMLab); both are paths and never reach a log.
+	StudyloadBin, LLMLabCredentials string
+	// OmitMinTokens is the run-wide switch of the min_tokens probe's verdict, and Phases the baseline row's phases (DefaultPhases and the override).
+	OmitMinTokens bool
+	Phases        []Phase
 }
 
 // Mode names the run's mode for the log, so a dry pass cannot be read as a live one.
@@ -135,6 +149,26 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	if err := ValidFrontLabel(cfg.FrontLabel); err != nil {
 		bad = append(bad, EnvFrontLabel+": "+err.Error())
 	}
+	// The baseline row's phases and its min_tokens switch, read in both modes: a dry run's generator config follows them too.
+	if IsBaselineRow(row.Name) {
+		var perr error
+		if cfg.Phases, perr = PhasesFromEnv(DefaultPhases(int(row.InstanceCap)), getenv(envBaselinePhases)); perr != nil {
+			bad = append(bad, perr.Error())
+		}
+		switch v := getenv(envOmitMinTokens); v {
+		case "", "0":
+		case "1":
+			cfg.OmitMinTokens = true
+		default:
+			bad = append(bad, envOmitMinTokens+" must be 1 or 0")
+		}
+	} else {
+		for _, k := range []string{envBaselinePhases, envOmitMinTokens} {
+			if v := getenv(k); v != "" {
+				bad = append(bad, k+" is set for a row that has no baseline phases")
+			}
+		}
+	}
 	if getenv(envDry) == "1" {
 		cfg.Dry, cfg.DryFault = true, getenv(envDryFault)
 		for _, k := range liveEnv {
@@ -179,6 +213,22 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 		}
 	} else if getenv(envStagingDir) != "" {
 		bad = append(bad, envStagingDir+" is set for a row whose profile gives the staging directory")
+	}
+	// The baseline row's generator binary and LLMLab credentials: required by the row that takes them, refused for one that does not, and only
+	// their shape is checked: an absolute path, never in a message.
+	for _, f := range []struct {
+		key  string
+		need bool
+		to   *string
+	}{{envStudyloadBin, row.Studyload, &cfg.StudyloadBin}, {envLLMLabCreds, row.LLMLab, &cfg.LLMLabCredentials}} {
+		switch {
+		case f.need:
+			if *f.to = need(f.key); *f.to != "" && !filepath.IsAbs(*f.to) {
+				bad = append(bad, f.key+" must be an absolute path")
+			}
+		case getenv(f.key) != "":
+			bad = append(bad, f.key+" is set for a row that does not take it")
+		}
 	}
 	switch cfg.DialHomeMode {
 	case "host-dialed":

@@ -1,0 +1,563 @@
+package alpha
+
+// The baseline row (baseline.go) over the fake cluster: RunBaseline, the real sequencer, over a world whose generator and front are stood in for, with the
+// one job on the fake Slurm. Each fault departs from the healthy run in one way, and ends it FAIL (baselineCases, through TestDryRunsOfEveryRowAndEveryFault)
+// or INVALID (baselineInvalidCases, TestTheBaselinesInvalidRunsThroughRun). The healthy world is built from the row's own constants and phase shapes:
+// sessions of the phase, their turns, and the routes the front's rule gives them at the cap.
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+// baselineCases are the baseline row's dry faults that end FAIL, each with the failed check's words.
+var baselineCases = []dryCase{
+	{"", ""},
+	{"llmlab-in-the-control", "request(s), and the control gives it none"},
+	{"llmlab-one-too-many-first-turns", "LLMLab was asked for 3 first-turn request(s), want exactly k = 2"},
+	{"llmlab-spill-below-the-cap", "arrived while the Instance was below its cap of 11"},
+	{"llmlab-over-its-guard", "LLMLab was asked for more than 144 requests in one phase, so the generator was stopped"},
+	{"llmlab-after-the-detach", "request(s) after it was detached"},
+	{"detach-not-seen", "the managed ModelDeployment was not seen detached at the front before the phase"},
+	{"instance-ineligible", "the served Instance became ineligible, so the generator was stopped"},
+	{"engine-over-the-cap", "the engine ran more than the cap of 11 requests"},
+	{"engine-waiting", "the engine had requests waiting"},
+	{"engine-preempts", "the engine preempted"},
+	{"engine-unread", "fewer than 2 engine samples were read"},
+	// In the long phase the engine's waiting requests and preemptions are readings (ruling H0), posted and never failed on.
+	{"long-engine-readings", ""},
+	{"front-503-in-the-control", "a request failed (status 503, emitter \"front\")"},
+	{"instance-fails", "a request failed (status 500, emitter \"instance\")"},
+	{"session-moves", "a session did not stay on its Instance"},
+	{"detach-skipped", "request(s) after it was detached"},
+	{"generator-names-another-route", "generator record(s) name another route than the front's usage record"},
+	{"metric-unread", "the front's per-provider request metric was not read"},
+	{"metric-disagrees", "the front's request metric says LLMLab was asked"},
+	{"unlisted-llmlab-request", "LLMLab answered a request the generator did not send"},
+	{"no-answer", "request(s) got no answer from the front"},
+	{"no-record", "request(s) the generator sent have no usage record at the front"},
+	{"over-the-cap-in-flight", "the Instance had more than its cap of 11 requests in flight"},
+	{"no-gate", "the gate was not sent"},
+	{"p0-not-sent", "P0 was not sent"},
+	{"p0-answered-by-an-instance", "P0 was not answered by LLMLab"},
+	{"p0-front-fails", "P0's request failed and the front answered it"},
+	{"kv-unread", "the engine's logged KV was not read"},
+	{"no-routing-block", "does not hold routing.instanceCap at the row's cap of 11"},
+	{"two-instances", "does not ask for exactly 1 Instance"},
+	{"hedged", "hedgeWidth is not 1"},
+	{"over-allocated", "overAllocation is not 0"},
+	{"managed-not-attached", "the managed ModelDeployment is not attached to the managed Provider by name"},
+	{"wrong-deployment-id", "the served Instance's deployment ID is not the one the shipped example derives (965fa2409193)"},
+	{"untagged", "a job tag was not written down before its submission"},
+	{"wrong-partition", "a job ran on another partition than the row's"},
+	{"default-lease", "the deployment's leaseLimit is not the row's shortest lease"},
+	{"short-lease", "not longer than the lead an Instance needs (PartitionTooShort)"},
+	{"duplicate-tag", "a tag names more than one job"},
+	{"extra-allocation", "exactly one Allocation"},
+}
+
+// baselineInvalidCases are the dry faults that end INVALID, each with the reason's words: the reading measures nothing, and no check failed.
+var baselineInvalidCases = []struct{ fault, why string }{
+	{"cap-never-binds", "the cap never bound: LLMLab was asked for no request, so no spill was shown"},
+	{"detach-503", "a request was answered 503 (emitter \"front\"): the detach phase's waiting requests must be served after waiting under queueTimeout, never refused"},
+	{"detach-no-wait", "no request waited: by the usage records no more than the cap of 11 was in the front at once"},
+	{"kv-below-the-cap", "the engine's logged KV is 100000 tokens, below the cap's need of 11 x 32768 = 360448"},
+	{"llmlab-fails", "a request LLMLab answered failed (status 500)"},
+	{"p0-llmlab-fails", "P0's request failed and LLMLab answered it (status 500)"},
+	{"min-tokens-ignored", "LLMLab did not give exactly that: it does not honour min_tokens"},
+	{"long-contexts-short", "outside the long phase's 24000 to 28672"},
+	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
+}
+
+func init() {
+	faults := []string{}
+	for _, c := range baselineCases {
+		if c.fault != "" {
+			faults = append(faults, c.fault)
+		}
+	}
+	for _, c := range baselineInvalidCases {
+		faults = append(faults, c.fault)
+	}
+	dryFaults["baseline"] = append(faults, "pend-past-bound")
+	dryCases[BetaBaselineName] = baselineCases
+}
+
+const (
+	dryServedUID      = "00000000-0000-4000-8000-0000000000a1"
+	dryServedInstance = "default/dry-inst-1"
+	dryServedProvider = "alpha-dry"
+)
+
+// Baseline is the baseline row over the fake cluster.
+func (d *drySteps) Baseline(ctx context.Context, p Plan) (BaselineObs, error) {
+	if d.fault("pend-past-bound") {
+		return BaselineObs{}, d.pendPastBound(p)
+	}
+	cap := int(p.Row.InstanceCap)
+	phases := d.cfg.Phases
+	if len(phases) == 0 {
+		phases = DefaultPhases(cap)
+	}
+	w := &dryBaseline{d: d, p: p, cap: cap}
+	d.baseline = w
+	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens, Poll: time.Millisecond, DetachEvery: time.Millisecond, Logf: p.Logf})
+	if err != nil {
+		return BaselineObs{}, err
+	}
+	o.Tags = append([]string(nil), d.tags...)
+	return o, nil
+}
+
+// dryBaseline is the sequencer's world over the fake cluster.
+type dryBaseline struct {
+	d    *drySteps
+	p    Plan
+	cap  int
+	n    int
+	id   string
+	mu   sync.Mutex
+	rows []FrontRow
+	// detached says DetachManaged ran; generated counts the phases started and reads the reads of LLMLab's count since the current one started; phaseLLM
+	// is how many LLMLab requests the current phase made and cum how many the earlier ones made; running is the engine's running gauge in the phase; pre
+	// counts the preemptions the fault adds.
+	detached  bool
+	generated int
+	reads     int
+	phaseLLM  int
+	cum       float64
+	running   float64
+	kv        float64
+	pre       float64
+	samples   int
+	phase     Phase
+	gens      []*dryGenerator
+	// calls are the world's calls in order, by name, for the tests of the sequencer's order. released says the job was released and its Allocation's directory
+	// with it; readAfterRelease says something read that directory after.
+	calls            []string
+	configs          map[string][]byte
+	preBumped        bool
+	released         bool
+	readAfterRelease bool
+}
+
+func (w *dryBaseline) call(name string) {
+	w.mu.Lock()
+	w.calls = append(w.calls, name)
+	w.mu.Unlock()
+}
+
+func (w *dryBaseline) Now() time.Time { return w.d.now() }
+
+func (w *dryBaseline) AttachManaged(context.Context) (ManagedMD, error) {
+	w.call("AttachManaged")
+	m := ManagedMD{Model: BaselineModel, Platform: "llmlab", Providers: []string{LLMLabProviderName}}
+	switch {
+	case w.d.fault("managed-not-attached"):
+		m.Providers = []string{"another-provider"}
+	}
+	return m, nil
+}
+
+func (w *dryBaseline) row(id, provider, emitter string, status int, start time.Time, dur time.Duration, prompt, completion int64, first int64) FrontRow {
+	r := FrontRow{RequestID: id, Provider: provider, ModelDeployment: "default/dry-md", Emitter: emitter, Status: status, Start: start, End: start.Add(dur),
+		FirstTokenMs: &first, PromptTokens: &prompt, CompletionTokens: &completion, DurationMs: dur.Milliseconds()}
+	if emitter == "instance" {
+		r.Instance, r.InstanceUID = dryServedInstance, dryServedUID
+	}
+	return r
+}
+
+func (w *dryBaseline) Probe(context.Context) (ProbeObs, error) {
+	w.call("Probe")
+	if w.d.fault("p0-not-sent") {
+		return ProbeObs{}, nil
+	}
+	tokens := int64(P0Tokens)
+	if w.d.fault("min-tokens-ignored") {
+		tokens = 2
+	}
+	r := w.row("p0", LLMLabProviderName, "provider", 200, w.d.now(), 2*time.Second, 14, tokens, 300)
+	switch {
+	case w.d.fault("p0-answered-by-an-instance"):
+		r.Emitter, r.Provider, r.Instance, r.InstanceUID = "instance", dryServedProvider, dryServedInstance, dryServedUID
+	case w.d.fault("p0-front-fails"):
+		r.Emitter, r.Provider, r.Status = "front", "", 503
+	case w.d.fault("p0-llmlab-fails"):
+		r.Status = 500
+	}
+	return ProbeObs{Sent: true, Row: r}, nil
+}
+
+func (w *dryBaseline) StartServed(context.Context) (ServedReady, error) {
+	w.call("StartServed")
+	d, p := w.d, w.p
+	tm := p.Row.Clock()
+	tag := d.tag(p, "baseline")
+	n, id := d.submit(tag, d.partitionFor(true), d.cfg.Row.QOS)
+	w.n, w.id = n, id
+	j := d.running(id)
+	started := *j.StartTime
+	d.extras(p, tag)
+	d.tick(8 * time.Minute) // a warm start, inside the profile's 12 minutes
+	ready := d.now()
+	drain := started.Add(d.deployment().LeaseLimit - DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0))
+	if d.fault("phases-do-not-fit") {
+		drain = ready.Add(16 * time.Minute) // P1 (10 minutes and the wait for the records) fits; P1-long (15 and the wait) cannot
+	}
+	one, zero := int32(1), int32(0)
+	c := int32(w.cap)
+	sr := ServedReady{ReadyAt: ready, DrainStart: drain, Deployment: d.deployment(),
+		Served: ServedMD{Model: BaselineModel, Providers: []string{dryServedProvider}, Instances: 1, OverAllocation: &zero, HedgeWidth: &one, InstanceCap: &c, DeploymentID: BaselineDeploymentID}}
+	switch {
+	case d.fault("no-routing-block"):
+		sr.Served.InstanceCap = nil
+	case d.fault("two-instances"):
+		sr.Served.Instances = 2
+	case d.fault("hedged"):
+		two := int32(2)
+		sr.Served.HedgeWidth = &two
+	case d.fault("over-allocated"):
+		sr.Served.OverAllocation = &one
+	case d.fault("wrong-deployment-id"):
+		sr.Served.DeploymentID = "000000000000"
+	}
+	return sr, nil
+}
+
+// EndServed releases the job, and with it the Allocation's directory: the engine's log is gone (internal/providerctl/delete.go:110), so a read of it after
+// this fails and is marked.
+func (w *dryBaseline) EndServed(context.Context) error {
+	w.call("EndServed")
+	w.d.tick(time.Minute)
+	if w.n > 0 {
+		w.d.end(w.n, w.id)
+	}
+	w.mu.Lock()
+	w.released = true
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *dryBaseline) LoggedKV(context.Context) (int64, bool) {
+	w.call("LoggedKV")
+	w.mu.Lock()
+	released := w.released
+	if released {
+		w.readAfterRelease = true
+	}
+	w.mu.Unlock()
+	if released {
+		return 0, false
+	}
+	switch {
+	case w.d.fault("kv-unread"):
+		return 0, false
+	case w.d.fault("kv-below-the-cap"):
+		return 100000, true
+	}
+	return KVSano, true
+}
+
+func (w *dryBaseline) Gate(context.Context) (GateObs, error) {
+	w.call("Gate")
+	if w.d.fault("no-gate") {
+		return GateObs{}, nil
+	}
+	return GateObs{Sent: true, Row: w.row("gate", dryServedProvider, "instance", 200, w.d.now(), time.Second, 9, 1, 40)}, nil
+}
+
+// LLMLabCount is the front's metric for the managed Provider: the earlier phases' requests, and the current phase's, all of them at each look, or, for
+// the guard's fault, 100 at the first look and all of them at the second. The read that starts a phase is made before its generator exists, so it reads
+// the earlier phase's end, which is the same number.
+func (w *dryBaseline) LLMLabCount(context.Context) (float64, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.generated == 0 {
+		return 0, !w.d.fault("metric-unread")
+	}
+	w.reads++
+	done := float64(w.phaseLLM)
+	if w.d.fault("llmlab-over-its-guard") && w.phase.Name == PhaseP2 && w.reads == 1 {
+		done = 100
+	}
+	if w.d.fault("metric-disagrees") && w.phase.Name == PhaseP2 {
+		done++
+	}
+	// A phase's generator ends once the sequencer has looked at the count twice, unless a fault keeps it running.
+	for _, g := range w.gens {
+		g.looked(w.reads)
+	}
+	return w.cum + done, !w.d.fault("metric-unread")
+}
+
+func (w *dryBaseline) ServedEligible(context.Context) bool {
+	return !(w.d.fault("instance-ineligible") && w.phase.Name == PhaseP1Long)
+}
+
+// inPhase says the named phase's generator is running: the sample before a phase starts, and the one after it ends, belong to the neighbours.
+func (w *dryBaseline) inPhase(name string) bool {
+	if w.phase.Name != name || len(w.gens) == 0 {
+		return false
+	}
+	select {
+	case <-w.gens[len(w.gens)-1].Done():
+		return false
+	default:
+		return true
+	}
+}
+
+func (w *dryBaseline) EngineSample(context.Context) (EngineSample, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.d.fault("engine-unread") {
+		return EngineSample{}, false
+	}
+	w.d.tick(time.Second) // each look is a second of the fake clock, so a generator that never ends reaches the phase's bound
+	s := EngineSample{At: w.d.now(), Running: w.running, KVUsage: w.kv, Preemptions: w.pre}
+	switch {
+	case w.d.fault("engine-over-the-cap") && w.phase.Name == PhaseP2:
+		s.Running = float64(w.cap + 1)
+	case w.d.fault("engine-waiting") && w.phase.Name == PhaseP2:
+		s.Waiting = 1
+	case w.d.fault("engine-preempts") && w.phase.Name == PhaseP2:
+		w.pre += 3
+		s.Preemptions = w.pre
+	case w.d.fault("long-engine-readings") && w.inPhase(PhaseP1Long):
+		// Eleven long prompts queue in the engine's own prefill, and the engine preempts three requests once: readings, not failures.
+		s.Waiting = 2
+		if !w.preBumped {
+			w.pre, w.preBumped = w.pre+3, true
+		}
+		s.Preemptions = w.pre
+	}
+	w.samples++
+	return s, true
+}
+
+// dryGenerator ends when the world says its phase has been looked at enough, or when it is stopped.
+type dryGenerator struct {
+	done   chan struct{}
+	once   sync.Once
+	gen    []GenRow
+	needed int
+	never  bool
+}
+
+func (g *dryGenerator) Done() <-chan struct{} { return g.done }
+func (g *dryGenerator) Stop()                 { g.once.Do(func() { close(g.done) }) }
+func (g *dryGenerator) Result() ([]GenRow, error) {
+	return g.gen, nil
+}
+func (g *dryGenerator) looked(n int) {
+	if !g.never && n >= g.needed {
+		g.Stop()
+	}
+}
+
+// StartGenerator builds the phase the front's rule would give: the first cap sessions on the Instance, the rest on LLMLab (or waiting, when LLMLab is
+// detached), each of the phase's turns in turn. The generator's config is made too, as the live world makes it, and its record kept.
+func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, error) {
+	cfgJSON, err := StudyConfig(ph, StudyRun{BaseURL: "http://127.0.0.1:1/v1", RunID: PhaseRunID("0123456789", ph.Name), RequestTimeout: 5 * time.Minute})
+	if err != nil {
+		return nil, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.configs == nil {
+		w.configs = map[string][]byte{}
+	}
+	w.configs[ph.Name] = cfgJSON // the generator's config of the phase, as the live world writes it
+	w.calls = append(w.calls, "StartGenerator "+ph.Name)
+	if w.generated > 0 {
+		w.cum += float64(w.phaseLLM)
+	}
+	w.generated++
+	w.phase, w.reads = ph, 0
+	gen, rows, llm, instance, length := w.build(ph)
+	w.rows = append(w.rows, rows...)
+	w.phaseLLM, w.running = llm, float64(min(instance, w.cap))
+	w.kv = 0.2
+	if ph.Kind == KindLong {
+		w.kv = 0.74
+	}
+	g := &dryGenerator{done: make(chan struct{}), gen: gen, needed: 2}
+	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 || w.d.fault("instance-ineligible") && ph.Name == PhaseP1Long {
+		g.never = true // the phase ends only by the sequencer's stop
+	}
+	w.gens = append(w.gens, g)
+	w.d.tick(length)
+	return g, nil
+}
+
+// build is a phase's sessions, rows and generator records. The first turns of all sessions arrive together; a turn takes two seconds, with the phase's
+// think time between turns. llm is the LLMLab rows made, instance the sessions on the Instance.
+func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, instance int, length time.Duration) {
+	t0 := w.d.now()
+	cap := w.cap
+	instanceSessions, llmSessions, waiting := ph.Sessions, 0, 0
+	switch ph.Kind {
+	case KindFull:
+		instanceSessions, llmSessions = min(ph.Sessions, cap), max(ph.Sessions-cap, 0)
+		if w.d.fault("cap-never-binds") {
+			instanceSessions, llmSessions = ph.Sessions, 0
+		}
+		if w.d.fault("llmlab-one-too-many-first-turns") {
+			instanceSessions, llmSessions = ph.Sessions-1, 3
+		}
+	case KindDetach:
+		instanceSessions, waiting = ph.Sessions, max(ph.Sessions-cap, 0)
+		if !w.detached {
+			// The managed ModelDeployment was never deleted: LLMLab answers the overflow, as it does in P2.
+			instanceSessions, llmSessions, waiting = min(ph.Sessions, cap), max(ph.Sessions-cap, 0), 0
+		}
+		if w.d.fault("detach-no-wait") {
+			waiting = 0
+		}
+	}
+	if w.d.fault("llmlab-in-the-control") && ph.Name == PhaseP1 {
+		instanceSessions, llmSessions = ph.Sessions-1, 1
+	}
+	if w.d.fault("llmlab-after-the-detach") && ph.Kind == KindDetach {
+		instanceSessions, llmSessions = ph.Sessions-3, 3
+	}
+	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 {
+		llmSessions = 150 // one request each: the guard is the metric's, past 144
+	}
+	step := 2*time.Second + ph.Think
+	delay := time.Duration(0)
+	// late is when the sessions beyond the cap start in the faults where the cap is never reached: after the others have ended.
+	late := time.Duration(ph.Turns)*step + time.Second
+	neverReached := (w.d.fault("cap-never-binds") && ph.Kind == KindFull) || (w.d.fault("detach-no-wait") && ph.Kind == KindDetach)
+	if w.d.fault("llmlab-spill-below-the-cap") && ph.Kind == KindFull {
+		delay = 2 * time.Second // the Instance's sessions arrive after LLMLab's: at LLMLab's arrival the Instance held none
+	}
+	add := func(session string, turn int, provider, emitter string, status int, start time.Time, dur time.Duration, prompt, first int64) {
+		id := fmt.Sprintf("%s-%s-t%02d", ph.Name, session, turn)
+		r := w.row(id, provider, emitter, status, start, dur, prompt, int64(ph.Output), first)
+		g := GenRow{Session: session, Turn: turn, RequestID: id, Emitter: r.Emitter, Provider: r.Provider, Instance: r.Instance}
+		rows, gen = append(rows, r), append(gen, g)
+		if end := r.End.Sub(t0); end > length {
+			length = end
+		}
+	}
+	promptOf := func(turn int) int64 {
+		if ph.Kind == KindLong {
+			if w.d.fault("long-contexts-short") {
+				return 5000
+			}
+			return int64(ph.Context+7) + int64(turn-1)*int64(ph.Turn+ph.Output)
+		}
+		return int64(ph.Context+7) + int64(turn-1)*int64(ph.Turn+ph.Output)
+	}
+	for i := 0; i < instanceSessions+llmSessions; i++ {
+		session := fmt.Sprintf("s%03d", i)
+		onLLMLab := i >= instanceSessions
+		isWaiting := !onLLMLab && waiting > 0 && i >= instanceSessions-waiting
+		turns := ph.Turns
+		if onLLMLab && w.d.fault("llmlab-over-its-guard") {
+			turns = 1
+		}
+		// A turn takes two seconds, on the Instance and on LLMLab, and the next starts after the think time.
+		for t := 1; t <= turns; t++ {
+			start := t0.Add(time.Duration(t-1) * step)
+			if neverReached && i >= cap {
+				start = start.Add(late)
+			}
+			dur, status, emitter, provider, first := 2*time.Second, 200, "instance", dryServedProvider, int64(50)
+			switch {
+			case onLLMLab:
+				emitter, provider, first = "provider", LLMLabProviderName, 300
+			default:
+				if delay > 0 {
+					start = start.Add(delay)
+				}
+				if isWaiting && t == 1 {
+					// Arrived with the cap's sessions in the Instance, served after one turn's time: a wait in the front's FIFO.
+					dur, first = 2*dur+500*time.Millisecond, 2500
+				}
+				if isWaiting && t > 1 {
+					start = start.Add(2500 * time.Millisecond)
+				}
+			}
+			if w.d.fault("session-moves") && ph.Name == PhaseP1 && i == 0 && t == 3 {
+				emitter, provider, first = "provider", LLMLabProviderName, 300
+			}
+			if w.d.fault("front-503-in-the-control") && ph.Name == PhaseP1 && i == 1 && t == 2 {
+				emitter, provider, status = "front", "", 503
+			}
+			if w.d.fault("instance-fails") && ph.Name == PhaseP1 && i == 1 && t == 2 {
+				status = 500
+			}
+			if w.d.fault("llmlab-fails") && ph.Kind == KindFull && onLLMLab && i == instanceSessions && t == 5 {
+				status = 500
+			}
+			if w.d.fault("detach-503") && ph.Kind == KindDetach && isWaiting && t == 1 {
+				emitter, provider, status = "front", "", 503
+			}
+			add(session, t, provider, emitter, status, start, dur, promptOf(t), first)
+			if status != 200 {
+				break // a failed request ends its session
+			}
+			if w.d.fault("over-the-cap-in-flight") && ph.Name == PhaseP1 && i == 0 && t == 1 {
+				// a request the generator sent that stays open past its session's next turn: more than the cap in flight at once
+				extra := w.row(ph.Name+"-extra", dryServedProvider, "instance", 200, start, 10*time.Second, 9, 1, 40)
+				rows = append(rows, extra)
+				gen = append(gen, GenRow{Session: "extra", Turn: 1, RequestID: extra.RequestID, Emitter: "instance", Provider: dryServedProvider, Instance: dryServedInstance})
+			}
+		}
+	}
+	llm = 0
+	for _, r := range rows {
+		if r.Emitter == "provider" {
+			llm++
+		}
+	}
+	if w.d.fault("generator-names-another-route") && len(gen) > 0 {
+		gen[0].Emitter = "provider"
+	}
+	if w.d.fault("no-answer") && len(gen) > 0 {
+		gen = append(gen, GenRow{Session: "lost", Turn: 1})
+	}
+	if w.d.fault("no-record") && len(gen) > 0 {
+		gen = append(gen, GenRow{Session: "lost", Turn: 1, RequestID: "never-recorded"})
+	}
+	if w.d.fault("unlisted-llmlab-request") && ph.Kind == KindControl {
+		rows = append(rows, w.row("unlisted", LLMLabProviderName, "provider", 200, t0.Add(time.Second), 2*time.Second, 9, 8, 300))
+	}
+	instance = instanceSessions
+	return gen, rows, llm, instance, length + time.Second
+}
+
+func (w *dryBaseline) FrontRows(_ context.Context, since time.Time, _ []string) ([]FrontRow, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []FrontRow
+	for _, r := range w.rows {
+		if !r.Start.Before(since) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (w *dryBaseline) DetachManaged(context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.calls = append(w.calls, "DetachManaged")
+	if w.d.fault("detach-skipped") {
+		return nil // the managed ModelDeployment stays, and LLMLab answers the overflow
+	}
+	w.detached = true
+	return nil
+}
+
+// ManagedDetached is the wait for the front to drop the target: each look is half a minute of the fake clock, so a front that never does reaches the
+// sequencer's bound.
+func (w *dryBaseline) ManagedDetached(context.Context) bool {
+	w.d.tick(30 * time.Second)
+	return w.detached && !w.d.fault("detach-not-seen")
+}
