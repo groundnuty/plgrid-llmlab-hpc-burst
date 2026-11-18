@@ -54,23 +54,34 @@ type selUnit struct {
 	passed  bool
 	started bool
 	marked  bool
+	// candidate: a kept started loser of a replacement hedge, still waiting on its winner (candidateWinnerOf), whose
+	// predecessor still counts. It is surplus whatever its rank: a replacement never takes a primary's slot (How it
+	// counts, A replacement waits for no ranking). Any other kept loser is an ordinary Instance of the selection.
+	candidate bool
 }
 
 // primaryCandidatesOf are the Instances that count towards capacity, each member of a hedge apart: not draining,
-// ended or deleting, not stale, and not the replacement of a predecessor that still counts.
+// ended or deleting, not stale, and not the replacement of a predecessor that still counts. Two replacements are
+// counted all the same, so that the selection reads them (#616, PR 5): a kept started loser still waiting on its
+// winner (candidateWinnerOf), which is held surplus since its hedge is a replacement hedge (selUnit.candidate), and a
+// replacement winner a candidate outranked (markedOut), whose drain step 7 then takes.
 func primaryCandidatesOf(insts []*v1alpha1.Instance, stale map[types.UID]bool) []*v1alpha1.Instance {
 	counted := map[string]bool{}
+	byName := map[string]*v1alpha1.Instance{}
 	for _, in := range insts {
+		byName[in.Name] = in
 		if countable(in) && !stale[in.UID] {
 			counted[in.Name] = true
 		}
 	}
+	named := func(name string) *v1alpha1.Instance { return byName[name] }
 	var out []*v1alpha1.Instance
 	for _, in := range insts {
 		if !countable(in) || stale[in.UID] {
 			continue
 		}
-		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] {
+		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && counted[pred] &&
+			candidateWinnerOf(in, named, stale) == nil && !markedOut(in, byName) {
 			continue
 		}
 		out = append(out, in)
@@ -107,6 +118,7 @@ func (s selection) units() []selUnit {
 			replaced[pred] = true
 		}
 	}
+	counts := func(in *v1alpha1.Instance) bool { return in != nil && countable(in) && !s.stale[in.UID] }
 	var out []selUnit
 	for _, g := range groupHedges(primaryCandidatesOf(s.insts, s.stale), func(*v1alpha1.Instance) bool { return true }) {
 		rep := hedgeRepresentative(g.members, s.allocOf)
@@ -120,6 +132,7 @@ func (s selection) units() []selUnit {
 		}
 		u.started = jobStarted(s.allocOf(rep))
 		u.marked = markedOut(rep, byName)
+		u.candidate = candidateWinnerOf(rep, func(name string) *v1alpha1.Instance { return byName[name] }, s.stale) != nil && counts(byName[rep.Annotations[v1alpha1.AnnotationPredecessor]])
 		out = append(out, u)
 	}
 	return out
@@ -207,17 +220,60 @@ func (s selection) ordered() []selUnit {
 	return us
 }
 
+// selectUnits is the selection by hedge: the chosen units, the first desired in HBEP-7's order (a marked peer and a
+// replacement hedge's kept started loser waiting on its winner excepted: they are surplus; any other kept loser is an
+// ordinary Instance, chosen when the deployment is short, since ranking never holds back an Instance the deployment
+// needs), and the surplus units, both in that order. Instances that do not count, and a
+// replacement whose predecessor still counts, are in neither: a replacement is never ranked. selectPrimaries
+// reads the representatives of these units; reservedOn reads their members (a surplus hedge's every member
+// holds no reserved slot).
+func selectUnits(s selection, desired int) (chosen, surplus []selUnit) {
+	for _, u := range s.ordered() {
+		if !u.marked && !u.candidate && len(chosen) < desired {
+			chosen = append(chosen, u)
+			continue
+		}
+		surplus = append(surplus, u)
+	}
+	return chosen, surplus
+}
+
 // selectPrimaries returns the deployment's chosen primaries, the first desired of its Instances in HBEP-7's order
 // (a marked peer excepted: it is surplus), and its surplus, both in that order, one Instance per hedge: the hedge's
 // representative (hedgeRepresentative). Instances that do not count, and a replacement whose predecessor still
 // counts, are in neither: a replacement is never ranked.
 func selectPrimaries(s selection, desired int) (chosen, surplus []*v1alpha1.Instance) {
-	for _, u := range s.ordered() {
-		if !u.marked && len(chosen) < desired {
-			chosen = append(chosen, u.rep)
-			continue
-		}
+	cu, su := selectUnits(s, desired)
+	for _, u := range cu {
+		chosen = append(chosen, u.rep)
+	}
+	for _, u := range su {
 		surplus = append(surplus, u.rep)
 	}
 	return chosen, surplus
+}
+
+// selectionOfView is the selection a deployment's own pass makes, from its Instances and Allocations read by label
+// (reservedOn's views and the headroom's re-read of the other deployments): its Instances in the pass's order, the ones an earlier
+// ModelDeployment of the same name owned marked stale, and its Allocations by name.
+func selectionOfView(md *v1alpha1.ModelDeployment, v deploymentView) selection {
+	var insts []*v1alpha1.Instance
+	stale := map[types.UID]bool{}
+	for _, in := range v.insts {
+		owned, old := ownedBy(in, md.Name, md)
+		if owned || old {
+			insts = append(insts, in)
+		}
+		if old {
+			stale[in.UID] = true
+		}
+	}
+	sort.Slice(insts, func(i, j int) bool {
+		a, b := insts[i], insts[j]
+		if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+			return a.CreationTimestamp.Before(&b.CreationTimestamp)
+		}
+		return a.Name < b.Name
+	})
+	return selection{insts: insts, stale: stale, allocOf: func(in *v1alpha1.Instance) *v1alpha1.Allocation { return v.allocs[in.Spec.AllocationRef.Name] }}
 }
