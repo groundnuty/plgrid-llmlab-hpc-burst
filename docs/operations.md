@@ -487,6 +487,41 @@ In `host-dialed` mode no job dials your host. The host dials each job, and the j
 - **A relay waits for a slot.** Behind that cap, a login node carries at most 4 relays in alpha, 2 Allocations. The login node is the host name as `ssh -G` resolves it through the Provider's own ssh settings, so an alias and a full name of one node count as one, and the count is shared by every Provider of the controller that uses it. An Allocation's pair of slots is reserved whole before either relay starts and held through its relays' restarts and backoffs, so a relay that drops never hands its slot to another Allocation and none is left with half a pair. An Allocation that finds the node's slots taken waits for a pair and logs nothing: the sign is an Allocation with no relays in `pgrep -a -P <pid>` while two others' relays run on the same login node. Its slots free when the Allocation's job ends or the Allocation is deleted. Until its relays run, that job's agent cannot reach the host, and an Instance still unregistered at its registration deadline ends with `RegistrationTimeout`, with `DialHomeUnreachable` on its Provider, as for any broken route above. A per-platform budget is HBEP-4's open question 17.
 - **One host-dialed Provider per login host.** The login host is the Provider's host name as `ssh -G` resolves it through its own ssh settings, so two Providers of one cluster, as two partitions of it are, name the same one. The host goes to the oldest of them by creation time, then by name, whichever asks first, so a controller restart never moves it; a younger Provider waits while an older one has not yet said which host it uses. The Provider's controller refuses the other: it submits nothing, its `Ready` condition goes false with reason `LoginHostInUse` and a message that names the login host and the Provider that holds it, and the planner skips it as `ProviderUnavailable`, so no Allocation is created for it ([HBEP-6](../hbep/0006-instance-reachability/README.md), Dial-home modes, Capacity). `hbk describe provider <provider>` shows it. The refused Provider does no harm: the planner skips it, and the Provider that holds the host keeps its relays. To use both, they must be on different login hosts.
 
+### Bursting onto Sano
+
+Sano's `gpu` partition has two nodes, one with 4 and one with 8 NVIDIA A100 80GB PCIe GPUs. Its compute nodes have no home directory, which is where `ssh` mode's agent reads its dial-home key, so a Sano Provider runs in `host-dialed` mode only. It also needs a staging directory of its own.
+
+**Before the first deployment:**
+
+1. **Apply the profile:**
+
+   ```
+   hbk apply -f profiles/sano.yaml
+   ```
+
+   It is the only profile that chooses the QOS by the Allocation's GPU count: 1 GPU runs under `gpu1`, 2 under `gpu2`, 3 or 4 under `gpu4` and 5 to 8 under `gpu8`, and a count above 8 is refused before any call. Each of the four has a 3-day wall. An Allocation asks for 11 CPUs and 135904Mi of memory per GPU, which fits both node classes. A Provider on this profile sets no `qos` of its own, and one that does is refused.
+2. **Create the Provider** from a copy of `examples/provider-sano-a100.yaml` with every placeholder replaced, and apply the copy.
+   - **`spec.stagingDir` is required on Sano.** Give an absolute path, with no `..` segment, in a directory of your own on the shared Ceph file system that the login node and the compute nodes both mount. The profile names none, since no variable on the cluster names one and a literal path carries a user name.
+   - **The dial-home mode is `host-dialed`.** The controller reaches each job through the login node, with an `srun` step that overlaps the job's own steps and starts in the Allocation's directory.
+3. **The agent stages the engine image and the model itself,** on the first deployment, into the Provider's `stagingDir`: the image as a SIF with a record beside it, and the weights in a directory named by the pinned revision. An image with no record is moved aside and pulled again, so a SIF pulled by hand is not reused: don't pre-pull. The weights come from the Hugging Face hub, which the compute nodes reach. On Sano the stage row staged both in one Allocation of one GPU in 10 minutes: the SIF in 432 s and the model's 14 files in 144 s, with no scratch request on the job (#735).
+
+**The engine's launch is the agent's own** ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), The allocation agent, Home and caches). It runs the engine in the SIF with the GPU passed through and no home directory, with its caches in the Allocation's cache directory, and there is nothing to set by hand. The serve row passed on Sano with that launch unchanged (#735).
+
+**One engine default to know:** vLLM v0.32.0's default GPU memory utilization is 0.92, not 0.9. The agent adds no flag for it, so unless the deployment's flags set one, 0.92 applies.
+
+**What to expect,** for `Qwen/Qwen2.5-7B-Instruct` on one A100 80 GB, Sano's reference model (all from #735's live rows and probes, 18 Nov 2026):
+- the container starts in about 2 seconds;
+- after the engine was killed, the worker was ready again in 3 min 24 s in the serve row and 3 min 40 s in the handover row. A hand launch from a cold read of the weights took 142 s from exec to ready, with a KV cache of about 1.07 million tokens, which holds about 32 sessions of 32k tokens;
+- a long stream ran at the engine's own rate, about 91 tokens/s;
+- the relay between your host and a job carried medians of 65 to 113 MiB/s in each direction, with a round trip of 0.4 to 0.5 ms from the development host;
+- the throughput gate's reference is Sano's `expectedPerformance` entry, which is TBD: the reference run.
+
+**A handover** ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover) moves the Instance to its successor before the job's time limit. The handover row on Sano ran one: 2 of 2 streams in flight at the drain start finished, and none was cut.
+
+**If something fails,** see [`ProviderUnavailable`](#providerunavailable) and [Host-dialed relays](#host-dialed-relays) above. On Sano in particular:
+- an `srun` step that fails with "couldn't chdir" could not enter the Allocation's directory on the compute node, so check that `stagingDir` is on the shared file system;
+- Sano's submit plugin refuses a job with no QOS, no memory request, no CPU count or a generic job name. The framework sends all four, so report a refusal that names one.
+
 ### The bulk path (beta)
 
 On one frp session a large non-streamed reply holds an Instance's token streams back for about frp's 6 MiB stream window over the path rate: spike S15 measured a gap p99 of 137 ms in `direct` mode and 206 ms in `host-dialed` mode, against 52 ms. The bulk path gives each Instance's non-streamed replies a tunnel of their own ([HBEP-6](../hbep/0006-instance-reachability/README.md), The bulk path; [issue 448](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/448)). It is off unless you ask for it, and works in `direct` and `host-dialed` mode only.
