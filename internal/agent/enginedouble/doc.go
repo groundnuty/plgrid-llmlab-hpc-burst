@@ -142,6 +142,7 @@
 //
 // ParseModes reads the comma-separated value of the environment variable
 // HB_ENGINE_DOUBLE, for example "kv-low,slow-first=200ms". The modes are kv-low,
+// kv-tokens=<n> (the KV capacity, in tokens, that the engine reports),
 // greedy-diverge=<n>, greedy-repeat, early-stop=<n>, loop-above=<tokens>,
 // tool-malformed, tool-args-null, tool-args-badtype, no-tool-call,
 // reports-nothing, report-max-model-len=<n>, health-fail, health-fail-after=<dur>,
@@ -152,10 +153,11 @@
 // or is answered 500: the faults of spike S18, #528), slow-first=<dur>, never-settle=<pct>, stall,
 // token-delay=<dur>,
 // reasoning-first=<n>, reasoning-forever, reply-bytes=<n> (a non-streamed chat
-// reply's content padded to n bytes), and four that leave lines out of
+// reply's content padded to n bytes), and five that leave lines out of
 // /metrics: no-prefix-cache-metrics (not the same as prefix caching off, which
-// a real vLLM reports as two counters at 0), no-tpot, no-tpot-sum and
-// no-tpot-count;
+// a real vLLM reports as two counters at 0), no-tpot, no-tpot-sum,
+// no-tpot-count and no-cache-config-info (vllm:cache_config_info alone, where
+// reports-nothing drops it with other things too);
 // the startup modes, used by Main only, are start-delay=<dur>,
 // exit-after=<dur>[:code], ignore-term, write-caches (writeCaches: one file in
 // each cache a real engine fills at start, each at its variable) and
