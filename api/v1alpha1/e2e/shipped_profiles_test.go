@@ -52,6 +52,8 @@ var shippedProfiles = []struct {
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_node_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
 	}, false},
+	// Sano (#735): its facts are S5's and the probes of 18 Nov 2026; spike S1 ran only on Helios and Athena, so it has none of S1's.
+	{"sano.yaml", "sano", nil, false},
 	{"llmlab.yaml", "llmlab", nil, true},
 }
 
