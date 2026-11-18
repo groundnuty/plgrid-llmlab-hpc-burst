@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -110,37 +109,39 @@ type placeOpts struct {
 	// never reached: capacity() calls provisionWith for the extra outside its missing-primary loop, and reads
 	// only the Provider that loop placed on.
 	extra bool
-	// alsoLeave is how many of the deployment's own chosen primaries on the Provider hold no reserved slot yet but
-	// will once Running (extraAlsoLeave), left free beside the new Allocation: the extra's slot is beyond its own
-	// handovers (HBEP-7, Its checks, a slot beyond its own handovers). Set with extra, on the Provider named by only.
-	alsoLeave int
+	// ask is what the extra's checks add to its reservation (extraChecks): the slots left free beside the new
+	// Allocation for the primaries that will hold one once Running (HBEP-7, Its checks, a slot beyond its own
+	// handovers), the replacements its caps check counts and the admission headroom, read under the Provider's lock.
+	// Set with extra, on the Provider named by only.
+	ask extraAsk
 	// deadline, when set, is the start deadline of the replacement a hedge member is for, which the pass read from
 	// the hedge's need: a deferral never runs past it. It carries the deadline of a replacement hedge whose
 	// predecessor is gone, which a nil predecessor cannot give (growHedges; Astra's review of #724, point 3).
 	deadline time.Time
-	// headroom is the extra's admission headroom (extraChecks): how many more slots the reservation leaves free, read
-	// under the Provider's lock (slotAsk.headroom). Set with extra.
-	headroom func(context.Context) (int, error)
-	// qosAlsoLeave and qosHeadroom are alsoLeave and headroom counted over the Allocations under the extra's own QOS,
-	// for a Provider whose partition sets qosByGpus (extraChecks; HBEP-7, Per-user limits). Set with extra.
-	qosAlsoLeave int
-	qosHeadroom  func(context.Context) (int, error)
 }
 
 // placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
-// every reservation takes (slots.go), and clears the Allocation's idle anchor: the Allocation is no longer idle
+// every reservation takes (slots.go), and then clears the Allocation's idle anchor: the Allocation is no longer idle
 // (v1alpha1.ClearIdleSince). The Instance becomes a Running primary that reserves a handover slot and ends its
 // deployment's missing primary, so both the reserved slots and the admission headroom an extra reads change with
 // it; made outside the lock, another pass could read the one before and the other after (#708, the delta review of the
-// headroom). The lock is held across two API writes of no other lock of this package.
+// headroom). The lock is held across that one API write and no other lock of this package. The anchor's clear changes
+// neither the count nor the headroom, so it is written AFTER the lock is released: a slow API there stalls no other
+// reservation on the Provider (#725; the anchor is idle-since, which the Instance's own placement makes stale and the
+// next pass clears again if this write is lost).
 func (p *pass) placeOnWarm(pv *providerView, cid *classID, pred *v1alpha1.Instance, warm *v1alpha1.Allocation, o placeOpts) error {
-	l := p.r.slots().slotLock(pv.name)
-	l.Lock()
-	defer l.Unlock()
-	if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+	if err := p.createInstanceUnderLock(pv, cid, pred, warm.Name, o); err != nil {
 		return err
 	}
 	return p.writeIdleSince(warm, nil)
+}
+
+// createInstanceUnderLock creates the Instance with the Provider's lock held for the create alone.
+func (p *pass) createInstanceUnderLock(pv *providerView, cid *classID, pred *v1alpha1.Instance, allocName string, o placeOpts) error {
+	l := p.r.slots().slotLock(pv.name)
+	l.Lock()
+	defer l.Unlock()
+	return p.createInstance(pv, cid, pred, allocName, o)
 }
 
 // provisionWith places one Instance by the steps placementOrder gives: the first that places it ends the walk. A warm
@@ -586,16 +587,17 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		}
 		capsOf, quiet = &params, true
 	case member:
-		// A hedge member's retry reserves as its first creation did: the caps check beside our Allocations there, and no
-		// condition for a refusal (a member is extra capacity), since another job may have filled its QOS since (review of #756,
-		// Astra 4; in alpha too).
-		capsOf, quiet = &params, true
+		// A hedge member's retry reserves as its first creation did: the caps check beside our Allocations there, since another
+		// job may have filled its QOS since (review of #756, Astra 4; in alpha too). Not quiet: a refusal for the caps records
+		// no condition (reserveSlotWhy), and a refusal for the submit limit records its words, which the member waits with
+		// (Degraded SubmitLimitReached), as a member's retry always did (endsOnRefusal).
+		capsOf = &params
 	}
-	ok, holds, err := p.reserveSlotAs(pv, params.GPUs, name, holder, takers, &params, capsOf, quiet, x)
+	ok, holds, capsWhy, err := p.reserveSlotWhy(pv, params.GPUs, name, holder, takers, &params, capsOf, quiet, x)
 	if err != nil {
 		return err
 	}
-	if !ok && quiet && member {
+	if !ok && member && endsOnRefusal(capsWhy) {
 		return p.endCutShortMember(in)
 	}
 	if !ok && quiet {
@@ -611,8 +613,16 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	return nil
 }
 
-// endCutShortMember ends a pending hedge member whose Allocation was never made and whose slot or caps check now refuses
-// it: a member is extra capacity, so it is dropped in silence, as a member that finds no room at its creation is passed over.
+// endsOnRefusal is the ONE predicate for what becomes of a pending hedge member whose Allocation was never made and whose
+// retry's reservation is refused (ensureAllocation): it ends only when the PER-USER CAPS refuse it (capsWhy is the refusal's
+// words, "" for the submit limit), since another job may have filled its QOS since its first creation passed them (#756, aec8945e,
+// review Astra 4); refused for the SLOT LIMIT it waits for the older racing member's slot, as HBEP-7 rules (Hedging, Slots
+// reserved atomically, Interactions: the newer of two racing members on one Provider waits; #604's last criterion; the A5 row).
+// #756 ended it for both; a ruling that it should flips this one line.
+func endsOnRefusal(capsWhy string) bool { return capsWhy != "" }
+
+// endCutShortMember ends a pending hedge member whose Allocation was never made and whose per-user caps now refuse it
+// (endsOnRefusal): a member is extra capacity, so it is dropped in silence, as a member that finds no room at its creation is passed over.
 func (p *pass) endCutShortMember(in *v1alpha1.Instance) error {
 	return p.end(in, nil, v1alpha1.ReasonDrained, "scaled down: its Provider refuses the hedge member (the slot or the caps)", true)
 }

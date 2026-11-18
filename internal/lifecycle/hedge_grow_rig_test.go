@@ -462,14 +462,15 @@ func TestAHedgeSkipsAProviderItCannotUse(t *testing.T) {
 	}
 }
 
-// newHedgeRigB is newHedgeRig with B's partition's maxTime and, when qos is set, B's partition under that QOS.
-func newHedgeRigB(t *testing.T, bMax time.Duration, qos *v1alpha1.QOSProfile) *hedgeRig {
+// newHedgeRigB is newHedgeRig with B's partition's maxTime and, when qos is set, B's partition under that QOS; extra are the
+// rig's own options too.
+func newHedgeRigB(t *testing.T, bMax time.Duration, qos *v1alpha1.QOSProfile, extra ...rigOption) *hedgeRig {
 	var opts []rigOption
 	if qos != nil {
 		q := *qos
 		opts = append(opts, withProfile(func(s *v1alpha1.PlatformProfileSpec) { s.QOS = append(s.QOS, q) }))
 	}
-	rg := newRig(t, append([]rigOption{withMaxTime(4 * time.Hour)}, opts...)...)
+	rg := newRig(t, append(append([]rigOption{withMaxTime(4 * time.Hour)}, opts...), extra...)...)
 	b := rg.addProvider(hedgeB, hedgeBSlurm, bMax,
 		func(pp *v1alpha1.PartitionProfile) {
 			pp.AcceleratorClass.GPUModel = hedgeBGPU

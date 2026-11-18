@@ -179,6 +179,11 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 // beside no longer than the placement waits for it, or the mode, and the
 // queued successor it would make, would be held past ReplacementLate (Astra's
 // review of #724, point 2).
+//
+// A registered warm Allocation counts as room beside from the moment this pass reads it until an Instance is placed on
+// it, a short window: another placement of the deployment, or the Allocation's release, can take it in between. The
+// decision is made afresh by the next pass from what it then reads, so the window is bounded by one pass, and a
+// replacement that finds the warm Allocation gone then meets the ordinary slot and caps checks (#725, from #724's review).
 func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) bool {
 	warm, deferUntil := p.warmFor(pv, params, pred)
 	if warm != nil {

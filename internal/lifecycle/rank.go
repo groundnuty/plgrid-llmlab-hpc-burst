@@ -172,9 +172,12 @@ func (p *pass) candidateWinner(in *v1alpha1.Instance) *v1alpha1.Instance {
 //   - the selection leaves it surplus: it is ranked against its winner alone while that winner can be ranked against
 //     (rankCandidate), and otherwise it ends HedgeLost, kept as warm capacity. A winner that has gone, is draining,
 //     is being deleted, or is already outranked (it carries the ranked-out mark of another Instance, whose rewriting
-//     would leave two ready for one slot) cannot be ranked against.
+//     would leave two ready for one slot) cannot be ranked against. A mark that names the candidate itself is its
+//     own: it outranked this winner, restarted before the winner's drain began (step 6 may not have cleared it yet), and
+//     passes again, so the outranking resumes (outrank writes the mark only when it differs).
 //
-// It is never ranked against another primary of its Provider.
+// It is never ranked against another primary of its Provider, a candidate that restarted after it outranked its winner
+// included (#730).
 func (p *pass) candidateStep(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, ready func() error) error {
 	chosen, surplus := selectPrimaries(p.selection(in), p.desiredCount())
 	w := p.candidateWinner(in)
@@ -189,7 +192,7 @@ func (p *pass) candidateStep(in *v1alpha1.Instance, alloc *v1alpha1.Allocation, 
 	switch {
 	case w == nil:
 		return p.endCandidate(in, alloc, nil, fmt.Sprintf("hedge lost to %s, on Provider %s: its winner has left and the deployment's need is met without Instance %s, so it passed its checks and is kept as warm capacity", candidateOf(in), in.Labels[v1alpha1.LabelProvider], in.Name))
-	case w.Annotations[annotationRankedOut] != "":
+	case w.Annotations[annotationRankedOut] != "" && w.Annotations[annotationRankedOut] != in.Name:
 		return p.endCandidate(in, alloc, w, fmt.Sprintf("hedge lost to %s, on Provider %s: its winner has been outranked by another Instance, whose mark is not rewritten, so Instance %s passed its checks and is kept as warm capacity", w.Name, w.Labels[v1alpha1.LabelProvider], in.Name))
 	}
 	return p.rankCandidate(in, alloc, w, ready)

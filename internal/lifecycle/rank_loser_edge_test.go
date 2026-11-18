@@ -2,8 +2,8 @@ package lifecycle
 
 // Two edges of a hedge's started loser kept as a candidate (#616, PR 5): D1's guard that only a loser that has never
 // been ready is kept, and what a candidate does when it restarts after it outranked its winner and before the winner's
-// drain starts, a STATED LIMIT (HBEP-7, Hedging's started losers, erratum of 17 Nov 2026; issue #730): the rows pin
-// what the code does today.
+// drain starts: it keeps its mark and is ranked against that winner alone again (HBEP-7, Hedging's started losers; issue
+// #730, whose stated limit #725's batch lifts).
 
 import (
 	"testing"
@@ -65,18 +65,24 @@ func TestAStartedLoserThatHasBeenReadyIsNotKept(t *testing.T) {
 	}
 }
 
-// TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains pins a stated limit (#730), not a goal. A candidate that
-// outranked its winner and restarts inside the front's 10 s window, before the winner's drain starts, is verifying
-// again with its readyTime set, so it is no longer a waiting candidate (candidateWinnerOf needs a never-ready Instance)
-// and takes PR 3's general path on re-passing. Today that has two consequences, found by tracing and pinned here:
-//   - in P's replacement hedge, readyUnmarked clears its mark while the winner still serves, so it rejoins the winner's
-//     hedge and the next resolveHedges drains it, ending HedgeLost: the winner serves on, and capacity holds;
-//   - in a missing-primary hedge with another primary on its Provider (instances 2), its peer is that primary, so it
-//     outranks it: the comparison HBEP-7 forbids, though only inside the window.
+// TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains (#730): a candidate that outranked its winner and restarts
+// inside the front's 10 s window, before the winner's drain starts, is verifying again with its readyTime set. It is not
+// ready now, so it is a waiting candidate again (waitingCandidate), keeps its candidate-of mark and, passing, is ranked
+// against its winner alone, as it was the first time (rankCandidate); it never takes PR 3's general path, which
+// compared it with the other primaries of its Provider. Worked by hand for each row (17.9 ms against 20 ms:
+// 179 < 180, so it outranks, as the fixture's first ranking did):
+//   - in P's replacement hedge, R1 (candidate of R2) passes again: R2 is ready, has no live replacement, and carries the
+//     ranked-out mark of R1 itself, which is its own and not another's, so R1 is ranked against R2: it outranks, ready
+//     is called, R2's mark is not rewritten (it names R1 already), R1's candidate-of mark is still R2, and resolveHedges
+//     drains nothing: R1 is a hedge of its own (its key is its own), no loser of R2's, so it is not ended with HedgeLost
+//     and R2 serves on (the old behaviour cleared the mark, rejoined the hedge and drained R1);
+//   - with instances 2, M1 (candidate of M2, on A) passes again with P, the other primary on A, ready at 40 ms: it is
+//     ranked against M2 alone, outranks it, ready is called, and P's ranked-out mark stays empty (the old behaviour
+//     outranked P: 17.9 ms against 40 ms).
 //
 // The restart is forged on the pass's objects (phase verifying, checks passed), as TestAKeptLoserRankingPointCases does.
 func TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains(t *testing.T) {
-	t.Run("a replacement hedge: the candidate is drained as the hedge's loser", func(t *testing.T) {
+	t.Run("a replacement hedge: the candidate is ranked against its winner again and not drained as the hedge's loser", func(t *testing.T) {
 		h, p0 := klPrimary(t)
 		w := klWin(t, h, p0, rk179, ptrTo(int32(1)), false)
 		w.waitsToItsPoint()
@@ -94,21 +100,21 @@ func TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains(t *testing.T) {
 		if err := p.enterReady(l, p.allocOf(l), func() error { called = true; l.Status.Phase = v1alpha1.InstanceReady; return nil }); err != nil {
 			t.Fatal(err)
 		}
-		if !called || candidateOf(l) != "" {
-			t.Fatalf("ready called %v, candidate-of %q: today a re-passing outranker is made ready with its mark cleared", called, candidateOf(l))
+		if !called || candidateOf(l) != w.r2 {
+			t.Fatalf("ready called %v, candidate-of %q: want the candidate ranked against R2, outranking it again, with its mark kept", called, candidateOf(l))
 		}
 		if err := p.resolveHedges(); err != nil {
 			t.Fatal(err)
 		}
 		got := h.mustInstance(w.r1)
-		if got.Annotations[annotationHedgeLost] != w.r2 || (got.Status.Phase != v1alpha1.InstanceDraining && got.Status.Phase != v1alpha1.InstanceEnded) {
-			t.Fatalf("R1 is %s with hedge-lost %q: today it is drained as the hedge's loser", got.Status.Phase, got.Annotations[annotationHedgeLost])
+		if got.Annotations[annotationHedgeLost] != "" || got.Status.Phase != v1alpha1.InstanceReady {
+			t.Fatalf("R1 is %s with hedge-lost %q: it is its own hedge, no loser of R2's, so it is not drained", got.Status.Phase, got.Annotations[annotationHedgeLost])
 		}
-		if win := h.mustInstance(w.r2); win.Status.Phase != v1alpha1.InstanceReady {
-			t.Fatalf("R2 is %s, want it serving on: capacity holds", win.Status.Phase)
+		if win := h.mustInstance(w.r2); win.Status.Phase != v1alpha1.InstanceReady || win.Annotations[annotationRankedOut] != w.r1 {
+			t.Fatalf("R2 is %s with ranked-out %q, want it serving on with its mark naming R1", win.Status.Phase, win.Annotations[annotationRankedOut])
 		}
 	})
-	t.Run("instances 2: the candidate outranks the other primary on its Provider", func(t *testing.T) {
+	t.Run("instances 2: the candidate is ranked against its winner alone and never against the other primary on its Provider", func(t *testing.T) {
 		h, pp, m1, m2 := klMissing(t, 2, rk179)
 		hoStepTo(h.rig, hoT(8, 10, 50), 10*time.Second, nil)
 		h.clock.Advance(10 * time.Second)
@@ -125,8 +131,65 @@ func TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains(t *testing.T) {
 		if err := p.enterReady(l, p.allocOf(l), func() error { called = true; return nil }); err != nil {
 			t.Fatal(err)
 		}
-		if !called || h.mustInstance(pp).Annotations[annotationRankedOut] != m1 {
-			t.Fatalf("ready called %v, the other primary's ranked-out mark %q: today the re-passing candidate outranks it", called, h.mustInstance(pp).Annotations[annotationRankedOut])
+		if !called || candidateOf(l) != m2 || h.mustInstance(pp).Annotations[annotationRankedOut] != "" {
+			t.Fatalf("ready called %v, candidate-of %q, the other primary's ranked-out mark %q: want M1 ranked against M2 alone, outranking it, and P never compared", called, candidateOf(l), h.mustInstance(pp).Annotations[annotationRankedOut])
 		}
 	})
+}
+
+// TestARestartedOutrankingCandidateWithNoPeerIsRankedAgainstItsWinner (#725's R4; #721's note: "a restarted outranking
+// candidate with no peer (instances 1) ends RankedOut, as read from the code"). Instances 1: M1 on A is the candidate
+// of M2, on B, which wins at 08:01:10 measuring 20 ms; M1 passes at 08:11:00, measures 17.9 ms and outranks it (179 <
+// 180). M1 restarts before M2's drain starts and passes again. Its Provider A holds no other primary, so on the general
+// path it had no peer and ended RankedOut with no ranking at all, whatever it measured (the old behaviour). With its
+// mark kept it is ranked against M2 alone, whatever their Providers:
+//   - measuring 17.9 ms again, 179 < 180: it outranks, ready is called, it is not ended, no RankedOut event regards it,
+//     and its mark is still M2;
+//   - measuring 18.0 ms now, 180 is not below 180: it does not outrank, and ends HedgeLost, not RankedOut (it has a
+//     winner, not a peer), kept as warm capacity.
+func TestARestartedOutrankingCandidateWithNoPeerIsRankedAgainstItsWinner(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		again        time.Duration
+		wantReady    bool
+		wantEndsWith string
+	}{
+		{"17.9 ms again: it outranks and is ready", rk179, true, ""},
+		{"18.0 ms now: it ends HedgeLost, not RankedOut", rk180, false, v1alpha1.ReasonHedgeLost},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, m1, m2 := klMissing(t, 1, rk179)
+			hoStepTo(h.rig, hoT(8, 10, 50), 10*time.Second, nil)
+			h.clock.Advance(10 * time.Second)
+			h.Step() // 08:11:00: M1 outranks M2
+			h.at(hoT(8, 11, 0))
+			if h.mustInstance(m1).Status.Phase != v1alpha1.InstanceReady || h.mustInstance(m2).Annotations[annotationRankedOut] != m1 {
+				t.Fatal("the fixture did not outrank")
+			}
+			p := h.passOf(hoMD)
+			l := p.instanceNamed(m1)
+			l.Status.Phase = v1alpha1.InstanceVerifying
+			klPass(l, c.again)
+			called := false
+			if err := p.enterReady(l, p.allocOf(l), func() error { called = true; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			got := h.mustInstance(m1)
+			if called != c.wantReady {
+				t.Fatalf("ready called %v, want %v", called, c.wantReady)
+			}
+			if c.wantReady {
+				if ended(got) || candidateOf(l) != m2 {
+					t.Fatalf("M1 is %s with candidate-of %q, want it kept as M2's candidate", got.Status.Phase, candidateOf(l))
+				}
+			} else if !ended(got) || got.Status.EndReason != c.wantEndsWith {
+				t.Fatalf("M1 is %s (end %q), want it ended with %s", got.Status.Phase, got.Status.EndReason, c.wantEndsWith)
+			}
+			for _, e := range h.rec.Find(eventReplaced, v1alpha1.ReasonRankedOut) {
+				if e.Name == m1 {
+					t.Fatalf("a RankedOut event regards M1: %+v: a candidate with a winner is never ranked out against no peer", e)
+				}
+			}
+		})
+	}
 }
