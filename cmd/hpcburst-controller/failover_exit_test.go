@@ -14,7 +14,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -49,30 +48,46 @@ func lostLeadershipLine(log string) (string, bool) {
 	return "", false
 }
 
-// endMidSubmit ends the first copy, whose first sbatch reached the fake at
-// midSubmit, with SIGKILL and reports how it ended. Two ends are right:
-//   - killed: the copy was alive when the signal came, and its wait status is
-//     SIGKILL (earlyExit false);
-//   - earlyExit: the copy had already left on its own, and all of these hold:
-//     it left at or after midSubmit, so it had reached the mid-submit point;
-//     its wait status is a normal exit with lostLeaderExitCode; and its own
-//     stderr shows the process ending through lost leadership.
+// midSubmitPoint is the moment the first copy's first sbatch reached the fake,
+// as the rig recorded it: the time, and whether the first copy was alive then
+// (running, and not exited and waiting to be reaped). The liveness is what
+// shows that the copy reached the point. The time of its exit is when its
+// reaper returned, which a delayed reaper puts after the arrival for a copy
+// that left before it.
+type midSubmitPoint struct {
+	at     time.Time
+	aliveA bool
+}
+
+// endMidSubmit ends the first copy, whose first sbatch reached the fake at mid,
+// with SIGKILL and reports how it ended. Two ends are right:
+//   - killed: the test's SIGKILL was delivered to the live copy, and its wait
+//     status is SIGKILL (earlyExit false). A copy that was already reaped, or
+//     had exited and waited to be reaped, took no signal, so a SIGKILL in its
+//     status came from elsewhere (the kernel's OOM killer, say) and is not
+//     this end;
+//   - earlyExit: the copy left on its own, and all of these hold: it was alive
+//     when its sbatch reached the fake; its wait status is a normal exit with
+//     lostLeaderExitCode; and its own stderr shows the process ending through
+//     lost leadership.
 //
 // Any other end is an error that names the wait status and the end of the log:
-// a crash, a panic, an exit before the mid-submit point or by another signal, or
-// an exit with a code or a log that does not say lost leadership.
-func (c *child) endMidSubmit(midSubmit time.Time) (earlyExit bool, ws syscall.WaitStatus, err error) {
-	if err := c.sigkill(); err != nil {
+// a crash, a panic, an exit before the mid-submit point or by another signal
+// (a SIGKILL that the test did not deliver included), or an exit with a code or
+// a log that does not say lost leadership.
+func (c *child) endMidSubmit(mid midSubmitPoint) (earlyExit bool, ws syscall.WaitStatus, err error) {
+	delivered, err := c.sigkill()
+	if err != nil {
 		return false, 0, err
 	}
 	ws, ok := c.reaped(30 * time.Second)
 	if !ok {
 		return false, 0, fmt.Errorf("child %s did not exit within 30 s of SIGKILL", c.name)
 	}
-	if ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+	if delivered && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
 		return false, ws, nil
 	}
-	// Not our kill: the copy ended by itself, before the signal took effect.
+	// Not our kill: the copy ended by itself, before the signal took effect, or before it was sent.
 	reject := func(why string) (bool, syscall.WaitStatus, error) {
 		return false, ws, fmt.Errorf("child %s ended by itself with %s, and %s; the end of its stderr:\n%s", c.name, waitStatusText(ws), why, c.tail(30))
 	}
@@ -81,8 +96,8 @@ func (c *child) endMidSubmit(midSubmit time.Time) (earlyExit bool, ws syscall.Wa
 		return reject("that is not a normal exit")
 	case ws.ExitStatus() != lostLeaderExitCode:
 		return reject(fmt.Sprintf("that is not the exit status %d of a run that returned an error", lostLeaderExitCode))
-	case c.exitedAt.Before(midSubmit):
-		return reject(fmt.Sprintf("it left %s before its sbatch reached the fake", midSubmit.Sub(c.exitedAt).Round(time.Millisecond)))
+	case !mid.aliveA:
+		return reject("it had already exited when its sbatch reached the fake")
 	}
 	if _, ok := lostLeadershipLine(c.log()); !ok {
 		return reject("its stderr has no line of the process ending with " + `"` + lostLeadershipText + `"`)
@@ -115,10 +130,11 @@ func awaitExit(t *testing.T, c *child) {
 var lostLine = childErrPrefix + " " + lostLeadershipText
 
 func TestEndMidSubmit(t *testing.T) {
-	// Each row's child is a real process. mark is when the first sbatch "reached
-	// the fake": before the child starts, except where a row says otherwise.
-	exitsAfter := func(t *testing.T, script string) (c *child, mark time.Time) {
-		mark = time.Now()
+	// Each row's child is a real process. mark is the first sbatch "reaching the
+	// fake" while the child is alive: before it starts, except where a row says
+	// otherwise.
+	exitsAfter := func(t *testing.T, script string) (c *child, mark midSubmitPoint) {
+		mark = midSubmitPoint{at: time.Now(), aliveA: true}
 		c = shChild(t, "A", script)
 		awaitExit(t, c)
 		return c, mark
@@ -171,14 +187,59 @@ func TestEndMidSubmit(t *testing.T) {
 	t.Run("an exit before the mid-submit point is rejected, even with the line in its log", func(t *testing.T) {
 		c := shChild(t, "A", "echo '"+lostLine+"' >&2; exit 1")
 		awaitExit(t, c)
-		mark := time.Now() // its sbatch "reaches the fake" only after the copy has left
+		// Its sbatch "reaches the fake" only after the copy has left and been reaped.
+		mark := midSubmitPoint{at: time.Now(), aliveA: c.alive()}
+		if mark.aliveA {
+			t.Fatal("a reaped copy is alive; the row's premise does not hold")
+		}
+		if early, _, err := c.endMidSubmit(mark); err == nil || early {
+			t.Errorf("endMidSubmit = (early %t, %v), want a rejection", early, err)
+		}
+	})
+
+	t.Run("an exit before the mid-submit point is rejected when the reaper returns after it", func(t *testing.T) {
+		// The copy has exited and waits to be reaped (a zombie) when its sbatch reaches the fake, and its reaper
+		// is delayed past that moment, so the time of the wait's return is later than the arrival.
+		c := startSh(t, "A", "echo '"+lostLine+"' >&2; exit 1")
+		awaitZombie(t, c)
+		mark := midSubmitPoint{at: time.Now(), aliveA: c.alive()}
+		if mark.aliveA {
+			t.Fatal("a zombie is alive; the row's premise does not hold")
+		}
+		time.AfterFunc(100*time.Millisecond, c.watch)
+		early, _, err := c.endMidSubmit(mark)
+		if err == nil || early {
+			t.Errorf("endMidSubmit = (early %t, %v), want a rejection", early, err)
+		}
+		if !c.exitedAt.After(mark.at) {
+			t.Error("the reaper returned before the arrival; the row's premise does not hold")
+		}
+	})
+
+	t.Run("a copy ended by a SIGKILL from elsewhere before the test signals it is rejected, even with the line in its log", func(t *testing.T) {
+		c, mark := exitsAfter(t, "echo '"+lostLine+"' >&2; kill -9 $$")
+		early, ws, err := c.endMidSubmit(mark)
+		if err == nil || early {
+			t.Fatalf("endMidSubmit = (early %t, %v, %v), want a rejection", early, ws, err)
+		}
+		if !ws.Signaled() || ws.Signal() != syscall.SIGKILL || !strings.Contains(err.Error(), "not a normal exit") {
+			t.Errorf("the rejection should report an end by SIGKILL that is not a normal exit: %v (%v)", err, ws)
+		}
+	})
+
+	t.Run("a copy ended by a SIGKILL from elsewhere that is not reaped yet is rejected too", func(t *testing.T) {
+		// The test's signal reaches the zombie and succeeds, and ends nothing: it is not the kill.
+		mark := midSubmitPoint{at: time.Now(), aliveA: true}
+		c := startSh(t, "A", "echo '"+lostLine+"' >&2; kill -9 $$")
+		awaitZombie(t, c)
+		time.AfterFunc(100*time.Millisecond, c.watch)
 		if early, _, err := c.endMidSubmit(mark); err == nil || early {
 			t.Errorf("endMidSubmit = (early %t, %v), want a rejection", early, err)
 		}
 	})
 
 	t.Run("a copy that is still running is killed by SIGKILL", func(t *testing.T) {
-		mark := time.Now()
+		mark := midSubmitPoint{at: time.Now(), aliveA: true}
 		c := shChild(t, "A", "echo started >&2; exec sleep 60")
 		if !c.running() {
 			t.Fatal("the child is not running")
@@ -193,7 +254,7 @@ func TestEndMidSubmit(t *testing.T) {
 	})
 
 	t.Run("a copy that has exited but is not reaped yet is accepted", func(t *testing.T) {
-		mark := time.Now()
+		mark := midSubmitPoint{at: time.Now(), aliveA: true}
 		c := startSh(t, "A", "echo '"+lostLine+"' >&2; exit 1")
 		awaitZombie(t, c)
 		// Its exit is known to the kernel and nobody has waited for it: the
@@ -210,16 +271,9 @@ func TestEndMidSubmit(t *testing.T) {
 // awaitZombie waits until the process has exited and nobody has waited for it.
 func awaitZombie(t *testing.T, c *child) {
 	t.Helper()
-	path := fmt.Sprintf("/proc/%d/stat", c.cmd.Process.Pid)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		// pid (comm) state ...: the state follows the last ')'.
-		s := string(b)
-		if rest := s[strings.LastIndexByte(s, ')')+1:]; strings.HasPrefix(strings.TrimSpace(rest), "Z") {
+		if procState(c.cmd.Process.Pid) == 'Z' {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)

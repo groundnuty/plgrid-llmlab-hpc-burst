@@ -45,6 +45,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -136,9 +137,12 @@ type failoverRig struct {
 	tag       string
 	// arrived receives the job ID that the first copy's first sbatch got from
 	// the fake, once it has; "" when the sbatch was held before it ran.
-	// midSubmitAt is when it did, written before the send (arrive).
-	arrived     chan string
-	midSubmitAt time.Time
+	// midSubmit is when it did, and whether the first copy was alive then, written
+	// before the send (arrive). aProc is the first copy for arrive, which runs on
+	// the fake's server before the rig's test goroutine looks at r.a.
+	arrived   chan string
+	midSubmit midSubmitPoint
+	aProc     atomic.Pointer[child]
 	// lifecycleA and provA are the first copy's Lease holders; killedAt is
 	// when it was killed.
 	lifecycleA, provA string
@@ -148,7 +152,8 @@ type failoverRig struct {
 // arrive records that the first copy's first sbatch has reached the fake, the
 // mid-submit point, and tells awaitMidSubmit.
 func (r *failoverRig) arrive(jobID string) {
-	r.midSubmitAt = time.Now()
+	a := r.aProc.Load()
+	r.midSubmit = midSubmitPoint{at: time.Now(), aliveA: a != nil && a.alive()}
 	r.arrived <- jobID
 }
 
@@ -207,6 +212,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	var digest string
 	r.fa, _, digest = prepareState(t, api, "direct", exampleFront)
 	r.a = startChild(t, "A", &r.fa, srvA.Addr())
+	r.aProc.Store(r.a)
 	waitFor(t, "the first copy leads lifecycle and holds "+r.provLease, failoverWait, func() bool {
 		return held(ctx, c, v1alpha1.LeaseLifecycle) && held(ctx, c, r.provLease)
 	}, r.a)
@@ -300,14 +306,14 @@ func (r *failoverRig) killFirst() {
 	t := r.t
 	t.Helper()
 	r.killedAt = time.Now()
-	early, ws, err := r.a.endMidSubmit(r.midSubmitAt)
+	early, ws, err := r.a.endMidSubmit(r.midSubmit)
 	if err != nil {
 		t.Fatalf("the first copy's end: %v", err)
 	}
 	if early {
 		// Its exit is the failover's trigger, so the takeover is timed from it.
 		r.killedAt = r.a.exitedAt
-		t.Logf("the first copy left on its own (%s), through lost leadership, %s after its sbatch reached the fake and before the test's SIGKILL took effect", waitStatusText(ws), r.a.exitedAt.Sub(r.midSubmitAt).Round(time.Millisecond))
+		t.Logf("the first copy left on its own (%s), through lost leadership, %s after its sbatch reached the fake and before the test's SIGKILL took effect", waitStatusText(ws), r.a.exitedAt.Sub(r.midSubmit.at).Round(time.Millisecond))
 	}
 	if !r.a.gone() {
 		t.Error("the first copy's PID is still there after it was reaped")

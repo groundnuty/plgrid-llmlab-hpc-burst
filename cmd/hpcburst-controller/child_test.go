@@ -233,19 +233,53 @@ func (c *child) watch() {
 	}()
 }
 
-// sigkill sends SIGKILL to a child that has not been reaped yet. A Signal that
-// finds the process finished (os.ErrProcessDone) is not an error: os.Process
-// can know that the process is gone before the goroutine of watch has closed
-// exited, and the signal then has nothing left to do. Any other Signal error is
-// returned.
-func (c *child) sigkill() error {
+// procState is the state letter of the process in /proc ("R", "S", "Z" for a zombie, which has exited and
+// waits to be reaped), 0 when there is no such process. The caller holds a PID that is not reaped yet.
+func procState(pid int) byte {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	// pid (comm) state ...: the state follows the last ')'.
+	rest := strings.TrimSpace(string(b[bytes.LastIndexByte(b, ')')+1:]))
+	if rest == "" {
+		return 0
+	}
+	return rest[0]
+}
+
+// alive reports whether the process runs at this moment: it is not reaped (exited is open and os.Process,
+// which holds the process's own handle, still finds it) and it has not exited and waits to be reaped.
+func (c *child) alive() bool {
 	if !c.running() {
-		return nil
+		return false
 	}
-	if err := c.cmd.Process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("SIGKILL to child %s: %w", c.name, err)
+	if err := c.cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		return false
 	}
-	return nil
+	return procState(c.cmd.Process.Pid) != 'Z'
+}
+
+// sigkill sends SIGKILL to a child that has not been reaped yet, and says whether the signal was delivered
+// to a live process. It was not when the child was already reaped, or had exited and waited to be reaped (a
+// signal to such a zombie succeeds and ends nothing), or when Signal found the process finished
+// (os.ErrProcessDone): os.Process can know that the process is gone before the goroutine of watch has closed
+// exited, and the signal then has nothing left to do, which is not an error. Any other Signal error is
+// returned. A process that ends by itself between the check for a zombie and the signal is the one case it
+// cannot tell apart.
+func (c *child) sigkill() (delivered bool, err error) {
+	if !c.running() {
+		return false, nil
+	}
+	zombie := procState(c.cmd.Process.Pid) == 'Z'
+	switch err := c.cmd.Process.Signal(syscall.SIGKILL); {
+	case err == nil:
+		return !zombie, nil
+	case errors.Is(err, os.ErrProcessDone):
+		return false, nil
+	default:
+		return false, fmt.Errorf("SIGKILL to child %s: %w", c.name, err)
+	}
 }
 
 // reaped waits up to wait for the process to be reaped and returns its wait
@@ -265,7 +299,7 @@ func (c *child) reaped(wait time.Duration) (ws syscall.WaitStatus, ok bool) {
 // finished while it was being signalled is waited for, not reported.
 func (c *child) kill(t *testing.T) syscall.WaitStatus {
 	t.Helper()
-	if err := c.sigkill(); err != nil {
+	if _, err := c.sigkill(); err != nil {
 		t.Errorf("%v", err)
 	}
 	ws, ok := c.reaped(30 * time.Second)
