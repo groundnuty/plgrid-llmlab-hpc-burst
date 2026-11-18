@@ -250,16 +250,21 @@ func TestARetryOfADeletedWorkloadsRequestLeavesNoStateAndNoWaitingSeriesBehind(t
 }
 
 // The queue deadline is taken at arrival (point 5). A request that no route can take is queued, and a wake that came meanwhile makes it run a pass of its
-// own, which the seam holds. The arrival clock advances an hour at each reading, so a deadline taken after the pass is an hour later than the arrival's:
-// the deadline the wait is handed is asserted itself, equal to the first reading plus queueTimeout, never an elapsed time.
+// own, which the seam holds. The arrival clock reads an hour later once the pass is held, so a deadline taken after the pass is an hour later than the
+// arrival's: the deadline the wait is handed is asserted itself, equal to the arrival's reading plus queueTimeout, never an elapsed time.
 func TestTheQueueDeadlineIsTakenAtArrivalBeforeTheRequestsOwnWakePass(t *testing.T) {
 	f := newWrFix(t, wrOpts{cap: 1, holdOurs: true, noManaged: true, edit: wkQueueLong})
 	f.start(f.alpha(), "r2-holder")
 	wkSettledOurs(f, 1, 0)
 
 	t0 := time.Now()
-	var reads atomic.Int64
-	f.router.arrivalClock = func() time.Time { return t0.Add(time.Duration(reads.Add(1)-1) * time.Hour) }
+	var passHeld atomic.Bool
+	f.router.arrivalClock = func() time.Time {
+		if passHeld.Load() {
+			return t0.Add(time.Hour)
+		}
+		return t0
+	}
 	deadlines := make(chan time.Time, 4)
 	f.router.onQueueDeadline = func(d time.Time) { deadlines <- d }
 	entered, gate := make(chan struct{}), make(chan struct{})
@@ -270,6 +275,7 @@ func TestTheQueueDeadlineIsTakenAtArrivalBeforeTheRequestsOwnWakePass(t *testing
 	f.router.beforeEnqueue = func() { f.router.wakeGen.Add(1) } // a wake request came while the arrival decided
 	f.router.beforeWake = func() {
 		if armed.CompareAndSwap(true, false) {
+			passHeld.Store(true)
 			close(entered)
 			<-gate
 		}
