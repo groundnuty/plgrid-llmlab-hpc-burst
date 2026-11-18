@@ -12,6 +12,7 @@
 //	hpcburst scale|end|release   create an Operation that lowers capacity, show its plan, and ask to confirm it
 //	hpcburst confirm|approve OPERATION --plan ID   confirm a plan as its owner, or approve it as an approver
 //	hpcburst approvals|operation   list what the caller may approve, or show an Operation's plan and report
+//	hpcburst inventory [-n NS | -A] [--owner USER]   one read-only query: every ModelDeployment, Allocation and Instance the caller can read
 //	hpcburst version           print the binary's release from its build information
 //
 // "hpcburst version" prints one line, "hpcburst <tag> <commit> <time>[ dirty]" (internal/version
@@ -51,7 +52,7 @@ const (
 	exitStopped   = 3
 	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|accounting|scale|end|release|confirm|approvals|approve|operation|version> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|accounting|scale|end|release|confirm|approvals|approve|operation|inventory|version> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -99,6 +100,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "approve":
 		return cmdAgent(ctx, args, stdout, stderr)
 	case "operation":
+		return cmdAgent(ctx, args, stdout, stderr)
+	case "inventory":
 		return cmdAgent(ctx, args, stdout, stderr)
 	case "version":
 		return version.Command("hpcburst", args[1:], stdout, stderr)
