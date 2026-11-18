@@ -258,7 +258,10 @@ func (x *index) walkWrapped(mi *ssa.MakeInterface, r *result, seen seenSet, ctx 
 	}
 	found := false
 	for i := 0; i < st.NumFields(); i++ {
-		if !types.Identical(st.Field(i).Type(), mi.Type()) {
+		// A field of the interface's own type, or of an interface that has all its methods (an embedded client.Client
+		// that is used as a client.Reader): the promoted methods run on it.
+		ft := st.Field(i).Type()
+		if !types.Identical(ft, mi.Type()) && !(types.IsInterface(ft) && types.AssignableTo(ft, mi.Type())) {
 			continue
 		}
 		found = true

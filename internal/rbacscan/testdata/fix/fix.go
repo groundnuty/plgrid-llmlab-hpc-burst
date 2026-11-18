@@ -148,6 +148,15 @@ func rawRequest(ctx context.Context, c rest.Interface) {
 	_ = c.Get().AbsPath("/api").Do(ctx)
 }
 
+// embedsClient embeds a whole client.Client and is used as a client.Reader: the Get it is used for is the embedded client's.
+type embedsClient struct{ client.Client }
+
+// viaEmbedded reads through the embedding struct (a: list watch approvalpolicies).
+func viaEmbedded(ctx context.Context, c client.Client) {
+	var r client.Reader = embedsClient{Client: c}
+	_ = r.Get(ctx, key, &v1alpha1.ApprovalPolicy{})
+}
+
 // methodValue takes a client method as a value, which the scan cannot read.
 func (r *reconciler) methodValue(ctx context.Context) {
 	get := r.Reader.Get
@@ -216,6 +225,7 @@ func wire(ctx context.Context, cfg *rest.Config) error {
 	ra.converted(ctx)
 	ra.fallback()
 	ra.staleNote(ctx)
+	viaEmbedded(ctx, ra.Client)
 	ra.methodValue(ctx)
 	rawRequest(ctx, nil)
 	libTrigger()

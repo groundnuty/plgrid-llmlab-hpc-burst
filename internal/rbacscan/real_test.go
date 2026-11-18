@@ -112,6 +112,20 @@ func TestTheScanSeesEachIdentityAtWork(t *testing.T) {
 		count[lifecycle], lifecycle, count[provider], provider, count[front], front, len(res.Entries), len(res.Dead))
 }
 
+// The calls in code that nothing calls are not counted, so a call the scan wrongly takes for unreached would pass unread.
+// Today the only code of that kind is the Operation removal controller (opttl.go), which the lifecycle manager does not wire
+// yet (#660's removal PR wires it, and its calls are then read like any other). Any other call the scan finds dead fails here,
+// until it is looked at and listed.
+func TestOnlyTheOperationRemovalIsInCodeNothingCalls(t *testing.T) {
+	res, _ := realResult(t)
+	for _, d := range res.Dead {
+		if !strings.HasPrefix(d, "internal/lifecycle/opttl.go:") {
+			t.Errorf("a call in code the scan takes for unreached, which is not the Operation removal controller's: %s\n"+
+				"If nothing really calls it, list it here with the reason; if something does, the scan lost the call.", d)
+		}
+	}
+}
+
 // Every rule of every role is a mutant: with one verb removed, the check fails and names a call site that needs it (for a
 // verb a library makes, the call that triggers the library). The same loop is the proof that no rule is there for nothing.
 func TestAVerbRemovedFromAnyRoleFailsNamingACallSite(t *testing.T) {

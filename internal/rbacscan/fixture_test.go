@@ -100,6 +100,9 @@ func TestTheFixtureYieldsTheRightsOfEachWayACallIsMade(t *testing.T) {
 		"a: (*reconciler).readerGet: get " + h + "/allocations",
 		"a: (*reconciler).readerList: list " + h + "/instances",
 		"a: (*reconciler).staleNote: delete " + h + "/allocations",
+		// a struct that embeds a whole client and is used as a reader: its promoted Get is the embedded client's
+		"a: viaEmbedded: list " + h + "/approvalpolicies",
+		"a: viaEmbedded: watch " + h + "/approvalpolicies",
 		// each write is its own verb
 		"a: (*reconciler).writes: create " + h + "/allocations",
 		"a: (*reconciler).writes: update " + h + "/instances",
