@@ -235,3 +235,19 @@ func TestQOSMaxPerJobCapsArePositive(t *testing.T) {
 		})
 	}
 }
+
+// An explicit empty qosByGpus is refused (MinItems 1; #745 and the review of #756): both CEL rules pass vacuously on an
+// empty list, and submission would fall back to the Provider's qos or the association's default though the field is
+// present. The Go type omits an empty list, so the profile goes in as unstructured, as an operator's YAML would.
+func TestQOSByGPUsAnEmptyListIsRefused(t *testing.T) {
+	obj := loadShipped(t, "sano.yaml")
+	empty := edit(t, obj, []any{}, "spec", "partitions", 0, "qosByGpus")
+	empty = edit(t, empty, uniq("sano"), "metadata", "name")
+	_, err := strictCreate(t, empty)
+	requireRefused(t, err, "qosByGpus", "must have at least 1 items")
+	// The control: the shipped list, one entry or four, is admitted.
+	ok := edit(t, obj, uniq("sano"), "metadata", "name")
+	if _, err := strictCreate(t, ok); err != nil {
+		t.Fatalf("the shipped Sano profile is refused: %v", err)
+	}
+}
