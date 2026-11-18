@@ -40,6 +40,8 @@ type State struct {
 type Attrs struct {
 	Provider  string
 	DisplayID string // the deployment ID's display form
+	// UID is the member's Instance UID, for the in-flight series' instance_uid label; "" when the caller sets none.
+	UID string
 }
 
 // Match is a request's filter: whether it may use a member. Nil matches all.
@@ -74,6 +76,10 @@ const noBound = 1 << 40
 //   - a full choice spills to the next eligible member below its cap on the
 //     ring, and when every one is full the request waits in a FIFO here.
 type Group struct {
+	// mu is the group's mutex. LOCK ORDER (the science agent's ruling Q6 on #764): a Workload's mutex is taken BEFORE any group's mutex,
+	// never the reverse, and the router's mutex before this one. So nothing holding mu may take a Workload's mutex, the router's, or
+	// wait on one: a wake for the Workload FIFOs is delivered only AFTER mu is released (OnFree, OnChange), and the hooks that do run
+	// under mu (OnDrift, OnCount, OnLeave) call back into nothing.
 	mu      sync.Mutex
 	kg      *loadbalancer.Group
 	state   State
@@ -94,6 +100,22 @@ type Group struct {
 	// and the wrapper's open reservations (HBEP-5, Operational readiness 3).
 	// It must not call back into the group.
 	OnDrift func(total, members, open int64)
+
+	// OnFree, when set, is called after a completion released a reservation (Reservation.Release), once the group's mutex is released and
+	// its own waiters have been placed: a route of the group has freed, so a Workload's FIFO may place its oldest waiter (HBEP-5, Workloads,
+	// Waiting). The caller of Release holds no lock of the router's or a Workload's, by contract, so the hook may take them.
+	OnFree func()
+
+	// OnChange, when set, is called after Update, once the group's mutex is released and its own waiters have been placed: a join, an
+	// Instance eligible again or the cap going off may have freed a route. Update runs under the router's mutex, so the hook must not take
+	// a Workload's mutex or wait for one: it hands the wake off.
+	OnChange func()
+
+	// OnCount, when set, is called under the group's mutex with +1 when a reservation is counted on a member and -1 when it is released,
+	// by a completion or by the member's leave, with the member's attributes and the reservation's charge (the in-flight series). OnLeave
+	// is called under the mutex once a member's reservations have been released and it is gone. Neither may call back into the group.
+	OnCount func(a Attrs, ch Charge, delta int)
+	OnLeave func(a Attrs)
 
 	// onContended, set by tests only, runs in a caller that finds the lock
 	// held, before it waits.
@@ -119,14 +141,34 @@ type Reservation struct {
 // Release ends the reservation. Only the first call counts; a reservation a
 // leave already released changes nothing.
 func (r *Reservation) Release() {
+	if r.releaseQuiet() {
+		r.g.freed()
+	}
+}
+
+// ReleaseQuiet is Release without the wake of the Workload FIFOs (OnFree): for a caller that holds a Workload's mutex, where the wake would
+// take it again. The group's own waiters are still placed.
+func (r *Reservation) ReleaseQuiet() { r.releaseQuiet() }
+
+// releaseQuiet releases r once and places the group's waiters, and reports whether this call released it. The group's mutex is released on return.
+func (r *Reservation) releaseQuiet() bool {
 	if r == nil || r.g == nil {
-		return
+		return false
 	}
 	g := r.g
 	g.lock()
 	defer g.mu.Unlock()
 	if g.releaseLocked(r) {
 		g.placeWaitersLocked()
+		return true
+	}
+	return false
+}
+
+// freed tells the Workload FIFOs that a route of this group freed, outside the group's mutex.
+func (g *Group) freed() {
+	if f := g.OnFree; f != nil {
+		f()
 	}
 }
 
@@ -157,6 +199,14 @@ func (g *Group) lock() {
 // are then placed where they now fit. It returns how many reservations the
 // leaves released.
 func (g *Group) Update(s State) int {
+	released := g.update(s)
+	if f := g.OnChange; f != nil {
+		f()
+	}
+	return released
+}
+
+func (g *Group) update(s State) int {
 	g.lock()
 	defer g.mu.Unlock()
 	next := make(map[string]bool, len(s.Members))
@@ -178,6 +228,9 @@ func (g *Group) Update(s State) int {
 				// its reservation released already, and changes nothing (releaseLocked).
 				delete(g.charged, m)
 				delete(g.unnamed, m)
+				if g.OnLeave != nil {
+					g.OnLeave(g.state.Attrs[m])
+				}
 			}
 		}
 		g.members, g.ring, g.pins = next, nil, nil
@@ -376,6 +429,9 @@ func (g *Group) pinLocked(target string) (string, error) {
 func (g *Group) registerLocked(m string, done func(), spilled bool, ch Charge) *Reservation {
 	r := &Reservation{Member: m, Spilled: spilled, g: g, release: done, charge: ch}
 	g.countLocked(m, ch)
+	if g.OnCount != nil {
+		g.OnCount(g.state.Attrs[m], ch, +1)
+	}
 	if g.open[m] == nil {
 		g.open[m] = map[*Reservation]struct{}{}
 	}
@@ -396,6 +452,9 @@ func (g *Group) releaseLocked(r *Reservation) bool {
 	r.released = true
 	r.release()
 	g.uncountLocked(r.Member, r.charge)
+	if g.OnCount != nil {
+		g.OnCount(g.state.Attrs[r.Member], r.charge, -1)
+	}
 	delete(g.open[r.Member], r)
 	return true
 }
