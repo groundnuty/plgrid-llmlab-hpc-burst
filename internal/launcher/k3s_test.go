@@ -1,11 +1,14 @@
 package launcher
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/audit"
 )
 
 func testSpec(t *testing.T, nice int) launchSpec {
@@ -35,9 +38,15 @@ func TestK3sArgs(t *testing.T) {
 		"--disable-network-policy", "--disable-helm-controller",
 		"--disable=coredns", "--disable=servicelb", "--disable=traefik",
 		"--disable=local-storage", "--disable=metrics-server", "--disable=runtimes",
-		// HBEP-11: the audit log at the Metadata level, inside the state directory.
+		// HBEP-10, Audit: the policy and the log inside the state directory, files of 100 MB, and every rotated
+		// file kept (no limit on their number or age) and gzipped. The values are written out here, not read from
+		// config/audit: a changed flag there must fail this test.
 		"--kube-apiserver-arg=audit-policy-file=" + s.l.dir + "/audit-policy.yaml",
 		"--kube-apiserver-arg=audit-log-path=" + s.l.dir + "/logs/audit.log",
+		"--kube-apiserver-arg=audit-log-maxsize=100",
+		"--kube-apiserver-arg=audit-log-maxbackup=0",
+		"--kube-apiserver-arg=audit-log-maxage=0",
+		"--kube-apiserver-arg=audit-log-compress=true",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("k3s arguments lack %q:\n%s", want, args)
@@ -231,16 +240,24 @@ func TestPrepareIsolationLeavesEmptyFiles(t *testing.T) {
 			t.Errorf("%s: %v, %v", d, fi, err)
 		}
 	}
-	// The audit policy: one rule, level Metadata, for everything (Kubernetes' audit policy format,
-	// audit.k8s.io/v1). Any other level would log request or response bodies.
+	// The audit policy is the embedded one (config/audit), whole. Whether its rules give the levels HBEP-10 names
+	// is judged by k8s.io/apiserver's own evaluator, in config/audit's test, not by a parse of ours here.
 	b, err := os.ReadFile(s.l.dir + "/audit-policy.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pol := string(b)
-	if !strings.Contains(pol, "apiVersion: audit.k8s.io/v1") || !strings.Contains(pol, "kind: Policy") ||
-		strings.Count(pol, "level:") != 1 || !strings.Contains(pol, "  - level: Metadata\n") {
-		t.Errorf("audit policy:\n%s", pol)
+	if !bytes.Equal(b, audit.Policy) {
+		t.Errorf("the audit policy file is not the embedded policy:\n%s", b)
+	}
+	// A policy somebody edited is the embedded one again after the next start.
+	if err := os.WriteFile(s.l.auditPolicy(), []byte("apiVersion: audit.k8s.io/v1\nkind: Policy\nrules:\n  - level: RequestResponse\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareIsolation(s.l); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(s.l.auditPolicy()); err != nil || !bytes.Equal(b, audit.Policy) {
+		t.Errorf("an edited audit policy survived the next start: %v\n%s", err, b)
 	}
 	if fi, _ := os.Stat(s.l.dir + "/audit-policy.yaml"); fi.Mode().Perm() != 0o600 {
 		t.Errorf("audit policy mode %v", fi.Mode().Perm())

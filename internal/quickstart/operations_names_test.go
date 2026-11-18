@@ -12,6 +12,8 @@ import (
 	"testing"
 	"unicode"
 
+	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -152,6 +154,14 @@ var guideNames = map[string]string{
 	// The event the durable log's publisher raises when the log did not take an event (HBEP-8, The
 	// durable log, When it is down).
 	"EventsNotLogged": eventcount.ReasonEventsNotLogged,
+
+	// The audit policy's levels, and the stage it omits (HBEP-10, Audit): the API server's own, from the audit API of
+	// k8s.io/apiserver, which the policy's evaluator test (config/audit) uses too. RequestReceived is a stage, not a level.
+	"None":            string(auditv1.LevelNone),
+	"Metadata":        string(auditv1.LevelMetadata),
+	"Request":         string(auditv1.LevelRequest),
+	"RequestResponse": string(auditv1.LevelRequestResponse),
+	"RequestReceived": string(auditv1.StageRequestReceived),
 }
 
 // unexportedNames are names the guide gives whose constant is unexported in its package, so this
