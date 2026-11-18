@@ -577,16 +577,26 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	var x extraAsk
 	var capsOf *v1alpha1.BatchParameters
 	quiet := false
-	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() == 0 {
+	member := in.Annotations[v1alpha1.AnnotationHedgeGroup] != ""
+	switch {
+	case !handover && !member && p.shortage() == 0:
 		var admitted bool
 		if x, admitted = p.extraChecks(pv, in, params.GPUs); !admitted {
 			return p.endCutShortExtra(in, "the bound on extras")
 		}
 		capsOf, quiet = &params, true
+	case member:
+		// A hedge member's retry reserves as its first creation did: the caps check beside our Allocations there, and no
+		// condition for a refusal (a member is extra capacity), since another job may have filled its QOS since (review of #756,
+		// Astra 4; in alpha too).
+		capsOf, quiet = &params, true
 	}
-	ok, holds, err := p.reserveSlotAs(pv, params.GPUs, name, holder, takers, capsOf, quiet, x)
+	ok, holds, err := p.reserveSlotAs(pv, params.GPUs, name, holder, takers, &params, capsOf, quiet, x)
 	if err != nil {
 		return err
+	}
+	if !ok && quiet && member {
+		return p.endCutShortMember(in)
 	}
 	if !ok && quiet {
 		return p.endCutShortExtra(in, "the slot beyond its primary's handover, the admission headroom or the caps")
@@ -599,6 +609,12 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		return err
 	}
 	return nil
+}
+
+// endCutShortMember ends a pending hedge member whose Allocation was never made and whose slot or caps check now refuses
+// it: a member is extra capacity, so it is dropped in silence, as a member that finds no room at its creation is passed over.
+func (p *pass) endCutShortMember(in *v1alpha1.Instance) error {
+	return p.end(in, nil, v1alpha1.ReasonDrained, "scaled down: its Provider refuses the hedge member (the slot or the caps)", true)
 }
 
 // endCutShortExtra ends a pending extra whose Allocation was never made and whose checks refuse it now, as step 7 ends

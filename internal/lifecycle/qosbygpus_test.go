@@ -207,10 +207,11 @@ func askOn(t *testing.T, tab *slotTable, r allocsReader, pv *providerView, key s
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := slotAsk{provider: pv.name, key: rigNS + "/" + key, limit: rv.limits.MaxSubmitPerUser, caps: rv.limits, scope: rv.scope, gpus: gpus}
+	// Every reservation carries its size, which is recorded; only one that asks for the caps check carries it as params too.
+	size := batch(gpus, gpus*11, "135904Mi")
+	size.Memory.Mul(int64(gpus))
+	q := slotAsk{provider: pv.name, key: rigNS + "/" + key, limit: rv.limits.MaxSubmitPerUser, caps: rv.limits, scope: rv.scope, gpus: gpus, size: &size}
 	if withCaps {
-		size := batch(gpus, gpus*11, "135904Mi")
-		size.Memory.Mul(int64(gpus))
 		q.params = &size
 	}
 	a, err := tab.reserveAsk(context.Background(), r, q, fixedAt(hoT(9, 0, 0)))
