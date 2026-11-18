@@ -23,9 +23,11 @@
 // Every listener is on loopback in a block of four ports starting at
 // HPCBURST_TESTENV_PORT_BASE (default 29200): etcd client, etcd peer,
 // kube-apiserver, kube-controller-manager. The whole block must lie inside
-// 29200-29219, issue #40's range, so the base is 29200 to 29216; any other
-// value is refused. The block must be free: a second control plane started at
-// the same time on the same block is refused.
+// 29200-29219, issue #40's range, so the base is 29200 to 29216, or inside
+// 28560-28579, a second range (internal/audit/e2e's block is 28560-28569,
+// and 28570-28579 is #697's), so the base is 28560 to 28576; any other value
+// is refused. The block must be free: a second control plane started at the
+// same time on the same block is refused.
 //
 // A root k3s may run on the same machine (ports 6443, 6444 and 10250). Nothing
 // here connects to those ports: GuardSystemPorts reads the kernel's table of

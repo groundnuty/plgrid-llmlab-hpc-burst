@@ -9,8 +9,10 @@
 // helpers hard-code their ports and live in a _test file, so another package cannot import them.
 // This copy takes the ports as a parameter. Those tests are left as they are.
 //
-// Ports: #625's block is 28480-28519 (IMPL-COMMON). 28500-28509 belong to internal/eventlog/node's
-// own tests and 28510-28519 to the publisher's and the forwarder's rigs, which pass their pair here.
+// Ports: #625's block is 28480-28519 (IMPL-COMMON). 28500-28501 belong to internal/eventlog/node's own
+// tests, 28502-28503 to cmd/hpcburst-front's and 28504-28505 to cmd/hpcburst-controller's durable-log tests,
+// 28506-28509 stay spare, and 28510-28519 are the publisher's and the forwarder's rigs, which pass their pair
+// here.
 package nodetest
 
 import (

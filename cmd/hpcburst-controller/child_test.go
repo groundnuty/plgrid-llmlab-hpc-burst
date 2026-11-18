@@ -38,6 +38,10 @@ import (
 // address of the remoteRunner's server.
 const childEnvRunner = "HPCBURST_TEST_CONTROLLER_RUNNER"
 
+// childErrPrefix starts the line that controllerChild, like main, prints when run
+// returns an error.
+const childErrPrefix = "hpcburst-controller:"
+
 // controllerChild is main(), with the fake Slurm's remote Runner as the batch
 // platform's transport. It returns the exit code main would exit with.
 func controllerChild(args []string, runnerAddr string) int {
@@ -46,7 +50,7 @@ func controllerChild(args []string, runnerAddr string) int {
 		return 0
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
+		fmt.Fprintln(os.Stderr, childErrPrefix, err)
 		return 2
 	}
 	ctrl.SetLogger(funcr.New(func(prefix, args string) {
@@ -61,12 +65,12 @@ func controllerChild(args []string, runnerAddr string) int {
 	// has started: they arrive as inherited descriptors (inheritListeners).
 	listen, err := inheritedListen(os.Getenv(childEnvListeners))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
+		fmt.Fprintln(os.Stderr, childErrPrefix, err)
 		return 1
 	}
 	d := deps{providerScheme: providerScheme, newPlatform: remotePlatforms(runner), frpcDigests: exampleFrpcDigests, listen: listen}
 	if err := run(ctx, f, d); err != nil {
-		fmt.Fprintln(os.Stderr, "hpcburst-controller:", err)
+		fmt.Fprintln(os.Stderr, childErrPrefix, err)
 		return 1
 	}
 	return 0
@@ -103,10 +107,11 @@ type child struct {
 	f          flags
 	cmd        *exec.Cmd
 	stderrPath string
-	// exited is closed once the process has been waited for; waitErr is set
-	// before that.
-	exited  chan struct{}
-	waitErr error
+	// exited is closed once the process has been waited for; waitErr and
+	// exitedAt (when the wait returned) are set before that.
+	exited   chan struct{}
+	waitErr  error
+	exitedAt time.Time
 }
 
 // startChild starts a controller process on f's ports and waits until it is
@@ -198,10 +203,7 @@ func launchChild(t *testing.T, name string, f flags, runnerAddr string) *child {
 	if err := c.cmd.Start(); err != nil {
 		t.Fatalf("start child %s: %v", name, err)
 	}
-	go func() {
-		c.waitErr = c.cmd.Wait()
-		close(c.exited)
-	}()
+	c.watch()
 	t.Cleanup(func() {
 		c.kill(t)
 		if t.Failed() {
@@ -221,21 +223,90 @@ func (c *child) running() bool {
 	}
 }
 
-// kill sends SIGKILL, waits for the process to be reaped and returns its wait
-// status. A process that is already reaped is not signalled again.
-func (c *child) kill(t *testing.T) syscall.WaitStatus {
-	t.Helper()
-	if c.running() {
-		if err := c.cmd.Process.Signal(syscall.SIGKILL); err != nil && c.running() {
-			t.Errorf("SIGKILL to child %s: %v", c.name, err)
-		}
+// watch reaps the started process in the background. waitErr and exitedAt are
+// set before exited closes, so a reader that has seen exited closed may read
+// them.
+func (c *child) watch() {
+	go func() {
+		c.waitErr = c.cmd.Wait()
+		c.exitedAt = time.Now()
+		close(c.exited)
+	}()
+}
+
+// procState is the state letter of the process in /proc ("R", "S", "Z" for a zombie, which has exited and
+// waits to be reaped), 0 when there is no such process. The caller holds a PID that is not reaped yet.
+func procState(pid int) byte {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
 	}
+	// pid (comm) state ...: the state follows the last ')'.
+	rest := strings.TrimSpace(string(b[bytes.LastIndexByte(b, ')')+1:]))
+	if rest == "" {
+		return 0
+	}
+	return rest[0]
+}
+
+// alive reports whether the process runs at this moment: it is not reaped (exited is open and os.Process,
+// which holds the process's own handle, still finds it) and it has not exited and waits to be reaped.
+func (c *child) alive() bool {
+	if !c.running() {
+		return false
+	}
+	if err := c.cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		return false
+	}
+	return procState(c.cmd.Process.Pid) != 'Z'
+}
+
+// sigkill sends SIGKILL to a child that has not been reaped yet, and says whether the signal was delivered
+// to a live process. It was not when the child was already reaped, or had exited and waited to be reaped (a
+// signal to such a zombie succeeds and ends nothing), or when Signal found the process finished
+// (os.ErrProcessDone): os.Process can know that the process is gone before the goroutine of watch has closed
+// exited, and the signal then has nothing left to do, which is not an error. Any other Signal error is
+// returned. A process that ends by itself between the check for a zombie and the signal is the one case it
+// cannot tell apart.
+func (c *child) sigkill() (delivered bool, err error) {
+	if !c.running() {
+		return false, nil
+	}
+	zombie := procState(c.cmd.Process.Pid) == 'Z'
+	switch err := c.cmd.Process.Signal(syscall.SIGKILL); {
+	case err == nil:
+		return !zombie, nil
+	case errors.Is(err, os.ErrProcessDone):
+		return false, nil
+	default:
+		return false, fmt.Errorf("SIGKILL to child %s: %w", c.name, err)
+	}
+}
+
+// reaped waits up to wait for the process to be reaped and returns its wait
+// status; ok is false when it was not reaped in time.
+func (c *child) reaped(wait time.Duration) (ws syscall.WaitStatus, ok bool) {
 	select {
 	case <-c.exited:
-	case <-time.After(30 * time.Second):
+	case <-time.After(wait):
+		return 0, false
+	}
+	ws, _ = c.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	return ws, true
+}
+
+// kill sends SIGKILL, waits for the process to be reaped and returns its wait
+// status. A process that is already reaped is not signalled again, and one that
+// finished while it was being signalled is waited for, not reported.
+func (c *child) kill(t *testing.T) syscall.WaitStatus {
+	t.Helper()
+	if _, err := c.sigkill(); err != nil {
+		t.Errorf("%v", err)
+	}
+	ws, ok := c.reaped(30 * time.Second)
+	if !ok {
 		t.Fatalf("child %s did not exit within 30 s of SIGKILL", c.name)
 	}
-	ws, _ := c.cmd.ProcessState.Sys().(syscall.WaitStatus)
 	return ws
 }
 
