@@ -258,19 +258,21 @@ func (b *liveBaseline) ServedDeploymentsOfModel(ctx context.Context) (int, bool)
 
 // DialFailures reads <state>/logs/front.log, the front's own log (internal/launcher/state.go:57), the stack's PRIVATE state: whole, up to a bound, never
 // echoed, never logged, and its path and any error of the read name nothing (the test's log gets none of them). A log that is missing, unreadable or past the
-// bound is not read: false, which fails closed. What leaves is the requests ParseDialFailures matches for the served Instance's key.
-func (b *liveBaseline) DialFailures(ctx context.Context) ([]DialFailure, bool) {
+// bound is not read: false, which fails closed. What leaves is the requests ParseDialFailures matches for the served Instance's key and the number of lines
+// it parsed.
+func (b *liveBaseline) DialFailures(ctx context.Context) ([]DialFailure, int, bool) {
 	const bound = 256 << 20
 	f, err := os.Open(filepath.Join(b.r.h.State, "logs", "front.log"))
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, bound+1))
 	if err != nil || len(data) > bound {
-		return nil, false
+		return nil, 0, false
 	}
-	return ParseDialFailures(data, b.in.Namespace+"/"+b.in.Name), true
+	fails, parsed := ParseDialFailures(data, b.in.Namespace+"/"+b.in.Name)
+	return fails, parsed, true
 }
 
 // ServedEligible: the served Instance's phase is ready and its AgentUnreachable condition is not true.

@@ -1243,7 +1243,11 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # #776's review, point 5: the cap-spill rule's tick (0 rejects a healthy burst), guard 2 (a failed dial in a phase) and the front log's privacy (the post prints the matches).
   'baseline.go@@	ArrivalTick = time.Millisecond@@	ArrivalTick = 0'
   'baselinejudge.go@@		case po.DialFailures > 0:@@		case false:'
-  'baselinejudge.go@@(a count only; the log is private): %d\n", po.DialFailures)@@(a count only; the log is private): %d %v\n", po.DialFailures, po.DialFailed)'
+  'baselinejudge.go@@%d dial failures for our Instance\n", po.DialLines, po.DialFailures)@@%d dial failures for our Instance %v\n", po.DialLines, po.DialFailures, po.DialFailed)'
+  # The guard's read must have found the front's lines: no parsed line is INVALID (the empty-log row), the parsed count is counted, and a line with no message is not one.
+  'baselinejudge.go@@		case po.DialLines == 0:@@		case false:'
+  'baseline.go@@		parsed++@@		parsed += 0'
+  'baseline.go@@		if json.Unmarshal(line, &l) != nil || l.Msg == "" {@@		if json.Unmarshal(line, &l) != nil {'
   # #776's review, point 6: the detach phase passes only on the front's own waiting count reaching 2 and returning to 0.
   'baselinejudge.go@@			if maxWaiting < LLMLabK {@@			if maxWaiting < 1 {'
   'baselinejudge.go@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 {@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 && false {'

@@ -527,11 +527,14 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 
 	// Guard 2 (team lead's decision on #776's review, point 5): a request of the phase that the front's own log reports resent after a failed dial of the served
 	// Instance makes the phase INVALID, in P1, P1-long, P2 and P3 alike: it went to another target for a reason that is no cap, and the usage record cannot say
-	// so. A log that could not be read fails closed.
+	// so. A log that could not be read fails closed. A log read with no line parsed as a slog JSON object (a live front logs at its start) is the wrong file or an
+	// empty one, and rules nothing out: INVALID, never a silent count of 0.
 	if po.Stopped != StopGuardUnread {
 		switch {
 		case !po.DialLogRead:
 			f("the front's log could not be read, so a failed dial of the Instance could not be ruled out")
+		case po.DialLines == 0:
+			inv("the front's log held no parsed line, so a failed dial of the Instance could not be ruled out")
 		case po.DialFailures > 0:
 			inv("%d request(s) of the phase were resent after a failed dial of the Instance, by the front's own log: the phase did not measure the cap", po.DialFailures)
 		}
@@ -908,7 +911,7 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 		}
 		b.WriteString(waitsLine(o, po, joined))
 		if po.DialLogRead {
-			fmt.Fprintf(&b, "  - requests resent after a failed dial of the Instance, by the front's own log (a count only; the log is private): %d\n", po.DialFailures)
+			fmt.Fprintf(&b, "  - dial-failure guard: front.log read, %d lines parsed, %d dial failures for our Instance\n", po.DialLines, po.DialFailures)
 		} else if po.Stopped != StopGuardUnread {
 			b.WriteString("  - the front's log could not be read: a failed dial of the Instance could not be ruled out\n")
 		}

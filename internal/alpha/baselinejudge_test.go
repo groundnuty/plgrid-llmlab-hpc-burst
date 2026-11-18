@@ -914,7 +914,8 @@ func TestTheLongestWaitingStretchIsALowerBound(t *testing.T) {
 
 // ParseDialFailures reads the front's slog JSON lines, typed by hand in the form of internal/front/proxy.go:253's: a line counts only if its msg EQUALS the text
 // (never a substring of the line), its level is WARN, its target is ours and it names a request. A line that is not a JSON object, is cut short, or has a
-// non-string member is skipped: never a failure found, and never a pass.
+// non-string member is skipped: never a failure found, and never a pass. It also returns the number of lines PARSED, a JSON object with a message: a line that
+// is none of these (cut short, no JSON, an array, null, an object with no message) is not counted.
 func TestDialFailuresAreParsedFromTheFrontsSlogLines(t *testing.T) {
 	const ours, msg = "ns/inst-a", "no connection to the target; nothing was sent"
 	line := func(level, m, req, target, errText string) string {
@@ -928,18 +929,64 @@ func TestDialFailuresAreParsedFromTheFrontsSlogLines(t *testing.T) {
 		`{"level":"WARN","msg":"` + msg + `","request":"r5","target":"` + ours + `"` + "\n" + // cut short
 		"not json at all\n" +
 		`{"level":"WARN","msg":"` + msg + `","request":7,"target":"` + ours + `"}` + "\n" + // a request that is no string
+		"[1,2]\nnull\n{}\n" + `{"level":"WARN","request":"r7","target":"` + ours + `"}` + "\n" + // none a JSON object with a message
 		"\n" +
 		line("WARN", msg, "r6", ours, "again")
-	got := ParseDialFailures([]byte(log), ours)
+	got, parsed := ParseDialFailures([]byte(log), ours)
 	if len(got) != 2 || got[0] != (DialFailure{"r1", ours}) || got[1] != (DialFailure{"r6", ours}) {
 		t.Errorf("parsed %+v, want r1 and r6 of the target alone", got)
 	}
-	if got := ParseDialFailures(nil, ours); len(got) != 0 {
-		t.Errorf("an empty log gave %+v", got)
+	if parsed != 6 {
+		t.Errorf("%d lines parsed, want 6 (r1, r2, r3, r4, the one with no request, and r6)", parsed)
+	}
+	if got, parsed := ParseDialFailures(nil, ours); len(got) != 0 || parsed != 0 {
+		t.Errorf("an empty log gave %+v and %d lines parsed", got, parsed)
 	}
 	// A whole line of the other front messages, none of them a dial failure.
-	if got := ParseDialFailures([]byte(strings.Repeat(line("WARN", "a request was cut", "r1", ours, "x"), 3)), ours); len(got) != 0 {
-		t.Errorf("another message gave %+v", got)
+	if got, parsed := ParseDialFailures([]byte(strings.Repeat(line("WARN", "a request was cut", "r1", ours, "x"), 3)), ours); len(got) != 0 || parsed != 3 {
+		t.Errorf("another message gave %+v and %d lines parsed, want none and 3", got, parsed)
+	}
+}
+
+// The guard's post line shows that the log read RAN and found what it expected, never a silent 0: the lines parsed and the dial failures, counts alone. A
+// healthy run shows lines parsed above 0 and no failures (the dry front writes one line a generator run, the ratio probe's too, and the log is the run's whole, so each phase reads one more).
+// An empty log, and one of lines that are none a slog JSON object, make every phase INVALID with 0 lines parsed posted: a log that was read and holds nothing
+// of the front rules nothing out.
+func TestTheDialFailureGuardPostsWhatItRead(t *testing.T) {
+	const prefix = "  - dial-failure guard: front.log read, "
+	post := func(fault string) (string, error) {
+		out, failures, err, _ := runBaselineDry(t, fault)
+		if len(failures) != 0 {
+			t.Fatalf("%q: failed checks %q", fault, failures)
+		}
+		b, rerr := os.ReadFile(filepath.Join(out, PostsFile))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		return string(b), err
+	}
+	text, err := post("")
+	if err != nil {
+		t.Fatalf("the healthy run: %v", err)
+	}
+	for i, ph := range []string{"P1", "P1-long", "P2", "P3"} {
+		want := fmt.Sprintf("%s%d lines parsed, 0 dial failures for our Instance\n", prefix, i+2)
+		if !strings.Contains(text, want) {
+			t.Errorf("the healthy post lacks %q (%s)", want, ph)
+		}
+	}
+	if strings.Contains(text, "0 lines parsed") || strings.Contains(text, "held no parsed line") {
+		t.Errorf("the healthy post shows a log with no parsed line:\n%s", text)
+	}
+	for _, fault := range []string{"front-log-empty", "front-log-malformed-only"} {
+		text, err := post(fault)
+		var ie *BaselineInvalidError
+		if !errors.As(err, &ie) || !strings.Contains(err.Error(), "the front's log held no parsed line, so a failed dial of the Instance could not be ruled out") {
+			t.Errorf("%s: err = %v, want INVALID for a log with no parsed line", fault, err)
+		}
+		if n := strings.Count(text, prefix+"0 lines parsed, 0 dial failures for our Instance\n"); n != 4 {
+			t.Errorf("%s: %d phases post 0 lines parsed, want all 4:\n%s", fault, n, text)
+		}
 	}
 }
 
@@ -969,7 +1016,7 @@ func TestTheFrontLogIsPrivateAndOnlyItsCountIsPosted(t *testing.T) {
 	// The record is the run's private file and holds the front's USAGE records, which name the Instance and the request IDs; what only the log holds, its error text
 	// and its path, is in none of them. The Instance's key and the matched request's ID, which the log and the usage records share, are kept out of what is posted, logged
 	// or printed.
-	logOnly := []string{dryDialError, "INVENTED-9c1f", "192.0.2.77", "front.log"}
+	logOnly := []string{dryDialError, "INVENTED-9c1f", "192.0.2.77", "logs/front.log"}
 	for where, text := range everywhere {
 		for _, secret := range logOnly {
 			if strings.Contains(text, secret) {
@@ -985,14 +1032,15 @@ func TestTheFrontLogIsPrivateAndOnlyItsCountIsPosted(t *testing.T) {
 			}
 		}
 	}
-	// The count does reach them: in the post, the run's log and the error, and the other phases show none.
-	if !strings.Contains(string(post), "- requests resent after a failed dial of the Instance, by the front's own log (a count only; the log is private): 1\n") {
-		t.Errorf("the post lacks the count:\n%s", post)
+	// The counts do reach them: in the post, the run's log and the error, and the other phases show none. P2 is the fourth run of the generator after the ratio probe's, so
+	// its read finds the five lines the dry front wrote by then (one a run, and the failure's) and the one failure; N and K are the only things of the log the post holds, with the log's file name in the guard's line.
+	if !strings.Contains(string(post), "  - dial-failure guard: front.log read, 5 lines parsed, 1 dial failures for our Instance\n") {
+		t.Errorf("the post lacks the counts:\n%s", post)
 	}
-	if !strings.Contains(logged.String(), "P2:") || !strings.Contains(logged.String(), "1 resent after a failed dial") || !strings.Contains(err.Error(), "1 request(s) of the phase were resent after a failed dial of the Instance") {
+	if !strings.Contains(logged.String(), "P2:") || !strings.Contains(logged.String(), "5 log lines parsed, 1 resent after a failed dial") || !strings.Contains(err.Error(), "1 request(s) of the phase were resent after a failed dial of the Instance") {
 		t.Errorf("the count is not in the run's log or the error:\n%s\n%v", logged.String(), err)
 	}
-	if n := strings.Count(string(post), "(a count only; the log is private): 0\n"); n != 3 {
-		t.Errorf("%d other phases show a count of 0, want 3 (P1, P1-long and P3)", n)
+	if n := strings.Count(string(post), ", 0 dial failures for our Instance\n"); n != 3 {
+		t.Errorf("%d other phases show 0 dial failures, want 3 (P1, P1-long and P3)", n)
 	}
 }

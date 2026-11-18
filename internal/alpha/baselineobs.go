@@ -109,9 +109,11 @@ type PhaseObs struct {
 	// ONE served deployment of the model: ServedOfModel counts them, read when the phase began.
 	Waiting []WaitSample `json:"waiting,omitempty"`
 	// DialFailures counts the requests of the phase that the front's own log reports resent after a failed dial of the served Instance (a count only: the log
-	// is private state), DialLogRead says the log could be read, and DialFailed holds the matched requests for the count, never written to a record or a post.
+	// is private state), DialLogRead says the log could be read, DialLines how many of its lines were parsed (a count only), and DialFailed holds the matched
+	// requests for the count, never written to a record or a post.
 	DialFailures      int           `json:"dialFailures,omitempty"`
 	DialLogRead       bool          `json:"dialLogRead"`
+	DialLines         int           `json:"dialLines"` // the lines of the log parsed as slog JSON objects: 0 means the wrong file or an empty one
 	DialFailed        []DialFailure `json:"-"`
 	ServedOfModel     int           `json:"servedOfModel,omitempty"`
 	ServedOfModelRead bool          `json:"servedOfModelRead,omitempty"`

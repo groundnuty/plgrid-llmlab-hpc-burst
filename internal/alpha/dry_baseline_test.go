@@ -129,6 +129,9 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"dial-failure-p1long", "P1-long: 1 request(s) of the phase were resent after a failed dial of the Instance"},
 	{"dial-failure-p2", "P2: 1 request(s) of the phase were resent after a failed dial of the Instance"},
 	{"dial-failure-p3", "P3: 1 request(s) of the phase were resent after a failed dial of the Instance"},
+	// A log read with no line parsed as a slog JSON object (empty, or only lines that are none) rules nothing out: INVALID, with the count of 0 posted.
+	{"front-log-empty", "the front's log held no parsed line, so a failed dial of the Instance could not be ruled out"},
+	{"front-log-malformed-only", "the front's log held no parsed line, so a failed dial of the Instance could not be ruled out"},
 	// A P2 LLMLab request with fewer than the cap in flight on the Instance at its arrival, or within one tick after it, is no cap spill (#776's review,
 	// point 5): INVALID, and posted as such. 2 s, 50 ms (the reviewer's case) and 2 ms apart; a LLMLab request in P1 is still a FAIL (llmlab-in-the-control).
 	{"llmlab-spill-below-the-cap", "LLMLab request(s) arrived while the front's records showed fewer than the cap's 11 requests in flight on the Instance, at the arrival or within 1ms after it: not a cap spill"},
@@ -444,6 +447,13 @@ func (w *dryBaseline) dryLogLines(ph Phase) string {
 	line := func(level, msg, target string) string {
 		return fmt.Sprintf(`{"time":"2026-11-18T12:00:00Z","level":%q,"msg":%q,"request":%q,"target":%q,"error":%q}`+"\n", level, msg, req, target, dryDialError)
 	}
+	switch {
+	case w.d.fault("front-log-empty"):
+		return "" // the wrong file, or one the front never wrote to
+	case w.d.fault("front-log-malformed-only"):
+		// Lines that are no slog JSON object: one cut short, one that is no JSON, an array, and an object with no message.
+		return `{"time":"2026-11-18T12:00:00Z","level":"INFO","msg":"serving a request","request":"unrelated"` + "\nnot json at all\n[1,2]\n" + `{"level":"WARN"}` + "\n"
+	}
 	out := `{"time":"2026-11-18T12:00:00Z","level":"INFO","msg":"serving a request","request":"unrelated","target":"` + dryServedInstance + `"}` + "\n"
 	for fault, phase := range map[string]string{"dial-failure-p1": PhaseP1, "dial-failure-p1long": PhaseP1Long, "dial-failure-p2": PhaseP2, "dial-failure-p3": PhaseP3} {
 		if w.d.fault(fault) && ph.Name == phase {
@@ -468,13 +478,14 @@ func (w *dryBaseline) dryLogLines(ph Phase) string {
 }
 
 // DialFailures reads the dry front's log.
-func (w *dryBaseline) DialFailures(context.Context) ([]DialFailure, bool) {
+func (w *dryBaseline) DialFailures(context.Context) ([]DialFailure, int, bool) {
 	if w.d.fault("front-log-unread") {
-		return nil, false
+		return nil, 0, false
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return ParseDialFailures([]byte(w.frontLog), dryServedInstance), true
+	fails, parsed := ParseDialFailures([]byte(w.frontLog), dryServedInstance)
+	return fails, parsed, true
 }
 
 // FrontWaiting is the front's own count of requests in its FIFO: while the detach phase's generator runs, none, then two for two reads, then one, then none; at

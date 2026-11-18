@@ -566,14 +566,16 @@ const dialFailureMsg = "no connection to the target; nothing was sent"
 // (team lead's condition on guard 2). The error text of the line is never read.
 type DialFailure struct{ Request, Target string }
 
-// ParseDialFailures reads the front's log, one slog JSON object a line, and returns the requests it reports resent after a failed dial of target. A line
-// counts only if its "msg" EQUALS dialFailureMsg (never a substring of the line: the error field of another line may quote it), its "level" is WARN and its
-// "target" is target. A line that is not a JSON object with string members, or has no request, is skipped: it is never a failure found, and never a pass.
-func ParseDialFailures(log []byte, target string) []DialFailure {
-	var out []DialFailure
+// ParseDialFailures reads the front's log, one slog JSON object a line, and returns the requests it reports resent after a failed dial of target, and the
+// number of lines it PARSED. A line counts as parsed if it is a JSON object with string members and a message (slog writes one on every line); a line that is
+// cut short, is no JSON object, or has a non-string member is not counted and never read further. A line is a failure only if its "msg" EQUALS dialFailureMsg
+// (never a substring of the line: the error field of another line may quote it), its "level" is WARN, its "target" is target and it names a request: a line
+// that is not one is never a failure found, and never a pass. The parsed count is what tells a log that was read and held the front's lines from an empty
+// one or the wrong file: a live front logs at its start, so no parsed line rules nothing out (judgePhase, guard 2).
+func ParseDialFailures(log []byte, target string) (failures []DialFailure, parsed int) {
 	for _, line := range bytes.Split(log, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
+		if len(line) == 0 || line[0] != '{' {
 			continue
 		}
 		var l struct {
@@ -582,12 +584,13 @@ func ParseDialFailures(log []byte, target string) []DialFailure {
 			Request string `json:"request"`
 			Target  string `json:"target"`
 		}
-		if json.Unmarshal(line, &l) != nil {
+		if json.Unmarshal(line, &l) != nil || l.Msg == "" {
 			continue
 		}
+		parsed++
 		if l.Msg == dialFailureMsg && l.Level == "WARN" && l.Target == target && l.Request != "" {
-			out = append(out, DialFailure{Request: l.Request, Target: l.Target})
+			failures = append(failures, DialFailure{Request: l.Request, Target: l.Target})
 		}
 	}
-	return out
+	return failures, parsed
 }
