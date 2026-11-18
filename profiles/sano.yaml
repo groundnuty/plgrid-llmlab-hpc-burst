@@ -88,9 +88,7 @@ spec:
   minJobAge: 5m # facts.slurm.min_job_age_s, 300
   # facts.slurm.squeue_json.note: meta names data_parser/v0.0.40 (HBEP-4, The Slurm dialect), without the prefix.
   jsonDataParser: v0.0.40
-  # startEstimateTime is not set: the field is not on main yet (#717 adds it). Probe 4 (facts.slurm.time_format)
-  # measured that SLURM_TIME_FORMAT=%s gives epoch seconds in sbatch --test-only's start estimate, so Sano's
-  # value, once the field exists, is epoch-seconds (HBEP-4, Estimate).
+  startEstimateTime: epoch-seconds # probe 4 of #735 (facts.slurm.time_format, 18 Nov 2026): SLURM_TIME_FORMAT=%s gives epoch seconds in sbatch --test-only's start (HBEP-4, Estimate)
   # stagingDir is not set: no fact names a directory that the login node and the compute nodes share and that
   # a variable reaches. The compute nodes have no home directory (facts.slurm.srun_chdir), and the shared file
   # system lies at a cluster path, which a public profile does not hold. ReadProfile refuses a Provider on this
