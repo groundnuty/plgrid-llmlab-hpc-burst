@@ -195,10 +195,15 @@ func dryHostDialedWorld(t *testing.T, row, fault, out string) (*world, *hostDial
 		// No setting and none on the job's PATH, whatever this machine has.
 		delete(jobEnv, "HPCBURST_APPTAINER")
 		var keep []string
-		for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		for i, d := range filepath.SplitList(os.Getenv("PATH")) {
 			if _, err := os.Stat(filepath.Join(d, "apptainer")); err != nil {
 				keep = append(keep, d)
+				continue
 			}
+			// A directory that holds apptainer (/usr/bin on a node that has it, as Sano's compute nodes do) holds the job's
+			// other tools too (sha256sum, cut): dropping the whole directory left the job's wrap with no sha256sum, and it
+			// failed there, not at the apptainer check. Keep a directory of links to all of it but apptainer.
+			keep = append(keep, linkedWithout(t, d, "apptainer", filepath.Join(base, "nopath", strconv.Itoa(i))))
 		}
 		jobEnv["PATH"] = strings.Join(keep, string(filepath.ListSeparator))
 	}
@@ -289,4 +294,25 @@ func removeShmSocketDir(t *testing.T, out string) {
 		t.Logf("the agent left its socket's directory under /dev/shm; removing it")
 		_ = os.RemoveAll(string(m[1]))
 	}
+}
+
+// linkedWithout makes dir holding a symbolic link to each entry of src but the one called skip, and returns dir.
+func linkedWithout(t *testing.T, src, skip, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == skip {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(src, e.Name()), filepath.Join(dir, e.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
