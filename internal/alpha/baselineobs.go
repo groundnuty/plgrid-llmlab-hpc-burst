@@ -28,6 +28,10 @@ type FrontRow struct {
 	PromptTokens     *int64 `json:"promptTokens,omitempty"`
 	CompletionTokens *int64 `json:"completionTokens,omitempty"`
 	DurationMs       int64  `json:"durationMs"`
+	// Finish is the stream's finish reason, nil when it had none, and ContentEvents the front's own count of content events, nil when it kept none (the
+	// usage record's finish and contentEvents): a completed stream has a finish reason and, with no counts, at least one content event.
+	Finish        *string `json:"finish,omitempty"`
+	ContentEvents *int64  `json:"contentEvents,omitempty"`
 }
 
 // FrontRowOf reads a usage record. A record whose times cannot be read is an error: it cannot be placed in a phase.
@@ -42,7 +46,7 @@ func FrontRowOf(r usage.Record) (FrontRow, error) {
 	}
 	row := FrontRow{RequestID: r.RequestID, Provider: r.Provider, ModelDeployment: r.ModelDeployment, Emitter: r.Emitter, Instance: r.Instance,
 		InstanceUID: r.InstanceUID, Status: r.Status, Start: start, End: end, FirstTokenMs: r.FirstTokenMs, PromptTokens: r.PromptTokens,
-		CompletionTokens: r.CompletionTokens, DurationMs: r.DurationMs}
+		CompletionTokens: r.CompletionTokens, DurationMs: r.DurationMs, Finish: r.Finish, ContentEvents: r.ContentEvents}
 	if r.CutBy != nil {
 		row.CutBy = *r.CutBy
 	}

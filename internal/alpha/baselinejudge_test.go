@@ -501,7 +501,9 @@ func TestAFailedP0EndsTheRunBeforeAnyJob(t *testing.T) {
 	for _, c := range []struct {
 		fault   string
 		invalid bool
-	}{{"p0-front-fails", false}, {"p0-not-sent", false}, {"p0-answered-by-an-instance", false}, {"p0-llmlab-fails", true}, {"min-tokens-ignored", true}} {
+	}{{"p0-front-fails", false}, {"p0-not-sent", false}, {"p0-answered-by-an-instance", false}, {"p0-llmlab-fails", true}, {"min-tokens-ignored", true},
+		// An HTTP 200 from LLMLab that is no completed stream with tokens, with min_tokens left out, authorises no GPU job.
+		{"p0-empty-200", true}, {"p0-no-finish", true}, {"p0-zero-tokens", true}, {"p0-counts-null-no-events", true}, {"p0-cut-200", true}} {
 		t.Run(c.fault, func(t *testing.T) {
 			out, failures, err, st := runBaselineDry(t, c.fault)
 			if n := st.plat.CountSubmits(); n != 0 {
@@ -522,10 +524,14 @@ func TestAFailedP0EndsTheRunBeforeAnyJob(t *testing.T) {
 			}
 		})
 	}
-	_, failures, err, st := runBaselineDry(t, "")
-	probe, served := slices.Index(st.baseline.calls, "Probe"), slices.Index(st.baseline.calls, "StartServed")
-	if err != nil || len(failures) != 0 || st.plat.CountSubmits() != 1 || probe < 0 || served < probe {
-		t.Errorf("the control: failures %v, err %v, %d submissions, Probe at %d and StartServed at %d: want a pass with one submission, after P0", failures, err, st.plat.CountSubmits(), probe, served)
+	// The controls: a healthy P0, and one whose counts are null but whose content events are positive (a completed stream with tokens), each submit one job,
+	// after P0.
+	for _, fault := range []string{"", "p0-counts-null-events"} {
+		_, failures, err, st := runBaselineDry(t, fault)
+		probe, served := slices.Index(st.baseline.calls, "Probe"), slices.Index(st.baseline.calls, "StartServed")
+		if err != nil || len(failures) != 0 || st.plat.CountSubmits() != 1 || probe < 0 || served < probe {
+			t.Errorf("the control %q: failures %v, err %v, %d submissions, Probe at %d and StartServed at %d: want a pass with one submission, after P0", fault, failures, err, st.plat.CountSubmits(), probe, served)
+		}
 	}
 }
 

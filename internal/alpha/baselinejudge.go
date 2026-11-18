@@ -403,10 +403,26 @@ func p0Problems(o BaselineObs) (fail, invalid []string) {
 		}
 	case routeOfRow(o.P0.Row, o.LLMLabProvider) != RouteLLMLab:
 		fail = append(fail, fmt.Sprintf("P0 was not answered by LLMLab: with no Instance ready everything is (HBEP-5, Test plan), and the emitter was %q", o.P0.Row.Emitter))
+	case !p0Completed(o.P0.Row):
+		// An HTTP 200 is not an answer: with min_tokens left out, an empty stream from LLMLab passes every check below, and the GPU job would be authorised
+		// by a managed leg that never served a token.
+		invalid = append(invalid, "P0's reply was a 200 that is no completed stream with tokens (no finish reason, a cut, or no completion tokens and no content events): LLMLab was not shown to serve, and no GPU job was authorised")
 	case !o.OmitMinTokens && (o.P0.Row.CompletionTokens == nil || *o.P0.Row.CompletionTokens != P0Tokens):
 		invalid = append(invalid, fmt.Sprintf("P0 asked for %d tokens with min_tokens and LLMLab did not give exactly that: it does not honour min_tokens, so the shapes' output lengths are not the config's (set HPCBURST_ALPHA_OMIT_MIN_TOKENS=1, the probe's verdict)", P0Tokens))
 	}
 	return fail, invalid
+}
+
+// p0Completed says P0's reply was a completed stream that carried tokens: a finish reason, no cut, and a positive count of completion tokens or, with no
+// counts, of content events (usage's Record: finish, cutBy, completionTokens, contentEvents).
+func p0Completed(r FrontRow) bool {
+	if r.Finish == nil || *r.Finish == "" || r.CutBy != "" {
+		return false
+	}
+	if r.CompletionTokens != nil {
+		return *r.CompletionTokens > 0
+	}
+	return r.ContentEvents != nil && *r.ContentEvents > 0
 }
 
 // judgePhase judges one phase. The checks prove that a spill is the cap's and not forced by loading LLMLab, from the front's records and the engine alone: LLMLab gets none in the control; exactly k first-turn requests in P2, at most k in flight, with the Instance at its cap at each arrival; the engine at or under the cap with nothing waiting and nothing preempted; and what LLMLab got is posted.

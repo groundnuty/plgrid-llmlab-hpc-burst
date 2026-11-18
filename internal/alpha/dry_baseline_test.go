@@ -8,6 +8,7 @@ package alpha
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,6 +48,8 @@ var baselineCases = []dryCase{
 	{"no-gate", "the gate was not sent"},
 	{"p0-not-sent", "P0 was not sent"},
 	{"p0-answered-by-an-instance", "P0 was not answered by LLMLab"},
+	// A stream that asked for no usage has null counts and the front's own count of content events: a completed stream with tokens, so no failure.
+	{"p0-counts-null-events", ""},
 	{"p0-front-fails", "P0's request failed and the front answered it"},
 	{"ratio-probe-fails", "the ratio probe was not answered by the served Instance (status 500"},
 	// A word that comes to 1.3 tokens: the contexts are fewer words, the run passes (TestTheRatioSetsTheLongContextsWords).
@@ -74,6 +77,12 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"kv-below-the-cap", "the engine's logged KV is 100000 tokens, below the cap's need of 11 x 32768 = 360448"},
 	{"llmlab-fails", "a request LLMLab answered failed (status 500)"},
 	{"p0-llmlab-fails", "P0's request failed and LLMLab answered it (status 500)"},
+	// An HTTP 200 that is no completed stream with tokens authorises no GPU job, with min_tokens left out (the dry fault sets the switch).
+	{"p0-empty-200", "P0's reply was a 200 that is no completed stream with tokens"},
+	{"p0-no-finish", "P0's reply was a 200 that is no completed stream with tokens"},
+	{"p0-zero-tokens", "P0's reply was a 200 that is no completed stream with tokens"},
+	{"p0-counts-null-no-events", "P0's reply was a 200 that is no completed stream with tokens"},
+	{"p0-cut-200", "P0's request failed and LLMLab answered it (status 200)"},
 	{"min-tokens-ignored", "LLMLab did not give exactly that: it does not honour min_tokens"},
 	{"long-contexts-short", "outside the long phase's 24000 to 28672"},
 	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
@@ -113,7 +122,7 @@ func (d *drySteps) Baseline(ctx context.Context, p Plan) (BaselineObs, error) {
 	}
 	w := &dryBaseline{d: d, p: p, cap: cap}
 	d.baseline = w
-	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens, Poll: time.Millisecond, DetachEvery: time.Millisecond, Logf: p.Logf})
+	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, Logf: p.Logf})
 	if err != nil {
 		return BaselineObs{}, err
 	}
@@ -178,6 +187,10 @@ func (w *dryBaseline) row(id, provider, emitter string, status int, start time.T
 	if emitter == "instance" {
 		r.Instance, r.InstanceUID = dryServedInstance, dryServedUID
 	}
+	if status == 200 {
+		finish, events := "length", completion
+		r.Finish, r.ContentEvents = &finish, &events
+	}
 	return r
 }
 
@@ -198,6 +211,23 @@ func (w *dryBaseline) Probe(context.Context) (ProbeObs, error) {
 		r.Emitter, r.Provider, r.Status = "front", "", 503
 	case w.d.fault("p0-llmlab-fails"):
 		r.Status = 500
+	case w.d.fault("p0-empty-200"):
+		// LLMLab answers 200 and an empty stream: no tokens, no events, no finish reason. With min_tokens left out nothing else catches it.
+		zero := int64(0)
+		r.CompletionTokens, r.ContentEvents, r.Finish = &zero, &zero, nil
+	case w.d.fault("p0-no-finish"):
+		r.Finish = nil
+	case w.d.fault("p0-cut-200"):
+		r.CutBy = "upstream"
+	case w.d.fault("p0-zero-tokens"):
+		zero := int64(0)
+		r.CompletionTokens = &zero
+	case w.d.fault("p0-counts-null-events"):
+		// A stream that asked for no usage: the counts are null and the front's own count of content events stands (usage's countsSource front_events).
+		events := int64(5)
+		r.CompletionTokens, r.ContentEvents = nil, &events
+	case w.d.fault("p0-counts-null-no-events"):
+		r.CompletionTokens, r.ContentEvents = nil, nil
 	}
 	return ProbeObs{Sent: true, Row: r}, nil
 }
