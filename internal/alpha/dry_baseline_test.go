@@ -120,6 +120,8 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"p1-serialized", "P1: the front's records show at most 1 requests in flight at once on the Instance, want the cap's 11"},
 	{"p1-sessions-missing", "P1: only 10 of the 11 sessions had a request answered by the Instance"},
 	{"long-serialized", "P1-long: the front's records show at most 1 requests in flight at once on the Instance, want the cap's 11"},
+	// All the Instance's requests together reach the cap, but those whose prompt is in the long range never do: only the long range's own count catches it.
+	{"long-staggered-short-later-turns", "P1-long: the front's records show at most 10 requests in flight at once whose prompt is in the long range of 24000 to 28672 tokens, want the cap's 11"},
 	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
 	{"ratio-impossible", "no word count reaches 24000 to 28672 tokens"},
 	// A request the front's own log reports resent after a failed dial of the Instance makes its phase INVALID, in every phase (#776's review, point 5, guard 2).
@@ -766,6 +768,9 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		if ph.Kind == KindLong && w.d.fault("long-contexts-short") {
 			return 5000
 		}
+		if turn > 1 && w.d.fault("long-staggered-short-later-turns") && ph.Kind == KindLong {
+			return 5000 // the later turns are short: out of the long range, yet in flight beside the first turns
+		}
 		return int64(float64(ph.Context)*w.ratio()) + 7 + int64(float64(turn-1)*float64(ph.Turn+ph.Output)*w.ratio())
 	}
 	for i := 0; i < instanceSessions+llmSessions; i++ {
@@ -785,6 +790,9 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		// A turn takes two seconds, on the Instance and on LLMLab, and the next starts after the think time.
 		for t := 1; t <= turns; t++ {
 			start := t0.Add(time.Duration(t-1) * step)
+			if w.d.fault("long-staggered-short-later-turns") && ph.Kind == KindLong {
+				start = start.Add(time.Duration(i) * 4 * time.Second) // the first turns, each forty seconds long, overlap ten at a time at most
+			}
 			if serialized {
 				start = start.Add(time.Duration(i*turns) * step) // each session starts after the one before it has ended
 			}

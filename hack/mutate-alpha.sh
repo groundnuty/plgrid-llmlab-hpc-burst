@@ -1258,7 +1258,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # #776's review, point 8: the guard fails closed (a failed first scrape starts no generator, a failed poll stops it) and the final count from the records counts.
   'baselineflow.go@@	if !beforeOK {@@	if false && !beforeOK {'
   'baselineflow.go@@		if !ok {
-			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed@@		if false {
+			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed@@		if !ok && false {
 			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed'
   'baselinejudge.go@@	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard {@@	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard && false {'
   # #776's review, point 2: a gate the served Instance did not answer stops the row before any phase.
