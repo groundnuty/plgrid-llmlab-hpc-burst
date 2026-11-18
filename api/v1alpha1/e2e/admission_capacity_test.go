@@ -14,6 +14,7 @@ package e2e
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -195,6 +196,23 @@ func refusedMDCases() []guardCase {
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {
 				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.Providers.Names = []string{"helios-a", "helios-b"} })
 			}},
+		// spec.workloads is on the allowlist (HBEP-764): an edit of it alone is accepted (acceptedMDCases). These are the
+		// twins that show the allowlist entry unlocks that field and nothing else: the same edit, beside a change the
+		// guard refuses, is refused for the other change.
+		{name: "spec.workloads set beside a lower spec.instances (the twin of the accepted edit)", policies: capacity, msg: "cannot lower spec.instances",
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) {
+					m.Spec.Workloads = []string{"study-a"}
+					m.Spec.Instances = 1
+				})
+			}},
+		{name: "spec.workloads set beside a changed spec.providers (the twin of the accepted edit)", policies: capacity, msg: rest,
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) {
+					m.Spec.Workloads = []string{"study-a"}
+					m.Spec.Providers.Names = []string{"helios-a", "helios-b"}
+				})
+			}},
 		{name: "a label added", policies: capacity, msg: "cannot change a ModelDeployment's labels",
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {
 				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Labels = map[string]string{"example": "label"} })
@@ -223,6 +241,14 @@ func acceptedMDCases() []guardCase {
 			t.Helper()
 			if got.Spec.HedgeWidth == nil || *got.Spec.HedgeWidth != n {
 				t.Errorf("spec.hedgeWidth = %v after the write, want %d: it was accepted and did nothing", got.Spec.HedgeWidth, n)
+			}
+		}
+	}
+	workloads := func(want ...string) func(t *testing.T, got *v1alpha1.ModelDeployment) {
+		return func(t *testing.T, got *v1alpha1.ModelDeployment) {
+			t.Helper()
+			if !slices.Equal(got.Spec.Workloads, want) {
+				t.Errorf("spec.workloads = %v after the write, want %v: it was accepted and did nothing", got.Spec.Workloads, want)
 			}
 		}
 	}
@@ -293,6 +319,21 @@ func acceptedMDCases() []guardCase {
 		{name: "spec.hedgeWidth lowered, 2 to 1 (HBEP-10, as amended for #606)", check: hedgeWidth(1),
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {
 				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.HedgeWidth = ptr.To[int32](1) })
+			}},
+		// spec.workloads is a routing input and releases nothing (HBEP-764, HBEP-11): an agent may edit it. Each case has
+		// its refused twin in refusedMDCases, the same edit beside a lower count.
+		{name: "spec.workloads set to two names (HBEP-764)", check: workloads("study-a", "study-b"),
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.Workloads = []string{"study-a", "study-b"} })
+			}},
+		{name: "spec.workloads set through a merge patch (HBEP-764)", check: workloads("study-a"),
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.mergePatch(md, `{"spec":{"workloads":["study-a"]}}`)
+			}},
+		{name: "spec.workloads emptied (HBEP-764)", check: workloads(),
+			base: func(md *v1alpha1.ModelDeployment) { md.Spec.Workloads = []string{"study-a"} },
+			run: func(w writer, md *v1alpha1.ModelDeployment) error {
+				return w.update(md, func(m *v1alpha1.ModelDeployment) { m.Spec.Workloads = nil })
 			}},
 		{name: "a no-op update", check: instances(3),
 			run: func(w writer, md *v1alpha1.ModelDeployment) error {

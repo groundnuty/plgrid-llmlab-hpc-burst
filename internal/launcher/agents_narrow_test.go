@@ -78,9 +78,10 @@ func TestNarrowAgentRoleGrantsNoWrite(t *testing.T) {
 	}
 }
 
-// What the wide form adds to the narrow one, from the issue: ModelDeployment create, update, patch; the
-// scale subresource get, update, patch; Operation create, update, patch; Approval create. Nothing else
-// differs: every rule of the narrow form is in the wide one, and the wide one has these four more.
+// What the wide form adds to the narrow one, from the issue and HBEP-764: ModelDeployment create, update, patch;
+// the scale subresource get, update, patch; Operation create, update, patch; Approval create; Workload create,
+// update, patch. Nothing else differs: every rule of the narrow form is in the wide one, and the wide one has
+// these five more.
 func TestWideAgentRoleIsTheNarrowRolePlusExactlyTheWrites(t *testing.T) {
 	narrow, err := agentNarrowRole()
 	if err != nil {
@@ -99,6 +100,7 @@ func TestWideAgentRoleIsTheNarrowRolePlusExactlyTheWrites(t *testing.T) {
 		rule("modeldeployments/scale", "get", "update", "patch"),
 		rule("operations", "create", "update", "patch"),
 		rule("approvals", "create"),
+		rule("workloads", "create", "update", "patch"),
 	}
 	var extra []any
 	for _, r := range wide {

@@ -102,7 +102,7 @@ func rkWarmUp(tpot time.Duration) func(int32, agentapi.WarmUpRequest) agentapi.W
 func rkMD(edit func(*v1alpha1.ModelDeployment)) *v1alpha1.ModelDeployment {
 	md := mdSpec(hoMD)
 	md.Spec.OverAllocation = ptrTo(int32(1))
-	md.Spec.Workload = &v1alpha1.Workload{
+	md.Spec.Workload = &v1alpha1.DeploymentWorkload{
 		ContextTokens: v1alpha1.ContextTokens{Typical: 1024}, OutputTokens: v1alpha1.OutputTokens{Typical: 128}, TargetSessions: 8,
 	}
 	md.Spec.Source.Served.Flags = append(md.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "max-num-seqs", Value: "16"})

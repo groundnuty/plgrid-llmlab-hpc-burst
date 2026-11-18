@@ -63,6 +63,7 @@ instances:$.spec.launch#0|^TestInstanceLaunchCommandAgreesWithMaxNumSeqs$
 instances:$.status.gate.referenceDate#0|^TestDatesAreRealCalendarDates$
 modeldeployments:$.spec#0|^TestServedDeploymentNeedsAWorkload$
 modeldeployments:$.spec.leaseLimit#0|^TestDurationsArePositiveAndFit$
+modeldeployments:$.spec.model#0|^TestModelDeploymentModelNeverContainsAHash$
 modeldeployments:$.spec.providers#0|^TestModelDeploymentProvidersAndInstances$
 modeldeployments:$.spec.providers.names#0|^TestModelDeploymentProviderNamesAreOrderedAndUnique$
 modeldeployments:$.spec.retentionPolicy#0|^TestRetentionPolicy$
@@ -98,6 +99,7 @@ modeldeployments:$.spec.source.served.flags[]#11|^TestEngineFlagsRefuseEveryPref
 modeldeployments:$.spec.source.served.flags[]#12|^TestMaxModelLenIsAPlainPositiveInteger$
 modeldeployments:$.spec.source.served.flags[]#13|^TestParallelSizesArePlainPositiveIntegers$
 modeldeployments:$.spec.workload.contextTokens#0|^TestContextTokensTypicalIsAtMostLongest$
+modeldeployments:$.spec.workloads#0|^TestModelDeploymentWorkloadsListsEachOnce$
 modeldeployments:$.status.referenceMisses[].capacityFlags#0|^TestCapacityFlagsAlwaysHoldMaxNumSeqs$
 modeldeployments:$.status.referenceMisses[].capacityFlags#1|^TestCapacityFlagNamesAreOneTo64Characters$
 modeldeployments:$.status.referenceMisses[].date#0|^TestDatesAreRealCalendarDates$
@@ -170,6 +172,10 @@ platformprofiles:$.spec.unknownBound#0|^TestDurationsArePositiveAndFit$
 providers:$#0|^TestProviderNamesAreDNS1123Labels$
 providers:$.spec.credentialsRef#0|^TestProviderCredentialsReferenceNamesExactlyOneSource$
 providers:$.spec.stagingDir#0|^TestProviderStagingDirRefusesDotDotSegments$
+workloads:$#0|^TestWorkloadNameIsADNS1123Label$
+workloads:$.spec#0|^TestWorkloadRefusesManagedSessionsUntilTheFrontRoutesIt$
+workloads:$.spec.model#0|^TestWorkloadModelNeverContainsAHash$
+workloads:$.spec.shape.contextTokens#0|^TestWorkloadShapeTypicalContextIsAtMostLongest$
 TABLE
 )
 

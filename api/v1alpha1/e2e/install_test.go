@@ -30,9 +30,9 @@ func TestRunsOnK3s(t *testing.T) {
 	}
 }
 
-// The eight kinds are served in the group and version, with the scopes of
-// HBEP-3 and HBEP-10 (an Operation and an Approval are namespaced, an
-// ApprovalPolicy is cluster-scoped): this asks the API server's discovery, not
+// The nine kinds are served in the group and version, with the scopes of
+// HBEP-3, HBEP-10 and HBEP-764 (an Operation, an Approval and a Workload are
+// namespaced, an ApprovalPolicy is cluster-scoped): this asks the API server's discovery, not
 // the Go types.
 func TestKindsAreServedWithTheirScopes(t *testing.T) {
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
@@ -41,7 +41,7 @@ func TestKindsAreServedWithTheirScopes(t *testing.T) {
 	must(t, err, "discovery of "+v1alpha1.GroupVersion.String())
 	want := map[string]bool{ // kind -> namespaced
 		"Provider": false, "PlatformProfile": false, "ModelDeployment": true, "Allocation": true, "Instance": true,
-		"Operation": true, "Approval": true, "ApprovalPolicy": false,
+		"Operation": true, "Approval": true, "ApprovalPolicy": false, "Workload": true,
 	}
 	got := map[string]bool{}
 	for _, r := range list.APIResources {

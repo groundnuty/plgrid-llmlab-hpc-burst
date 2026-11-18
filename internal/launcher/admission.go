@@ -231,7 +231,7 @@ func probeCapacityGuard(ctx context.Context, cfg *rest.Config) error {
 			}},
 			Instances: 1,
 			Providers: v1alpha1.ProviderSelection{Names: []string{"probe"}},
-			Workload: &v1alpha1.Workload{
+			Workload: &v1alpha1.DeploymentWorkload{
 				ContextTokens: v1alpha1.ContextTokens{Typical: 1024}, OutputTokens: v1alpha1.OutputTokens{Typical: 128}, TargetSessions: 1,
 			},
 		},

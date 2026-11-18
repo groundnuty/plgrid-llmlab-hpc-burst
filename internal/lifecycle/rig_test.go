@@ -327,7 +327,7 @@ func mdSpec(name string) *v1alpha1.ModelDeployment {
 			// k = 0: the rig's deployments are about other behaviour; over-allocation's rows set k.
 			OverAllocation: ptrTo(int32(0)),
 			Providers:      v1alpha1.ProviderSelection{Names: []string{rigProvider}},
-			Workload: &v1alpha1.Workload{
+			Workload: &v1alpha1.DeploymentWorkload{
 				ContextTokens:  v1alpha1.ContextTokens{Typical: 4096},
 				OutputTokens:   v1alpha1.OutputTokens{Typical: 512},
 				TargetSessions: 4,

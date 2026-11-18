@@ -41,7 +41,7 @@ func TestServedDeploymentNeedsAWorkload(t *testing.T) {
 		}, ""},
 		{"a workload with every field and a lease limit", func(md *v1alpha1.ModelDeployment) {
 			md.Spec.LeaseLimit = ptr.To(v1alpha1.Duration("4h"))
-			md.Spec.Workload = &v1alpha1.Workload{
+			md.Spec.Workload = &v1alpha1.DeploymentWorkload{
 				ContextTokens:  v1alpha1.ContextTokens{Short: ptr.To(int32(256)), Typical: 8192, Longest: ptr.To(int32(30000))},
 				OutputTokens:   v1alpha1.OutputTokens{Typical: 1024, Longest: ptr.To(int32(2048))},
 				TargetSessions: 16, ToolCalls: ptr.To(true),

@@ -65,7 +65,7 @@ func klMD(n, k int32) func(*v1alpha1.ModelDeployment) {
 		seededOnly(md)
 		md.Spec.Instances = n
 		md.Spec.OverAllocation = ptrTo(k)
-		md.Spec.Workload = &v1alpha1.Workload{
+		md.Spec.Workload = &v1alpha1.DeploymentWorkload{
 			ContextTokens: v1alpha1.ContextTokens{Typical: 1024}, OutputTokens: v1alpha1.OutputTokens{Typical: 128}, TargetSessions: 8,
 		}
 		md.Spec.Source.Served.Flags = append(md.Spec.Source.Served.Flags, v1alpha1.EngineFlag{Name: "max-num-seqs", Value: "16"})

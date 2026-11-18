@@ -17,8 +17,8 @@
 # role grant a write before the policy that bounds it is enforced:
 #   - the NARROW form, config/rbac/agents-narrow.yaml: read-only. up applies it with the policies and
 #     keeps it until each policy has refused a dry-run probe, or for good where a probe cannot be made;
-#   - the WIDE form, in this file: the narrow rules plus the writes the policies bound. up applies it
-#     last, after the wait.
+#   - the WIDE form, in this file: the narrow rules plus the writes the policies bound (and the Workload
+#     writes, which no policy bounds). up applies it last, after the wait.
 # The two are hand-written, never derived from each other in code; a test states the difference
 # (the writes) by hand and compares it with both.
 #
@@ -45,7 +45,7 @@ metadata:
   name: hpcburst-agent
 rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
-    resources: ["modeldeployments", "allocations", "instances", "operations", "approvals"]
+    resources: ["modeldeployments", "allocations", "instances", "operations", "approvals", "workloads"]
     verbs: ["get", "list", "watch"]
   # The writes. Each is bounded by an admission policy (config/admission): the capacity guard bounds
   # what an agent may change in a ModelDeployment, its count included, and an Operation's metadata; the
@@ -63,6 +63,11 @@ rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["approvals"]
     verbs: ["create"]
+  # A Workload is a routing input that releases no capacity (HBEP-764), so no admission policy bounds
+  # it: the CRD's own schema does. An agent creates and edits Workloads and never deletes one.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["workloads"]
+    verbs: ["create", "update", "patch"]
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]
     verbs: ["get", "list", "watch"]
