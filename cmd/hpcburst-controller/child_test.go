@@ -197,10 +197,7 @@ func launchChild(t *testing.T, name string, f flags, runnerAddr string) *child {
 	if err := c.cmd.Start(); err != nil {
 		t.Fatalf("start child %s: %v", name, err)
 	}
-	go func() {
-		c.waitErr = c.cmd.Wait()
-		close(c.exited)
-	}()
+	c.watch()
 	t.Cleanup(func() {
 		c.kill(t)
 		if t.Failed() {
@@ -220,21 +217,54 @@ func (c *child) running() bool {
 	}
 }
 
-// kill sends SIGKILL, waits for the process to be reaped and returns its wait
-// status. A process that is already reaped is not signalled again.
-func (c *child) kill(t *testing.T) syscall.WaitStatus {
-	t.Helper()
-	if c.running() {
-		if err := c.cmd.Process.Signal(syscall.SIGKILL); err != nil && c.running() {
-			t.Errorf("SIGKILL to child %s: %v", c.name, err)
-		}
+// watch reaps the started process in the background. waitErr is set before
+// exited closes, so a reader that has seen exited closed may read it.
+func (c *child) watch() {
+	go func() {
+		c.waitErr = c.cmd.Wait()
+		close(c.exited)
+	}()
+}
+
+// sigkill sends SIGKILL to a child that has not been reaped yet. A Signal that
+// finds the process finished (os.ErrProcessDone) is not an error: os.Process
+// can know that the process is gone before the goroutine of watch has closed
+// exited, and the signal then has nothing left to do. Any other Signal error is
+// returned.
+func (c *child) sigkill() error {
+	if !c.running() {
+		return nil
 	}
+	if err := c.cmd.Process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("SIGKILL to child %s: %w", c.name, err)
+	}
+	return nil
+}
+
+// reaped waits up to wait for the process to be reaped and returns its wait
+// status; ok is false when it was not reaped in time.
+func (c *child) reaped(wait time.Duration) (ws syscall.WaitStatus, ok bool) {
 	select {
 	case <-c.exited:
-	case <-time.After(30 * time.Second):
+	case <-time.After(wait):
+		return 0, false
+	}
+	ws, _ = c.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	return ws, true
+}
+
+// kill sends SIGKILL, waits for the process to be reaped and returns its wait
+// status. A process that is already reaped is not signalled again, and one that
+// finished while it was being signalled is waited for, not reported.
+func (c *child) kill(t *testing.T) syscall.WaitStatus {
+	t.Helper()
+	if err := c.sigkill(); err != nil {
+		t.Errorf("%v", err)
+	}
+	ws, ok := c.reaped(30 * time.Second)
+	if !ok {
 		t.Fatalf("child %s did not exit within 30 s of SIGKILL", c.name)
 	}
-	ws, _ := c.cmd.ProcessState.Sys().(syscall.WaitStatus)
 	return ws
 }
 
