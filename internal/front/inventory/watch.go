@@ -65,6 +65,9 @@ func NewWatch(client dynamic.Interface, namespaces []string, onChange func()) *W
 }
 
 func (w *Watch) add(f dynamicinformer.DynamicSharedInformerFactory, gvr schema.GroupVersionResource) {
+	// The kinds NewWatch gives add are its four: a list and a watch of each, which is what the front's role grants
+	// (internal/rbacscan checks the role against this call).
+	//rbac:resources hpcburst.groundnuty.github.io/modeldeployments hpcburst.groundnuty.github.io/instances hpcburst.groundnuty.github.io/providers hpcburst.groundnuty.github.io/platformprofiles
 	inf := f.ForResource(gvr).Informer()
 	kind := gvr.Resource
 	touch := func() {
