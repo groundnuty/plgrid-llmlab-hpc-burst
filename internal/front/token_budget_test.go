@@ -228,6 +228,25 @@ func TestAnUnnamedRequestIsHeldWhenNLeavesNoRoomForItsShare(t *testing.T) {
 	f.wantDrained("a-0")
 }
 
+// Both Workloads on one Instance. One long request (N = 500) and four short ones (c = 125 each) fill B: the fourth short one is
+// 10 * (500 + 3 * 125 + 125) + 0 = 10 * 1,000 = 10,000 <= 10,000, admitted. The fifth is 10 * (1,000 + 125) = 11,250 > 10,000: it waits, with
+// the count at 5 < 10.
+func TestALongAndFourShortSessionsFillAnInstanceAndAFifthShortOneWaits(t *testing.T) {
+	f := newTbFix(t, 10, 1000, "a-0")
+	f.start(scModel + "#long")
+	f.settled(1, 0)
+	for i := 1; i <= 4; i++ {
+		f.start(scModel + "#short")
+		f.settled(1+i, 0)
+	}
+	f.wantCharged("a-0", 1000, 0, "one long and four short requests")
+	f.start(scModel + "#short")
+	f.settled(5, 1)
+	f.wantCharged("a-0", 1000, 0, "the fifth short request waits")
+	f.finish(nil)
+	f.wantDrained("a-0")
+}
+
 // An Instance with no kvCacheTokens has no B: both kinds meet the count rule alone, whatever the charges are. Ten long requests (N = 5,000) and the
 // eleventh waits only because the count is 10.
 func TestAnInstanceWithoutKVCacheTokensMeetsTheCountRuleAlone(t *testing.T) {

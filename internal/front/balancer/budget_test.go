@@ -302,33 +302,48 @@ func TestTheInequalitiesRefuseOnOverflowAndNeverWrap(t *testing.T) {
 	}
 }
 
-// An overflow-sized B and cap on a live group: both kinds are refused cleanly, nothing is reserved, and the member's counts do
-// not move.
+// An overflow-sized B and cap on a live group (cap = B = 2^40, so cap * B = 2^80, which no int64 holds): the request is
+// refused cleanly, nothing is reserved, and the member's counts do not move. Four rows, typed by hand:
+//
+//	full membership, a Workload request:    refused (its inequality overflows).
+//	full membership, an unnamed request:    refused (its inequality overflows).
+//	partial membership, a Workload request: refused (its inequality overflows, and it stays in force).
+//	partial membership, an unnamed request: admitted, since its condition is off below full membership, as before the budget.
 func TestAnOverflowSizedBudgetRefusesCleanlyThroughTheGroup(t *testing.T) {
-	for _, partial := range []bool{false, true} {
-		for _, req := range []Charge{workload(1), noWorkload} {
+	for _, row := range []struct {
+		name    string
+		partial bool
+		req     Charge
+		admit   bool
+	}{
+		{"full membership, a Workload request", false, workload(1), false},
+		{"full membership, an unnamed request", false, noWorkload, false},
+		{"partial membership, a Workload request", true, workload(1), false},
+		{"partial membership, an unnamed request", true, noWorkload, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
 			f := newTokFix(t)
 			s := State{
 				Members: []string{"m", "o"}, Eligible: map[string]bool{"m": true}, Percent: noBound,
 				CapValues: map[string]int{"m": 1 << 40}, Budgets: map[string]int64{"m": 1 << 40},
 			}
-			if !partial {
+			if !row.partial {
 				s.Caps = map[string]int{"m": 1 << 40}
 			}
 			f.g.Update(s)
-			r, err := f.g.TryPickFor(f.keyOnM, nil, req)
-			// cap * B = 2^80: a Workload request is always refused. An unnamed request is refused when the cap is in force;
-			// below full membership its condition is off, and it is admitted as before the budget existed.
-			wantRefused := req.Named || !partial
-			if wantRefused {
-				if !errors.Is(err, ErrAllAtCap) || r != nil {
-					t.Fatalf("partial %v, %+v: got %v, %v, want ErrAllAtCap", partial, req, r, err)
+			r, err := f.g.TryPickFor(f.keyOnM, nil, row.req)
+			if row.admit {
+				if err != nil || r == nil || r.Member != "m" {
+					t.Fatalf("got %v, %v, want the request admitted on m", r, err)
 				}
-				wantCounts(t, f.g, 0, "after the refusal")
-			} else if err != nil || r == nil {
-				t.Fatalf("partial %v, %+v: got %v, %v, want it admitted", partial, req, r, err)
+				return
 			}
-		}
+			if !errors.Is(err, ErrAllAtCap) || r != nil {
+				t.Fatalf("got %v, %v, want ErrAllAtCap and no reservation", r, err)
+			}
+			wantCounts(t, f.g, 0, "after the refusal")
+			wantCharged(t, f.g, "m", 0, 0, "after the refusal")
+		})
 	}
 }
 
