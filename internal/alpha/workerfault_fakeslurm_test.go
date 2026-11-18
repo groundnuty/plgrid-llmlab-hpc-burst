@@ -350,20 +350,20 @@ func (r *faultRig) orphanEngine() int {
 	return engine
 }
 
-// slurmJobCgroupSegment is a Slurm job's cgroup in a /proc/<pid>/cgroup listing: a path segment job_<digits> (the segment
-// last or followed by a slash) under a segment that starts with slurm or is <node>_slurmstepd.scope, as Slurm's own cgroup
-// plugins place it (/system.slice/<node>_slurmstepd.scope/job_<n>/step_0/user/task_0 under cgroup v2, as on Sano's nodes,
-// /slurm/uid_<u>/job_<n>/... under v1). workerfault.go's
-// classifier takes any job_<digits> segment; this is narrower on purpose, so that only a real Slurm job skips the test.
-var slurmJobCgroupSegment = regexp.MustCompile(`(?m)/(?:slurm[^/\n]*|[^/\n]+_slurmstepd\.scope)/(?:[^/\n]+/)*job_[0-9]+(?:/|$)`)
+// slurmJobCgroup matches the two shapes of a Slurm job's cgroup that this CI knows, and no other: cgroup v2 as Sano's nodes
+// show it, 0::/system.slice/<node>_slurmstepd.scope/job_<n>/step_0/user/task_0 (read on a node, inside the container), and
+// cgroup v1, <id>:<controllers>:/slurm/uid_<u>/job_<n>/... . Anything else with a job_<digits> segment, such as
+// /slurm-backup.service/job_42 or /a/job_12, is not a Slurm job. workerfault.go's classifier takes any job_<digits> segment;
+// this is narrower on purpose, so that only a real Slurm job skips the test. A cluster that shows another shape needs its row here.
+var slurmJobCgroup = regexp.MustCompile(`(?m)^(?:0::/system\.slice/[^/\n]+_slurmstepd\.scope/job_[0-9]+|[0-9]+:[^:\n]*:/slurm/uid_[0-9]+/job_[0-9]+)(?:/|$)`)
 
 // inASlurmJobCgroup reports whether the cgroup listing of this very process has a Slurm job's segment.
-func inASlurmJobCgroup(cgroups string) bool { return slurmJobCgroupSegment.MatchString(cgroups) }
+func inASlurmJobCgroup(cgroups string) bool { return slurmJobCgroup.MatchString(cgroups) }
 
 // The fake job's processes are this test's own children, so they share its cgroup. The shapes below name that cgroup
 // "other", which holds on a developer machine and on a hosted runner; inside a Slurm job (CI on Sano) the cgroup is the
 // job's, every process classifies as cgroup:job_<n>, and the test cannot hold. It is skipped there, visibly, on one
-// condition alone: this process's own cgroup is a Slurm job's (a job_<n> segment under a slurm one). Hosted CI keeps
+// condition alone: this process's own cgroup is one of the two known shapes of a Slurm job's. Hosted CI keeps
 // running it. It is not made to expect what it finds: that would be circular.
 func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
 	if b, err := os.ReadFile("/proc/self/cgroup"); err == nil && inASlurmJobCgroup(string(b)) {
@@ -438,23 +438,24 @@ func TestASlurmJobCgroupIsRecognisedAndNothingLooserIs(t *testing.T) {
 		name, cgroups string
 		want          bool
 	}{
-		{"a Slurm task under cgroup v2", "0::/system.slice/slurmstepd.scope/job_29490/step_0/task_0\n", true},
-		{"a Slurm task as a node's cgroup shows it (the node's name before _slurmstepd.scope)", "0::/system.slice/node-x1_slurmstepd.scope/job_7654321/step_0/user/task_0\n", true},
+		{"a Slurm task under cgroup v2, as a node shows it", "0::/system.slice/node-x1_slurmstepd.scope/job_7654321/step_0/user/task_0\n", true},
 		{"a Slurm step under cgroup v1", "12:cpuacct:/slurm/uid_1000/job_7654321/step_batch\n11:memory:/slurm/uid_1000/job_7654321\n", true},
-		{"the job segment last, with no newline, under a slurm segment", "0::/slurm/job_12", true},
-		{"a job segment deeper under a slurm segment", "0::/slurm_node/x/y/job_5/z\n", true},
-		{"a job_<digits> segment with no slurm segment above it", "0::/a/job_12", false},
-		{"a job_<digits> segment under some other name", "0::/system.slice/mycluster.service/job_5/step_0\n", false},
-		{"a segment that only ends in slurm", "0::/x/myslurm/job_5/y\n", false},
-		{"a segment that ends in _slurmd.service, not slurmstepd.scope", "0::/system.slice/node-x1_slurmd.service/job_5/y\n", false},
-		{"a slurm segment with no job under it", "0::/system.slice/slurmstepd.scope/step_0\n", false},
-		{"a job segment above the slurm one", "0::/job_12/slurmstepd.scope\n", false},
-		{"a job line among others", "1:name=systemd:/user.slice\n0::/x/slurmd.slice/job_5/y\n", true},
+		{"the job segment last, with no newline", "0::/system.slice/node-x1_slurmstepd.scope/job_12", true},
+		{"a job line among others", "1:name=systemd:/user.slice\n0::/system.slice/node-x1_slurmstepd.scope/job_5/y\n", true},
 		{"a hosted runner's service", "0::/system.slice/hosted-runner.service\n", false},
 		{"a login session", "0::/user.slice/user-1000.slice/session-3.scope\n", false},
-		{"a segment that only starts with job_", "0::/job_12abc/step_0\n", false},
-		{"a segment with no digits", "0::/x/job_/y\n", false},
-		{"job_<digits> inside a longer segment", "0::/x/myjob_12/y\n", false},
+		{"a service whose name starts with slurm", "0::/slurm-backup.service/job_42\n", false},
+		{"a job_<digits> segment with no Slurm shape above it", "0::/a/job_12", false},
+		{"a job_<digits> segment under another service", "0::/system.slice/mycluster.service/job_5/step_0\n", false},
+		{"a slurmstepd.scope with no node name before it", "0::/system.slice/slurmstepd.scope/job_29490/step_0/task_0\n", false},
+		{"a slurm segment under v2 with no system.slice", "0::/slurm/job_5\n", false},
+		{"a v1 slurm path whose uid is not digits", "12:cpuacct:/slurm/uid_x/job_5\n", false},
+		{"a v1 slurm path with no job", "12:cpuacct:/slurm/uid_1000/step_0\n", false},
+		{"a _slurmd.service, not a _slurmstepd.scope", "0::/system.slice/node-x1_slurmd.service/job_5/y\n", false},
+		{"the shape under another prefix", "0::/x/system.slice/node-x1_slurmstepd.scope/job_5\n", false},
+		{"a job segment with letters after the digits", "0::/system.slice/node-x1_slurmstepd.scope/job_12abc\n", false},
+		{"a stepd.scope with no job under it", "0::/system.slice/node-x1_slurmstepd.scope/step_0\n", false},
+		{"the job segment above the stepd.scope", "0::/job_12/node-x1_slurmstepd.scope\n", false},
 		{"an empty listing", "", false},
 	} {
 		if got := inASlurmJobCgroup(c.cgroups); got != c.want {
