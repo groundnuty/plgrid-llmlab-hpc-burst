@@ -114,8 +114,15 @@ func (rg *rig) allAllocations() []v1alpha1.Allocation {
 }
 
 // reconcileAtOnce reconciles the named deployments at the same moment, one
-// goroutine each, released together, and returns their errors.
+// goroutine each, released together, and returns their errors. Each pass's context
+// names its deployment (passKey), which a passGate reads to hold that pass alone.
 func (rg *rig) reconcileAtOnce(r *Reconciler, names ...string) []error {
+	return rg.reconcileAtOnceThen(r, nil, names...)
+}
+
+// reconcileAtOnceThen is reconcileAtOnce that also calls after(name) as each deployment's pass returns, on that pass's own
+// goroutine: a row that forces an interleaving by gates learns of a pass's end by it.
+func (rg *rig) reconcileAtOnceThen(r *Reconciler, after func(name string), names ...string) []error {
 	start := make(chan struct{})
 	errs := make([]error, len(names))
 	var wg sync.WaitGroup
@@ -124,7 +131,10 @@ func (rg *rig) reconcileAtOnce(r *Reconciler, names ...string) []error {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, errs[i] = r.Reconcile(rg.ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: rigNS, Name: n}})
+			_, errs[i] = r.Reconcile(context.WithValue(rg.ctx, passKey{}, n), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: rigNS, Name: n}})
+			if after != nil {
+				after(n)
+			}
 		}()
 	}
 	close(start)
