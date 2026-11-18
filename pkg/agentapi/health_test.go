@@ -298,7 +298,7 @@ func TestEngineCounterFieldsRoundTripAndKeepAZeroOnTheWire(t *testing.T) {
 		"all zero": {Time: at, ProbeOK: true, Preemptions: Int64(0), PrefixCacheQueriedTokens: Int64(0), PrefixCacheHitTokens: Int64(0),
 			TimePerOutputTokenSecondsSum: Float64(0), TimePerOutputTokenCount: Int64(0)},
 		"all set": {Time: at, ProbeOK: true, Preemptions: Int64(7), PrefixCacheQueriedTokens: Int64(3310655), PrefixCacheHitTokens: Int64(2647024),
-			TimePerOutputTokenSecondsSum: Float64(12.5), TimePerOutputTokenCount: Int64(250)},
+			TimePerOutputTokenSecondsSum: Float64(12.5), TimePerOutputTokenCount: Int64(250), KVCacheTokens: Int64(528160)},
 		"mixed": {Time: at, ProbeOK: true, Preemptions: Int64(0), TimePerOutputTokenSecondsSum: Float64(0.25)},
 	} {
 		b, err := json.Marshal(h)
@@ -315,7 +315,7 @@ func TestEngineCounterFieldsRoundTripAndKeepAZeroOnTheWire(t *testing.T) {
 		for key, present := range map[string]bool{
 			`"preemptions"`: h.Preemptions != nil, `"prefixCacheQueriedTokens"`: h.PrefixCacheQueriedTokens != nil,
 			`"prefixCacheHitTokens"`: h.PrefixCacheHitTokens != nil, `"timePerOutputTokenSecondsSum"`: h.TimePerOutputTokenSecondsSum != nil,
-			`"timePerOutputTokenCount"`: h.TimePerOutputTokenCount != nil,
+			`"timePerOutputTokenCount"`: h.TimePerOutputTokenCount != nil, `"kvCacheTokens"`: h.KVCacheTokens != nil,
 		} {
 			if got := strings.Contains(string(b), key); got != present {
 				t.Errorf("%s: %s has key %s = %v, want %v", name, b, key, got, present)

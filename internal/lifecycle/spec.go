@@ -102,7 +102,7 @@ func checkServed(md *v1alpha1.ModelDeployment) (servedPlan, error) {
 		return servedPlan{}, refuse("%v", err)
 	}
 	if dp > 1 {
-		return servedPlan{}, refuse("data-parallel-size %d: alpha runs one engine worker per Instance, so data-parallel-size above 1 is refused (HBEP-7, Provisioning)", dp)
+		return servedPlan{}, refuse("data-parallel-size %d: alpha runs one engine worker per Instance, so data-parallel-size above 1 is refused (HBEP-7, Provisioning), and an engine with it would export several vllm:cache_config_info series, where the KV cache size is read from one (HBEP-7, The KV cache size)", dp)
 	}
 	tp, err := intFlag(s, "tensor-parallel-size", 1)
 	if err != nil {
