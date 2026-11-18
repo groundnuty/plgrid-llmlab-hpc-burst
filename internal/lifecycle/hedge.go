@@ -45,15 +45,18 @@ const annotationCandidateOf = v1alpha1.Group + "/candidate-of"
 func candidateOf(in *v1alpha1.Instance) string { return in.Annotations[annotationCandidateOf] }
 
 // candidateWinnerOf is the winner a kept started loser still waits on: the Instance its mark names, when the Instance
-// has never been ready and that winner is countable (not ended, draining or deleting) and not stale. Such a
-// candidate is the surplus of its Provider whatever its rank, and is ranked against that winner alone
-// (HBEP-7, Hedging's started losers, How it counts). One whose winner has gone is chosen like any
-// Instance: the round's primary failed, so its extra is chosen in its place and no Allocation is made (How it counts).
-// named finds an Instance by name among the deployment's. The pass and the selection both read it through here, so
-// they never disagree.
+// is not ready now (it has never been, or it was and restarted: HBEP-7, Hedging's started losers, a candidate that
+// outranked its winner keeps its mark through a restart inside the front's window and is ranked against that winner
+// alone again; #730) and has not ended, and that winner is countable (not ended, draining or deleting) and not stale.
+// A candidate that serves is nobody's candidate: it is a primary, and its winner is the marked peer that drains
+// (select.go, markedOut). Such a candidate is the surplus of its Provider whatever its rank, and is ranked against that
+// winner alone (HBEP-7, Hedging's started losers, How it counts). One whose winner has gone, or has begun its drain, is
+// chosen like any Instance: the round's primary failed, so its extra is chosen in its place and no Allocation is made
+// (How it counts). named finds an Instance by name among the deployment's. The pass and the selection both read it
+// through here, so they never disagree.
 func candidateWinnerOf(in *v1alpha1.Instance, named func(string) *v1alpha1.Instance, stale map[types.UID]bool) *v1alpha1.Instance {
 	name := candidateOf(in)
-	if name == "" || in.Status.ReadyTime != nil || ended(in) {
+	if name == "" || in.Status.Phase == v1alpha1.InstanceReady || ended(in) {
 		return nil
 	}
 	w := named(name)
@@ -63,12 +66,12 @@ func candidateWinnerOf(in *v1alpha1.Instance, named func(string) *v1alpha1.Insta
 	return w
 }
 
-// waitingCandidate reports whether the Instance is a kept started loser that has never been ready and has not ended:
-// it carries the mark. Starting reads it at its ranking point (candidateStep), and never through the general ranking.
-// One that was ready, and restarted after it outranked its winner, is not waiting: it takes the general path, the
-// stated limit of #730.
+// waitingCandidate reports whether the Instance is a kept started loser that is not ready now and has not ended: it
+// carries the mark. Starting reads it at its ranking point (candidateStep), and never through the general ranking. That
+// includes one that outranked its winner and restarted before the winner's drain began: it is not ready again until it
+// passes, and it is ranked against its winner alone again, never against another primary of its Provider (#730).
 func waitingCandidate(in *v1alpha1.Instance) bool {
-	return candidateOf(in) != "" && in.Status.ReadyTime == nil && !ended(in)
+	return candidateOf(in) != "" && in.Status.Phase != v1alpha1.InstanceReady && !ended(in)
 }
 
 // hedgeKey is the hedge an Instance belongs to, as the reconcile loop reads it: its memberHedgeKey, except that a kept
