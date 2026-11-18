@@ -293,7 +293,11 @@ spec:
               writeConnectionSecretToRef:
                 description: |-
                   WriteConnectionSecretToReference names a Secret for connection details.
-                  An Allocation has none; the field keeps crossplane's wire format.
+                  An Allocation has none; the field keeps crossplane's wire format, and the
+                  API server refuses it: crossplane-runtime's managed reconciler would
+                  publish an empty Secret for it, which reads Secrets through a cluster-wide
+                  informer that hpcburst-provider's role does not allow, so the Allocation
+                  would never be reconciled (HBEP-11, Implementation history).
                 properties:
                   name:
                     description: Name of the secret.
@@ -319,6 +323,9 @@ spec:
                 one'
               rule: '!has(oldSelf.providerConfigRef) || (has(self.providerConfigRef)
                 && self.providerConfigRef == oldSelf.providerConfigRef)'
+            - message: 'writeConnectionSecretToRef is refused: the provider identity
+                has no access to Secrets'
+              rule: '!has(self.writeConnectionSecretToRef)'
           status:
             description: |-
               AllocationStatus is the observed state of an Allocation. Conditions,
