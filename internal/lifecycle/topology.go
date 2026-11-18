@@ -112,76 +112,101 @@ func (r *Reconciler) loadProviders(ctx context.Context, md *v1alpha1.ModelDeploy
 	}
 	var out []*providerView
 	for i, n := range names {
-		pv := &providerView{name: n, extra: i >= allowed}
+		pv, err := r.providerViewOf(ctx, n, byName[n], i >= allowed, r.cachedProfile)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, pv)
-		p, ok := byName[n]
-		if !ok {
-			pv.problem = "Provider " + n + " does not exist"
-			continue
-		}
-		pv.prov = p
-		var prof v1alpha1.PlatformProfile
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: p.Spec.PlatformProfileRef.Name}, &prof); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("get PlatformProfile %s: %w", p.Spec.PlatformProfileRef.Name, err)
-			}
-			pv.problem = fmt.Sprintf("Provider %s names PlatformProfile %s, which does not exist", n, p.Spec.PlatformProfileRef.Name)
-			continue
-		}
-		pv.profile = &prof
-		if prof.Spec.ProviderKind == v1alpha1.PlatformManaged {
-			pv.managed = true
-			continue
-		}
-		if prof.Spec.ProviderKind != v1alpha1.PlatformBatch {
-			pv.problem = fmt.Sprintf("Provider %s is on a %s platform; alpha provisions on batch platforms only", n, prof.Spec.ProviderKind)
-			continue
-		}
-		s, err := resolveSettings(prof.Spec)
-		pv.settings = s
-		if err != nil {
-			pv.problem = fmt.Sprintf("Provider %s: %v", n, err)
-			continue
-		}
-		partition, err := allowedPartition(p, &prof)
-		if err != nil {
-			pv.problem = err.Error()
-			continue
-		}
-		pv.partition = partition
-		pv.class, pv.hasClass = pv.partition.AcceleratorClass, true
-		jobQOS := p.Spec.QOS
-		if len(partition.QOSByGPUs) > 0 {
-			// The QOS has one source (HBEP-4, The Slurm dialect): the partition's qosByGpus. A Provider that also
-			// sets qos is refused by ReadProfile, so no Allocation could be submitted on it: say so here.
-			if jobQOS != "" {
-				pv.problem = fmt.Sprintf("Provider %s sets qos %q, but partition %s of PlatformProfile %s sets qosByGpus, which chooses the QOS by GPU count: the QOS has one source (HBEP-4, The Slurm dialect)", n, jobQOS, partition.Name, prof.Name)
-				continue
-			}
-			// With no QOS chosen yet, only the partition QOS's limits apply (forGPUs adds the job QOS's).
-		}
-		limits, err := v1alpha1.EffectiveQOSLimits(&prof.Spec, pv.partition, jobQOS)
-		if err != nil {
-			pv.problem = fmt.Sprintf("Provider %s: PlatformProfile %s: %v", n, prof.Name, err)
-			continue
-		}
-		pv.limits = limits
-		pv.hostDialed = r.Config.HostDialed
-		if r.Config.HostDialed {
-			pv.limits = hostDialedLimits(limits)
-		}
-		if !v1alpha1.ProviderReady(p, r.Clock.Now()) {
-			pv.problem = fmt.Sprintf("Provider %s is not Ready", n)
-			continue
-		}
-		digest, err := r.Config.AgentDigest(pv.class.CPUArch)
-		if err != nil {
-			pv.problem = fmt.Sprintf("Provider %s: no allocation agent build for %s: %v", n, pv.class.CPUArch, err)
-			continue
-		}
-		pv.agentDigest = digest
 	}
 	return out, nil
+}
+
+// providerViewOf is the view of the Provider named n, whose object is p (nil: it does not exist), with its profile from
+// profileOf (nil: it does not exist) and the partition, limits and settings sizing needs. A missing object, or one that cannot
+// be used, is a problem of the view, not an error; only a failed read is an error. loadProviders reads through the pass's
+// client at the pass's start (cachedProfile); the extra's sizing reads the Provider again, under the Provider's lock, through
+// the uncached Reader, which the controller may only list (sizingUnderLock).
+func (r *Reconciler) providerViewOf(ctx context.Context, n string, p *v1alpha1.Provider, extra bool, profileOf func(context.Context, string) (*v1alpha1.PlatformProfile, error)) (*providerView, error) {
+	pv := &providerView{name: n, extra: extra}
+	if p == nil {
+		pv.problem = "Provider " + n + " does not exist"
+		return pv, nil
+	}
+	pv.prov = p
+	profPtr, err := profileOf(ctx, p.Spec.PlatformProfileRef.Name)
+	if err != nil {
+		return nil, err
+	}
+	if profPtr == nil {
+		pv.problem = fmt.Sprintf("Provider %s names PlatformProfile %s, which does not exist", n, p.Spec.PlatformProfileRef.Name)
+		return pv, nil
+	}
+	prof := *profPtr
+	pv.profile = &prof
+	if prof.Spec.ProviderKind == v1alpha1.PlatformManaged {
+		pv.managed = true
+		return pv, nil
+	}
+	if prof.Spec.ProviderKind != v1alpha1.PlatformBatch {
+		pv.problem = fmt.Sprintf("Provider %s is on a %s platform; alpha provisions on batch platforms only", n, prof.Spec.ProviderKind)
+		return pv, nil
+	}
+	s, err := resolveSettings(prof.Spec)
+	pv.settings = s
+	if err != nil {
+		pv.problem = fmt.Sprintf("Provider %s: %v", n, err)
+		return pv, nil
+	}
+	partition, err := allowedPartition(p, &prof)
+	if err != nil {
+		pv.problem = err.Error()
+		return pv, nil
+	}
+	pv.partition = partition
+	pv.class, pv.hasClass = pv.partition.AcceleratorClass, true
+	jobQOS := p.Spec.QOS
+	if len(partition.QOSByGPUs) > 0 {
+		// The QOS has one source (HBEP-4, The Slurm dialect): the partition's qosByGpus. A Provider that also
+		// sets qos is refused by ReadProfile, so no Allocation could be submitted on it: say so here.
+		if jobQOS != "" {
+			pv.problem = fmt.Sprintf("Provider %s sets qos %q, but partition %s of PlatformProfile %s sets qosByGpus, which chooses the QOS by GPU count: the QOS has one source (HBEP-4, The Slurm dialect)", n, jobQOS, partition.Name, prof.Name)
+			return pv, nil
+		}
+		// With no QOS chosen yet, only the partition QOS's limits apply (forGPUs adds the job QOS's).
+	}
+	limits, err := v1alpha1.EffectiveQOSLimits(&prof.Spec, pv.partition, jobQOS)
+	if err != nil {
+		pv.problem = fmt.Sprintf("Provider %s: PlatformProfile %s: %v", n, prof.Name, err)
+		return pv, nil
+	}
+	pv.limits = limits
+	pv.hostDialed = r.Config.HostDialed
+	if r.Config.HostDialed {
+		pv.limits = hostDialedLimits(limits)
+	}
+	if !v1alpha1.ProviderReady(p, r.Clock.Now()) {
+		pv.problem = fmt.Sprintf("Provider %s is not Ready", n)
+		return pv, nil
+	}
+	digest, err := r.Config.AgentDigest(pv.class.CPUArch)
+	if err != nil {
+		pv.problem = fmt.Sprintf("Provider %s: no allocation agent build for %s: %v", n, pv.class.CPUArch, err)
+		return pv, nil
+	}
+	pv.agentDigest = digest
+	return pv, nil
+}
+
+// cachedProfile reads a PlatformProfile through the reconciler's client: nil when it does not exist.
+func (r *Reconciler) cachedProfile(ctx context.Context, name string) (*v1alpha1.PlatformProfile, error) {
+	var prof v1alpha1.PlatformProfile
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, &prof); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get PlatformProfile %s: %w", name, err)
+	}
+	return &prof, nil
 }
 
 // allowedPartition returns the profile's entry for the Provider's partition,

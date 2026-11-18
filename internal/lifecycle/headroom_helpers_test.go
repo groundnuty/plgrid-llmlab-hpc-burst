@@ -40,6 +40,15 @@ func extraMD(name string) *v1alpha1.ModelDeployment {
 	return md
 }
 
+// noHandover is the deployment with extraMD's end time, 14:00, before its primary's expected drain start (08:00:10 + 12 h
+// - 2 h 10 min = 17:50:10 and later): its primary holds no slot for a replacement once Running, so an extra of another
+// deployment leaves no slot for it beside the primary's own (#725, the extra's slot beyond other deployments' handovers).
+func noHandover(md *v1alpha1.ModelDeployment) *v1alpha1.ModelDeployment {
+	end := metav1.NewTime(hoT(14, 0, 0))
+	md.Spec.EndTime = &end
+	return md
+}
+
 func deploymentOfInstance(in v1alpha1.Instance) string {
 	return in.Labels[v1alpha1.LabelModelDeployment]
 }
