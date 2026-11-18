@@ -118,11 +118,12 @@ func stageRehashLine(r alpha.RehashObs) string {
 	return "- the checkpoint's rehash, from the stage helper's line (HBEP-9's rehash time; information, not a check): " + alpha.RehashWords(r) + "\n"
 }
 
-// stageExampleInputs are the served deployment's image and checkpoint, read as a ModelDeployment from the file row A
-// serves (examples/modeldeployment-qwen25-instruct.yaml), and its load format, auto when it names none.
-func stageExampleInputs(t testing.TB) (image, digest, repo, rev, load string) {
+// stageExampleInputs are the served deployment's image and checkpoint, read as a ModelDeployment from the file of examples/ the row's serve row
+// serves (Row.DeploymentFile: examples/modeldeployment-qwen25-instruct.yaml for the Athena row, the 7B's for Sano's), and its load format,
+// auto when it names none.
+func stageExampleInputs(t testing.TB, file string) (image, digest, repo, rev, load string) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "examples", "modeldeployment-qwen25-instruct.yaml"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "examples", file))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func stageExampleInputs(t testing.TB) (image, digest, repo, rev, load string) {
 // stageHelperBinary is the helper build the script made, held to the example deployment: each of its compiled-in values
 // is in the binary, as -X writes them, so a build for another image or checkpoint is refused before anything is
 // submitted.
-func stageHelperBinary(t testing.TB, path string) []byte {
+func stageHelperBinary(t testing.TB, path, example string) []byte {
 	t.Helper()
 	if path == "" {
 		t.Fatalf("%s is not set: hack/live-checks.sh builds the helper (hack/build-stage-helper.sh) before the row takes its slot", stageHelperSetting)
@@ -155,7 +156,7 @@ func stageHelperBinary(t testing.TB, path string) []byte {
 	if err != nil || len(b) == 0 {
 		t.Fatalf("%s names no helper build: %v", stageHelperSetting, err)
 	}
-	image, digest, repo, rev, _ := stageExampleInputs(t)
+	image, digest, repo, rev, _ := stageExampleInputs(t, example)
 	for _, v := range []string{image, digest, repo, rev} {
 		if !bytes.Contains(b, []byte(v)) {
 			t.Fatal("the stage helper was not built with the example deployment's image and checkpoint (hack/build-stage-helper.sh)")
@@ -203,12 +204,37 @@ func TestNowStage(t *testing.T) {
 	if s.profile.Name != "athena-now" || s.part.Name != "plgrid-now" {
 		t.Fatalf("the pre-staging row runs under athena-now on plgrid-now, not %s on %s", s.profile.Name, s.part.Name)
 	}
-	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting))
+	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting), alpha.NowStageRow().DeploymentFile())
 	w := buildWorld(t, s, worldKit{agent: helper, keepStaging: true, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
 		ssh, err := sshrunNew(s, v)
 		return ssh, ssh, err
 	}})
 	stageBody(t, w, alpha.NowStageRow().Name)
+}
+
+// TestSanoStage is the pre-staging row on Sano's gpu partition (issue #735), the same body as TestNowStage over the same helper: the stage
+// helper as the Allocation's agent build, through the Provider's controller, staging the 7B deployment's image and checkpoint in the Provider's
+// own stagingDir (HPCBURST_CONF_STAGING_ROOT; Sano's profile has none), which the run keeps. The serve and handover rows then start warm from
+// it. It runs one gpu1 job: the framework cannot submit a CPU-only job on Sano's gpu partition (qosByGpus gives a count of 0 gpu1, alpha.SanoStageRow).
+//
+//livecheck:alpha-sano-stage
+func TestSanoStage(t *testing.T) {
+	if os.Getenv("HPCBURST_ALPHA_DRY") == "1" {
+		t.Fatal("the pre-staging row has no dry run through the script; its dry run is TestTheStageRowsDryRunStagesWhereTheAgentStages")
+	}
+	s := load(t)
+	row := alpha.SanoStageRow()
+	if s.profile.Name != row.ProfileName() || s.part.Name != row.Partition || s.stagingRoot == "" {
+		t.Fatalf("the Sano pre-staging row runs under %s on %s with the Provider's own stagingDir (HPCBURST_CONF_STAGING_ROOT), not %s on %s", row.ProfileName(), row.Partition, s.profile.Name, s.part.Name)
+	}
+	// Staged where the agent stages: the Provider's own root, not a run's directory below it, and kept.
+	s.runStaging = s.stagingRoot
+	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting), row.DeploymentFile())
+	w := buildWorld(t, s, worldKit{agent: helper, keepStaging: true, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
+		ssh, err := sshrunNew(s, v)
+		return ssh, ssh, err
+	}})
+	stageBody(t, w, row.Name)
 }
 
 // stageResultOf reads the helper's line from the Allocation's directory, its last bytes (the one read both a login node
@@ -239,8 +265,8 @@ func stageBody(t testing.TB, w *world, rowName string) {
 	t.Helper()
 	ctx := context.Background()
 	row, ok := alpha.RowByName(rowName)
-	if !ok || rowName != alpha.NowStageRow().Name {
-		t.Fatalf("%s is not the pre-staging row", rowName)
+	if !ok || !alpha.IsStageRow(rowName) {
+		t.Fatalf("%s is not a pre-staging row", rowName)
 	}
 	name := "stage"
 	w.timeLimit = stageTimeLimit
@@ -290,10 +316,21 @@ func stageBody(t testing.TB, w *world, rowName string) {
 	if !pass {
 		verdict = "FAIL"
 	}
-	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the cold staging on partition %s, qos %s, in the Provider's staging directory as the profile names it: the job ran %s of its %s lease\n",
-		row.Name, verdict, row.PostsTo, row.Partition, qosUsed(w.s.qos, w.s.part.QOS), ran.Round(time.Second), limit)
+	// The QOS the job ran under: the Provider's or the partition's own, or, where the partition's qosByGpus chooses one by GPU count (Sano's), that one.
+	qos := qosUsed(w.s.qos, w.s.part.QOS)
+	if len(w.s.part.QOSByGPUs) > 0 {
+		if q, err := v1alpha1.QOSForGPUs(w.s.part, w.s.qos, w.s.gpus); err == nil {
+			qos = q
+		}
+	}
+	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the cold staging on partition %s, qos %s, in the Provider's staging directory where the agent stages: the job ran %s of its %s lease\n",
+		row.Name, verdict, row.PostsTo, row.Partition, qos, ran.Round(time.Second), limit)
 	if res.ok {
-		posts += fmt.Sprintf("- the sandbox image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
+		kind := "sandbox"
+		if w.s.part.ImageFormat == v1alpha1.ImageFormatSIF {
+			kind = "SIF"
+		}
+		posts += fmt.Sprintf("- the %s image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", kind, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
 		posts += stageRehashLine(res.rehash)
 	}
 	if !pass {
@@ -315,7 +352,7 @@ func dryStageHelper(t testing.TB, dir string) []byte {
 	t.Helper()
 	out := filepath.Join(dir, "stagehelper")
 	flags := "-X main.image=example.org/engine/server -X main.imageDigest=sha256:" + strings.Repeat("ab", 32) +
-		" -X main.checkpointRepo=" + stack.CheckpointRepo + " -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto"
+		" -X main.checkpointRepo=" + stack.CheckpointRepo + " -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto -X main.imageFormat=sandbox"
 	cmd := exec.Command("go", "build", "-ldflags", flags, "-o", out, "./internal/providerctl/conformance/stagehelper")
 	cmd.Dir = filepath.Join("..", "..", "..")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -480,8 +517,8 @@ func TestTheStageHelpersBuildIsTheExampleDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hack/build-stage-helper.sh --print: %v", err)
 	}
-	image, digest, repo, rev, load := stageExampleInputs(t)
-	want := fmt.Sprintf("-X main.image=%s -X main.imageDigest=%s -X main.checkpointRepo=%s -X main.checkpointRev=%s -X main.loadFormat=%s\n", image, digest, repo, rev, load)
+	image, digest, repo, rev, load := stageExampleInputs(t, alpha.NowStageRow().DeploymentFile())
+	want := fmt.Sprintf("-X main.image=%s -X main.imageDigest=%s -X main.checkpointRepo=%s -X main.checkpointRev=%s -X main.loadFormat=%s -X main.imageFormat=sandbox\n", image, digest, repo, rev, load)
 	if string(b) != want {
 		t.Errorf("the build's flags are %q, want %q", b, want)
 	}

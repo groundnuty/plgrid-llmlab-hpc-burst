@@ -94,7 +94,7 @@ type shapeRow struct {
 
 // allocLimit is the time limit of the row's Allocation: the harness's, or the reach rows' own, shorter one.
 func (r shapeRow) allocLimit() string {
-	if r.name == alpha.NowStageRow().Name {
+	if alpha.IsStageRow(r.name) {
 		return stageTimeLimit
 	}
 	if strings.HasPrefix(r.name, "reach-host-dialed-") {
@@ -145,6 +145,10 @@ func (r shapeRow) env(creds string) map[string]string {
 		"HPCBURST_CONF_ACCOUNT": "example-account", "HPCBURST_CONF_GPUS": r.gpus, "HPCBURST_CONF_CPUS": r.cpus, "HPCBURST_CONF_MEMORY": r.memory,
 		"HPCBURST_CONF_STAGING": "$SCRATCH/hpc-burst-conformance", "HPCBURST_CONF_HOST_LOCK": "/private/lock",
 		"HPCBURST_CONF_CONTROL_DIR": "/private/ctl", "HPCBURST_CONF_OUT": "/private/out",
+	}
+	if r.profile == "sano" {
+		// Sano's profile has no stagingDir: the Provider's own root is the setting, and the run's directory is below it (the script's env_conformance).
+		m["HPCBURST_CONF_STAGING_ROOT"], m["HPCBURST_CONF_STAGING"] = "/path/to/shared/example-stage", "/path/to/shared/example-stage/hpc-burst-conformance"
 	}
 	if r.qos != "-" {
 		m["HPCBURST_CONF_QOS"] = r.qos
@@ -212,8 +216,8 @@ func clock(t *testing.T, text string) time.Duration {
 // issue #194, the tunnel rows and beta's rows on plgrid-now of issue #521), whose leases are the deployments' (the accounting rows run
 // through this harness and keep its 5-minute Allocations). Their timeouts and requests are hack/livechecks's to check.
 func notAConformanceRun(name string) bool {
-	if name == alpha.NowStageRow().Name {
-		return false // the pre-staging row of issue #376 is a conformance run (nowstage_test.go)
+	if alpha.IsStageRow(name) {
+		return false // the pre-staging rows of issues #376 and #735 are conformance runs (nowstage_test.go)
 	}
 	for _, r := range alpha.Rows() {
 		if r.Name == name {
@@ -233,7 +237,7 @@ func TestTheStackRowsAreNoConformanceRuns(t *testing.T) {
 	}
 	harness := 0
 	for _, r := range readShapeRows(t) {
-		if r.name == alpha.NowStageRow().Name || strings.HasPrefix(r.name, "conformance-") || strings.HasPrefix(r.name, "gpu-accounting-") || strings.HasPrefix(r.name, "reach-") {
+		if alpha.IsStageRow(r.name) || strings.HasPrefix(r.name, "conformance-") || strings.HasPrefix(r.name, "gpu-accounting-") || strings.HasPrefix(r.name, "reach-") {
 			harness++
 			if notAConformanceRun(r.name) {
 				t.Errorf("%s is a row this harness runs, but counts as no conformance run", r.name)

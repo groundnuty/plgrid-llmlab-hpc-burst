@@ -255,7 +255,7 @@ func TestBuildLineSetsTheCompiledInVariables(t *testing.T) {
 	}
 	slices.Sort(named)
 	slices.Sort(declared)
-	want := []string{"checkpointRepo", "checkpointRev", "image", "imageDigest", "loadFormat"}
+	want := []string{"checkpointRepo", "checkpointRev", "image", "imageDigest", "imageFormat", "loadFormat"}
 	if !slices.Equal(named, want) || !slices.Equal(declared, want) {
 		t.Errorf("the build line names %v, the package declares uninitialized string variables %v, want %v", named, declared, want)
 	}
