@@ -18,7 +18,10 @@ import (
 var baselineCases = []dryCase{
 	{"", ""},
 	{"llmlab-in-the-control", "request(s), and the control gives it none"},
-	{"llmlab-one-too-many-first-turns", "LLMLab was asked for 3 first-turn request(s), want exactly k = 2"},
+	{"llmlab-one-too-many-first-turns", "LLMLab answered the first turn of 3 distinct session(s), want exactly k = 2"},
+	// Two first-turn requests of ONE session count once; and a turn repeated is a failed check of its own.
+	{"llmlab-one-spiller-twice", "LLMLab answered the first turn of 1 distinct session(s), want exactly k = 2"},
+	{"llmlab-first-turn-twice", "request(s) repeat a session's turn that was already sent"},
 	{"llmlab-spill-below-the-cap", "arrived while the Instance was below its cap of 11"},
 	{"llmlab-over-its-guard", "LLMLab was asked for more than 144 requests in one phase, so the generator was stopped"},
 	{"llmlab-after-the-detach", "request(s) after it was detached"},
@@ -533,6 +536,10 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		if w.d.fault("llmlab-one-too-many-first-turns") {
 			instanceSessions, llmSessions = ph.Sessions-1, 3
 		}
+		if w.d.fault("llmlab-one-spiller-twice") {
+			// One session spills, and its first turn is sent twice: two first-turn requests, one distinct session.
+			instanceSessions, llmSessions = cap, 1
+		}
 	case KindDetach:
 		instanceSessions, waiting = ph.Sessions, max(ph.Sessions-cap, 0)
 		if !w.detached {
@@ -560,8 +567,9 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 	if w.d.fault("llmlab-spill-below-the-cap") && ph.Kind == KindFull {
 		delay = 2 * time.Second // the Instance's sessions arrive after LLMLab's: at LLMLab's arrival the Instance held none
 	}
+	idSuffix := ""
 	add := func(session string, turn int, provider, emitter string, status int, start time.Time, dur time.Duration, prompt, first int64) {
-		id := fmt.Sprintf("%s-%s-t%02d", ph.Name, session, turn)
+		id := fmt.Sprintf("%s-%s-t%02d%s", ph.Name, session, turn, idSuffix)
 		r := w.row(id, provider, emitter, status, start, dur, prompt, int64(ph.Output), first)
 		g := GenRow{Session: session, Turn: turn, RequestID: id, Emitter: r.Emitter, Provider: r.Provider, Instance: r.Instance}
 		rows, gen = append(rows, r), append(gen, g)
@@ -632,6 +640,11 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 				gen = append(gen, GenRow{Session: "extra", Turn: 1, RequestID: extra.RequestID, Emitter: "instance", Provider: dryServedProvider, Instance: dryServedInstance})
 			}
 		}
+	}
+	if ph.Kind == KindFull && (w.d.fault("llmlab-first-turn-twice") || w.d.fault("llmlab-one-spiller-twice")) {
+		// The first LLMLab session's first turn once more, as a request of its own: the same session and turn, sent twice.
+		idSuffix = "-again"
+		add(fmt.Sprintf("s%03d", instanceSessions), 1, LLMLabProviderName, "provider", 200, t0, 2*time.Second, promptOf(1), 300)
 	}
 	llm = 0
 	for _, r := range rows {

@@ -274,6 +274,35 @@ func rowsOn(joined []joinedRow, managed string, route Route) []FrontRow {
 	return out
 }
 
+// firstTurnSessions are the distinct sessions whose first turn was answered on a route, by the joined requests' session and turn: two first-turn requests of
+// one session are one session.
+func firstTurnSessions(joined []joinedRow, managed string, route Route) map[string]bool {
+	out := map[string]bool{}
+	for _, j := range joined {
+		if j.Gen.Turn == 1 && j.route(managed) == route {
+			out[j.Gen.Session] = true
+		}
+	}
+	return out
+}
+
+// duplicateTurns counts the joined requests that repeat a (session, turn) pair an earlier one already had: the generator sends each turn once.
+func duplicateTurns(joined []joinedRow) int {
+	type turn struct {
+		session string
+		turn    int
+	}
+	seen, dup := map[turn]bool{}, 0
+	for _, j := range joined {
+		k := turn{j.Gen.Session, j.Gen.Turn}
+		if seen[k] {
+			dup++
+		}
+		seen[k] = true
+	}
+	return dup
+}
+
 // firstTurnRows are the front's records of the joined requests that were a session's first turn, answered on a route.
 func firstTurnRows(joined []joinedRow, managed string, route Route) []FrontRow {
 	var out []FrontRow
@@ -512,6 +541,10 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 
 	switch ph.Kind {
 	case KindControl, KindLong:
+		// N is the cap, from the row's constant: a control with another N is not the control.
+		if ph.Sessions != cap {
+			inv("the phase ran %d sessions, and the row's constant for the cap says %d: it is not the control, so what it measured was not judged", ph.Sessions, cap)
+		}
 		// (a) LLMLab gets none.
 		if len(llm) != 0 {
 			f("LLMLab was asked for %d request(s), and the control gives it none", len(llm))
@@ -530,19 +563,25 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 			f("%d request(s) were answered away from their session's earlier route: a session did not stay on its Instance", moved)
 		}
 	case KindFull:
-		k := ph.Sessions - cap
-		first := firstTurnRows(joined, managed, RouteLLMLab)
+		// The expectation is FIXED by the row's constants, never read from the phase's own sessions: N = the cap + k = 13, and exactly k = 2 DISTINCT sessions
+		// whose FIRST turn LLMLab answered (the science agent's ruling, #776's review, point 4). A P2 whose N differs is not the measurement: INVALID, and no
+		// spill count is judged against an expectation the override moved.
+		k := LLMLabK
+		first := firstTurnSessions(joined, managed, RouteLLMLab)
 		switch {
-		case k < 1:
-			inv("%d sessions against a cap of %d: N is not above the cap, so the cap cannot bind", ph.Sessions, cap)
+		case ph.Sessions != cap+k:
+			inv("P2 ran %d sessions, and the row's constants, the cap %d plus k = %d, say %d: it is not the measurement, so no spill count was judged", ph.Sessions, cap, k, cap+k)
 		case len(first) == 0 && len(llm) == 0:
 			// A run where the cap never binds proves nothing (HBEP-5's Test plan).
 			inv("the cap never bound: LLMLab was asked for no request, so no spill was shown")
 		case len(first) != k:
-			// (b) exactly k first-turn requests.
-			f("LLMLab was asked for %d first-turn request(s), want exactly k = %d", len(first), k)
+			// (b) exactly k DISTINCT sessions whose first turn LLMLab answered: two first-turn requests of one session count once.
+			f("LLMLab answered the first turn of %d distinct session(s), want exactly k = %d", len(first), k)
 		}
-		if k >= 1 && len(llm) > 0 {
+		if dup := duplicateTurns(joined); dup > 0 {
+			f("%d request(s) repeat a session's turn that was already sent: a turn is sent once", dup)
+		}
+		if ph.Sessions == cap+k && len(llm) > 0 {
 			// (b) at most k in flight at any time.
 			if peak, _, _ := inFlightStats(llm, -1); peak > k {
 				f("LLMLab had %d requests in flight at once, want at most k = %d", peak, k)
@@ -560,6 +599,9 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 			}
 		}
 	case KindDetach:
+		if ph.Sessions != cap+LLMLabK {
+			inv("the phase ran %d sessions, and the row's constants, the cap %d plus k = %d, say %d: it is not the measurement", ph.Sessions, cap, LLMLabK, cap+LLMLabK)
+		}
 		if n := len(rowsFrom(po.Rows, managed)); n != 0 {
 			f("LLMLab answered %d request(s) after it was detached", n)
 		}

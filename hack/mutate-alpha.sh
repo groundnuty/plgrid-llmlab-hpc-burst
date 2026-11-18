@@ -1237,6 +1237,10 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 	if o.P0, err = w.Probe(ctx); err != nil {'
   'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
   'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # #776's review, point 4: P2's expectation is the constants' (N = cap + k, exactly k distinct first-turn sessions), never the override's.
+  'baselinejudge.go@@		k := LLMLabK@@		k := ph.Sessions - cap'
+  'baselinejudge.go@@		case len(first) != k:@@		case len(first) != k && false:'
+  'baselinejudge.go@@		case ph.Sessions != cap+k:@@		case false:'
   # #776's review, point 8: the guard fails closed (a failed first scrape starts no generator, a failed poll stops it) and the final count from the records counts.
   'baselineflow.go@@	if !beforeOK {@@	if false && !beforeOK {'
   'baselineflow.go@@		if !ok {

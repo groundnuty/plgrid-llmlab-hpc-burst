@@ -405,10 +405,11 @@ func TestTheEngineKVLineReadsTheLastStartsFigure(t *testing.T) {
 }
 
 // Changing H0's shape is a change of the config alone (ruling H0): phases overridden the way the settings override them (PhasesFromEnv) run through Run and
-// the sequencer, the generator is given each phase's own config, and the post and the judge follow it. P2 at 14 sessions and 5 turns makes k = 3, and LLMLab
-// gets exactly 3 first-turn requests: the judge expects what the config says.
+// the sequencer, the generator is given each phase's own config, and the post and the judge follow it. P2 at 5 turns gives LLMLab exactly k = 2 sessions of 5
+// turns, 10 requests. The session COUNT is the constants' (#776's review, point 4): a P2 or a P1 whose N is not the cap + k, or the cap, is INVALID and never a
+// pass, and no spill count is judged against an expectation the override moved. The test that let 14 sessions and three first-turn spills pass is inverted here.
 func TestAChangedPhaseConfigRunsThroughTheSequencerAndTheJudge(t *testing.T) {
-	phases, err := PhasesFromEnv(DefaultPhases(CapSano), `{"P2":{"sessions":14,"turns":5},"P1-long":{"contextTokens":27000}}`)
+	phases, err := PhasesFromEnv(DefaultPhases(CapSano), `{"P2":{"turns":5},"P1-long":{"contextTokens":27000}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,15 +418,15 @@ func TestAChangedPhaseConfigRunsThroughTheSequencerAndTheJudge(t *testing.T) {
 		t.Fatalf("failures %v, err %v: a run of the changed config must pass", failures, err)
 	}
 	post, _ := os.ReadFile(filepath.Join(out, PostsFile))
-	for _, w := range []string{"- P2 (full): N = 14, 5 turns, context 1024", "- P1-long (long): N = 11, 2 turns, context 27000",
-		"LLMLab (managed): 15 requests, 3 sessions (distinct), 3 at most in flight; spills in 15"} {
+	for _, w := range []string{"- P2 (full): N = 13, 5 turns, context 1024", "- P1-long (long): N = 11, 2 turns, context 27000",
+		"LLMLab (managed): 10 requests, 2 sessions (distinct), 2 at most in flight; spills in 10"} {
 		if !strings.Contains(string(post), w) {
 			t.Errorf("the text to post lacks %q:\n%s", w, post)
 		}
 	}
 	// The generator was given the changed configs, and the unchanged phase's own.
 	for name, want := range map[string][]string{
-		PhaseP2:     {`"sessions": 14`, `"turns": 5`},
+		PhaseP2:     {`"sessions": 13`, `"turns": 5`},
 		PhaseP1Long: {`"contextTokens": 27000`},
 		PhaseP1:     {`"sessions": 11`, `"turns": 24`, `"contextTokens": 1024`},
 	} {
@@ -436,10 +437,21 @@ func TestAChangedPhaseConfigRunsThroughTheSequencerAndTheJudge(t *testing.T) {
 			}
 		}
 	}
-	// A P2 whose sessions the cap holds (N at most the cap) cannot bind it: INVALID, however many LLMLab was given.
-	phases, _ = PhasesFromEnv(DefaultPhases(CapSano), `{"P2":{"sessions":11}}`)
-	if _, failures, err, _ = runBaselineDryWith(t, "", phases); len(failures) != 0 || !errors.Is(err, ErrBaselineInvalid) || !strings.Contains(err.Error(), "11 sessions against a cap of 11") {
-		t.Errorf("a P2 of the cap's sessions: failures %v, err %v, want INVALID", failures, err)
+	// A session count that is not the constants' is INVALID, never a pass, whatever LLMLab was given: 14 sessions with three first-turn spills, 11 with none,
+	// a control of 5 and a detach of 14.
+	for _, c := range []struct{ env, why string }{
+		{`{"P2":{"sessions":14}}`, "P2 ran 14 sessions, and the row's constants, the cap 11 plus k = 2, say 13"},
+		{`{"P2":{"sessions":11}}`, "P2 ran 11 sessions, and the row's constants, the cap 11 plus k = 2, say 13"},
+		{`{"P1":{"sessions":5}}`, "the phase ran 5 sessions, and the row's constant for the cap says 11"},
+		{`{"P3":{"sessions":14}}`, "the phase ran 14 sessions, and the row's constants, the cap 11 plus k = 2, say 13"},
+	} {
+		phases, err := PhasesFromEnv(DefaultPhases(CapSano), c.env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, failures, err, _ = runBaselineDryWith(t, "", phases); len(failures) != 0 || !errors.Is(err, ErrBaselineInvalid) || !strings.Contains(err.Error(), c.why) {
+			t.Errorf("%s: failures %v, err %v, want INVALID with %q", c.env, failures, err, c.why)
+		}
 	}
 }
 
