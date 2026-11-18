@@ -544,9 +544,10 @@ func lines(s string) []string {
 	return out
 }
 
-// hostDialedOnly names the rows that run in host-dialed mode alone (the script refuses them in another): the keeper row, whose relay keeper runs that
-// mode's relays, and the bulk row, which reads the bulk path's buffer on the relays' ssh (issue #521), and the Sano rows, whose profile lists that
-// mode alone (issue #735). The harness gives them that mode.
+// hostDialedOnly names the rows the harness runs in host-dialed mode: the keeper row, whose relay keeper runs that mode's relays, and the bulk row, which
+// reads the bulk path's buffer on the relays' ssh (issue #521), both of which the script refuses in another mode; and the Sano rows, which it gives that mode
+// by default (the one that has run there; their profile lists it alone, issue #735). The script takes direct mode for the Sano rows too, and sano_test.go
+// runs them in it with exactMode.
 func hostDialedOnly(row string) bool {
 	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover"
 }

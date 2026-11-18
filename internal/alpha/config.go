@@ -195,10 +195,11 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	default:
 		bad = append(bad, envMode+" must be direct, ssh or host-dialed")
 	}
-	// Sano's compute nodes have no home directory, where ssh mode's agent reads its key, so its profile lists host-dialed alone (profiles/sano.yaml,
-	// dialHomeModes; HBEP-4), and these rows run in no other mode: ReadProfile refuses ssh there. (direct is untested on Sano, not refused by the profile.)
-	if row.Cluster == "sano" && cfg.DialHomeMode != "host-dialed" {
-		bad = append(bad, envMode+" must be host-dialed for "+row.Name+": Sano's profile lists no other dial-home mode")
+	// Sano's compute nodes have no home directory, where ssh mode's agent reads its key, so these rows refuse ssh mode (L-1.16; ReadProfile refuses it there
+	// too: profiles/sano.yaml lists host-dialed alone, dialHomeModes, HBEP-4). Direct mode is allowed: it is no profile value (HBEP-4: it rests on the
+	// control-plane host's address, not on the platform), so ReadProfile skips it, and the first study dials Sano in it (issue #735).
+	if row.Cluster == "sano" && cfg.DialHomeMode == "ssh" {
+		bad = append(bad, envMode+" must be host-dialed or direct for "+row.Name+": Sano's compute nodes have no home directory, where ssh mode's agent reads its key")
 	}
 	// The keeper row tests the relay keeper, which runs the relays of host-dialed mode alone (HBEP-6, The relay keeper): another mode has none.
 	if row.Name == BetaKeeperName && cfg.DialHomeMode != "host-dialed" {

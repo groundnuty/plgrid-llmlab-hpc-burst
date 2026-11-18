@@ -131,23 +131,30 @@ func TestEveryRowsProviderStagingFollowsItsProfile(t *testing.T) {
 	}
 }
 
-// A row's Provider on Sano is host-dialed alone, as its profile lists (the dialHomeModes of profiles/sano.yaml): ConfigFromEnv refuses another
-// mode for a Sano row.
-func TestASanoRowRefusesAnotherDialHomeMode(t *testing.T) {
-	for _, mode := range []string{"direct", "ssh"} {
-		m := liveSettings(SanoServeName)
-		m[envMode], m[envAddr], m[envKey] = mode, "gateway.example:29227", "/example/key"
-		if mode == "ssh" {
-			m[envAddr] = "gateway.example:29227"
-		}
-		_, _, err := ConfigFromEnv(env(m), SanoServeName)
-		if err == nil || !strings.Contains(err.Error(), "host-dialed") {
-			t.Errorf("mode %s: err %v, want a refusal that names host-dialed", mode, err)
-		}
-	}
-	m := liveSettings(SanoServeName)
-	if _, _, err := ConfigFromEnv(env(m), SanoServeName); err != nil {
-		t.Errorf("host-dialed: %v", err)
+// A Sano row refuses ssh mode alone (issue #735; L-1.16): its compute nodes have no home directory, where ssh mode's agent reads its key. Direct mode
+// is accepted, with its address and the front's listen address as the first study sets them, and so is host-dialed with neither; ConfigFromEnv
+// refuses ssh for a Sano row and takes the others.
+func TestASanoRowRefusesSSHAndTakesDirectAndHostDialed(t *testing.T) {
+	for _, row := range []string{SanoServeName, SanoHandoverName} {
+		t.Run(row, func(t *testing.T) {
+			m := liveSettings(row)
+			if _, _, err := ConfigFromEnv(env(m), row); err != nil {
+				t.Errorf("host-dialed: %v", err)
+			}
+			m = liveSettings(row)
+			m[envMode], m[envAddr], m[envListen] = "direct", "gateway.example:29427", "127.0.0.1:29427"
+			cfg, _, err := ConfigFromEnv(env(m), row)
+			if err != nil {
+				t.Errorf("direct with an address and a listen address: %v", err)
+			} else if cfg.DialHomeMode != "direct" || cfg.DialHomeAddr != "gateway.example:29427" || cfg.DialHomeListen != "127.0.0.1:29427" {
+				t.Errorf("direct: the config carries mode %q, address %q, listen %q", cfg.DialHomeMode, cfg.DialHomeAddr, cfg.DialHomeListen)
+			}
+			m = liveSettings(row)
+			m[envMode], m[envAddr], m[envKey] = "ssh", "gateway.example:29227", "/example/key"
+			if _, _, err := ConfigFromEnv(env(m), row); err == nil || !strings.Contains(err.Error(), "ssh mode") || !strings.Contains(err.Error(), "must be host-dialed or direct") {
+				t.Errorf("ssh: err %v, want a refusal that says the row takes host-dialed or direct and names ssh mode", err)
+			}
+		})
 	}
 }
 
