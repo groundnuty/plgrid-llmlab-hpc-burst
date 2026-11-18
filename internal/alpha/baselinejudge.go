@@ -137,7 +137,9 @@ func countAt(rows []FrontRow, t time.Time) int {
 }
 
 // heldItsCapAt says the Instance held its cap at an LLMLab request's arrival: with ArrivalTolerance each way (milliseconds in the records, and the
-// release that follows the relay), its count reached the cap at the arrival or at an instant within the tolerance of it.
+// release that follows the relay), its count reached the cap at the arrival or at an instant within the tolerance of it. That is how this row reads the
+// tolerance of "one request within 100 ms": a count one short of the cap at the arrival is accepted only as the edge of an instant at the cap within 100 ms,
+// and a count that stays below the cap for longer is a spill that was not the cap's.
 func heldItsCapAt(served []FrontRow, arrival time.Time, cap int) bool {
 	cands := []time.Time{arrival, arrival.Add(-ArrivalTolerance), arrival.Add(ArrivalTolerance)}
 	lo, hi := arrival.Add(-ArrivalTolerance), arrival.Add(ArrivalTolerance)
