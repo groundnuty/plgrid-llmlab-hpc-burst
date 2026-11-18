@@ -53,8 +53,10 @@
 #     by resourceNames; the Provider managers' are one per Provider, made at run time, and stay namespace-wide.
 #     Events stay in the ClusterRoles, since a deployment, and so the events about it, can be in any namespace.
 # Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
-# would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it, and were it set,
-# the Forbidden would surface as a reconcile error, not silently); the Operation's get and delete of the 7-day
+# would write for an Allocation that names spec.writeConnectionSecretToRef (the Allocation CRD refuses the field
+# at admission: its reconciler would publish an empty Secret through a cluster-wide Secret informer that this
+# role cannot sync, and the Allocation would never be reconciled; HBEP-11, Implementation history, 18 Nov 2026);
+# the Operation's get and delete of the 7-day
 # removal (internal/lifecycle/opttl.go, which no manager wires yet: #660's PR B adds both verbs with its wiring);
 # impersonation, RBAC, CRDs, admission objects, namespaces, nodes, tokens.
 apiVersion: v1

@@ -1,11 +1,14 @@
 package rbacscan
 
 import (
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/rbac"
 )
 
@@ -224,6 +227,24 @@ func TestAStatusWriteIsNotSatisfiedByItsParentInTheRealRole(t *testing.T) {
 	}
 }
 
+// The managed reconciler's Secret path has no library entry because the Allocation CRD refuses the field that turns it on:
+// without the rule, the roles would lack what an Allocation naming a connection Secret makes the reconciler do.
+func TestTheManagedReconcilersSecretPathIsRefusedAtAdmission(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(), "config", "crd", "hpcburst.groundnuty.github.io_allocations.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "rule: '!has(self.writeConnectionSecretToRef)'") {
+		t.Error("the Allocation CRD no longer refuses spec.writeConnectionSecretToRef: crossplane-runtime's managed reconciler would then publish a connection Secret " +
+			"(pkg/reconciler/managed/api.go APILocalSecretPublisher.PublishConnection) through an informer the Provider's role cannot sync, so either restore the rule or give the managed-reconciler library entry that path's rights")
+	}
+	// and the reconciler's other Allocation-driven paths are the ones the entry lists (crossplane-runtime v2.4.3): references
+	// are resolved only for a type with a ResolveReferences method, which Allocation has not
+	if _, ok := reflect.TypeOf(&v1alpha1.Allocation{}).MethodByName("ResolveReferences"); ok {
+		t.Error("v1alpha1.Allocation has a ResolveReferences method: crossplane-runtime's reference resolver (pkg/reconciler/managed/api.go:237-244) would read and patch what it names")
+	}
+}
+
 // A rule added to a role that nothing calls fails the check, naming the rule.
 func TestARuleWithNoCallFails(t *testing.T) {
 	res, roles := realResult(t)
@@ -270,8 +291,11 @@ const (
 // realLibrary are the calls the libraries make for the controllers, which no walk of the module's code can see. Each entry
 // is triggered by a call (or a reference) in the code, so that the rights go when the call does, and cites the pinned
 // source of the library that makes the requests. Not an entry, on purpose: the Secrets crossplane-runtime's managed
-// reconciler would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it; were it set, the
-// Forbidden would surface as a reconcile error, not silently, and S2 grants only what each controller does today).
+// reconciler would publish for an Allocation that names spec.writeConnectionSecretToRef. The Allocation CRD refuses the
+// field at admission (config/crd, the rule "!has(self.writeConnectionSecretToRef)", with its rows in api/v1alpha1/e2e and
+// hack/mutate-cel.sh; TestTheManagedReconcilersSecretPathIsRefusedAtAdmission pins it), because the Provider's identity has
+// no rights on Secrets and S2 grants only what each controller does today: a reconciler that tried would start a
+// cluster-wide Secret informer that its role cannot sync, and the Allocation would never be reconciled.
 func realLibrary() []LibraryEntry {
 	events := func(group string) []Triple {
 		return []Triple{{group, "events", "create"}, {group, "events", "patch"}}
