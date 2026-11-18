@@ -136,6 +136,7 @@ func DefaultManagementPolicies() []xpv2.ManagementAction {
 // +kubebuilder:validation:XValidation:rule="has(self.providerConfigRef) && self.providerConfigRef.kind == 'Provider'",message="providerConfigRef must name a Provider: set kind to 'Provider' (a crossplane ProviderConfig or ClusterProviderConfig is refused)"
 // +kubebuilder:validation:XValidation:rule="has(self.providerConfigRef) && self.providerConfigRef.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') && size(self.providerConfigRef.name) <= 63",message="providerConfigRef.name must be a Provider name, a DNS-1123 label"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.providerConfigRef) || (has(self.providerConfigRef) && self.providerConfigRef == oldSelf.providerConfigRef)",message="an Allocation's providerConfigRef is immutable: the job it holds is on that provider; delete the Allocation and create a new one"
+// +kubebuilder:validation:XValidation:rule="!has(self.writeConnectionSecretToRef)",message="writeConnectionSecretToRef is refused: the provider identity has no access to Secrets"
 type AllocationSpec struct {
 	// ProviderConfigReference names the Provider that holds the job. It is
 	// required, has no default, and is immutable.
@@ -162,7 +163,11 @@ type AllocationSpec struct {
 	ManagementPolicies []xpv2.ManagementAction `json:"managementPolicies,omitempty"`
 
 	// WriteConnectionSecretToReference names a Secret for connection details.
-	// An Allocation has none; the field keeps crossplane's wire format.
+	// An Allocation has none; the field keeps crossplane's wire format, and the
+	// API server refuses it: crossplane-runtime's managed reconciler would
+	// publish an empty Secret for it, which reads Secrets through a cluster-wide
+	// informer that hpcburst-provider's role does not allow, so the Allocation
+	// would never be reconciled (HBEP-11, Implementation history).
 	//
 	// +optional
 	WriteConnectionSecretToReference *xpv2.LocalSecretReference `json:"writeConnectionSecretToRef,omitempty"`

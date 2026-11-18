@@ -55,6 +55,28 @@ func TestAllocationNamesAProvider(t *testing.T) {
 	}
 }
 
+// An Allocation has no connection details, and crossplane-runtime's managed reconciler publishes a Secret for any that names one:
+// through a cluster-wide Secret informer that the Provider controller's identity has no right to, so the Allocation would never be
+// reconciled. The API server refuses the reference, at create and at update.
+func TestAllocationRefusesAConnectionSecretReference(t *testing.T) {
+	ns := newNamespace(t)
+	const want = "writeConnectionSecretToRef is refused: the provider identity has no access to Secrets"
+	t.Run("an Allocation without one is accepted", func(t *testing.T) {
+		must(t, c.Create(bg(), newAllocation(ns, uniq("alloc"))), "create Allocation")
+	})
+	t.Run("one that names a Secret is refused at create", func(t *testing.T) {
+		a := newAllocation(ns, uniq("alloc"))
+		a.Spec.WriteConnectionSecretToReference = &xpv2.LocalSecretReference{Name: "connection"}
+		requireRefused(t, c.Create(bg(), a), want)
+	})
+	t.Run("one added later is refused at update", func(t *testing.T) {
+		a := newAllocation(ns, uniq("alloc"))
+		must(t, c.Create(bg(), a), "create Allocation")
+		a.Spec.WriteConnectionSecretToReference = &xpv2.LocalSecretReference{Name: "connection"}
+		requireRefused(t, c.Update(bg(), a), want)
+	})
+}
+
 func TestAllocationSubmissionParameters(t *testing.T) {
 	ns := newNamespace(t)
 	for _, tc := range []struct {

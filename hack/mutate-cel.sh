@@ -40,6 +40,7 @@ table=$(cat <<'TABLE'
 allocations:$.spec#0|^TestAllocationNamesAProvider$
 allocations:$.spec#1|^TestAllocationNamesAProvider$
 allocations:$.spec#2|^TestAllocationProviderIsImmutable$
+allocations:$.spec#3|^TestAllocationRefusesAConnectionSecretReference$
 allocations:$.spec.forProvider#0|^TestAllocationSubmissionParametersAreImmutable$|^TestAllocationKindOfLeaseIsImmutable$
 allocations:$.spec.forProvider#1|^TestAllocationIsABatchJobOrACatalogEntry$
 allocations:$.spec.forProvider.batch.memory#0|^TestAllocationMemoryIsNotNegative$
