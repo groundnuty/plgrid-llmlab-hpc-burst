@@ -22,6 +22,7 @@ const (
 // its accelerator class (HBEP-11, API, PlatformProfile schema).
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.tmpDirFeature) || has(self.tmpDir)",message="tmpDirFeature is the node feature that tmpDir needs, so it requires tmpDir"
+// +kubebuilder:validation:XValidation:rule="!has(self.qosByGpus) || (self.qosByGpus.map(e, e.gpus).isSorted() && self.qosByGpus.all(a, self.qosByGpus.exists_one(b, b.gpus == a.gpus)))",message="qosByGpus must be strictly increasing in gpus"
 type PartitionProfile struct {
 	// Name of the partition.
 	//
@@ -128,6 +129,28 @@ type PartitionProfile struct {
 	// +kubebuilder:validation:MaxLength=64
 	QOS string `json:"qos,omitempty"`
 
+	// QOSByGPUs is the QOS an Allocation runs under, chosen by its GPU count,
+	// for a partition whose QOS classes are sized by GPUs: Sano's gpu1, gpu2,
+	// gpu4 and gpu8 (HBEP-4, The Slurm dialect, The QOS by GPU count; #745;
+	// the Sano probes of 18 Nov 2026, #735). The entries are strictly
+	// increasing in gpus. QOSForGPUs picks the first entry whose gpus is at
+	// least the request; a request above the last entry is refused before any
+	// call. The plan and the Slurm plugin both choose through it, so the
+	// chosen QOS is the job's QOS for every limit (HBEP-4, QOS limits). Each
+	// entry's qos must be listed in the profile's qos. A Provider whose
+	// partition sets it sets no qos of its own: ReadProfile refuses both,
+	// since only it reads the Provider and its profile (HBEP-4, The Slurm
+	// dialect). At most 8 entries: the estimated CEL cost of the rule that
+	// checks each qos against the profile's qos nests partitions, entries and
+	// the qos list. Absent, the partition's QOS is the Provider's qos, as before; present, it has at
+	// least one entry, since an empty list would pass both rules vacuously and leave no tier to cover a request.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	QOSByGPUs []QOSByGPUs `json:"qosByGpus,omitempty"`
+
 	// BillingUnit is what one unit of the scheduler's billing count counts on
 	// this partition (beta; HBEP-4, Platform profile schema, The remaining
 	// groups): the Provider's controller copies it into each Allocation's
@@ -205,6 +228,21 @@ type GatewayProfile struct {
 	RewritesRequests *bool `json:"rewritesRequests,omitempty"`
 }
 
+// QOSByGPUs is one entry of a partition's qosByGpus: the QOS for Allocations
+// of up to GPUs GPUs (QOSForGPUs takes the first entry whose gpus is at least
+// the request).
+type QOSByGPUs struct {
+	// GPUs is the most GPUs an Allocation may have to run under QOS.
+	//
+	// +kubebuilder:validation:Minimum=1
+	GPUs int32 `json:"gpus"`
+
+	// QOS is the QOS's name, listed in the profile's qos.
+	//
+	// +kubebuilder:validation:MinLength=1
+	QOS string `json:"qos"`
+}
+
 // QOSProfile is one Slurm QOS that a Provider's qos or a partition's qos names,
 // with the limits the plan reads (HBEP-4, QOS limits and Platform profile
 // schema; `@hpc-burst-science-agent`, 1 Nov 2026). Every limit is optional,
@@ -260,6 +298,34 @@ type QOSProfile struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="maxMemPerUser must be positive"
 	MaxMemPerUser *resource.Quantity `json:"maxMemPerUser,omitempty"`
+
+	// MaxGPUsPerJob is the GPU entry of the QOS's MaxTRES: the most GPUs one
+	// job may ask for. A request above it is refused, never capped, before any
+	// call (HBEP-4, Submission, Refused before any call; #745; Sano's caps are
+	// per job: the probes of 18 Nov 2026, #735). Positive when set, like
+	// maxCpusPerUser.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self > 0",message="maxGpusPerJob must be positive"
+	MaxGPUsPerJob *int32 `json:"maxGpusPerJob,omitempty"`
+
+	// MaxCPUsPerJob is the CPU entry of the QOS's MaxTRES. An Allocation's
+	// CPUs are capped at it when the plan sizes them, and a request above it
+	// is refused before any call (HBEP-4, Submission; #745; #735's probe 3).
+	// Positive when set, like maxCpusPerUser.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self > 0",message="maxCpusPerJob must be positive"
+	MaxCPUsPerJob *int32 `json:"maxCpusPerJob,omitempty"`
+
+	// MaxMemPerJob is the memory entry of the QOS's MaxTRES. An Allocation's
+	// memory is capped at it when the plan sizes it, and a request above it is
+	// refused before any call (HBEP-4, Submission; #745; #735's probe 3).
+	// Positive when set, like maxMemPerUser.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="quantity(string(self)).isGreaterThan(quantity('0'))",message="maxMemPerJob must be positive"
+	MaxMemPerJob *resource.Quantity `json:"maxMemPerJob,omitempty"`
 
 	// OverPartQOS is whether the QOS carries Slurm's OverPartQOS flag, which
 	// puts its limits before the partition QOS's (EffectiveQOSLimits). No QOS
@@ -436,6 +502,7 @@ type JobNameRules struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.partitions) || self.partitions.all(p, !has(p.qos) || (has(self.qos) && self.qos.exists(q, q.name == p.qos)))",message="every partition's qos must be listed in qos, so the plan knows its limits (HBEP-4, QOS limits)"
 // +kubebuilder:validation:XValidation:rule="!has(self.expectedPerformance) || self.expectedPerformance.all(a, self.expectedPerformance.exists_one(b, a.deploymentID == b.deploymentID && a.sessions == b.sessions && a.contextTokens == b.contextTokens && a.outputTokens == b.outputTokens && a.capacityFlags == b.capacityFlags))",message="expectedPerformance holds one entry per deploymentID, capacityFlags and shape (sessions, contextTokens, outputTokens) (HBEP-4, Expected performance)"
 // +kubebuilder:validation:XValidation:rule="!has(self.gateway) || self.providerKind == 'managed'",message="gateway is a managed gateway's behaviour: only a managed profile may set it (HBEP-4, The remaining groups)"
+// +kubebuilder:validation:XValidation:rule="!has(self.partitions) || self.partitions.all(p, !has(p.qosByGpus) || p.qosByGpus.all(e, has(self.qos) && self.qos.exists(q, q.name == e.qos)))",message="every qosByGpus qos must be listed in qos"
 type PlatformProfileSpec struct {
 	// ProviderKind is managed, batch or static: the kind of provider the
 	// platform offers (HBEP-3, Vocabulary, Provider). It is not the object's
@@ -453,7 +520,7 @@ type PlatformProfileSpec struct {
 	// QOS lists the QOSes that a Provider's qos or a partition's qos names,
 	// with their limits (HBEP-4, QOS limits and Platform profile schema;
 	// `@hpc-burst-science-agent`, 1 Nov 2026). Helios lists now, plgrid and
-	// normal; Athena plgrid-now. At most 8: the estimated CEL cost of the
+	// normal; Athena plgrid-now; Sano gpu1, gpu2, gpu4 and gpu8. At most 8: the estimated CEL cost of the
 	// rule on maxMemPerUser, which parses a quantity of unbounded length
 	// (controller-gen gives a quantity no maxLength), grows with this bound
 	// and exceeds the API server's per-rule budget at 16 (by 1.0066 times).

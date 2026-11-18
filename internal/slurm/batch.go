@@ -510,8 +510,23 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 			return s, refuse("%v", err)
 		}
 	}
-	s.qos = req.QOS
-	limits, err := v1alpha1.EffectiveQOSLimits(&profile.Spec, part, settings.QOS)
+	// The job's QOS: the Provider's qos, or, where the partition sets
+	// qosByGpus, the one its list chooses for the GPU count, which a count above
+	// the list's last entry has none of (v1alpha1.QOSForGPUs; HBEP-4, The Slurm
+	// dialect). The chosen QOS is the job's QOS for every limit below, as it is
+	// in the lifecycle controller's plan (HBEP-4, QOS limits). ReadProfile
+	// refuses a Provider qos beside a qosByGpus, so only one source feeds it.
+	jobQOS, err := v1alpha1.QOSForGPUs(part, req.QOS, p.GPUs)
+	if err != nil {
+		return s, refuse("%v", err)
+	}
+	if jobQOS != "" && jobQOS != req.QOS {
+		if err := CheckValue("qos", jobQOS); err != nil {
+			return s, refuse("%v", err)
+		}
+	}
+	s.qos = jobQOS
+	limits, err := v1alpha1.EffectiveQOSLimits(&profile.Spec, part, jobQOS)
 	if err != nil {
 		return s, refuse("%v", err)
 	}
@@ -544,6 +559,9 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 	if m := limits.MaxCPUsPerUser; m != nil && p.CPUsPerTask > *m {
 		return s, refuse("cpusPerTask %d is above maxCpusPerUser %d of qos %q", p.CPUsPerTask, *m, limits.From[v1alpha1.LimitMaxCPUsPerUser])
 	}
+	if m := limits.MaxCPUsPerJob; m != nil && p.CPUsPerTask > *m {
+		return s, refuse("cpusPerTask %d is above maxCpusPerJob %d of qos %q", p.CPUsPerTask, *m, limits.From[v1alpha1.LimitMaxCPUsPerJob])
+	}
 	s.cpusPerTask = p.CPUsPerTask
 	// Memory 0 is refused although the CRD admits it: Slurm reads --mem=0 as
 	// the whole node's memory (science agent's ruling, 31 Oct 2026).
@@ -559,6 +577,13 @@ func checkRequest(req provider.SubmitRequest, profile provider.Profile, settings
 		if capMiB := m.Value() >> 20; s.memMiB > capMiB {
 			return s, refuse("memory %s (%d MiB) is above maxMemPerUser %s (%d MiB) of qos %q",
 				p.Memory.String(), s.memMiB, m.String(), capMiB, limits.From[v1alpha1.LimitMaxMemPerUser])
+		}
+	}
+	if m := limits.MaxMemPerJob; m != nil {
+		// Compared as the per-user cap is, in whole MiB (#745).
+		if capMiB := m.Value() >> 20; s.memMiB > capMiB {
+			return s, refuse("memory %s (%d MiB) is above maxMemPerJob %s (%d MiB) of qos %q",
+				p.Memory.String(), s.memMiB, m.String(), capMiB, limits.From[v1alpha1.LimitMaxMemPerJob])
 		}
 	}
 	if p.Nodes > 1 {
