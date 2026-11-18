@@ -126,11 +126,22 @@ func (f *wrFix) settled(managed, open, waiting int) {
 	})
 }
 
-// wlState is the router's state of ns/alpha, or nil when it has none.
+// wlState is the router's state of ns/alpha, or nil when it has none: the state of the Workload object in the snapshot, or, when the snapshot has none
+// (it was deleted), the one state of that name that is left.
 func (f *wrFix) wlState() *wlState {
 	f.router.wlMu.Lock()
 	defer f.router.wlMu.Unlock()
-	return f.router.wls["ns/alpha"]
+	for i := range f.snap.Workloads {
+		if w := &f.snap.Workloads[i]; w.Namespace == "ns" && w.Name == "alpha" {
+			return f.router.wls[wlKey("ns", "alpha", w.UID)]
+		}
+	}
+	for _, ws := range f.router.wls {
+		if ws.ns == "ns" && ws.name == "alpha" {
+			return ws
+		}
+	}
+	return nil
 }
 
 // managedCount is alpha's count of requests in flight on managed targets, read under its mutex.

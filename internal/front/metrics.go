@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/usage"
@@ -255,6 +256,18 @@ func (m *Metrics) inFlightAdd(workload, provider, deployment, instanceUID string
 		return
 	}
 	m.inFlight.WithLabelValues(workload, provider, deployment, instanceUID).Add(float64(delta))
+}
+
+// inFlightDropIfEmpty drops the series of an Instance's earlier incarnation when its last request has been released: a replacement under the same name
+// has another UID and no leave to drop the old one's series.
+func (m *Metrics) inFlightDropIfEmpty(workload, provider, deployment, instanceUID string) {
+	if m == nil || instanceUID == "" {
+		return
+	}
+	var d dto.Metric
+	if err := m.inFlight.WithLabelValues(workload, provider, deployment, instanceUID).Write(&d); err == nil && d.GetGauge().GetValue() <= 0 {
+		m.inFlight.DeleteLabelValues(workload, provider, deployment, instanceUID)
+	}
 }
 
 // inFlightGone drops every in-flight series of an Instance that has left its group.

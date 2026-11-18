@@ -91,6 +91,11 @@ type Router struct {
 	onWlContended     func()
 	// beforeEnqueue runs under a Workload's mutex just before a request that no route could take is put in its FIFO.
 	beforeEnqueue func()
+	// afterSort runs in a wake pass after it has ordered the Workloads' FIFOs and before it serves the first. arrivalClock replaces time.Now as the time a
+	// request's queue deadline counts from, and onQueueDeadline is told the deadline a request waits against.
+	afterSort       func()
+	arrivalClock    func() time.Time
+	onQueueDeadline func(time.Time)
 
 	// The coalesced rebuilds of a burst of registration changes (#417). dirty
 	// says a registration changed since the last rebuild began; running, that a
@@ -315,7 +320,7 @@ func (r *Router) indexLocked() {
 	for _, byName := range r.view.Workloads {
 		for _, ws := range byName {
 			for _, w := range ws {
-				r.wlKnown[w.Key] = true
+				r.wlKnown[wlKey(w.Namespace, w.Name, w.UID)] = true
 			}
 		}
 	}
@@ -359,6 +364,9 @@ func (r *Router) applyLocked(d *inventory.Deployment, prev *inventory.View, now 
 				r.metrics.inFlightAdd(ch.Workload, a.Provider, key, a.UID, delta)
 			}
 			g.OnLeave = func(a balancer.Attrs) { r.metrics.inFlightGone(a.UID) }
+			g.OnStale = func(a balancer.Attrs, ch balancer.Charge) {
+				r.metrics.inFlightDropIfEmpty(ch.Workload, a.Provider, key, a.UID)
+			}
 		}
 		r.groups[d.Key] = g
 	}

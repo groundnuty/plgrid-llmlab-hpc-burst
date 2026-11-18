@@ -116,6 +116,10 @@ type Group struct {
 	// is called under the mutex once a member's reservations have been released and it is gone. Neither may call back into the group.
 	OnCount func(a Attrs, ch Charge, delta int)
 	OnLeave func(a Attrs)
+	// OnStale, when set, is called under the group's mutex after a release whose member has since been replaced by an Instance of the same name and
+	// another UID, or is gone: the reservation was counted under the attributes it had then, and OnCount released those, so the series of that old
+	// UID may now be empty and has no leave to drop it (the in-flight series).
+	OnStale func(a Attrs, ch Charge)
 
 	// onContended, set by tests only, runs in a caller that finds the lock
 	// held, before it waits.
@@ -136,6 +140,9 @@ type Reservation struct {
 	release  func() // upstream's
 	released bool
 	charge   Charge // counted on Member until released
+	// attrs are Member's attributes when the reservation was counted: the in-flight series is released under them, never under what a later
+	// Update gave the same name (a replacement Instance has another UID).
+	attrs Attrs
 }
 
 // Release ends the reservation. Only the first call counts; a reservation a
@@ -307,6 +314,16 @@ func (g *Group) pickLocked(key string, match Match, ch Charge) (*Reservation, er
 	return g.registerLocked(choice, done, spilled, ch), nil
 }
 
+// HasEligible reports whether some member is eligible and matches: whether a request with that filter could be placed once a member has room, which is
+// what a request that may wait asks (HBEP-5, Workloads, Waiting). It reserves nothing.
+func (g *Group) HasEligible(match Match) bool {
+	g.lock()
+	defer g.mu.Unlock()
+	return g.anyLocked(func(m string) bool {
+		return g.state.Eligible[m] && (match == nil || match(m, g.state.Attrs[m]))
+	})
+}
+
 func (g *Group) anyLocked(ok func(string) bool) bool {
 	for m := range g.members {
 		if ok(m) {
@@ -427,10 +444,10 @@ func (g *Group) pinLocked(target string) (string, error) {
 }
 
 func (g *Group) registerLocked(m string, done func(), spilled bool, ch Charge) *Reservation {
-	r := &Reservation{Member: m, Spilled: spilled, g: g, release: done, charge: ch}
+	r := &Reservation{Member: m, Spilled: spilled, g: g, release: done, charge: ch, attrs: g.state.Attrs[m]}
 	g.countLocked(m, ch)
 	if g.OnCount != nil {
-		g.OnCount(g.state.Attrs[m], ch, +1)
+		g.OnCount(r.attrs, ch, +1)
 	}
 	if g.open[m] == nil {
 		g.open[m] = map[*Reservation]struct{}{}
@@ -453,7 +470,10 @@ func (g *Group) releaseLocked(r *Reservation) bool {
 	r.release()
 	g.uncountLocked(r.Member, r.charge)
 	if g.OnCount != nil {
-		g.OnCount(g.state.Attrs[r.Member], r.charge, -1)
+		g.OnCount(r.attrs, r.charge, -1)
+	}
+	if g.OnStale != nil && g.state.Attrs[r.Member].UID != r.attrs.UID {
+		g.OnStale(r.attrs, r.charge)
 	}
 	delete(g.open[r.Member], r)
 	return true

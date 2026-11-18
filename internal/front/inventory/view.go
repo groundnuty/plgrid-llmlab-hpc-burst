@@ -82,6 +82,8 @@ type Workload struct {
 	Namespace string
 	Name      string
 	Model     string // spec.model
+	// UID is the Workload object's, so that a Workload deleted and created again under the same name is another Workload to the front's state.
+	UID types.UID
 	// Charge is c, what one request of the Workload is charged against an Instance's token budget (HBEP-5, Workloads,
 	// The count in tokens): shape.contextTokens.typical plus shape.outputTokens.typical, as the Workload had it when
 	// this view was built.

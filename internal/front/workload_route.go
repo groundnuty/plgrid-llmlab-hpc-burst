@@ -4,9 +4,11 @@ import (
 	"context"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/balancer"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/naming"
@@ -32,8 +34,13 @@ import (
 // wlState is one Workload's state, kept by the router under the Workload's namespace and name: it outlives the router's rebuilds, and goes only when the
 // Workload has left the view and nothing of it is in flight or waiting (Q15).
 type wlState struct {
-	r   *Router
-	key string // namespace/name
+	r *Router
+	// key is the state's key in the registry, wlKey: the Workload's namespace, name and UID. It is per object, so a Workload deleted and created again under
+	// the same name has a new state, with none of the deleted one's managed count or FIFO.
+	key  string
+	ns   string
+	name string
+	uid  types.UID
 
 	// mu is the Workload's mutex (LOCK ORDER above). It guards managed, queue and dead; a request's count is reserved and released under it, once, as
 	// the balancer's reservations are under the group's.
@@ -71,12 +78,21 @@ type wlWaiter struct {
 	key         string
 	exclude     []string
 	withManaged bool
-	ch          chan *target // buffered: a placement never blocks
+	ch          chan wlResult // buffered: an answer never blocks
 }
+
+// wlResult is what a pass tells a waiter: the target it was placed on, or the error that ends its wait (no route of its serving set can ever take it).
+type wlResult struct {
+	tg  *target
+	err *routeError
+}
+
+// wlKey is the registry key of a Workload's state.
+func wlKey(ns, name string, uid types.UID) string { return ns + "/" + name + "/" + string(uid) }
 
 // enqueueLocked appends a request to the FIFO. The caller holds mu.
 func (ws *wlState) enqueueLocked(p *plan) *wlWaiter {
-	w := &wlWaiter{seq: ws.r.wlSeq.Add(1), n: p.n, res: p.res, key: p.key, exclude: slices.Clone(p.exclude), withManaged: p.withManaged, ch: make(chan *target, 1)}
+	w := &wlWaiter{seq: ws.r.wlSeq.Add(1), n: p.n, res: p.res, key: p.key, exclude: slices.Clone(p.exclude), withManaged: p.withManaged, ch: make(chan wlResult, 1)}
 	ws.queue = append(ws.queue, w)
 	ws.syncQueueLocked()
 	return w
@@ -139,16 +155,24 @@ func (m *managedRes) release() {
 	m.r.wakeNow()
 }
 
-// wlAcquire returns the state of the Workload a Resolution names, creating it at the first request.
+// wlAcquire returns the state of the Workload a Resolution names, creating it at the first request. A request keeps the definition it came with, so a retry
+// may still route on a Workload that has been deleted since, and its state may have been pruned meanwhile: the state is then created again, but never
+// live. It is made an orphan at once (wlOrphan), so that the pass that ends the retry's last use of it drops it, and it leaks no FIFO and no waiting series.
 func (r *Router) wlAcquire(res *Resolution) *wlState {
-	key := res.Namespace + "/" + res.Name
+	key := wlKey(res.Namespace, res.Name, res.uid)
+	r.mu.Lock()
+	known := r.wlKnown[key]
+	r.mu.Unlock()
 	r.wlMu.Lock()
 	defer r.wlMu.Unlock()
 	ws := r.wls[key]
 	if ws == nil {
-		ws = &wlState{r: r, key: key}
+		ws = &wlState{r: r, key: key, ns: res.Namespace, name: res.Name, uid: res.uid}
 		r.wls[key] = ws
 		r.wlN.Add(1)
+		if !known {
+			r.wlOrphan.Store(true)
+		}
 	}
 	return ws
 }
@@ -171,6 +195,10 @@ func (r *Router) lockWorkload(res *Resolution) *wlState {
 // request, so a wake that comes between the try and the enqueue finds none for this Workload and skips it; the arrival counts the wake requests that came
 // meanwhile (wakeGen) and, when there were any, runs a pass of its own once it is queued (found by the tests of the wakes: the lost wake).
 func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
+	// The queue's deadline is taken here, at arrival, before the request is queued and before any wake pass it runs: a pass that waits for the pass lock
+	// must not spend the request's queueTimeout before it starts.
+	qctx, cancel := context.WithDeadline(ctx, r.arrivalNow().Add(r.cfg.QueueTimeout.D()))
+	defer cancel()
 	// An arrival counts as active before it reads the view, so no wake pass skips on seeing none: a rebuild whose wake finds nothing active has changed the
 	// view before this request reads it (wakeNow, wakeAsync).
 	r.wlActive.Add(1)
@@ -197,6 +225,13 @@ func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution
 			r.wlActive.Add(-1)
 			return nil, errNoReadyTarget(n.Model).forWorkload(p.wname)
 		}
+	} else if !r.mayFreeLocked(p) {
+		// Strict: a request behind a waiter tries no route. But one that no route may ever take, because nothing is eligible for it after its exclusions
+		// and its level's filter, is not made to wait: it is answered as it would be alone, so a retry with no other Instance relays its first failure
+		// and the FIFO is never held by a request that cannot be placed.
+		ws.mu.Unlock()
+		r.wlActive.Add(-1)
+		return nil, errNoReadyTarget(n.Model).forWorkload(p.wname)
 	}
 	if h := r.beforeEnqueue; h != nil {
 		h()
@@ -206,7 +241,31 @@ func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution
 	if r.wakeGen.Load() != gen {
 		r.wakeNow()
 	}
-	return r.waitNamed(ctx, ws, w)
+	return r.waitNamed(ctx, qctx, ws, w)
+}
+
+// arrivalNow is the time a request's queue deadline counts from. The tests of the deadline replace it.
+func (r *Router) arrivalNow() time.Time {
+	if f := r.arrivalClock; f != nil {
+		return f()
+	}
+	return time.Now()
+}
+
+// mayFreeLocked reports whether some route of the request's serving set may free: an eligible managed target (at the Workload's bound it frees when one of
+// its requests ends), or one of our Instances that is eligible for the request's level and not excluded (full, it frees when a request ends). It reserves
+// nothing. With none, no wake can ever place the request.
+func (r *Router) mayFreeLocked(p *plan) bool {
+	if len(p.managed) > 0 {
+		return true
+	}
+	match := levelMatch(p.n, p.exclude)
+	for _, d := range p.serving {
+		if g := p.groups[d.Key]; g != nil && g.HasEligible(match) {
+			return true
+		}
+	}
+	return false
 }
 
 // tryNamedLocked tries every route of the Workload once, in its route order, with the Workload's mutex held. It reserves nothing when it places nothing.
@@ -254,20 +313,22 @@ func (r *Router) takeManagedLocked(ws *wlState, p *plan) *target {
 
 // waitNamed holds a request in its Workload's FIFO for at most queueTimeout (HBEP-5, Workloads, Waiting). A wake places the head by tryHead and sends
 // the target on w.ch.
-func (r *Router) waitNamed(ctx context.Context, ws *wlState, w *wlWaiter) (*target, *routeError) {
-	qctx, cancel := context.WithTimeout(ctx, r.cfg.QueueTimeout.D())
-	defer cancel()
+func (r *Router) waitNamed(ctx, qctx context.Context, ws *wlState, w *wlWaiter) (*target, *routeError) {
+	if h := r.onQueueDeadline; h != nil {
+		d, _ := qctx.Deadline()
+		h(d)
+	}
 	select {
-	case tg := <-w.ch:
-		return tg, nil
+	case res := <-w.ch:
+		return res.tg, res.err
 	case <-qctx.Done():
 	}
 	ws.lock()
 	removed, wasHead := ws.removeLocked(w)
 	ws.mu.Unlock()
 	if !removed {
-		// Placed just as it gave up: hand the reservation back.
-		(<-w.ch).release()
+		// Answered just as it gave up: hand a reservation back.
+		(<-w.ch).tg.release()
 	}
 	if wasHead {
 		// The waiter behind it is the head now, and may fit a route that was free all along.
@@ -335,26 +396,33 @@ func (r *Router) wakePass() {
 	r.passMu.Lock()
 	defer r.passMu.Unlock()
 	for {
-		placed := false
-		for _, ws := range r.wlByHead() {
-			if r.tryHead(ws) {
-				placed = true
+		progressed := false
+		heads := r.wlByHead()
+		if h := r.afterSort; h != nil {
+			h()
+		}
+		for _, h := range heads {
+			// A head answered, or a head that changed since the order was taken (its oldest request left): either way the order is taken again.
+			if r.tryHead(h.ws, h.seq) != headNone {
+				progressed = true
 				break
 			}
 		}
-		if !placed {
+		if !progressed {
 			break
 		}
 	}
 	r.pruneWorkloads()
 }
 
+// headed is a Workload's FIFO with the arrival number of its head when the order of a pass was taken.
+type headed struct {
+	ws  *wlState
+	seq uint64
+}
+
 // wlByHead is the Workloads whose FIFO holds a request, the one with the oldest head first.
-func (r *Router) wlByHead() []*wlState {
-	type headed struct {
-		ws  *wlState
-		seq uint64
-	}
+func (r *Router) wlByHead() []headed {
 	r.wlMu.Lock()
 	var hs []headed
 	for _, ws := range r.wls {
@@ -364,34 +432,53 @@ func (r *Router) wlByHead() []*wlState {
 	}
 	r.wlMu.Unlock()
 	sort.Slice(hs, func(i, j int) bool { return hs[i].seq < hs[j].seq })
-	out := make([]*wlState, len(hs))
-	for i, h := range hs {
-		out[i] = h.ws
-	}
-	return out
+	return hs
 }
 
 // tryHead tries the head of one Workload's FIFO against the view as it is now, under the Workload's mutex, and delivers the target when it places. A
 // head whose serving set has gone, or whose routes are all taken, keeps its place.
-func (r *Router) tryHead(ws *wlState) bool {
+func (r *Router) tryHead(ws *wlState, seq uint64) headResult {
 	ws.lock()
 	defer ws.mu.Unlock()
 	if len(ws.queue) == 0 {
-		return false
+		return headNone
 	}
 	w := ws.queue[0]
+	if w.seq != seq {
+		// The head the order was taken on left before this lock: the oldest request of this FIFO is another now, and the order must be taken again, or a
+		// younger request of this FIFO could be placed ahead of an older one of another (Q5).
+		return headStale
+	}
 	p, rerr := r.plan(w.n, w.res, w.key, w.exclude, w.withManaged)
 	if rerr != nil {
-		return false
+		// Its serving set has gone, or its provider: no route can take it. It leaves with the error, and the pass goes on to the next waiter.
+		ws.popHeadLocked()
+		w.ch <- wlResult{err: rerr.forWorkload(w.res.Name)}
+		return headAnswered
 	}
-	tg, _ := r.tryNamedLocked(ws, p)
-	if tg == nil {
-		return false
+	tg, canWait := r.tryNamedLocked(ws, p)
+	switch {
+	case tg != nil:
+		ws.popHeadLocked()
+		w.ch <- wlResult{tg: tg}
+		return headAnswered
+	case !canWait:
+		// Nothing is eligible for it now, after its exclusions and its level's filter: no wake can place it, and it must not hold the waiters behind it.
+		ws.popHeadLocked()
+		w.ch <- wlResult{err: errNoReadyTarget(w.n.Model).forWorkload(w.res.Name)}
+		return headAnswered
 	}
-	ws.popHeadLocked()
-	w.ch <- tg
-	return true
+	return headNone
 }
+
+// headResult is what tryHead did with a FIFO's head.
+type headResult int
+
+const (
+	headNone     headResult = iota // nothing placed or answered
+	headAnswered                   // the head was placed or answered with an error
+	headStale                      // the head was not the one the pass's order was taken on
+)
 
 // pruneWorkloads drops the state of each Workload that has left the view and has nothing in flight or waiting: its FIFO has drained (Q15).
 func (r *Router) pruneWorkloads() {
@@ -457,7 +544,7 @@ func (r *Router) waitingSamples() []waitSample {
 	byName := map[string]int{}
 	r.wlMu.Lock()
 	for _, ws := range r.wls {
-		byName[ws.key[strings.IndexByte(ws.key, '/')+1:]] += int(ws.waiting.Load())
+		byName[ws.name] += int(ws.waiting.Load())
 	}
 	r.wlMu.Unlock()
 	for name, n := range byName {

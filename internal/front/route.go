@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/balancer"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/inventory"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/naming"
@@ -36,7 +38,10 @@ type target struct {
 // target that is not eligible; one that joined the Workload's namespace since is not in the set.
 type Resolution struct {
 	Namespace, Name string
-	serving         map[string]bool // namespace/name of each ModelDeployment of the serving set, served or managed-source
+	// uid is the resolved Workload object's UID: the front's state of a Workload (its managed count and FIFO) is kept per object, so a Workload deleted and
+	// created again under the same name starts with none of the deleted one's.
+	uid     types.UID
+	serving map[string]bool // namespace/name of each ModelDeployment of the serving set, served or managed-source
 	// charge is the Workload's c when it resolved: its typical context plus its typical output, which every attempt of the request reserves against
 	// an Instance's token budget (HBEP-5, Workloads, The count in tokens). A request keeps the definition it came with, so an edit of the Workload
 	// changes no request already resolved (the science agent's Q15 ruling on #764).
@@ -308,7 +313,7 @@ func servingSet(m *inventory.Model, wl *inventory.Workload) ([]*inventory.Deploy
 
 // newResolution records the serving set a Workload resolved to.
 func newResolution(wl *inventory.Workload, served []*inventory.Deployment, sources []*inventory.ManagedSource) *Resolution {
-	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, serving: map[string]bool{}, charge: wl.Charge,
+	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, uid: wl.UID, serving: map[string]bool{}, charge: wl.Charge,
 		managedFirst: wl.ManagedFirst && wl.ManagedSessions > 0, managedMax: wl.ManagedSessions}
 	for _, d := range served {
 		res.serving[d.Key] = true
