@@ -1,0 +1,26 @@
+# A Workload: one class of a study's requests, declared once in the study's namespace (beta;
+# HBEP-3, HBEP-5 Workloads, HBEP-764). A request names it by the header x-hpcburst-workload or
+# by a suffix on the model, Qwen/Qwen2.5-1.5B-Instruct#labelling, and the front then places it
+# only on the ModelDeployments of this namespace that list it in spec.workloads, or list none.
+# modeldeployment-qwen25-labelling.yaml lists it.
+#
+# spec.model is the ModelDeployment's spec.model, and the name is a DNS label of at most 63
+# characters, since it follows a "#" in a model name. The shape is the typical and longest
+# context and output of the study's requests, in tokens. routeOrder is left out: OwnFirst, our
+# Instances first and LLMLab for overflow only, is the default and the only order the front
+# routes yet. managedSessions is left out too: it is refused until the front routes it.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Workload
+metadata:
+  name: labelling
+  namespace: default
+spec:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  shape:
+    contextTokens:
+      typical: 1024
+      longest: 3072
+    outputTokens:
+      typical: 16
+      longest: 64
+  sessions: 8

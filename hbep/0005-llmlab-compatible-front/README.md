@@ -236,7 +236,7 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
 ### Request path
 
 1. **Authenticate.** The `Authorization: Bearer` key must equal one of the client keys in `clientKeysFile` (mode 600, HBEP-11 Credentials). Each entry has an ID, which usage records carry; the key itself is never logged. Otherwise 401.
-2. **Parse the name** by HBEP-3's grammar: split at the last `@`; `model`, `model@<provider>` or `model@<provider>/<deployment-id>`. In beta a `#<workload>` suffix is split off first, at the last `#` (Workloads; HBEP-3). A grammar error, an unknown provider or a malformed ID is a 400 and never falls back to a plain model (HBEP-3).
+2. **Parse the name** by HBEP-3's grammar: split at the last `@`; `model`, `model@<provider>` or `model@<provider>/<deployment-id>`. In beta a `#<workload>` suffix is split off first, at the name's only `#` (Workloads; HBEP-3). A grammar error, an unknown provider or a malformed ID is a 400 and never falls back to a plain model (HBEP-3).
 3. **Resolve the candidates.** The ModelDeployments whose `spec.model` is the model name, in the namespaces the front watches; for a request that names a Workload, only those that serve it (Workloads). Then:
    - `model`: every routable target of those ModelDeployments;
    - `model@<provider>`: those on that provider only;
@@ -728,6 +728,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-17: beta's open questions sharpened without a live job: S2c's rule and its three outcomes; GH200's glibc rule; membership's stale "open" label fixed (erratum); the bound's return rule; weighting's GPU-free measurement; the front's `capacity` answer matches `gateway.overloadStatus`, whose value no longer gates beta.
 - 2026-11-17: revised by its Fable and Gemini Carbon reviews (PR #679), and the owner's answers of 17 Nov 2026: S2c's default router applies per platform, only where the profile records the compute nodes' glibc at 2.30 or later (open question 2); LLMLab takes overflow only (open question 4), and one front for beta, revisited with the team option (open question 11).
 - 2026-11-18: amendment from HBEP-764: Workloads, named per request, served by their own deployments, ordered per Workload, and counted against a token budget per Instance (Workloads).
+- 2026-11-18: erratum (the science agent's ruling Q1 on #764's stage-0 plan, 18 Nov 2026): Request path step 2 splits a Workload suffix off at the name's only `#`, as HBEP-3's Grammar does; it read "the last `#`".
 
 ## Amendments
 

@@ -58,28 +58,28 @@ func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc, events *eventc
 		reg: prometheus.NewRegistry(),
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "hpcburst_front_requests_total",
-			Help: "Requests the front answered, by the HTTP status the client got. One per usage record. provider and model_deployment are empty for an error raised before a target was chosen.",
-		}, []string{"code", "endpoint", "provider", "model_deployment"}),
+			Help: "Requests the front answered, by the HTTP status the client got. One per usage record. provider and model_deployment are empty for an error raised before a target was chosen; workload is the request's resolved Workload, empty for a request that names none or was refused before one resolved.",
+		}, []string{"code", "endpoint", "provider", "model_deployment", "workload"}),
 		cuts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "hpcburst_front_cuts_total",
-			Help: "Requests cut before they ended, by the hop that cut them (HBEP-5 cutBy).",
-		}, []string{"cut_by", "provider", "model_deployment"}),
+			Help: "Requests cut before they ended, by the hop that cut them (HBEP-5 cutBy). workload is the request's resolved Workload, empty for a request that names none or was refused before one resolved.",
+		}, []string{"cut_by", "provider", "model_deployment", "workload"}),
 		pauses: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "hpcburst_front_pauses_total",
 			Help: "Pauses of a target after failed connections.",
 		}, []string{"provider", "model_deployment"}),
 		ttft: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "hpcburst_front_time_to_first_token_seconds",
-			Help:    "Time from the request's arrival to its first content event, from live traffic. A request without a first token is not observed.",
+			Help:    "Time from the request's arrival to its first content event, from live traffic. A request without a first token is not observed. workload is the request's resolved Workload, empty for a request that names none.",
 			Buckets: ttftBuckets,
-		}, []string{"provider", "model_deployment", "endpoint"}),
+		}, []string{"provider", "model_deployment", "endpoint", "workload"}),
 	}
 	m.reg.MustRegister(m.requests, m.cuts, m.pauses, m.ttft, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	if events != nil {
 		events.Zero(eventcount.ControllerFront, RaisedEvents())
 		m.reg.MustRegister(events)
 	}
-	m.known("", "") // the cuts of a request that never had a target
+	m.known("", "") // the cuts of a request that never had a target, and named no Workload
 	if sink != nil {
 		m.reg.MustRegister(&usageCollector{sink: sink, dir: dir, free: free})
 	}
@@ -173,6 +173,8 @@ func (m *Metrics) Handler() http.Handler {
 // the status the client got, its cut, and its time to first token. The labels
 // of the target come from the record, and are empty when no target was chosen
 // (the record's modelDeployment can still name one then, for a capacity error).
+// The workload label is the record's workload: its name once the request's
+// Workload resolved, so a refusal after that carries it, and empty otherwise.
 func (m *Metrics) observe(r usage.Record) {
 	if m == nil {
 		return
@@ -181,13 +183,17 @@ func (m *Metrics) observe(r usage.Record) {
 	if provider == "" {
 		dep = "" // no target was chosen
 	}
+	workload := ""
+	if r.Workload != nil {
+		workload = *r.Workload
+	}
 	endpoint := endpointLabel(r.Path)
-	m.requests.WithLabelValues(strconv.Itoa(r.Status), endpoint, provider, dep).Inc()
+	m.requests.WithLabelValues(strconv.Itoa(r.Status), endpoint, provider, dep, workload).Inc()
 	if r.CutBy != nil {
-		m.cuts.WithLabelValues(*r.CutBy, provider, dep).Inc()
+		m.cuts.WithLabelValues(*r.CutBy, provider, dep, workload).Inc()
 	}
 	if r.FirstTokenMs != nil {
-		m.ttft.WithLabelValues(provider, dep, endpoint).Observe(float64(*r.FirstTokenMs) / 1000)
+		m.ttft.WithLabelValues(provider, dep, endpoint, workload).Observe(float64(*r.FirstTokenMs) / 1000)
 	}
 }
 
@@ -198,14 +204,16 @@ var cutReasons = []string{cutFrontDeadline, cutFrontIdle, cutFrontHeaders, cutTu
 // samples: a count of the front's own events starts at 0, so a healthy front
 // shows zeros, and the first event has a zero before it for rate and
 // increase): one cut series for each cut_by and one pause series. An empty
-// provider and deployment are the cuts of a request that had no target. It is
+// provider and deployment are the cuts of a request that had no target. Only the
+// series with an empty workload are created: a Workload's series appear with its
+// first request, so a Workload object adds none (HBEP-8, Front metrics). It is
 // idempotent.
 func (m *Metrics) known(provider, deployment string) {
 	if m == nil {
 		return
 	}
 	for _, c := range cutReasons {
-		m.cuts.WithLabelValues(c, provider, deployment)
+		m.cuts.WithLabelValues(c, provider, deployment, "")
 	}
 	if provider != "" || deployment != "" {
 		m.pauses.WithLabelValues(provider, deployment)

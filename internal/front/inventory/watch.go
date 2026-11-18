@@ -20,6 +20,7 @@ import (
 var (
 	GVRModelDeployments = v1alpha1.GroupVersion.WithResource("modeldeployments")
 	GVRInstances        = v1alpha1.GroupVersion.WithResource("instances")
+	GVRWorkloads        = v1alpha1.GroupVersion.WithResource("workloads")
 	GVRProviders        = v1alpha1.GroupVersion.WithResource("providers")
 	GVRPlatformProfiles = v1alpha1.GroupVersion.WithResource("platformprofiles")
 )
@@ -30,7 +31,7 @@ var (
 // add, update or delete. It reads only: the front writes no object but its
 // events.
 type Watch struct {
-	namespaced []cache.SharedIndexInformer // per namespace: deployments, instances
+	namespaced []cache.SharedIndexInformer // per namespace: deployments, instances, workloads
 	cluster    []cache.SharedIndexInformer // providers, profiles
 	factories  []dynamicinformer.DynamicSharedInformerFactory
 	byKind     map[schema.GroupVersionResource][]cache.SharedIndexInformer
@@ -49,10 +50,13 @@ func NewWatch(client dynamic.Interface, namespaces []string, onChange func()) *W
 	if len(namespaces) == 0 {
 		namespaces = []string{""}
 	}
+	// A namespace the configuration lists twice is watched once: a second informer on it would list every object there a second time, and the
+	// view would then hold each Workload twice and refuse every request that names one as ambiguous (the review of #778, finding 4).
+	namespaces = distinct(namespaces)
 	for _, ns := range namespaces {
 		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(client, 0, ns, nil)
 		w.factories = append(w.factories, f)
-		for _, gvr := range []schema.GroupVersionResource{GVRModelDeployments, GVRInstances} {
+		for _, gvr := range []schema.GroupVersionResource{GVRModelDeployments, GVRInstances, GVRWorkloads} {
 			w.add(f, gvr)
 		}
 	}
@@ -64,10 +68,23 @@ func NewWatch(client dynamic.Interface, namespaces []string, onChange func()) *W
 	return w
 }
 
+// distinct is the names without a repeat, in their order.
+func distinct(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func (w *Watch) add(f dynamicinformer.DynamicSharedInformerFactory, gvr schema.GroupVersionResource) {
-	// The kinds NewWatch gives add are its four: a list and a watch of each, which is what the front's role grants
+	// The kinds NewWatch gives add are its five: a list and a watch of each, which is what the front's role grants
 	// (internal/rbacscan checks the role against this call).
-	//rbac:resources hpcburst.groundnuty.github.io/modeldeployments hpcburst.groundnuty.github.io/instances hpcburst.groundnuty.github.io/providers hpcburst.groundnuty.github.io/platformprofiles
+	//rbac:resources hpcburst.groundnuty.github.io/modeldeployments hpcburst.groundnuty.github.io/instances hpcburst.groundnuty.github.io/workloads hpcburst.groundnuty.github.io/providers hpcburst.groundnuty.github.io/platformprofiles
 	inf := f.ForResource(gvr).Informer()
 	kind := gvr.Resource
 	touch := func() {
@@ -161,6 +178,14 @@ func (w *Watch) Snapshot() (Snapshot, []string) {
 		err := fromUnstructured(u, &o)
 		if err == nil {
 			s.Instances = append(s.Instances, o)
+		}
+		return err
+	})
+	convert(GVRWorkloads, func(u *unstructured.Unstructured) error {
+		var o v1alpha1.Workload
+		err := fromUnstructured(u, &o)
+		if err == nil {
+			s.Workloads = append(s.Workloads, o)
 		}
 		return err
 	})

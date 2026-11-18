@@ -268,7 +268,7 @@ func full(i int) usage.Record {
 	return usage.Record{
 		RequestID: fmt.Sprintf("req-%d", i), StartTime: "2026-10-31T12:00:00.000Z", EndTime: "2026-10-31T12:00:01.250Z",
 		ClientKeyID: "client-a", Path: "/v1/chat/completions", RequestedModel: "example-27b@helios-a/0123456789ab",
-		Level: "pinned", Provider: "helios-a", ModelDeployment: "ns/md", DeploymentID: strings.Repeat("ab", 32),
+		Level: "pinned", Workload: s("study-a"), Provider: "helios-a", ModelDeployment: "ns/md", DeploymentID: strings.Repeat("ab", 32),
 		Instance: "ns/md-0", InstanceUID: "uid-1", Emitter: "instance", Status: 200, Stream: true,
 		Finish: s("stop"), CutBy: s("lease_end"), PromptTokens: &n, CachedTokens: ptr(n + 1), CompletionTokens: ptr(n + 2),
 		CountsSource: s("engine"), FirstTokenMs: ptr(n + 3), DurationMs: n + 4, ContentEvents: ptr(n + 5),
@@ -344,7 +344,7 @@ func TestRecordMembers(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("%d lines, want 2", len(lines))
 	}
-	hbep := []string{"counter", "requestID", "startTime", "endTime", "clientKeyID", "path", "requestedModel", "level", "provider",
+	hbep := []string{"counter", "requestID", "startTime", "endTime", "clientKeyID", "path", "requestedModel", "level", "workload", "provider",
 		"modelDeployment", "deploymentID", "instance", "instanceUID", "emitter", "status", "stream", "finish", "cutBy",
 		"promptTokens", "cachedTokens", "completionTokens", "countsSource", "firstTokenMs", "durationMs"}
 	var members [2]map[string]any
@@ -358,12 +358,12 @@ func TestRecordMembers(t *testing.T) {
 			}
 		}
 	}
-	for _, k := range []string{"finish", "cutBy", "promptTokens", "cachedTokens", "completionTokens", "countsSource", "firstTokenMs"} {
+	for _, k := range []string{"workload", "finish", "cutBy", "promptTokens", "cachedTokens", "completionTokens", "countsSource", "firstTokenMs"} {
 		if v := members[1][k]; v != nil {
 			t.Errorf("an unknown %s = %v, want null", k, v)
 		}
 	}
-	if members[0]["finish"] != "stop" || members[0]["cutBy"] != "lease_end" || members[0]["countsSource"] != "engine" || members[0]["contentEvents"] != float64(6) {
+	if members[0]["finish"] != "stop" || members[0]["cutBy"] != "lease_end" || members[0]["countsSource"] != "engine" || members[0]["contentEvents"] != float64(6) || members[0]["workload"] != "study-a" {
 		t.Errorf("a full record lost members: %s", lines[0])
 	}
 }

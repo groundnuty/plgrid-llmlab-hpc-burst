@@ -7,6 +7,7 @@
 package inventory
 
 import (
+	"slices"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -18,6 +19,7 @@ import (
 type Snapshot struct {
 	Deployments []v1alpha1.ModelDeployment
 	Instances   []v1alpha1.Instance
+	Workloads   []v1alpha1.Workload
 	Providers   []v1alpha1.Provider
 	Profiles    []v1alpha1.PlatformProfile
 }
@@ -41,6 +43,12 @@ type Inputs struct {
 type View struct {
 	Models    map[string]*Model        // by model name (spec.model)
 	Providers map[string]*ProviderInfo // every Provider, by name
+	// Workloads are the Workload objects by their model (spec.model) and then
+	// their name, kept apart from Models: a Workload of a model no
+	// ModelDeployment names still resolves, so a request that names it is
+	// refused for what it is (HBEP-5, Workloads, Naming it), not as a model that
+	// is not attached.
+	Workloads map[string]map[string][]*Workload
 	// Joined are the Instances routable in this view; pass them to the next
 	// Build.
 	Joined map[types.UID]bool
@@ -60,7 +68,46 @@ type Model struct {
 	Name    string
 	Served  []*Deployment
 	Managed []*ManagedTarget
+	// ManagedSources are the managed-source ModelDeployments that attach the
+	// model, with a target or not: a Workload's serving set counts them, so a
+	// serving managed deployment whose catalog entry is not listed now gives
+	// no_ready_target, not not_attached (HBEP-5, Workloads, Who serves it).
+	ManagedSources []*ManagedSource
 }
+
+// Workload is one Workload object (HBEP-5, Workloads). Only what the front
+// routes on is read: its identity and its model.
+type Workload struct {
+	Key       string // namespace/name
+	Namespace string
+	Name      string
+	Model     string // spec.model
+}
+
+// ManagedSource is a managed-source ModelDeployment that attaches a model.
+type ManagedSource struct {
+	Key       string // namespace/name
+	Namespace string
+	// Workloads is its spec.workloads: the Workloads it serves; empty serves
+	// every Workload of its model in its namespace.
+	Workloads []string
+}
+
+// serves reports whether a ModelDeployment in namespace ns with spec.workloads
+// list serves the Workload: it is in the Workload's own namespace, and lists the
+// Workload or lists none (HBEP-5, Workloads, Who serves it; HBEP-7).
+func serves(ns string, list []string, w *Workload) bool {
+	return ns == w.Namespace && (len(list) == 0 || slices.Contains(list, w.Name))
+}
+
+// Serves reports whether the served ModelDeployment serves the Workload.
+func (d *Deployment) Serves(w *Workload) bool { return serves(d.Namespace, d.Workloads, w) }
+
+// Serves reports whether the managed-source ModelDeployment serves the Workload.
+func (s *ManagedSource) Serves(w *Workload) bool { return serves(s.Namespace, s.Workloads, w) }
+
+// Serves reports whether the target's ModelDeployment serves the Workload.
+func (t *ManagedTarget) Serves(w *Workload) bool { return serves(t.Namespace, t.Workloads, w) }
 
 // Deployment is a served ModelDeployment and its routable Instances.
 type Deployment struct {
@@ -78,7 +125,10 @@ type Deployment struct {
 	// MaxRequestDuration is the deadline that applies to its requests: the
 	// shorter of the front's and spec.routing.maxRequestDuration.
 	MaxRequestDuration time.Duration
-	Members            []*Instance // routable, sorted by Key
+	// Workloads is spec.workloads: the Workloads it serves; empty serves every
+	// Workload of its model in its namespace (Serves).
+	Workloads []string
+	Members   []*Instance // routable, sorted by Key
 }
 
 // Instance is one routable Instance.
@@ -114,6 +164,8 @@ type ManagedTarget struct {
 	DisplayID          string
 	CredentialsFile    string // the Provider's credentialsRef.file
 	MaxRequestDuration time.Duration
+	// Workloads is its managed-source ModelDeployment's spec.workloads (Serves).
+	Workloads []string
 }
 
 // ProviderInfo is what the front reads of a Provider.
