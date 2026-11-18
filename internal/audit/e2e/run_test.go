@@ -7,7 +7,7 @@ package e2e
 // the API server's audit log FILES (the plain one and the rotated gzip ones), each event under its own user.username.
 //
 // What each part shows, and what it does not (the phases are in this file, their assertions in checks_test.go, the size
-// report in size_test.go and the rotation in rotation_test.go):
+// report in size_test.go, the rotation in rotation_test.go and the Keep link in removal_test.go):
 //   - (b) the Operation's life: the create by the requester at RequestResponse with its spec and purpose, the lifecycle
 //     identity's operations/status write with the plan, the confirm, the Approval's create by the approver with its
 //     plan ID, and the two agents under different user names, neither the administrator's; then the approved End's
@@ -16,6 +16,10 @@ package e2e
 //   - (e) a Secret whose value is a random marker is created, read and patched, and the marker, in its raw and
 //     base64 forms, is in no log file, plain or gunzipped, as a whole token; the same matcher finds a marker placed in an
 //     Operation's logged body, so a clean result is not a matcher that cannot see a body;
+//   - (c) the Keep link: after the controller's clock moves 7 days the removal takes both finished Operations (asserted
+//     GONE, not deleting, before the log is read), and the log's FILES still hold the plan that lists md2's kept Allocation by
+//     its UID as a Keep with needsApproval and its cost, then that Allocation's release (retention's own cause write, and
+//     the delete by that UID), both at Request level;
 //   - (d) the log rotates, with more rotated files than the old maxbackup=3 kept, each a gzip file and none removed,
 //     the first request's line still found in the oldest file;
 //   - the controllers' Lease reads and renewals are not in the log (rule 1, None), shown beside a renewal that did
@@ -70,6 +74,7 @@ func TestTheAuditLogOfAnOperationsLifeAndItsRotation(t *testing.T) {
 	t.Run("size: the log per Operation and per minute of an idle controller", func(t *testing.T) {
 		s.world.reportSize(t, s.rd, s.windowStart, s.windowEnd, 2)
 	})
+	t.Run("c: the Keep link survives the Operation's removal", s.checkKeepLink)
 	t.Run("d: rotation keeps every file, gzipped", func(t *testing.T) { s.world.rotation(t, s.rd) })
 	t.Run("e: after the rotation, in every file", s.checkSecretAfterRotation)
 	t.Run("no controller identity was refused", s.checkNoRefusals)
@@ -81,7 +86,7 @@ func newScenario(t *testing.T) *scenario {
 	w := newWorld(t)
 	s := &scenario{world: w, rd: newReader(w.logPath), prov: w.makeProvider()}
 	w.keepProviderFresh(s.prov)
-	w.startLifecycle(nil)
+	w.startLifecycle(w.clock)
 	return s
 }
 

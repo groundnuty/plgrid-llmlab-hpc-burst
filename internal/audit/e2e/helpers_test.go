@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,14 +42,7 @@ func (w *world) keepProviderFresh(prov *v1alpha1.Provider) {
 				return
 			case <-time.After(15 * time.Second):
 			}
-			var cur v1alpha1.Provider
-			if err := w.admin.c.Get(ctx, client.ObjectKeyFromObject(prov), &cur); err != nil {
-				continue
-			}
-			apimeta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPolled, LastTransitionTime: metav1.Now()})
-			at := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
-			cur.Status.LastSuccessfulStatusRead = &at
-			_ = w.admin.c.Status().Update(ctx, &cur, client.FieldOwner(v1alpha1.FieldManagerProvider)) // the next tick tries again
+			_ = w.refreshProvider(prov) // the next tick tries again
 		}
 	}()
 	w.t.Cleanup(func() { cancel(); wg.Wait() })
