@@ -146,6 +146,11 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		uid  types.UID
 		role unitRole
 	}]bool{}
+	// add counts a unit once by its Instance's UID and role. Both loops below read ONE snapshot (slot_snapshot.go), so a
+	// Running Allocation is never a reserved unit in one loop and absent from the other because the world moved between two
+	// lists; a duplicate remains possible when an Allocation names the Provider but not its deployment's label: the Provider's
+	// own list shows it Running (a reserved unit) while the deployment's view, by label, shows its Instance with no Allocation
+	// (a unit in flight). The row pins that case.
 	add := func(u extraUnit) {
 		k := struct {
 			uid  types.UID

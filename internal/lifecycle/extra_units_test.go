@@ -510,3 +510,29 @@ func TestAnotherDeploymentsListedPrimaryIsPreferredToItsInFlightTwin(t *testing.
 		}
 	}
 }
+
+// TestAnAllocationOfTheProviderWhoseDeploymentViewDoesNotShowItCountsItsHandoverOnce (D5, M3): md-e's extra on provider-a (md-e
+// ends at 09:30; pe listed) beside md-o (no end time), whose primary po is Running on an Allocation that names provider-a but
+// carries no model-deployment label. The Provider's own list shows the Allocation, so po holds a reserved handover slot, and
+// md-o's view by label does not, so po also reads as an Instance in flight: the SAME Instance and role twice. By hand, once:
+// listed pe 1 + po 1 + po's reserved handover slot 1 + the extra 1 = 4, so refused at limit 3 and admitted at limit 4. Counted
+// twice the unit's slot is left again, 5 > 4: refused at limit 4.
+func TestAnAllocationOfTheProviderWhoseDeploymentViewDoesNotShowItCountsItsHandoverOnce(t *testing.T) {
+	end := hoT(9, 30, 0)
+	f := &unitFx{}
+	f.md("md-e", &end)
+	f.md("md-o", nil)
+	f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	f.alloc("md-e", "pe", provA, false)
+	f.inst("md-o", "po", provA, "uid-po", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
+	f.alloc("md-o", "po", provA, true)
+	f.objs[len(f.objs)-1].(*v1alpha1.Allocation).Labels = map[string]string{v1alpha1.LabelProvider: provA}
+	for _, c := range []struct {
+		limit int32
+		ok    bool
+	}{{3, false}, {4, true}} {
+		if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", i32(c.limit), nil, rigNS+"/md-e", "")); a.ok != c.ok {
+			t.Fatalf("limit %d: ok %v with a count of %d, want %v: po's handover is left room for once", c.limit, a.ok, a.count, c.ok)
+		}
+	}
+}
