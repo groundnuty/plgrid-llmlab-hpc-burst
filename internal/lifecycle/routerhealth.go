@@ -17,6 +17,9 @@ import (
 //   - the controller writes status.healthyWorkers from the report of the router's /clusters, taking it
 //     only from a report whose router part echoes the desired router generation, so a stale report
 //     cannot undo the router rung's 0;
+//   - a worker counts only on a read of /clusters taken after its current process started and at most two
+//     probe intervals old at the report; past that window nobody counts, healthyWorkers is 0 and the front
+//     skips the Instance until a fresh read (identityHealthy; the science agent's ruling on #764, 18 Nov 2026);
 //   - a worker the router holds failing its active check for health.failureThreshold reports in a row,
 //     while its current generation is verified, enters the worker rung (RouterCheckFailing); a
 //     restarted worker is failing by design during its own warm-up, and an ejection alone is no signal;
@@ -59,41 +62,90 @@ func verifiedGeneration(in *v1alpha1.Instance) *int64 {
 	return &g
 }
 
-// routerHealthy is the workers the router holds healthy and not ejected, from a report that echoes the
-// desired router generation: none once the router has exited. ok is false when the report says nothing
-// current. It is the set healthyCount counts; the KV cache size is taken over a subset of it (kvRouterWorkers).
-func routerHealthy(in *v1alpha1.Instance, av agentView) (names []string, ok bool) {
+// readState says what a report tells about the router's view of its workers: whether there is a read, and
+// whether it is current at the report.
+type readState int
+
+const (
+	// readNone: the report says nothing current about the router's workers: no report, a report that does
+	// not echo the desired router generation, a router that is not running, or no /clusters read yet.
+	readNone readState = iota
+	// readFresh: a read at most agentapi.MetricsStaleProbeIntervals probe intervals old at the report's own
+	// time, or a router that has exited or stopped (no worker is healthy behind it, a current fact).
+	readFresh
+	// readStale: a read older than that, or one whose age cannot be judged (a probe interval or a report
+	// time that is not known): no worker counts.
+	readStale
+)
+
+// identityHealthy is the one join of the router's view to the workers' processes, for healthyWorkers
+// (healthyCount) and the KV cache size (kvRouterWorkers) alike (`@hpc-burst-science-agent`, 18 Nov 2026,
+// #764, the ruling on healthyWorkers; HBEP-7, Several workers). The router's report names a worker and no
+// process, so its healthy flag could be the flag of a worker's predecessor. A worker counts only if all of
+// these hold:
+//   - the router holds it healthy and not ejected, in a report that echoes the desired router generation;
+//   - the router's /clusters read postdates its current process's start (the report's StartTime, both on
+//     the agent's clock), so a read taken after the start shows the replacement's own state: the agent
+//     holds a restarted worker out of the router (its readiness answers 503) until its new generation is
+//     verified. The agent cannot stamp a generation on an Envoy host, which has none, so the join is on
+//     time. A worker with no report or no StartTime is a process the controller cannot place: not counted;
+//   - the read is at most agentapi.MetricsStaleProbeIntervals probe intervals old at the report's own time
+//     (exactly that old is still fresh). A failed /clusters read is not flagged in the report: the agent
+//     keeps the last good Workers and ClustersReadAt (internal/agent routerRead) and the age says how old
+//     it is, so one failed read inside the window changes nothing.
+//
+// state is readNone when the report says nothing current (today's ok == false), readStale past the window
+// or when the window cannot be judged (names are nil: none counts), readFresh otherwise.
+func identityHealthy(in *v1alpha1.Instance, av agentView) (names []string, state readState) {
 	rr := currentRouter(in, av)
 	switch {
 	case rr == nil:
-		return nil, false
+		return nil, readNone
 	case rr.Phase == agentapi.PartExited || rr.Phase == agentapi.PartStopped:
-		return nil, true
+		return nil, readFresh
 	case rr.Phase != agentapi.PartRunning || rr.ClustersReadAt == nil:
-		return nil, false
+		return nil, readNone
+	}
+	bound := agentapi.MetricsStaleProbeIntervals * av.probeInterval
+	if av.probeInterval <= 0 || av.reportTime.IsZero() || av.reportTime.Sub(*rr.ClustersReadAt) > bound {
+		return nil, readStale
 	}
 	for _, w := range rr.Workers {
-		if w.Healthy && !w.Ejected {
+		if !w.Healthy || w.Ejected {
+			continue
+		}
+		if wr := reportOf(av.report, w.Name); wr != nil && wr.StartTime != nil && rr.ClustersReadAt.After(*wr.StartTime) {
 			names = append(names, w.Name)
 		}
 	}
-	return names, true
+	return names, readFresh
 }
 
-// healthyCount is the router's healthy workers from a report that echoes the desired router generation:
-// the workers it holds healthy and not ejected while it runs, and 0 once it has exited. ok is false when
-// the report says nothing current.
+// healthyCount is the Instance's healthy workers from a report that echoes the desired router generation,
+// by identityHealthy: the workers the router holds healthy and not ejected on a fresh read that came after
+// their current process started, and 0 once the router has exited. ok is false when the report says
+// nothing current (no read yet): the field is then not written, and stays absent until the first read.
 func healthyCount(in *v1alpha1.Instance, av agentView) (int32, bool) {
-	names, ok := routerHealthy(in, av)
-	return int32(len(names)), ok
+	names, state := identityHealthy(in, av)
+	switch state {
+	case readFresh:
+		return int32(len(names)), true
+	case readStale:
+		// Past the window nobody counts: healthyWorkers 0, so the front skips the Instance (it is not
+		// eligible, internal/front/inventory/build.go) and its balancer keeps its in-flight count
+		// (HBEP-5, Load bound and cap), until a fresh read writes the real count (`@hpc-burst-science-agent`,
+		// 18 Nov 2026, #764; team-lead, the same day).
+		return 0, true
+	}
+	return 0, false
 }
 
 // writeWorkerCounts writes status.healthyWorkers and status.kvCacheTokens from a report, in ONE status
 // update when either changes, and none when neither does. The front's cap is healthyWorkers times
 // launch.maxNumSeqs and its token budget is kvCacheTokens times healthyWorkers, so two updates would
 // let it read a mixed pair between them: 2 workers at 400000 before 2 workers at 100000 lands, when a
-// 100000 worker rejoins a 400000 one (PR 780's review). healthyWorkers follows #429's rule only
-// (healthyCount, behind a router); the KV cache size follows kvcache.go's.
+// 100000 worker rejoins a 400000 one (PR 780's review). Both fields count the workers of identityHealthy;
+// healthyWorkers is written behind a router only (healthyCount), the KV cache size by kvcache.go's rules.
 func (p *pass) writeWorkerCounts(in *v1alpha1.Instance, av agentView) error {
 	var changes []func(*v1alpha1.InstanceStatus)
 	if routed(in) {

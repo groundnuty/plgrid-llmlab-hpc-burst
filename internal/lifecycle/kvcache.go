@@ -54,37 +54,11 @@ func kvCounted(in *v1alpha1.Instance, av agentView) []string {
 	return nil
 }
 
-// kvRouterWorkers is the router's healthy workers (routerHealthy, the set healthyCount counts) that the
-// KV cache size may be taken over: a subset of it, for two reasons healthyCount does not need to meet
-// (`@hpc-burst-science-agent`, 18 Nov 2026, #764, Q4 as revised, and PR 780's review):
-//   - Identity. The router's report names a worker and no process, so its healthy flag could be the flag of
-//     a worker's predecessor: a replacement's size would count under it before the router has seen the
-//     replacement. A worker counts only if the router's read postdates its current process's start. The
-//     agent takes both times on its own clock and holds a restarted worker out of the router (its
-//     readiness answers 503) until its new generation is verified, so a read taken after the start shows
-//     the replacement's own state. The agent cannot stamp a generation on an Envoy host, which has none,
-//     so the join is on time.
-//   - A failed read is unknown. When the agent cannot read /clusters, the last read stands and its time
-//     says how old it is (the agent's routerRead). A read older than agentapi.MetricsStaleProbeIntervals
-//     probe intervals at the report's own time, or a probe interval that is not known, makes every worker
-//     unknown: none counts.
-//
-// healthyWorkers is unchanged by both: healthyCount keeps its own rule (#429).
+// kvRouterWorkers is the router's healthy workers whose process the router has read and whose read is
+// current: identityHealthy's names, the very set healthyWorkers counts (`@hpc-burst-science-agent`, 18 Nov
+// 2026, #764, Q4 as revised, and PR 780's review; the join is identityHealthy's). A read that is stale or
+// absent makes every worker unknown: none counts.
 func kvRouterWorkers(in *v1alpha1.Instance, av agentView) []string {
-	names, ok := routerHealthy(in, av)
-	if !ok || len(names) == 0 {
-		return nil
-	}
-	rr := currentRouter(in, av)
-	bound := agentapi.MetricsStaleProbeIntervals * av.probeInterval
-	if rr == nil || rr.ClustersReadAt == nil || av.probeInterval <= 0 || av.reportTime.IsZero() || av.reportTime.Sub(*rr.ClustersReadAt) > bound {
-		return nil
-	}
-	var out []string
-	for _, name := range names {
-		if w := reportOf(av.report, name); w != nil && w.StartTime != nil && rr.ClustersReadAt.After(*w.StartTime) {
-			out = append(out, name)
-		}
-	}
-	return out
+	names, _ := identityHealthy(in, av)
+	return names
 }
