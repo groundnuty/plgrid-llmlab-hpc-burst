@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -39,6 +40,13 @@ import (
 // file (pkg/provider.ManagedCredentials: key and baseURL, mode 600), and skips
 // with a message otherwise. HPCBURST_LLMLAB_MODEL, when set, replaces the
 // default model.
+//
+// The file also holds the min_tokens probe (TestLLMLabMinTokens, HBEP-764 item
+// 4), run only by its own row: at most two more streamed chat requests of at
+// most llMaxTokens tokens, one without min_tokens and one with it, to learn
+// whether LLMLab honours the field. Its verdict decides the baseline row's
+// LIVE_STUDYLOAD_OMIT_MIN_TOKENS switch. The smoke test below does not run it,
+// and its count of requests and records is unchanged.
 //
 // Reading "the usage record of each request": only the two chat requests
 // reach LLMLab, so only their records carry the managed Provider, the managed
@@ -174,6 +182,31 @@ func (s *llSeen) observe(t *testing.T, label string, payload []byte) {
 			s.cached = r.Usage.Details.Cached
 		}
 	}
+}
+
+// llObserveStream reads the data events of a streamed reply into one llSeen. It
+// stops the step when the stream has fewer than two events or does not end with
+// [DONE].
+func llObserveStream(t *testing.T, label string, data []byte) llSeen {
+	t.Helper()
+	var seen llSeen
+	var payloads []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if p, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "data:"); ok {
+			payloads = append(payloads, strings.TrimSpace(p))
+		}
+	}
+	if n := len(payloads); n < 2 || payloads[n-1] != "[DONE]" {
+		t.Fatalf("the stream has %d data events and does not end with [DONE]", len(payloads))
+	}
+	for _, p := range payloads[:len(payloads)-1] {
+		if p == "[DONE]" {
+			t.Errorf("[DONE] before the end of the stream")
+			continue
+		}
+		seen.observe(t, label, []byte(p))
+	}
+	return seen
 }
 
 // jsonKind names a decoding error without the bytes it choked on.
@@ -498,23 +531,7 @@ func TestLLMLabThroughTheFront(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status %d, want 200", resp.StatusCode)
 		}
-		var seen llSeen
-		var payloads []string
-		for _, line := range strings.Split(string(data), "\n") {
-			if p, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "data:"); ok {
-				payloads = append(payloads, strings.TrimSpace(p))
-			}
-		}
-		if n := len(payloads); n < 2 || payloads[n-1] != "[DONE]" {
-			t.Fatalf("the stream has %d data events and does not end with [DONE]", len(payloads))
-		}
-		for _, p := range payloads[:len(payloads)-1] {
-			if p == "[DONE]" {
-				t.Errorf("[DONE] before the end of the stream")
-				continue
-			}
-			seen.observe(t, "stream", []byte(p))
-		}
+		seen := llObserveStream(t, "stream", data)
 		if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 			t.Errorf("the Content-Type is not text/event-stream")
 		}
@@ -582,6 +599,12 @@ func TestLLMLabThroughTheFront(t *testing.T) {
 // includeUsage adds stream_options.include_usage, without which a stream
 // carries no counts (HBEP-5, Usage records).
 func chatRequest(model string, stream, includeUsage bool) string {
+	return chatRequestWith(model, stream, includeUsage, nil)
+}
+
+// chatRequestWith is chatRequest plus extra top-level members, such as
+// min_tokens. An extra member replaces a base one of the same name.
+func chatRequestWith(model string, stream, includeUsage bool, extra map[string]any) string {
 	req := map[string]any{
 		"model":       model,
 		"max_tokens":  llMaxTokens,
@@ -592,11 +615,121 @@ func chatRequest(model string, stream, includeUsage bool) string {
 	if includeUsage {
 		req["stream_options"] = map[string]bool{"include_usage": true}
 	}
+	for k, v := range extra {
+		req[k] = v
+	}
 	b, err := json.Marshal(req)
 	if err != nil {
 		panic(err)
 	}
 	return string(b)
+}
+
+// The verdict words of the min_tokens probe, a closed set: the only text of the
+// probe's result that comes from anything but a fixed message.
+const (
+	llMinHonoured     = "honoured"
+	llMinIgnored      = "ignored"
+	llMinRefused      = "refused"
+	llMinInconclusive = "inconclusive"
+)
+
+// minTokensVerdict says what LLMLab does with min_tokens, from two streamed
+// requests that differ only in it: control (no min_tokens) and with
+// (min_tokens = llMaxTokens = max_tokens), whose HTTP status is withStatus. The
+// control must have stopped short of llMaxTokens, or the prompt cannot tell
+// honouring from ignoring: a control that already ran to the limit leaves the
+// verdict inconclusive, and so does a reply without a usage member, an
+// exact-length reply that did not end on the length finish reason, and a
+// failure that says nothing about the field (a 5xx, 408 or 429).
+func minTokensVerdict(control, with llSeen, withStatus int) string {
+	switch {
+	case withStatus >= 400 && withStatus < 500 && withStatus != http.StatusRequestTimeout && withStatus != http.StatusTooManyRequests:
+		// A refusal is the gateway's answer to the field, whatever the control did.
+		return llMinRefused
+	case withStatus != http.StatusOK:
+		return llMinInconclusive
+	case !control.haveUsage || !with.haveUsage:
+		return llMinInconclusive
+	case control.completion < 1 || control.completion >= llMaxTokens:
+		return llMinInconclusive
+	case with.completion < 1:
+		return llMinInconclusive
+	case with.completion < llMaxTokens:
+		return llMinIgnored
+	case with.completion == llMaxTokens && with.finish == "length":
+		return llMinHonoured
+	}
+	return llMinInconclusive
+}
+
+// minTokensInstruction is the one fixed instruction the probe prints for a
+// verdict: it is the setting the baseline row takes from it.
+func minTokensInstruction(verdict string) string {
+	switch verdict {
+	case llMinHonoured:
+		return "min_tokens is honoured: leave LIVE_STUDYLOAD_OMIT_MIN_TOKENS unset"
+	case llMinIgnored, llMinRefused:
+		return "min_tokens is not honoured: set LIVE_STUDYLOAD_OMIT_MIN_TOKENS=1 for the baseline row"
+	}
+	return "no instruction: the probe did not conclude"
+}
+
+// llStreamChat sends one streamed chat request through the front. A 200 reply
+// is read as a stream; any other status returns an empty llSeen, since its body
+// is an error and not a stream.
+func (l *llLive) llStreamChat(t *testing.T, label, body string) (*http.Response, llSeen) {
+	t.Helper()
+	resp, data := l.llCall(t, http.MethodPost, "/v1/chat/completions", body)
+	if resp.StatusCode != http.StatusOK {
+		return resp, llSeen{}
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Errorf("%s: the Content-Type is not text/event-stream", label)
+	}
+	return resp, llObserveStream(t, label, data)
+}
+
+// TestLLMLabMinTokens probes whether LLMLab honours min_tokens, which the
+// baseline row (HBEP-764 item 4) sends on every request, equal to max_tokens,
+// so that output lengths are exact. Two streamed requests of at most
+// llMaxTokens tokens go through the front: a control without min_tokens, then
+// the same with "min_tokens": 8. The probe concludes, and passes, on honoured,
+// ignored and refused, and logs which setting of LIVE_STUDYLOAD_OMIT_MIN_TOKENS
+// the baseline row needs. It fails on inconclusive, because a probe that cannot
+// tell the cases apart must not pass: the usual cause is a control that already
+// produced all llMaxTokens tokens, and a different prompt would fix it.
+//
+// The output holds the verdict word, numbers and closed-set values only
+// (llRouted's lines for the two requests, and the fixed texts below).
+//
+//livecheck:llmlab-min-tokens
+func TestLLMLabMinTokens(t *testing.T) {
+	l := llSetup(t)
+
+	l.step(t, "a request without min_tokens and one with it", func(t *testing.T) {
+		ctrlResp, control := l.llStreamChat(t, "control", chatRequestWith(l.model, true, true, nil))
+		if ctrlResp.StatusCode != http.StatusOK {
+			t.Fatalf("the control request, without min_tokens, got status %d, want 200; the probe cannot conclude", ctrlResp.StatusCode)
+		}
+		l.llRouted(t, "control", true, ctrlResp, control)
+
+		withResp, with := l.llStreamChat(t, "min_tokens", chatRequestWith(l.model, true, true, map[string]any{"min_tokens": llMaxTokens}))
+		verdict := minTokensVerdict(control, with, withResp.StatusCode)
+		switch {
+		case withResp.StatusCode == http.StatusOK:
+			l.llRouted(t, "min_tokens", true, withResp, with)
+		case verdict == llMinRefused:
+			// A refusal has no usage and no stream to read: it is the target's,
+			// not the front's, when the attribution names the managed Provider.
+			llAttribution(t, withResp, "provider", llProvider, l.managedID[:12])
+		}
+		if verdict == llMinInconclusive {
+			t.Errorf("the probe did not conclude: control completion %d, min_tokens request status %d completion %d finish %s, usage in both replies %v",
+				control.completion, withResp.StatusCode, with.completion, llEnum(with.finish, llFinishes), control.haveUsage && with.haveUsage)
+		}
+		t.Logf("min_tokens probe: %s; %s", verdict, minTokensInstruction(verdict))
+	})
 }
 
 // TestLLMLabLiveDiagnosticsAreSafe checks the live test's helpers without the
@@ -669,4 +802,98 @@ func TestLLMLabLiveDiagnosticsAreSafe(t *testing.T) {
 	if got := llEnumPtr(&hostile, llSources); got != llUnknownValue {
 		t.Errorf("a value outside the set printed as %q", got)
 	}
+}
+
+// TestLLMLabMinTokensVerdict checks the min_tokens probe's verdict, its fixed
+// instructions and its two requests without the network, so CI runs them. Every
+// expected word and text is typed here, never taken from the code under test.
+//
+// The excluded case: a control that already ran to the limit (8 tokens) must be
+// inconclusive. The "honoured" row and the "control already 8" row hold the same
+// min_tokens reply and differ only in the control, so a verdict that ignores the
+// control fails one of them: a probe whose prompt cannot tell honouring from
+// ignoring must not pass.
+//
+//livecheck:none offline: CI runs it
+func TestLLMLabMinTokensVerdict(t *testing.T) {
+	reply := func(finish string, completion int64, usage bool) llSeen {
+		return llSeen{finish: finish, prompt: 12, completion: completion, haveUsage: usage}
+	}
+	stoppedShort := reply("stop", 3, true)
+	ranToLimit := reply("length", 8, true)
+	none := llSeen{} // a refusal or a failure has no stream to read
+
+	t.Run("verdicts", func(t *testing.T) {
+		for _, c := range []struct {
+			name    string
+			control llSeen
+			with    llSeen
+			status  int
+			want    string
+		}{
+			{"honoured: the control stopped at 3, the request with min_tokens ran to 8 on length", stoppedShort, ranToLimit, 200, "honoured"},
+			{"inconclusive: the control already ran to 8 (the same reply as above)", ranToLimit, ranToLimit, 200, "inconclusive"},
+			{"inconclusive: the control already ran to 8 and the other did too, on stop", ranToLimit, reply("stop", 8, true), 200, "inconclusive"},
+			{"ignored: the request with min_tokens stopped at 3 as the control did", stoppedShort, reply("stop", 3, true), 200, "ignored"},
+			{"ignored: it stopped at 7, one short", stoppedShort, reply("stop", 7, true), 200, "ignored"},
+			{"refused: 400", stoppedShort, none, 400, "refused"},
+			{"refused: 422", stoppedShort, none, 422, "refused"},
+			{"refused whatever the control did: 400 after a control of 8", ranToLimit, none, 400, "refused"},
+			{"inconclusive: the request with min_tokens has no usage member", stoppedShort, reply("length", 8, false), 200, "inconclusive"},
+			{"inconclusive: the control has no usage member", reply("stop", 3, false), ranToLimit, 200, "inconclusive"},
+			{"inconclusive: 8 tokens but the finish reason is stop", stoppedShort, reply("stop", 8, true), 200, "inconclusive"},
+			{"inconclusive: 8 tokens and no finish reason", stoppedShort, reply("", 8, true), 200, "inconclusive"},
+			{"inconclusive: 9 tokens, above max_tokens", stoppedShort, reply("length", 9, true), 200, "inconclusive"},
+			{"inconclusive: a control of 0 tokens", reply("stop", 0, true), ranToLimit, 200, "inconclusive"},
+			{"inconclusive: a reply of 0 tokens", stoppedShort, reply("stop", 0, true), 200, "inconclusive"},
+			{"inconclusive: 429 says nothing about the field", stoppedShort, none, 429, "inconclusive"},
+			{"inconclusive: 408 says nothing about the field", stoppedShort, none, 408, "inconclusive"},
+			{"inconclusive: 500", stoppedShort, none, 500, "inconclusive"},
+			{"inconclusive: a status other than 200 whose reply looks like honouring", stoppedShort, ranToLimit, 204, "inconclusive"},
+		} {
+			if got := minTokensVerdict(c.control, c.with, c.status); got != c.want {
+				t.Errorf("%s: verdict %q, want %q", c.name, got, c.want)
+			}
+		}
+	})
+
+	t.Run("instructions", func(t *testing.T) {
+		for _, c := range []struct{ verdict, want string }{
+			{"honoured", "min_tokens is honoured: leave LIVE_STUDYLOAD_OMIT_MIN_TOKENS unset"},
+			{"ignored", "min_tokens is not honoured: set LIVE_STUDYLOAD_OMIT_MIN_TOKENS=1 for the baseline row"},
+			{"refused", "min_tokens is not honoured: set LIVE_STUDYLOAD_OMIT_MIN_TOKENS=1 for the baseline row"},
+			{"inconclusive", "no instruction: the probe did not conclude"},
+		} {
+			if got := minTokensInstruction(c.verdict); got != c.want {
+				t.Errorf("instruction for %s: %q, want %q", c.verdict, got, c.want)
+			}
+		}
+	})
+
+	// The probe means nothing if its two requests differ in anything but min_tokens.
+	t.Run("requests", func(t *testing.T) {
+		parse := func(body string) map[string]any {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(body), &m); err != nil {
+				t.Fatalf("a request is not JSON: %v", err)
+			}
+			return m
+		}
+		control := parse(chatRequestWith("m", true, true, nil))
+		with := parse(chatRequestWith("m", true, true, map[string]any{"min_tokens": llMaxTokens}))
+		if _, ok := control["min_tokens"]; ok {
+			t.Errorf("the control request carries min_tokens")
+		}
+		if with["min_tokens"] != float64(8) || with["max_tokens"] != float64(8) {
+			t.Errorf("the request with min_tokens carries min_tokens %v max_tokens %v, want 8 and 8", with["min_tokens"], with["max_tokens"])
+		}
+		delete(with, "min_tokens")
+		if !reflect.DeepEqual(control, with) {
+			t.Errorf("the two requests differ in more than min_tokens")
+		}
+		opts, _ := control["stream_options"].(map[string]any)
+		if control["stream"] != true || control["temperature"] != float64(0) || opts["include_usage"] != true {
+			t.Errorf("the requests are not streamed at temperature 0 with include_usage")
+		}
+	})
 }

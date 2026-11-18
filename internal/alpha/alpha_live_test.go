@@ -60,6 +60,14 @@ func runRow(t *testing.T, family string, rows ...string) {
 		}
 		t.Skipf("INVALID: %v", err)
 	}
+	if BaselineInvalidRun(cfg.Row, err) {
+		// The baseline row's INVALID (ErrBaselineInvalid) by the same protocol, its own words in the marker: the run was judged, recorded and posted,
+		// nothing failed, and its reading measures nothing. hack/live-checks.sh reads it as INVALID on that row alone.
+		if merr := rec.SaveText(NotRunFile, BaselineInvalidNote(cfg.Row)); merr != nil {
+			t.Fatalf("%s: the reading measures nothing, but the marker could not be written: %v", cfg.Row.Name, merr)
+		}
+		t.Skipf("INVALID: %v", err)
+	}
 	if Finding(cfg.Row, err) {
 		// The bulk row's FINDING (ErrFinding): the run was judged, recorded and posted, nothing failed, the witness held, and the bulk path was
 		// 30 ms or less below the control. The test passes beside its marker, which hack/live-checks.sh reads as FINDING, exit 5, on that row alone.
@@ -179,4 +187,17 @@ func TestAlphaSanoHandover(t *testing.T) {
 //livecheck:alpha-sano-serve
 func TestAlphaSanoServe(t *testing.T) {
 	runRow(t, "nowserve", SanoServeName)
+}
+
+// TestBetaSanoLLMLabBaseline is HBEP-764's baseline row (issue #764, item 4; baseline.go) on Sano's gpu partition under profiles/sano.yaml: Qwen3-VL-8B on
+// one A100 and on LLMLab, LLMLab attached by a managed Provider as HBEP-5's overflow, on today's code with no Workload. P0 (one request answered by LLMLab
+// before the GPU job), the gate, P1 (N = the cap, none to LLMLab), P1-long (24k to 28k contexts, the engine's KV use and preemptions at the cap), P2 (N = the
+// cap + 2: LLMLab gets exactly 2 first-turn requests) and P3 (the managed ModelDeployment deleted, two sessions waiting in the front's FIFO). A request
+// LLMLab fails, a cap that never binds and a 503 in P3 are INVALID; LLMLab past 144 requests in a phase, or a failure of the front or an Instance, is a
+// FAIL. It uses the Sano Provider's staging directory (LIVE_SANO_STAGING_DIR), where the agent's own earlier load of Qwen3-VL staged the checkpoint, so
+// it starts warm; it has no stage row of its own.
+//
+//livecheck:beta-sano-llmlab-baseline
+func TestBetaSanoLLMLabBaseline(t *testing.T) {
+	runRow(t, "baseline", BetaBaselineName)
 }

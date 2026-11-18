@@ -54,7 +54,8 @@ if [ -n "${HPCBURST_CONFORMANCE:-}" ]; then
   unset $(env | sed -n 's/^\(HPCBURST_CONF[A-Z_]*\)=.*/\1/p')
 else
   unset HPCBURST_ALPHA_ACCOUNT HPCBURST_ALPHA_CREDENTIALS HPCBURST_ALPHA_HOST_LOCK HPCBURST_ALPHA_CONTROL_DIR HPCBURST_ALPHA_BIN_DIR \
-    HPCBURST_ALPHA_BUILD_DIR HPCBURST_ALPHA_DIALHOME_MODE HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_STAGING_DIR
+    HPCBURST_ALPHA_BUILD_DIR HPCBURST_ALPHA_DIALHOME_MODE HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_STAGING_DIR \
+    HPCBURST_ALPHA_STUDYLOAD_BIN HPCBURST_ALPHA_LLMLAB_CREDENTIALS
 fi
 export HPCBURST_ALPHA_DRY=1 HPCBURST_ALPHA_DRY_FAULT="$fault"
 cd "@REALDIR@" || exit 3
@@ -172,6 +173,17 @@ var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unr
 
 // nowNoOverlapFaults are row B's failing faults (issue #376; internal/alpha, run_test.go's nowNoOverlapCases); its NOT RUNs
 // are TestRowBsNotRunsThroughTheScript's.
+// baselineFaults are the baseline row's failing faults (issue #764; internal/alpha, dry_baseline_test.go's baselineCases). Its INVALID faults are
+// baselineInvalidFaults, which end exit 3.
+var baselineFaults = []string{"llmlab-in-the-control", "llmlab-one-too-many-first-turns", "llmlab-over-its-guard", "llmlab-after-the-detach",
+	"detach-not-seen", "detach-skipped", "wrong-deployment-id", "ratio-probe-fails", "engine-waiting-thrice", "gate-503", "gate-engine-500", "gate-cut-200", "engine-cached-idle", "metric-unread-at-p2-start", "metric-unread-midphase", "llmlab-over-final-count", "llmlab-one-spiller-twice", "llmlab-first-turn-twice", "waiting-not-returning", "waiting-unread", "front-log-unread", "two-served-mds", "detach-session-missing", "instance-ineligible", "engine-over-the-cap", "engine-waiting", "engine-preempts", "engine-unread", "front-503-in-the-control", "instance-fails",
+	"session-moves", "generator-names-another-route", "metric-unread", "metric-disagrees", "unlisted-llmlab-request", "no-answer", "no-record", "over-the-cap-in-flight", "no-gate",
+	"p0-not-sent", "p0-answered-by-an-instance", "p0-front-fails", "kv-unread", "no-routing-block", "two-instances", "hedged", "over-allocated", "managed-not-attached", "untagged",
+	"wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
+
+// baselineInvalidFaults are the baseline row's faults that make its reading measure nothing: INVALID, exit 3.
+var baselineInvalidFaults = []string{"cap-never-binds", "detach-503", "detach-no-wait", "kv-below-the-cap", "llmlab-fails", "p0-llmlab-fails", "min-tokens-ignored", "long-contexts-short", "phases-do-not-fit", "ratio-impossible", "ratio-unread", "long-no-read-in-window", "p1-serialized", "p1-sessions-missing", "long-serialized", "long-staggered-short-later-turns", "waiting-never-two", "llmlab-spill-below-the-cap", "llmlab-spill-50ms-before-the-cap", "llmlab-spill-2ms-before-the-cap", "dial-failure-p1", "dial-failure-p1long", "dial-failure-p2", "dial-failure-p3", "front-log-empty", "front-log-malformed-only", "p0-empty-200", "p0-no-finish", "p0-zero-tokens", "p0-counts-null-no-events", "p0-cut-200"}
+
 // betaBulkFaults are the bulk row's failing faults (issue #521; internal/alpha, dry_betabulk_test.go's betaBulkCases). A bulk path more than 30 ms
 // below the control passes, above or below S17's 85 ms prediction; 30 ms or less is a FINDING, exit 5 (dryFindings; #584); its INVALIDs are
 // TestTheBulkRowsFourVerdictsThroughTheScript's.
@@ -212,6 +224,8 @@ var dryRows = []dryRow{
 	// The Sano rows (issue #735): the Athena handover's faults and row A's, on Sano's gpu partition, with no slot.
 	{"alpha-sano-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults, nil, nil},
 	{"alpha-sano-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, []string{"rehash-cold", "rehash-unread", "warm-foreign-first", "warm-foreign-three"}, nil},
+	// The baseline row (issue #764): its failing faults; its INVALID faults end the run with exit 3 (baseline_test.go).
+	{"beta-sano-llmlab-baseline", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", baselineFaults, []string{"long-engine-readings", "engine-waiting-twice", "engine-waiting-blip", "engine-waiting-split", "ratio-wide", "p0-counts-null-events", "engine-waiting-cached", "llmlab-spill-1ms-before-the-cap", "dial-failure-other-target", "dial-failure-wrong-level", "dial-failure-in-error-field", "dial-failure-malformed"}, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 }

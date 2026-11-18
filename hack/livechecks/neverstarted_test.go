@@ -60,6 +60,8 @@ var neverStartedBound = map[string]struct {
 	"alpha-sano-stage":    {notRunPending2h, false},
 	"alpha-sano-serve":    {notRunPending2h, false},
 	"alpha-sano-handover": {notRunPending2h, false},
+	// The baseline row (issue #764): a row of one job like the Sano serve row, with no start wait.
+	"beta-sano-llmlab-baseline": {notRunPending2h, false},
 }
 
 var cleanupLeftNone = regexp.MustCompile(`cleanup: left behind 0 \(cancelled \d+\)`)
@@ -295,6 +297,7 @@ var cannotTellLine = map[string]string{
 	"alpha-sano-stage":           "FAIL (exit status 1)",
 	"alpha-sano-serve":           "FAIL (exit status 1)",
 	"alpha-sano-handover":        "FAIL (exit status 1)",
+	"beta-sano-llmlab-baseline":  "FAIL (exit status 1)",
 }
 
 func TestEveryRowThatCannotCallItsJobNeverStartedEndsAFailure(t *testing.T) {
