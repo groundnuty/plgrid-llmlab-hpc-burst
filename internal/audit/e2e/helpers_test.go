@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -76,10 +77,32 @@ func (w *world) startAllocation(a *v1alpha1.Allocation) {
 }
 
 // endOperation builds an End Operation of the deployment, owned by the identity that creates it.
-func endOperation(name string, owner who, purpose string) *v1alpha1.Operation {
+func endOperation(name, deployment string, owner who, purpose string) *v1alpha1.Operation {
 	return &v1alpha1.Operation{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exampleNS, Annotations: map[string]string{v1alpha1.AnnotationPurpose: purpose}},
-		Spec:       v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd, ModelDeploymentRef: v1alpha1.ObjectReference{Name: "md"}, Owner: owner.user},
+		Spec:       v1alpha1.OperationSpec{Action: v1alpha1.OperationActionEnd, ModelDeploymentRef: v1alpha1.ObjectReference{Name: deployment}, Owner: owner.user},
+	}
+}
+
+// waitDone waits until the approved Operation has run to Done. On a timeout it says what each target's outcome is and which
+// requests of a ServiceAccount the API server refused (403): a verb the controller's role lacks shows there.
+func (w *world) waitDone(rd *reader, name string) {
+	t := w.t
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		op := w.getOperation(name)
+		if op.Status.Phase == v1alpha1.OperationPhaseDone {
+			return
+		}
+		if time.Now().After(deadline) {
+			var b strings.Builder
+			for _, o := range op.Status.Targets {
+				fmt.Fprintf(&b, "\n  target %s %s: %s %s %s", o.Kind, o.Name, o.State, o.Reason, o.Message)
+			}
+			t.Fatalf("the approved End %s is not Done within 90 s: phase %q, conditions %+v%s\n%s\ncontroller log:\n%s", name, op.Status.Phase, op.Status.Conditions, b.String(), refusals(rd.read(t)), w.logs.tail(40))
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
@@ -124,4 +147,33 @@ func hasPlanWrite(s *logSet, lifecycleUser, name, planID string) bool {
 		}
 	}
 	return false
+}
+
+// hasDoneWrite reports whether the lifecycle identity's status write of the Operation carries phase Done and its outcomes.
+func hasDoneWrite(s *logSet, lifecycleUser, name string) bool {
+	for _, e := range s.find("update", "operations", "status", name, lifecycleUser) {
+		var op v1alpha1.Operation
+		if len(e.RequestObject) > 0 && jsonUnmarshal(e.RequestObject, &op) == nil && op.Status.Phase == v1alpha1.OperationPhaseDone && len(op.Status.Targets) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// releasedAllocations are the names of the Allocations the Operation's plan takes with an effect that releases them (not a Keep),
+// and whose release the log holds: a delete by the lifecycle identity.
+func (w *world) releasedAllocations(s *logSet, op *v1alpha1.Operation) []string {
+	var out []string
+	if op.Status.Plan == nil {
+		return nil
+	}
+	for _, tg := range op.Status.Plan.Targets {
+		if tg.Kind != v1alpha1.TargetKindAllocation || tg.Effect == v1alpha1.PlanEffectKeep {
+			continue
+		}
+		if len(s.find("delete", "allocations", "", tg.Name, w.lc.user)) > 0 {
+			out = append(out, tg.Name)
+		}
+	}
+	return out
 }
