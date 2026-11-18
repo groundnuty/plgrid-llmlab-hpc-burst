@@ -718,7 +718,9 @@ func (p *pass) keepWarm(op *v1alpha1.Operation, a *v1alpha1.Allocation) error {
 
 // unitOf is the unit an Instance belongs to: one primary's capacity, which is its Instance and Allocation, its hedge's members
 // and its pending replacement (HBEP-7, Hedging; Handover). The key is the first member of the hedge of the root of the
-// predecessor chain.
+// predecessor chain. It is memberHedgeKey, never hedgeKey: the give-back counts the hedge a target was committed in, and a
+// kept candidate's own key ("candidate/<name>", #721) is for ranking alone, so a loser kept as a candidate stays one unit
+// with the hedge's winner.
 func (p *pass) unitOf(in *v1alpha1.Instance) string {
 	for i := 0; i < 8; i++ {
 		pred := in.Annotations[v1alpha1.AnnotationPredecessor]
@@ -731,7 +733,7 @@ func (p *pass) unitOf(in *v1alpha1.Instance) string {
 		}
 		in = next
 	}
-	return hedgeKey(in)
+	return memberHedgeKey(in)
 }
 
 // untakenUnits counts the units of a Scale that are untaken: a unit has an Instance, a committed target, that remains live
