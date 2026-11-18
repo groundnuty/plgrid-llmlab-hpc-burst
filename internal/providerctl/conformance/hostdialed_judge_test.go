@@ -34,7 +34,7 @@ func ascending() []byte {
 const goodAgent = "/scratch/stage/agent/" + "0123abcd" + "/hb-agent"
 
 func goodLine(ch string, epoch, seq int) string {
-	return "srun -u --overlap --jobid=4242 --ntasks=1 " + goodAgent + " relay " + ch + " --dir /scratch/stage/alloc/hb-x --allocation u-1 --epoch " +
+	return "srun -u --overlap --jobid=4242 --ntasks=1 --chdir=/scratch/stage/alloc/hb-x " + goodAgent + " relay " + ch + " --dir /scratch/stage/alloc/hb-x --allocation u-1 --epoch " +
 		strconv.Itoa(epoch) + " --seq " + strconv.Itoa(seq)
 }
 
@@ -87,6 +87,35 @@ func TestJudgeHostDialedPassesARunInWhichEverythingHeld(t *testing.T) {
 	}
 }
 
+// HBEP-4 and HBEP-6's relay line as amended on 18 Nov 2026 (#735), written out here word by word, not built with goodLine or
+// agentapi.RelayLine: srun's --chdir is the Allocation's directory, for a compute node with no home. The check accepts it, and
+// refuses the line the HBEPs had before, which has no --chdir.
+func TestJudgeHostDialedAcceptsTheChdirLineAndRefusesTheOldLine(t *testing.T) {
+	withChdir := []string{
+		"srun -u --overlap --jobid=4242 --ntasks=1 --chdir=/scratch/stage/alloc/hb-x /scratch/stage/agent/0123abcd/hb-agent relay control --dir /scratch/stage/alloc/hb-x --allocation u-1 --epoch 7 --seq 1",
+		"srun -u --overlap --jobid=4242 --ntasks=1 --chdir=/scratch/stage/alloc/hb-x /scratch/stage/agent/0123abcd/hb-agent relay serving --dir /scratch/stage/alloc/hb-x --allocation u-1 --epoch 7 --seq 2",
+	}
+	old := []string{
+		"srun -u --overlap --jobid=4242 --ntasks=1 /scratch/stage/agent/0123abcd/hb-agent relay control --dir /scratch/stage/alloc/hb-x --allocation u-1 --epoch 7 --seq 1",
+		"srun -u --overlap --jobid=4242 --ntasks=1 /scratch/stage/agent/0123abcd/hb-agent relay serving --dir /scratch/stage/alloc/hb-x --allocation u-1 --epoch 7 --seq 2",
+	}
+	o := goodObs()
+	o.Lines = withChdir
+	if f := failedOf(o); len(f) != 0 {
+		t.Errorf("a run whose relays ran the --chdir line failed %v", f)
+	}
+	o = goodObs()
+	o.Lines = old
+	if f := failedOf(o); !slices.Equal(f, []string{checkSrunU}) {
+		t.Errorf("a run whose relays ran the line without --chdir failed %v, want only %q", f, checkSrunU)
+	}
+	o = goodObs()
+	o.Lines = []string{withChdir[0], old[1]}
+	if f := failedOf(o); !slices.Equal(f, []string{checkSrunU}) {
+		t.Errorf("a run with one relay on the line without --chdir failed %v, want only %q", f, checkSrunU)
+	}
+}
+
 // Each rule on its own: a run that differs from a good one in one fact fails exactly the checks that fact is part of.
 func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 	desc := strings.Repeat("0", 64)
@@ -124,6 +153,23 @@ func TestJudgeHostDialedFailsEachCheckOnItsOwnFact(t *testing.T) {
 		{"a line with -l for -u", func(o *hostDialedObs) { o.Lines[1] = strings.Replace(o.Lines[1], "srun -u ", "srun -l ", 1) }, []string{checkSrunU}},
 		{"a line without --overlap", func(o *hostDialedObs) { o.Lines[0] = strings.Replace(o.Lines[0], " --overlap", "", 1) }, []string{checkSrunU}},
 		{"a line on another job", func(o *hostDialedObs) { o.Lines[0] = strings.Replace(o.Lines[0], "--jobid=4242", "--jobid=4243", 1) }, []string{checkSrunU}},
+		// HBEP-4 and HBEP-6, amended on 18 Nov 2026 (#735): --chdir is part of the form, and it is the line's own --dir.
+		{"a line without --chdir", func(o *hostDialedObs) {
+			o.Lines[0] = strings.Replace(o.Lines[0], " --chdir=/scratch/stage/alloc/hb-x", "", 1)
+		}, []string{checkSrunU}},
+		{"a line whose --chdir is another directory than its --dir", func(o *hostDialedObs) {
+			o.Lines[0] = strings.Replace(o.Lines[0], "--chdir=/scratch/stage/alloc/hb-x", "--chdir=/scratch/stage/alloc/hb-y", 1)
+		}, []string{checkSrunU}},
+		{"a line with an empty --chdir", func(o *hostDialedObs) {
+			o.Lines[0] = strings.Replace(o.Lines[0], "--chdir=/scratch/stage/alloc/hb-x", "--chdir=", 1)
+		}, []string{checkSrunU}},
+		// Empty is not the line's own --dir, even where the line has none to compare it with.
+		{"a line with an empty --chdir and no --dir", func(o *hostDialedObs) {
+			o.Lines[0] = strings.Replace(strings.Replace(o.Lines[0], "--chdir=/scratch/stage/alloc/hb-x", "--chdir=", 1), " --dir /scratch/stage/alloc/hb-x", "", 1)
+		}, []string{checkSrunU}},
+		{"a line with --chdir after the program", func(o *hostDialedObs) {
+			o.Lines[0] = strings.Replace(o.Lines[0], " --chdir=/scratch/stage/alloc/hb-x", "", 1) + " --chdir=/scratch/stage/alloc/hb-x"
+		}, []string{checkSrunU}},
 		{"a line of another agent", func(o *hostDialedObs) { o.Lines[0] = strings.Replace(o.Lines[0], goodAgent, "/tmp/hb-agent", 1) }, []string{checkSrunU}},
 		{"no serving line", func(o *hostDialedObs) { o.Lines = o.Lines[:1] }, []string{checkSrunU}},
 		{"no line at all", func(o *hostDialedObs) { o.Lines = nil }, []string{checkSrunU}},
