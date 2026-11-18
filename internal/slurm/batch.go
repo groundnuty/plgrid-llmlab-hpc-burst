@@ -47,7 +47,9 @@ type Options struct {
 type Paths struct {
 	// Home is HOME on the login node.
 	Home string
-	// Staging is the profile's stagingDir with its variable resolved.
+	// Staging is the staging directory (the Provider's stagingDir, else the
+	// profile's; provider.StagingDirOf) with its variable resolved. Like the
+	// account it is account data: never in a status, an event or a log.
 	Staging string
 }
 
@@ -134,12 +136,13 @@ func NewBatch(runner Runner, profile provider.Profile, settings provider.Setting
 
 // Configure replaces the profile and settings, for example after the
 // PlatformProfile changed. The cached listing stays. The cached login-node
-// paths stay only while the profile's stagingDir is the same: they were
-// resolved from it, and the connection's generation would not change.
+// paths stay only while the staging directory (provider.StagingDirOf: the
+// Provider's stagingDir, else the profile's) is the same: they were resolved
+// from it, and the connection's generation would not change.
 func (b *Batch) Configure(profile provider.Profile, settings provider.Settings) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if profile.Spec.StagingDir != b.profile.Spec.StagingDir {
+	if provider.StagingDirOf(profile, settings) != provider.StagingDirOf(b.profile, b.settings) {
 		b.paths = nil
 	}
 	b.profile, b.settings = profile, settings
@@ -792,9 +795,11 @@ func (b *Batch) printenv(ctx context.Context, name string) (string, error) {
 	return v, nil
 }
 
-// Paths resolves HOME and the profile's stagingDir on the login node, once
-// per connection (HBEP-4, Transport). An unset or unsafe value is an error
-// that wraps provider.ErrPathUnresolved, and Health says so.
+// Paths resolves HOME and the staging directory on the login node, once per
+// connection (HBEP-4, Transport). The staging directory is the Provider's own
+// stagingDir, else the profile's (provider.StagingDirOf; #757). An unset or
+// unsafe value is an error that wraps provider.ErrPathUnresolved, and Health
+// says so.
 func (b *Batch) Paths(ctx context.Context) (Paths, error) {
 	// A runner that connects lazily is connected first, so a dropped and
 	// replaced connection shows in Generation before the cached paths are
@@ -811,13 +816,13 @@ func (b *Batch) Paths(ctx context.Context) (Paths, error) {
 		b.mu.Unlock()
 		return p, nil
 	}
-	staging := b.profile.Spec.StagingDir
+	staging := provider.StagingDirOf(b.profile, b.settings)
 	b.mu.Unlock()
 
 	p, err := b.resolve(ctx, staging)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if staging != b.profile.Spec.StagingDir {
+	if staging != provider.StagingDirOf(b.profile, b.settings) {
 		// Configure changed the stagingDir while this call resolved the old
 		// one: its answer is good for this call only and is not cached.
 		return p, err
@@ -840,7 +845,7 @@ func (b *Batch) resolve(ctx context.Context, staging string) (Paths, error) {
 	}
 	switch {
 	case staging == "":
-		return Paths{}, fmt.Errorf("%w: the profile sets no stagingDir", provider.ErrPathUnresolved)
+		return Paths{}, fmt.Errorf("%w: neither the Provider's spec.stagingDir nor the profile's sets one", provider.ErrPathUnresolved)
 	case strings.HasPrefix(staging, "$"):
 		m := varPrefix.FindStringSubmatch(staging)
 		if m == nil {

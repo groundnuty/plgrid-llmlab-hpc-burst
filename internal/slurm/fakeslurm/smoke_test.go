@@ -304,7 +304,10 @@ func wantSubmitted(t *testing.T, j fakeslurm.Job, digest string) {
 		t.Errorf("output %q error %q, want files under %s", j.Output, j.Error, dir)
 	}
 	agent := smokeStaging + "/agent/" + digest + "/hb-agent"
-	wrap := "[ $(sha256sum " + agent + " | cut -c1-64) = " + digest + " ] && exec " + agent + " " + dir
+	// The bootstrap names no path on job.err (#762): sha256sum is silenced, a binary that cannot be executed is found by a test, and
+	// a failure prints one fixed line.
+	wrap := `if [ "$(sha256sum ` + agent + ` 2>/dev/null | cut -c1-64)" = ` + digest + ` ] && [ -x ` + agent + ` ]; then exec ` + agent + ` ` + dir +
+		`; else echo "hb: the staged agent binary is missing, changed or not executable" >&2; exit 1; fi`
 	if j.Wrap != wrap {
 		t.Errorf("wrap = %q, want %q", j.Wrap, wrap)
 	}

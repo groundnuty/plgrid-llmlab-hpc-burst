@@ -37,7 +37,9 @@ func limitOpts(limit int32) []rigOption {
 //   - limit 3, md-a placed, nobody missing: 2 listed, H = 0, 2 + 0 + 1 + 0 = 3 <= 3: admitted, a lone deployment takes the last
 //     slot (there is no floor), 3 Allocations; at limit 2 it is 2 + 0 + 1 + 0 = 3 > 2, refused.
 //
-// Nothing is cancelled in any of them.
+// Nothing is cancelled in any of them. The placed deployments end at 14:00 (noHandover), before their primaries' drain
+// starts, so their pending primaries will hold no slot for a replacement and the extra leaves none for them (#725's
+// other-deployments term, which its own rows cover): this row is about H.
 func TestHeadroomLeavesASlotPerMissingPrimaryOfTheOtherDeployments(t *testing.T) {
 	for _, c := range []struct {
 		name       string
@@ -58,7 +60,7 @@ func TestHeadroomLeavesASlotPerMissingPrimaryOfTheOtherDeployments(t *testing.T)
 			rg := newRig(t, append(limitOpts(c.limit), withInterceptors(log.funcs()))...)
 			rg.batch.Enqueue(pending10h(8)...)
 			for _, n := range c.placed {
-				rg.create(mdSpec(n))
+				rg.create(noHandover(mdSpec(n)))
 			}
 			tick10(rg) // 08:00:10: the placed ones submit their primaries
 			rg.create(extraMD("md-e"))
@@ -510,8 +512,8 @@ func TestTheHeadroomsClockIsReadUnderTheLock(t *testing.T) {
 		return c.List(ctx, list, opts...)
 	}}
 	rg := newRig(t, append(limitOpts(4), withInterceptors(hooks))...)
-	rg.batch.Enqueue(pending10h(4)...) // pending jobs: no Running primary reserves a handover slot
-	rg.create(mdSpec("md-a"))
+	rg.batch.Enqueue(pending10h(4)...) // pending jobs: no Running primary reserves a handover slot; md-a's ends before its drain start, so its pending one will hold none either
+	rg.create(noHandover(mdSpec("md-a")))
 	tick10(rg) // 08:00:10: md-a's primary
 	end := metav1.NewTime(hoT(8, 0, 30))
 	z := mdSpec("md-z")

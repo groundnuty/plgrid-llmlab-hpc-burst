@@ -80,10 +80,12 @@ type boundaryCase struct {
 	noOverlap, queued bool
 	// why is the text the NoOverlapSlot message holds.
 	why string
-	// extra is whether PR 4 makes its extra beside the primary at k = 1: the extra's own slot and caps checks, by hand.
-	// The submit limits of 2 and 1 leave no slot beyond the primary's own handover (1 + 1 + 1 > 2); a cap that holds
-	// two jobs lets the extra be made (1 GPU + 1 GPU = 2, 16 + 16 = 32 CPUs, 120Gi + 120Gi = 240Gi) and one that holds
-	// one refuses it.
+	// extra is whether PR 4 makes its extra beside the primary at k = 1: the extra's own slot and caps checks, by hand,
+	// as HBEP-7's amendment of 18 Nov 2026 (#743; #725) words them. The submit limits of 2 and 1 leave no slot beyond
+	// the primary's own handover (1 + 1 + 1 > 2). A cap counts the primary, the extra AND the primary's future
+	// replacement, since nothing else holds room for it: a cap that holds three jobs lets the extra be made (1 GPU x 3,
+	// 16 CPUs x 3 = 48, 120Gi x 3 = 360Gi), and one that holds only two, the exact fit the mode's rows draw, refuses it
+	// (1 + 1 + 1 = 3 > 2), so there k is 0 in effect and the row has no extra.
 	extra bool
 }
 
@@ -104,15 +106,19 @@ func TestNoOverlapModeBoundaries(t *testing.T) {
 		{name: "submit limit 2 leaves one slot beside the primary", qos: v1alpha1.QOSProfile{Name: "example-s2", MaxSubmitPerUser: i32(2)}},
 		{name: "submit limit 1 leaves none", qos: v1alpha1.QOSProfile{Name: "example-s1", MaxSubmitPerUser: i32(1)},
 			noOverlap: true, why: "no free submit slot for a replacement: 1 Allocations still holding a slot, at its maxSubmitPerUser 1 of QOS example-s1"},
-		{name: "GPU cap 2 fits one GPU and one GPU", qos: v1alpha1.QOSProfile{Name: "example-g2", MaxGPUsPerUser: i32(2)}, extra: true},
+		{name: "GPU cap 2 fits one GPU and one GPU", qos: v1alpha1.QOSProfile{Name: "example-g2", MaxGPUsPerUser: i32(2)}},
 		{name: "GPU cap 1 does not", qos: v1alpha1.QOSProfile{Name: "example-g1", MaxGPUsPerUser: i32(1)},
 			noOverlap: true, queued: true, why: "need 2 GPUs, above the maxGpusPerUser 1 of QOS example-g1"},
-		{name: "CPU cap 32 fits 16 and 16", qos: v1alpha1.QOSProfile{Name: "example-c32", MaxCPUsPerUser: i32(32)}, extra: true},
+		{name: "CPU cap 32 fits 16 and 16", qos: v1alpha1.QOSProfile{Name: "example-c32", MaxCPUsPerUser: i32(32)}},
 		{name: "CPU cap 31 does not", qos: v1alpha1.QOSProfile{Name: "example-c31", MaxCPUsPerUser: i32(31)},
 			noOverlap: true, queued: true, why: "need 32 CPUs, above the maxCpusPerUser 31 of QOS example-c31"},
-		{name: "memory cap 240Gi fits 120Gi and 120Gi", qos: v1alpha1.QOSProfile{Name: "example-m240", MaxMemPerUser: memQ("240Gi")}, extra: true},
+		{name: "memory cap 240Gi fits 120Gi and 120Gi", qos: v1alpha1.QOSProfile{Name: "example-m240", MaxMemPerUser: memQ("240Gi")}},
 		{name: "memory cap 239Gi does not", qos: v1alpha1.QOSProfile{Name: "example-m239", MaxMemPerUser: memQ("239Gi")},
 			noOverlap: true, queued: true, why: "240Gi of memory, above the maxMemPerUser 239Gi of QOS example-m239"},
+		// The extra's caps check counts the primary's future replacement too (#743): room for three jobs, and the extra is made.
+		{name: "GPU cap 3 fits the primary, the extra and the replacement", qos: v1alpha1.QOSProfile{Name: "example-g3", MaxGPUsPerUser: i32(3)}, extra: true},
+		{name: "CPU cap 48 fits 16 three times", qos: v1alpha1.QOSProfile{Name: "example-c48", MaxCPUsPerUser: i32(48)}, extra: true},
+		{name: "memory cap 360Gi fits 120Gi three times", qos: v1alpha1.QOSProfile{Name: "example-m360", MaxMemPerUser: memQ("360Gi")}, extra: true},
 	} {
 		// Each limit runs without the extra and with PR 4's, where it makes one (boundaryCase.extra): a kept ranked-out
 		// extra beside the primary must not change the mode, and its Allocation, which drains with the primary, never

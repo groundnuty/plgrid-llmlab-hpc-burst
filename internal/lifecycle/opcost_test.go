@@ -183,7 +183,7 @@ func TestStartToReadyIsTheClassesOwnFigure(t *testing.T) {
 }
 
 func TestTheEstimateIsAlwaysUnknownAndAdvisory(t *testing.T) {
-	const want = "the estimate operation is beta step 4 (HBEP-4 amendment pending)"
+	const want = "the estimate is in status.estimates, filled in by the Provider's controller"
 	for name, in := range map[string]costInput{
 		"a started Allocation": {alloc: startedAlloc(1, tp(opHardEnd))},
 		"a pending Allocation": {alloc: pendingAlloc(tp(opT0), nil)},

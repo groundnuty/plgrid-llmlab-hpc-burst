@@ -139,7 +139,7 @@ An estimate entry belongs to a plan ID, a Provider and the targets it covers, an
 3. An entry that carries an unknown reason is a final `unknown` with that reason. It is never `pending`, whatever its age.
 4. Otherwise the estimate is `known`: the entry's time, `advisory`, with its age, `now` minus the entry's read time.
 
-With several entries for one target the latest read wins. Until HBEP-10's beta step 4 stores estimates, no entry exists, so every estimate reads `pending` and then `unknown`.
+With several entries for one target the latest read wins. The entries are the Operation's `status.estimates[]`, which each Provider's controller writes (HBEP-4, `Estimate`): `provider`, `planID`, `shape`, `targets` (the plan targets' UIDs) and `start`, with `start.time` or `start.unknown`, and `start.observedAt`, the time it was read. An Operation the controller has not written to has none, so every estimate then reads `pending` and then `unknown`.
 
 ### Approvable (`approvals`)
 

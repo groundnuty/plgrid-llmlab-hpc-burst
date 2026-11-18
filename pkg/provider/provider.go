@@ -15,6 +15,10 @@ import (
 const (
 	SubmitTimeout  = 60 * time.Second
 	CommandTimeout = 30 * time.Second
+	// EstimateTimeout bounds one Estimate: an estimate not filled in within it
+	// reads as unknown (HBEP-10, The release cost). It is the submit time-out's,
+	// since sbatch --test-only does what sbatch does up to the point of the job.
+	EstimateTimeout = 60 * time.Second
 )
 
 // MaxConcurrentCommands is the most commands at once on one connection, a code
@@ -128,7 +132,48 @@ type Batch interface {
 	// epilog may still run (HBEP-4, Core operations, RemoveAllocationFiles and
 	// Phases, A completing job). Idempotent.
 	RemoveAllocationFiles(ctx context.Context, tag string) error
+
+	// Estimate asks the platform when a job with req's parameters would start if
+	// it were submitted now: one sbatch --test-only for Slurm, which submits no
+	// job (beta; HBEP-4, Core operations, Estimate; HBEP-10, The release cost).
+	// Read-only and idempotent: it claims no attempt, writes nothing, lifts no
+	// hold and leaves no job. req.Hold is not read. A request refused before any
+	// call wraps ErrInvalidRequest, as Submit's does. An error, a time-out or an
+	// answer that cannot be read means unknown, never a time and never zero: the
+	// error says why, or the result's Unknown does when the platform answered in
+	// a form this plugin does not read. Bounded by EstimateTimeout. The answer is
+	// advisory: nothing plans on it (HBEP-4, Risks: start estimates are trusted).
+	Estimate(ctx context.Context, req SubmitRequest) (EstimateResult, error)
 }
+
+// EstimateResult is the answer of Estimate: Start when the platform gave a
+// start this plugin reads, else Unknown with the reason. Exactly one of them is
+// set.
+type EstimateResult struct {
+	// Start is the platform's advisory start for the job submitted at ReadAt, in
+	// UTC. Nil when it is unknown.
+	Start *time.Time
+	// Unknown is why Start is nil, a fixed text that names no account, host, path
+	// or job; empty when Start is set.
+	Unknown string
+	// ReadAt is when the answer was read, by the plugin's clock.
+	ReadAt time.Time
+}
+
+// The reasons of an unknown estimate that more than one implementation gives.
+const (
+	// EstimateUndecided: the platform's profile does not say how to read the
+	// platform's start (PlatformProfileSpec.StartEstimateTime is absent), so no
+	// command ran (HBEP-4, Core operations, Estimate).
+	EstimateUndecided = "this platform's probe has not decided how to read the estimate (HBEP-4, Estimate)"
+	// EstimateUnreadable: the platform answered, in a form that is not a whole
+	// number of seconds since the epoch.
+	EstimateUnreadable = "the platform's answer is not a whole number of epoch seconds"
+	// EstimateNoAnswer: the command failed, or gave no start.
+	EstimateNoAnswer = "the estimate command gave no start"
+	// EstimateTimedOut: the command did not answer within EstimateTimeout.
+	EstimateTimedOut = "the estimate command did not answer in time"
+)
 
 // Managed is a managed provider's core operation besides ReadProfile (HBEP-4,
 // Core operations). Alpha reads the catalog at most once a minute.
@@ -152,7 +197,8 @@ type Profile struct {
 }
 
 // Settings are a Provider's settings (HBEP-4, Provider settings): account,
-// grant, credentials reference, allowed partition, labels and an optional QOS.
+// grant, credentials reference, allowed partition, labels, an optional QOS and
+// an optional staging directory.
 // The grant and the account are copied into the accounting record (beta;
 // HBEP-8, Provider accounting, Billing).
 type Settings struct {
@@ -169,6 +215,12 @@ type Settings struct {
 	// ReadProfile fills it, checking that the profile lists it; the Slurm
 	// plugin sends it as --qos.
 	QOS string
+	// StagingDir is the Provider's own stagingDir, "" when its settings give
+	// none (HBEP-4, Provider settings; #757, #735). Like the account it is
+	// account data: it never appears in a status, an event or a log. Read the
+	// staging directory only through StagingDirOf, which lets this value win
+	// over the profile's.
+	StagingDir string
 	// CredentialsFile is the path of the mode-600 credentials file on the
 	// control-plane host: for a Slurm provider an ssh client configuration
 	// naming the login node, the user and the key file; for a managed
@@ -177,6 +229,21 @@ type Settings struct {
 	// Labels are the Provider's labels (organization, platform, partition,
 	// account; HBEP-3).
 	Labels map[string]string
+}
+
+// StagingDirOf is THE staging directory of a Provider (HBEP-4, Provider
+// settings; #757): its own stagingDir when its settings give one, else the
+// profile's, as written (an absolute path, or one that starts with an
+// environment variable, which the Batch resolves on the login node). It is ""
+// only when neither gives one, which ReadProfile refuses for a batch
+// Provider. Every reader of the staging directory goes through it, so the
+// Provider's value wins everywhere HBEP-4 says stagingDir. Its result is
+// account data: it is never put in a status, an event or a log.
+func StagingDirOf(p Profile, s Settings) string {
+	if s.StagingDir != "" {
+		return s.StagingDir
+	}
+	return p.Spec.StagingDir
 }
 
 // SubmitRequest is one submission. The provider adds the fixed options

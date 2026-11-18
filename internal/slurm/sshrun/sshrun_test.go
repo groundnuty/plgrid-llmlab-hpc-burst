@@ -520,7 +520,10 @@ func TestBatchOverSSH(t *testing.T) {
 	want := []string{"--parsable", "--job-name=" + tag, "--no-requeue", "--hold", "--partition=example-gpu",
 		"--account=example-account", "--time=90", "--nodes=1", "--gres=gpu:1", "--cpus-per-task=8", "--mem=16384M",
 		"--output=" + allocDir + "/job.out", "--error=" + allocDir + "/job.err",
-		"--wrap=[ $(sha256sum " + agentPath + " | cut -c1-64) = " + digest + " ] && exec " + agentPath + " " + allocDir}
+		// The bootstrap names no path on job.err (#762): sha256sum is silenced, a binary that cannot be executed is found by a test,
+		// and a failure prints one fixed line.
+		"--wrap=if [ \"$(sha256sum " + agentPath + " 2>/dev/null | cut -c1-64)\" = " + digest + " ] && [ -x " + agentPath + " ]; then exec " + agentPath + " " + allocDir +
+			"; else echo \"hb: the staged agent binary is missing, changed or not executable\" >&2; exit 1; fi"}
 	if strings.Join(args, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("sbatch received\n%s\nwant\n%s", strings.Join(args, "\n"), strings.Join(want, "\n"))
 	}

@@ -73,7 +73,7 @@ func (s *Stager) Image(ctx context.Context, image, digest string, format agentap
 	final := filepath.Join(s.c.StagingDir, agentapi.StagedImagePath(digest, format))
 	dir := filepath.Dir(final)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return agent.ImageResult{}, err
+		return agent.ImageResult{}, stepFailed("creating the image directory under the staging directory", err)
 	}
 	hex := strings.TrimPrefix(digest, "sha256:")
 	lockPath := filepath.Join(dir, "."+hex+".lock")

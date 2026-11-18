@@ -1,6 +1,7 @@
 package agentcli
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -83,7 +84,73 @@ func TestOperationText(t *testing.T) {
 		"lease left: 9h30m0s (observed 2026-11-20T10:00:00Z)", "GPU-hours left: 38.0 (observed 2026-11-20T10:00:00Z)",
 		"last ready Instance: the model serves nothing on its own capacity",
 		"Allocation alloc-r (provider sano): Keep, needs no approval")
-	lacks(t, "stdout", out, "estimate operation is beta step 4", "confirm with:")
+	lacks(t, "stdout", out, "the estimate is in status.estimates", "confirm with:")
+}
+
+// The estimates the Provider's controller applied (status.estimates[], #661) show on the plan's targets in --json: a known one with
+// its time and age, and a failed one as a final unknown with its reason, whatever the age. A target no entry covers reads as it
+// did before. The expected objects are written by hand from docs/agent-cli.md (the same shapes as testdata/estimate-states.json),
+// never taken from the printer; the clock is read once.
+func TestOperationJSONShowsTheEstimatesTheProviderApplied(t *testing.T) {
+	op := scaleOperation() // plan planAB, observed at t0; alloc-p, inst-r and alloc-r on sano
+	start, read, failedRead := mt(time.Date(2026, 11, 23, 8, 0, 0, 0, time.UTC)), mt(t0.Add(10*time.Second)), mt(t0.Add(5*time.Second))
+	op.Status.Estimates = []v1alpha1.OperationEstimate{
+		{Provider: "sano", PlanID: planAB, Shape: "aaaaaaaaaaaaaaaa", Targets: []string{"uid-alloc-p"},
+			Start: v1alpha1.TimeFigure{Time: start, ObservedAt: read, Advisory: true}},
+		{Provider: "sano", PlanID: planAB, Shape: "bbbbbbbbbbbbbbbb", Targets: []string{"uid-inst-r"},
+			Start: v1alpha1.TimeFigure{Unknown: "the estimate command gave no start", ObservedAt: failedRead, Advisory: true}},
+		// An older plan's entry for the same target, read LATER with another time: it is not the current plan's, so it is not shown
+		// (the latest read would win among the current plan's entries, never over another plan's).
+		{Provider: "sano", PlanID: "0000000000000000", Shape: "cccccccccccccccc", Targets: []string{"uid-alloc-p"},
+			Start: v1alpha1.TimeFigure{Time: mt(time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)), ObservedAt: mt(t0.Add(30 * time.Second)), Advisory: true}},
+	}
+	w := newWorld(t, []client.Object{op})
+	w.now = t0.Add(70 * time.Second)
+	if code := w.run("", "operation", "scale-m", "--json"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, w.errs.String())
+	}
+	var got struct {
+		Operation struct {
+			Plan struct {
+				Targets []struct {
+					Name     string          `json:"name"`
+					Estimate json.RawMessage `json:"estimate"`
+				} `json:"targets"`
+			} `json:"plan"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(w.out.Bytes(), &got); err != nil {
+		t.Fatalf("the output is not JSON: %v\n%s", err, w.out.String())
+	}
+	want := map[string]string{
+		"alloc-p": `{"state": "known", "time": "2026-11-23T08:00:00Z", "observedAt": "2026-11-20T10:00:10Z", "age": "1m0s", "advisory": true}`,
+		"inst-r":  `{"state": "unknown", "unknown": "the estimate command gave no start", "observedAt": "2026-11-20T10:00:05Z", "advisory": true}`,
+		"alloc-r": ``, // no cost: no estimate, whatever an entry says
+	}
+	if len(got.Operation.Plan.Targets) != len(want) {
+		t.Fatalf("%d targets in the plan's JSON, want %d", len(got.Operation.Plan.Targets), len(want))
+	}
+	for _, tg := range got.Operation.Plan.Targets {
+		w, ok := want[tg.Name]
+		switch {
+		case !ok:
+			t.Errorf("unexpected target %s", tg.Name)
+		case w == "" && len(tg.Estimate) != 0:
+			t.Errorf("%s shows an estimate %s, want none", tg.Name, tg.Estimate)
+		case w != "":
+			sameJSON(t, tg.Estimate, []byte(w))
+		}
+	}
+	// The control: the same Operation without the entries shows no known estimate, so the rows above come from the entries.
+	bare := scaleOperation()
+	wb := newWorld(t, []client.Object{bare})
+	wb.now = t0.Add(70 * time.Second)
+	if code := wb.run("", "operation", "scale-m", "--json"); code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, wb.errs.String())
+	}
+	if strings.Contains(wb.out.String(), `"state":"known"`) || strings.Contains(wb.out.String(), `"state": "known"`) {
+		t.Errorf("an Operation with no status.estimates shows a known estimate:\n%s", wb.out.String())
+	}
 }
 
 // A figure is never shown as a zero when its value is not known.

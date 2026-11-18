@@ -81,6 +81,8 @@ type instOpts struct {
 	rankedOut string
 	// healthySince is when the Instance's Healthy condition last turned True; nil is no Healthy condition.
 	healthySince *time.Time
+	// hedge names the hedge's first member: this Instance is a later member of that hedge (AnnotationHedgeGroup).
+	hedge string
 }
 
 func (f *opFixture) addInstance(o instOpts) (*v1alpha1.Instance, *v1alpha1.Allocation) {
@@ -106,6 +108,12 @@ func (f *opFixture) addInstance(o instOpts) (*v1alpha1.Instance, *v1alpha1.Alloc
 			in.Annotations = map[string]string{}
 		}
 		in.Annotations[annotationRankedOut] = o.rankedOut
+	}
+	if o.hedge != "" {
+		if in.Annotations == nil {
+			in.Annotations = map[string]string{}
+		}
+		in.Annotations[v1alpha1.AnnotationHedgeGroup] = o.hedge
 	}
 	if o.healthySince != nil {
 		in.Status.Conditions = append(in.Status.Conditions, metav1.Condition{

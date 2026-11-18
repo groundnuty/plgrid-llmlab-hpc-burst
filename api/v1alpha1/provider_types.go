@@ -62,6 +62,21 @@ type ProviderSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	QOS string `json:"qos,omitempty"`
 
+	// StagingDir is where the agent binary, Allocation directories, images and checkpoints live on a
+	// batch platform, overriding the PlatformProfile's stagingDir (HBEP-4, Provider settings; #757, #735).
+	// It takes the profile's form: an absolute path, or one that starts with an environment variable set
+	// on login and compute nodes, resolved on the login node once per connection. A literal cluster path
+	// carries a user name, so, like the account, it is account data: it never appears in a shipped
+	// profile, the status, an event or a log. ReadProfile requires one of the two, and this one wins.
+	// Changing it under live Allocations has the same risk as editing the profile's stagingDir.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`
+	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '..')",message="stagingDir must not contain a '..' segment: agent.json refuses one (agentapi.AgentConfig)"
+	StagingDir string `json:"stagingDir,omitempty"`
+
 	// CredentialsRef refers to the provider's credentials: a mode-600 file on
 	// the control-plane host, or a Secret. The API never holds credentials.
 	//

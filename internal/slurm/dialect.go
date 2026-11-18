@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -56,15 +57,24 @@ func bootstrap(agentPath, digest, allocDir string) string {
 
 // bootstrapIn is bootstrap with the partition's tmpDir: it sets and exports
 // TMPDIR first (setTmpDir), then checks the digest, then runs the agent, as
-// HBEP-4's Submission orders them. With no tmpDir it is bootstrap's line, byte
-// for byte, and the job keeps its own TMPDIR.
+// HBEP-4's Submission orders them. With no tmpDir the job keeps its own TMPDIR.
+//
+// The staging directory is account data (HBEP-4, Provider settings; #757), and
+// the job's standard error, job.err, is read by people and carried by tools, so
+// no failure here names the binary's path. sha256sum's own error is silenced
+// (given the path as an argument, so that no redirection of the shell can
+// fail and print it), a binary that is not executable is found by a test
+// before the exec, and a failure ends the job, with exit status 1, after one
+// fixed line. The agent's own standard error is untouched: exec is not
+// redirected.
 func bootstrapIn(agentPath, digest, allocDir, tmpDir string) string {
-	check := "[ $(sha256sum " + agentPath + " | cut -c1-64) = " + digest + " ]"
-	run := "exec " + agentPath + " " + allocDir
+	check := `[ "$(sha256sum ` + agentPath + ` 2>/dev/null | cut -c1-64)" = ` + digest + ` ] && [ -x ` + agentPath + ` ]`
+	run := `if ` + check + `; then exec ` + agentPath + ` ` + allocDir +
+		`; else echo "hb: the staged agent binary is missing, changed or not executable" >&2; exit 1; fi`
 	if tmpDir == "" {
-		return check + " && " + run
+		return run
 	}
-	return setTmpDir(tmpDir) + " && " + check + " && " + run
+	return setTmpDir(tmpDir) + " && " + run
 }
 
 // setTmpDir sets TMPDIR to the partition's tmpDir, expanded by the job's own
@@ -99,6 +109,12 @@ func setTmpDir(dir string) string {
 // node feature its tmpDir needs, and is left out when the partition names none
 // (science-agent ruling, 1 Nov 2026, issue #125).
 func submitLine(s submission) (string, error) {
+	return Line(submitWords(s)...)
+}
+
+// submitWords are submitLine's words, before they are quoted into a line;
+// estimateLine builds on them.
+func submitWords(s submission) []string {
 	w := []string{"sbatch", "--parsable", "--job-name=" + s.tag, "--no-requeue"}
 	if s.hold {
 		w = append(w, "--hold")
@@ -126,7 +142,39 @@ func submitLine(s submission) (string, error) {
 		"--error="+path.Join(s.allocDir, agentapi.JobErrorName),
 		"--wrap="+bootstrapIn(s.agentPath, s.agentDigest, s.allocDir, s.tmpDir),
 	)
-	return Line(w...)
+	return w
+}
+
+// estimateJobName is the one job name an estimate runs under, in --job-name and in the paths that carry a tag. It is never a
+// live Allocation's tag: a --test-only call can leave an accounting record on a platform, and FindByTag reads accounting by job
+// name, so a phantom job under a live tag would be found as that Allocation's. No tag can equal it: a tag is hb-<n>-<h>, always
+// starting with "hb-" (v1alpha1.JobTag), and this name does not. It is fixed, not a suffix of the tag, which could push a long
+// tag past the profile's job-name length rule (a tag is already up to JobTagLength, 56, characters; this name is 17). No profile
+// sets a jobName.pattern today, and a platform that did would have its probe decide how the estimate reads there (HBEP-4,
+// Estimate). The name does not affect when Slurm would start the job.
+const estimateJobName = "hpcburst-estimate"
+
+// estimateEnvWord is the one environment assignment of an estimate's line: it
+// makes sbatch print the start as epoch seconds (HBEP-4, Core operations,
+// Estimate). A Command carries no environment, so it is the line's own prefix.
+const estimateEnvWord = "SLURM_TIME_FORMAT=%s"
+
+// estimateLine is Submit's line with the held flag taken out, --test-only added
+// and the epoch time format set:
+//
+//	env SLURM_TIME_FORMAT=%s sbatch --test-only --parsable ... (submitLine's options, never --hold)
+//
+// It asserts, before it returns a line the Runner could run, that --test-only is
+// one of the argv and that no --hold is: a line without --test-only would submit
+// a job, so it cannot be built (HBEP-4, Estimate: read-only).
+func estimateLine(s submission) (string, error) {
+	s.hold = false
+	w := submitWords(s)
+	words := append([]string{"env", estimateEnvWord, w[0], "--test-only"}, w[1:]...)
+	if !slices.Contains(words[3:], "--test-only") || slices.Contains(words, "--hold") {
+		return "", fmt.Errorf("the estimate's line lacks --test-only or holds --hold: it would submit a job, so it is not run")
+	}
+	return Line(words...)
 }
 
 // queueLine lists every job of the calling user (the Provider's cached
@@ -253,12 +301,15 @@ func slurmMessage(stderr string) string {
 	return "no error text"
 }
 
-// What redactPaths removes from Slurm's own error text: an absolute path (a
-// "/" at the start of a word, so "account/partition" and "send/recv" stay),
+// What redactPaths removes from Slurm's own error text: an absolute path, whole
+// (a "/" at the start of a word, so "account/partition" and "send/recv" stay;
+// the word runs to white space, a quote or the end, so a path with a colon, an
+// equals sign or a comma, which stagingDir's pattern allows, goes in one piece,
+// and a colon that ends the path is Slurm's own punctuation and stays),
 // Slurm's "host:<name>[:<port>]", an IPv4 address, and a dotted host name
 // whose last label is letters (so "v0.0.42" and "23.11" stay).
 var (
-	absPath   = regexp.MustCompile(`(^|[\s'"(=:])/[^\s:'"]*`)
+	absPath   = regexp.MustCompile(`(^|[\s'"(=:])/(?:[^\s'"]*[^\s'":])?`)
 	hostPort  = regexp.MustCompile(`\bhost:[^\s:]+(:[0-9]+)?`)
 	ipv4      = regexp.MustCompile(`\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b`)
 	dottedFQN = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)

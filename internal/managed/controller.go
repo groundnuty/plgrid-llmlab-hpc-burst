@@ -357,7 +357,8 @@ func (c *Controller) Sync(ctx context.Context) (time.Duration, error) {
 
 // checkProfile refuses a Provider whose PlatformProfile is missing or not
 // managed, before any read: a batch Provider's credentials file is an ssh
-// configuration, never a managed one (review of PR #85, nit 9).
+// configuration, never a managed one (review of PR #85, nit 9). It also
+// refuses a managed Provider that sets a stagingDir (#757).
 func (c *Controller) checkProfile(ctx context.Context, prov *v1alpha1.Provider) error {
 	name := prov.Spec.PlatformProfileRef.Name
 	var pp v1alpha1.PlatformProfile
@@ -366,6 +367,12 @@ func (c *Controller) checkProfile(ctx context.Context, prov *v1alpha1.Provider) 
 	}
 	if pp.Spec.ProviderKind != v1alpha1.PlatformManaged {
 		return fmt.Errorf("Provider %s: PlatformProfile %s has providerKind %q, not %q: not a managed Provider", c.provider, name, pp.Spec.ProviderKind, v1alpha1.PlatformManaged)
+	}
+	if prov.Spec.StagingDir != "" {
+		// A managed platform stages no files, so the field would be ignored: it is refused, not left to
+		// look as if it did something (HBEP-4, Provider settings; #757). The message names the field and
+		// never its value, which, like the account, is account data.
+		return fmt.Errorf("Provider %s: spec.stagingDir is set, but PlatformProfile %s is managed and stages no files: a managed Provider takes no stagingDir", c.provider, name)
 	}
 	return nil
 }
