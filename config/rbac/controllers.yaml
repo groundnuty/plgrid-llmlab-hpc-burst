@@ -49,9 +49,8 @@
 #     Events stay in the ClusterRoles, since a deployment, and so the events about it, can be in any namespace.
 # Not granted, because no controller reaches it: the Secrets that crossplane-runtime's managed reconciler
 # would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it, and were it set,
-# the Forbidden would surface as a reconcile error, not silently); the Operation's get and delete of the 7-day
-# removal (internal/lifecycle/opttl.go, which no manager wires yet: #660's PR B adds both verbs with its wiring);
-# impersonation, RBAC, CRDs, admission objects, namespaces, nodes, tokens.
+# the Forbidden would surface as a reconcile error, not silently); impersonation, RBAC, CRDs, admission objects,
+# namespaces, nodes, tokens.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -96,6 +95,15 @@ rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["operations"]
     verbs: ["get", "list", "watch", "update"]
+  # The removal of a finished Operation 7 days after it finished (internal/lifecycle/opttl.go,
+  # operationTTLReconciler.Reconcile): a DELETE with a UID precondition (opttl.go:58), the only delete of an Operation: an
+  # agent's Operation is its owner's, and no other code of the controller removes one. Its read of the Operation, a GET
+  # through the API reader (opttl.go:44), is the get above, and the controller that is For Operations watches them through
+  # the cached informer, the list and watch above. The Operation's finalizer is off from its finish (#707), so this delete
+  # of a finished Operation completes at once.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["operations"]
+    verbs: ["delete"]
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["providers", "platformprofiles", "approvals", "approvalpolicies"]
     verbs: ["list", "watch"]
