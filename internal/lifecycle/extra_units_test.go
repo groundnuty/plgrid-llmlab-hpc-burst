@@ -339,11 +339,12 @@ func unitsOf(t *testing.T, f *unitFx, prov, asker string) []extraUnit {
 
 // TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpecNow (U4, k616's precision to #751's fix round,
 // aligned with #756): md-a's primary p is Running, 1 GPU, and its replacement r, in flight (no Allocation yet), RECORDED a
-// 2-GPU launch (as an Instance made before md-a's spec changed would have). md-b's primary q is Running too, with no
-// replacement: its future one does not exist, so the current spec sizes it, 1 GPU. md-e's extra on provider-a, its primary pe
-// listed (md-e ends at 09:30): by hand, listed p 1 + q 1 + pe 1 + the extra 1 = 4, plus r's own Allocation at its recorded 2
-// = 6, plus q's future replacement at 1 = 7; p adds nothing (r is its replacement). So 7 <= 7 admitted at cap 7 and refused
-// at cap 6. Counted at the spec now (1 for r), the total is 6: admitted at cap 6 (what c88f8719 did). The units' GPU counts
+// 2-GPU launch (as an Instance made before md-a's spec changed would have). md-b's primary q is Running too, on a 2-GPU
+// launch and Allocation, with no replacement: its future one does not exist, so the current spec sizes it, 1 GPU, not q's 2.
+// md-e's extra on provider-a, its primary pe listed (md-e ends at 09:30): by hand, listed p 1 + q 2 + pe 1 + the extra 1 = 5,
+// plus r's own Allocation at its recorded 2 = 7, plus q's future replacement at the spec's 1 = 8; p adds nothing (r is its
+// replacement). So 8 <= 8 admitted at cap 8 and refused at cap 7. Counted at the spec now (1 for r), the total is 7:
+// admitted at cap 7 (what c88f8719 did); with q's future at q's own launch (2), 9: refused at cap 8. The units' GPU counts
 // are the same sources: r's 2 (recorded), q's replacement's 1 (spec).
 func TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpecNow(t *testing.T) {
 	end := hoT(9, 30, 0)
@@ -355,15 +356,17 @@ func TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpec
 	f.alloc("md-e", "pe", provA, false)
 	f.inst("md-a", "p", provA, "uid-p", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
 	f.alloc("md-a", "p", provA, true)
-	f.inst("md-b", "q", provA, "uid-q", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
+	q := f.inst("md-b", "q", provA, "uid-q", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
 	f.alloc("md-b", "q", provA, true)
+	f.objs[len(f.objs)-1].(*v1alpha1.Allocation).Spec.ForProvider.Batch.GPUs = 2
+	q.Spec.Launch.GPUs = 2
 	r := f.inst("md-a", "r", provA, "uid-r", hoT(9, 19, 30), v1alpha1.InstancePending, map[string]string{v1alpha1.AnnotationPredecessor: "p"})
 	r.Spec.Launch.GPUs = 2
-	if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(7), rigNS+"/md-e", "")); !a.ok {
-		t.Fatalf("cap 7: refused (%s), want admitted: 4 listed or asked + r's 2 + q's future 1 = 7", a.capsWhy)
+	if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(8), rigNS+"/md-e", "")); !a.ok {
+		t.Fatalf("cap 8: refused (%s), want admitted: 5 listed or asked + r's 2 + q's future 1 = 8", a.capsWhy)
 	}
-	if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(6), rigNS+"/md-e", "")); a.ok {
-		t.Fatal("cap 6: admitted, want refused: r's Allocation is its recorded 2 GPUs, not the spec's 1 (7 > 6)")
+	if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", nil, i32(7), rigNS+"/md-e", "")); a.ok {
+		t.Fatal("cap 7: admitted, want refused: r's Allocation is its recorded 2 GPUs, not the spec's 1 (8 > 7)")
 	}
 	got := map[string]int32{}
 	for _, u := range unitsOf(t, f, provA, rigNS+"/md-e") {
