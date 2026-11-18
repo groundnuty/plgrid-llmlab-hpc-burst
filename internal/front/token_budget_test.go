@@ -300,6 +300,29 @@ func TestBelowFullMembershipTheUnnamedConditionIsOffAndAWorkloadRequestsStays(t 
 	f.wantDrained("a-0")
 }
 
+// A known budget stays known however large it is. One Instance behind a router with two healthy workers, each reporting kvCacheTokens
+// 2^62, so B = 2 x 2^62 = 2^63, above any int64; routing.instanceCap 1 scaled by two healthy workers over its one launch worker gives
+// cap 2. The deployment wants two Instances and has one, so membership is partial: the count cap and the unnamed condition are off,
+// and two unnamed requests are taken (u = 2 = cap). A Workload request, c = 500, is then refused by its budget: 2 * (0 + 500) +
+// 2 * B <= 2 * B is false. A B that overflowed into "unknown" would have admitted it.
+func TestAKnownBudgetAboveAnInt64StillHoldsAWorkloadRequestBelowFullMembership(t *testing.T) {
+	f := newTbFix(t, 1, 1<<62, "a-0")
+	two := int32(2)
+	f.inst(f.uids["ns/a-0"]).Status.HealthyWorkers = &two
+	f.md("md-a").Spec.Instances = 2
+	f.apply()
+	f.start(scModel)
+	f.settled(1, 0)
+	f.start(scModel)
+	f.settled(2, 0)
+	f.wantCharged("a-0", 0, 2, "two unnamed requests: u = cap")
+	f.start(scModel + "#long")
+	f.settled(2, 1)
+	f.wantCharged("a-0", 0, 2, "the Workload request waits: the unnamed requests hold the whole budget")
+	f.finish(nil)
+	f.wantDrained("a-0")
+}
+
 // A cut: the request's client goes away while it is held on the Instance, and its charge comes back once. With the budget full, a waiter that was
 // refused takes it (the first test); here the cut is the only thing that happens to the one request.
 func TestACutRequestReleasesItsChargeOnce(t *testing.T) {

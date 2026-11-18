@@ -6,7 +6,7 @@ package balancer
 // one mutex, and a reservation gives its part back once, with the reservation (releaseLocked). The fork's counts are
 // unchanged.
 
-import "math"
+import "math/bits"
 
 // Charge is what one request adds to its member's counts. The zero value is a request that names no Workload.
 // Named is kept apart from Tokens: a Workload whose declared shape sums to 0 is still a Workload request, and takes
@@ -19,79 +19,64 @@ type Charge struct {
 	Tokens int64
 }
 
-// tokenFits is HBEP-5's integer inequality for one member, with cap and B their values now, n the tokens charged to its
-// Workload requests in flight, u its unnamed requests in flight, and c the request's charge:
+// Budget is a member's token budget B (HBEP-5, The count in tokens), held as the two factors it is the product of:
+// PerWorker, the Instance's kvCacheTokens, and Workers, the workers its cap counts. B = PerWorker * Workers can be larger than any
+// int64 (two workers of 2^62 tokens each), and a budget that is known stays known, so the product is never formed: tokenFits takes
+// the factors and compares exactly. Both must be at least 1; a member without such a budget has none in State.Budgets.
+type Budget struct {
+	PerWorker, Workers int64
+}
+
+// tokenFits is HBEP-5's integer inequality for one member, EXACTLY, for every int64 input: with limit the member's cap now, B its
+// budget (a Budget's two factors), n the tokens charged to its Workload requests in flight, u its unnamed requests in flight, and
+// c the request's charge,
 //
-//	a Workload request:  cap * (n + c) + u * B  <=  cap * B
-//	an unnamed request:  cap * n + (u + 1) * B  <=  cap * B
+//	a Workload request:  limit * (n + c) + u * B  <=  limit * B
+//	an unnamed request:  limit * n + (u + 1) * B  <=  limit * B
 //
-// c is read only when named. It is in int64 with every sum and product checked: a value that would overflow refuses
-// the request, never wraps into an admit. A negative input is refused too, since none can come from the counts.
-func tokenFits(limit, b, n, u, c int64, named bool) bool {
-	if limit < 0 || b < 0 || n < 0 || u < 0 || c < 0 {
+// c is read only when named. B is at least 1, so each is the same as
+//
+//	limit * m  <=  d * B       with  m = n + c and d = limit - u            (a Workload request)
+//	                                 m = n     and d = limit - u - 1        (an unnamed one)
+//
+// and a negative d refuses (its right side is below 0, its left side is not). Both sides are then unsigned and are formed in full,
+// the left in 128 bits and the right, d * PerWorker * Workers, in 192, so no overflow can change a verdict: a budget that is large
+// is compared, never refused, and a wrapped number never admits. A negative or non-positive input is refused, since none can come
+// from the counts or from copyBudgets.
+func tokenFits(limit int64, b Budget, n, u, c int64, named bool) bool {
+	if limit < 0 || b.PerWorker < 1 || b.Workers < 1 || n < 0 || u < 0 || c < 0 {
 		return false
 	}
-	rhs, ok := mulChecked(limit, b)
-	if !ok {
-		return false
-	}
-	var lhs int64
+	m, d := uint64(n), limit-u-1
 	if named {
-		lhs, ok = workloadLeft(limit, b, n, u, c)
-	} else {
-		lhs, ok = unnamedLeft(limit, b, n, u)
+		m, d = uint64(n)+uint64(c), limit-u // each part is below 2^63, so the sum fits a uint64
 	}
-	return ok && lhs <= rhs
+	if d < 0 {
+		return false
+	}
+	xHi, xLo := bits.Mul64(uint64(limit), m)
+	pHi, pLo := bits.Mul64(uint64(d), uint64(b.PerWorker))
+	y2, y1, y0 := mul192(pHi, pLo, uint64(b.Workers))
+	return le192(xHi, xLo, y2, y1, y0)
 }
 
-// workloadLeft is limit * (n + c) + u * B, and false when any step overflows.
-func workloadLeft(limit, b, n, u, c int64) (int64, bool) {
-	nc, ok := addChecked(n, c)
-	if !ok {
-		return 0, false
-	}
-	own, ok := mulChecked(limit, nc)
-	if !ok {
-		return 0, false
-	}
-	others, ok := mulChecked(u, b)
-	if !ok {
-		return 0, false
-	}
-	return addChecked(own, others)
+// mul192 is the 192-bit product of the 128-bit hi:lo and m, as three limbs, most significant first.
+func mul192(hi, lo, m uint64) (r2, r1, r0 uint64) {
+	h0, l0 := bits.Mul64(lo, m)
+	h1, l1 := bits.Mul64(hi, m)
+	r1, carry := bits.Add64(h0, l1, 0)
+	return h1 + carry, r1, l0 // the whole product is below 2^192, so the top limb cannot overflow
 }
 
-// unnamedLeft is limit * n + (u + 1) * B, and false when any step overflows.
-func unnamedLeft(limit, b, n, u int64) (int64, bool) {
-	charged, ok := mulChecked(limit, n)
-	if !ok {
-		return 0, false
+// le192 reports whether the 128-bit xHi:xLo is at most the 192-bit y2:y1:y0.
+func le192(xHi, xLo, y2, y1, y0 uint64) bool {
+	if y2 != 0 {
+		return true // y is at least 2^128, above every 128-bit x
 	}
-	u1, ok := addChecked(u, 1)
-	if !ok {
-		return 0, false
+	if xHi != y1 {
+		return xHi < y1
 	}
-	slots, ok := mulChecked(u1, b)
-	if !ok {
-		return 0, false
-	}
-	return addChecked(charged, slots)
-}
-
-// mulChecked is a * b for a, b >= 0, and false when it does not fit an int64.
-func mulChecked(a, b int64) (int64, bool) {
-	if a != 0 && b > math.MaxInt64/a {
-		return 0, false
-	}
-	return a * b, true
-}
-
-// addChecked is a + b for a, b >= 0, and false when it does not fit an int64.
-func addChecked(a, b int64) (int64, bool) {
-	if a > math.MaxInt64-b {
-		return 0, false
-	}
-	return a + b, true
+	return xLo <= y0
 }
 
 // tokensFitLocked says whether member m's token condition admits a request with charge ch now (the request count's
@@ -158,12 +143,12 @@ func (g *Group) Charged(m string) (tokens, unnamed int64, ok bool) {
 	return g.charged[m], g.unnamed[m], true
 }
 
-// copyBudgets copies the budgets, dropping any below 1: a budget of 0 or less is no size an engine reports, so it is
+// copyBudgets copies the budgets, dropping any whose factors are below 1: such a budget is no size an engine reports, so it is
 // unknown, never a budget that refuses every request.
-func copyBudgets(m map[string]int64) map[string]int64 {
-	out := make(map[string]int64, len(m))
+func copyBudgets(m map[string]Budget) map[string]Budget {
+	out := make(map[string]Budget, len(m))
 	for k, v := range m {
-		if v >= 1 {
+		if v.PerWorker >= 1 && v.Workers >= 1 {
 			out[k] = v
 		}
 	}

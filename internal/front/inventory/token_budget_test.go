@@ -28,7 +28,7 @@ func budgetSnap(kv *int64, n int32, h *int32, instanceCap *int32) Snapshot {
 
 func i32(v int32) *int32 { return &v }
 
-func TestTheTokenBudgetIsKVCacheTokensTimesTheWorkersTheCapCounts(t *testing.T) {
+func TestTheTokenBudgetIsKVCacheTokensAndTheWorkersTheCapCounts(t *testing.T) {
 	for _, c := range []struct {
 		name      string
 		kv        *int64
@@ -36,38 +36,40 @@ func TestTheTokenBudgetIsKVCacheTokensTimesTheWorkersTheCapCounts(t *testing.T) 
 		healthy   *int32 // status.healthyWorkers, nil: no router
 		instCap   *int32
 		wantCap   int
-		wantB     int64
+		wantPer   int64 // B's per-worker factor
+		wantW     int   // B's workers factor
 		wantKnown bool
 	}{
 		// No router: the Instance has one worker, the cap is 48 x 1, and B is 1,000 x 1.
-		{"no router", i64(1000), 1, nil, nil, 48, 1000, true},
+		{"no router", i64(1000), 1, nil, nil, 48, 1000, 1, true},
 		// Beside the cap's own rule: with no healthyWorkers the cap counts the one worker, whatever launch.workers says (48 x 1), so B
 		// does too (1,000 x 1), never 1,000 x 2.
-		{"no healthyWorkers yet, two launch workers", i64(1000), 2, nil, nil, 48, 1000, true},
+		{"no healthyWorkers yet, two launch workers", i64(1000), 2, nil, nil, 48, 1000, 1, true},
 		// A router with one healthy worker: 48 x 1 and 1,000 x 1.
-		{"one healthy worker", i64(1000), 1, i32(1), nil, 48, 1000, true},
+		{"one healthy worker", i64(1000), 1, i32(1), nil, 48, 1000, 1, true},
 		// Three healthy of three: cap 48 x 3 = 144, B 1,000 x 3 = 3,000.
-		{"three healthy workers", i64(1000), 3, i32(3), nil, 144, 3000, true},
+		{"three healthy workers", i64(1000), 3, i32(3), nil, 144, 1000, 3, true},
 		// Three healthy of four, instanceCap 10: cap 10 x 3 / 4 = 7 (rounded down); B 1,000 x 3 = 3,000, whatever the cap's rule.
-		{"three healthy of four with an instanceCap", i64(1000), 4, i32(3), i32(10), 7, 3000, true},
+		{"three healthy of four with an instanceCap", i64(1000), 4, i32(3), i32(10), 7, 1000, 3, true},
 		// No healthy worker: B unknown (the Instance is not eligible anyway), cap 0.
-		{"no healthy worker", i64(1000), 3, i32(0), nil, 0, 0, false},
+		{"no healthy worker", i64(1000), 3, i32(0), nil, 0, 0, 0, false},
 		// No kvCacheTokens: B unknown, whatever the workers are.
-		{"no kvCacheTokens, a router", nil, 3, i32(3), nil, 144, 0, false},
-		{"no kvCacheTokens, no router", nil, 1, nil, nil, 48, 0, false},
-		// A size no engine reports: the product 2^62 x 2 = 2^63 would wrap, so B is unknown, never a wrapped number.
-		{"a product that does not fit an int64", i64(1 << 62), 2, i32(2), nil, 96, 0, false},
-		// One below that edge: (2^62 - 1) x 2 = 2^63 - 2 fits.
-		{"the largest product that fits", i64(1<<62 - 1), 2, i32(2), nil, 96, 1<<63 - 2, true},
+		{"no kvCacheTokens, a router", nil, 3, i32(3), nil, 144, 0, 0, false},
+		{"no kvCacheTokens, no router", nil, 1, nil, nil, 48, 0, 0, false},
+		// A budget whose product 2^62 x 2 = 2^63 is above any int64 is STILL KNOWN: the Instance carries its two factors, never a
+		// wrapped number and never "unknown" (the balancer compares them exactly).
+		{"a product above an int64 stays known", i64(1 << 62), 2, i32(2), nil, 96, 1 << 62, 2, true},
+		// The largest size any report can carry, with two workers.
+		{"the largest size, two workers", i64(math.MaxInt64), 2, i32(2), nil, 96, math.MaxInt64, 2, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := member(t, budgetSnap(c.kv, c.launch, c.healthy, c.instCap))
 			if m.Cap != c.wantCap {
 				t.Errorf("cap %d, want %d", m.Cap, c.wantCap)
 			}
-			b, ok := m.TokenBudget()
-			if ok != c.wantKnown || b != c.wantB {
-				t.Errorf("B = %d (known %v), want %d (known %v)", b, ok, c.wantB, c.wantKnown)
+			per, workers, ok := m.TokenBudget()
+			if ok != c.wantKnown || per != c.wantPer || workers != c.wantW {
+				t.Errorf("B = %d x %d (known %v), want %d x %d (known %v)", per, workers, ok, c.wantPer, c.wantW, c.wantKnown)
 			}
 			if c.kv != nil && (m.KVCacheTokens == nil || *m.KVCacheTokens != *c.kv) {
 				t.Errorf("the view's kvCacheTokens %v, want %d", m.KVCacheTokens, *c.kv)
@@ -84,8 +86,8 @@ func TestTheViewCopiesKVCacheTokens(t *testing.T) {
 	s := budgetSnap(i64(1000), 1, nil, nil)
 	m := member(t, s)
 	*s.Instances[0].Status.KVCacheTokens = 5
-	if b, ok := m.TokenBudget(); !ok || b != 1000 {
-		t.Fatalf("B = %d (known %v) after the snapshot's value changed, want 1000", b, ok)
+	if per, workers, ok := m.TokenBudget(); !ok || per != 1000 || workers != 1 {
+		t.Fatalf("B = %d x %d (known %v) after the snapshot's value changed, want 1000 x 1", per, workers, ok)
 	}
 }
 
@@ -93,8 +95,8 @@ func TestTheViewCopiesKVCacheTokens(t *testing.T) {
 func TestAKVCacheSizeBelowOneIsNoBudget(t *testing.T) {
 	for _, v := range []int64{0, -5} {
 		m := member(t, budgetSnap(i64(v), 1, i32(1), nil))
-		if b, ok := m.TokenBudget(); ok {
-			t.Errorf("kvCacheTokens %d gave B = %d, want unknown", v, b)
+		if per, workers, ok := m.TokenBudget(); ok {
+			t.Errorf("kvCacheTokens %d gave B = %d x %d, want unknown", v, per, workers)
 		}
 	}
 }

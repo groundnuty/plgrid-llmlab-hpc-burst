@@ -27,7 +27,7 @@ func budgeted(members []string, eligible ...string) State {
 	s := stateOf(members, noBound, 0)
 	s.Caps = map[string]int{"m": 4}
 	s.CapValues = map[string]int{"m": 4}
-	s.Budgets = map[string]int64{"m": 100}
+	s.Budgets = map[string]Budget{"m": {PerWorker: 100, Workers: 1}}
 	s.Eligible = map[string]bool{}
 	for _, m := range eligible {
 		s.Eligible[m] = true
@@ -69,7 +69,7 @@ func TestACompletionReleasesItsChargeOnceAndAnotherReleaseChangesNothing(t *test
 func TestALeaveReleasesTheChargesAndALateCompletionChangesNothing(t *testing.T) {
 	g := New()
 	st := budgeted([]string{"m", "o"}, "m", "o")
-	st.Budgets["o"], st.Caps["o"], st.CapValues["o"] = 1000, 10, 10
+	st.Budgets["o"], st.Caps["o"], st.CapValues["o"] = Budget{PerWorker: 1000, Workers: 1}, 10, 10
 	g.Update(st)
 	onlyM := func(c Charge) *Reservation {
 		t.Helper()
@@ -145,7 +145,7 @@ func TestASkipKeepsTheChargesAndTheMemberIsHeldToThemWhenEligibleAgain(t *testin
 func TestARetryReleasesTheFirstChargeOnceAndReservesItsOwnOnTheNextMember(t *testing.T) {
 	g := New()
 	st := budgeted([]string{"m", "o"}, "m", "o")
-	st.Budgets["o"], st.Caps["o"], st.CapValues["o"] = 100, 4, 4
+	st.Budgets["o"], st.Caps["o"], st.CapValues["o"] = Budget{PerWorker: 100, Workers: 1}, 4, 4
 	g.Update(st)
 	first, err := g.TryPickFor("k", onlyMember("m"), workload(40))
 	if err != nil || first.Member != "m" {
@@ -266,4 +266,59 @@ func TestAWaiterPlacedAsItGivesUpReleasesItsCharge(t *testing.T) {
 	}
 	wantCharged(t, g, "m", 0, 0, "the placed reservation was handed back")
 	wantCounts(t, g, 0, "at the end")
+}
+
+// haveCountKeys reports whether the group still holds a key for m in the N map and in the u map.
+func haveCountKeys(g *Group, m string) (inCharged, inUnnamed bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, inCharged = g.charged[m]
+	_, inUnnamed = g.unnamed[m]
+	return inCharged, inUnnamed
+}
+
+// A member that leaves takes its counts out of the group: neither map keeps a key for it (a key per Instance that ever served would
+// stay for the life of the group), and a completion that comes after the leave changes no count and does not create the key again.
+// The member joins, takes one Workload charge and one unnamed request, and leaves with both released by the leave.
+func TestADepartedMembersCountsLeaveNoKeyBehindAndALateCompletionDoesNotCreateOne(t *testing.T) {
+	g := New()
+	st := budgeted([]string{"o"}, "o")
+	st.Budgets["o"], st.Caps["o"], st.CapValues["o"] = Budget{PerWorker: 1000, Workers: 1}, 10, 10
+	g.Update(st)
+	if c, u := haveCountKeys(g, "m"); c || u {
+		t.Fatalf("m has keys (N %v, u %v) before it joined", c, u)
+	}
+	g.Update(budgeted([]string{"m", "o"}, "m", "o")) // m joins
+	w30, err := g.TryPickFor("k", onlyMember("m"), workload(30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	un, err := g.TryPickFor("k", onlyMember("m"), noWorkload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro, err := g.TryPickFor("k", onlyMember("o"), workload(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, u := haveCountKeys(g, "m"); !c || !u {
+		t.Fatalf("m holds a charge and an unnamed request but has keys N %v, u %v: the test has nothing to remove", c, u)
+	}
+
+	if released := g.Update(budgeted([]string{"o"}, "o")); released != 2 { // m leaves with both reservations open
+		t.Fatalf("the leave released %d reservations, want the 2 open on m", released)
+	}
+	if c, u := haveCountKeys(g, "m"); c || u {
+		t.Fatalf("m left but its keys remain (N %v, u %v)", c, u)
+	}
+	w30.Release() // late completions of the departed member's requests, each twice
+	w30.Release()
+	un.Release()
+	un.Release()
+	if c, u := haveCountKeys(g, "m"); c || u {
+		t.Fatalf("a late completion created a key for m (N %v, u %v)", c, u)
+	}
+	wantCharged(t, g, "o", 5, 0, "o after m's late completions")
+	ro.Release()
+	wantCharged(t, g, "o", 0, 0, "o's own completion")
 }

@@ -7,7 +7,6 @@
 package inventory
 
 import (
-	"math"
 	"slices"
 	"time"
 
@@ -162,18 +161,16 @@ type Instance struct {
 	Eligible bool
 }
 
-// TokenBudget is the Instance's token budget B (HBEP-5, Workloads, The count in tokens): kvCacheTokens times the
-// workers its cap counts. ok is false when B is unknown, and the Instance then meets the count rule alone: it has no
-// kvCacheTokens, or no worker counted, or the product would not fit an int64 (no engine reports such a size, and a
-// wrapped value must never become a budget).
-func (i *Instance) TokenBudget() (b int64, ok bool) {
+// TokenBudget is the Instance's token budget B (HBEP-5, Workloads, The count in tokens) as its two factors: perWorker, its
+// status.kvCacheTokens, and workers, the workers its cap counts. B is their product, which the front never forms: it can be larger
+// than any int64 (two workers of 2^62 tokens each), and a budget that is known stays known, so the balancer compares the factors
+// exactly (balancer.Budget). ok is false when B is unknown, and the Instance then meets the count rule alone: it has no
+// kvCacheTokens (or one below 1, the field's minimum), or no worker its cap counts.
+func (i *Instance) TokenBudget() (perWorker int64, workers int, ok bool) {
 	if i.KVCacheTokens == nil || *i.KVCacheTokens < 1 || i.CapWorkers < 1 {
-		return 0, false
+		return 0, 0, false
 	}
-	if *i.KVCacheTokens > math.MaxInt64/int64(i.CapWorkers) {
-		return 0, false
-	}
-	return *i.KVCacheTokens * int64(i.CapWorkers), true
+	return *i.KVCacheTokens, i.CapWorkers, true
 }
 
 // ManagedTarget is one attached managed catalog entry under one Provider.

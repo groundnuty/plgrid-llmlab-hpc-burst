@@ -27,9 +27,10 @@ type State struct {
 	// (HBEP-5, Workloads, The count in tokens). Absent or 0: no cap value, so no token condition for a Workload
 	// request. It never turns the count cap on: Caps alone says that.
 	CapValues map[string]int
-	// Budgets is each member's token budget B, kvCacheTokens times the workers its cap counts. A member absent from
-	// it, or below 1, has no B known, and its requests meet the count rule alone, as before the budget existed.
-	Budgets map[string]int64
+	// Budgets is each member's token budget B, as its two factors, kvCacheTokens and the workers its cap counts (Budget). A
+	// member absent from it, or with a factor below 1, has no B known, and its requests meet the count rule alone, as before
+	// the budget existed.
+	Budgets map[string]Budget
 	// Attrs are each member's attributes, which a request's Match reads, so
 	// a waiting request can be placed on a member that joined after it.
 	Attrs map[string]Attrs
@@ -172,6 +173,11 @@ func (g *Group) Update(s State) int {
 					released++
 				}
 				delete(g.open, m)
+				// The departed member's counts go with it, after its reservations are released above: a key per Instance
+				// that ever served would otherwise stay for the life of the group. A completion that comes later finds
+				// its reservation released already, and changes nothing (releaseLocked).
+				delete(g.charged, m)
+				delete(g.unnamed, m)
 			}
 		}
 		g.members, g.ring, g.pins = next, nil, nil

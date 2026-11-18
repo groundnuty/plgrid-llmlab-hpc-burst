@@ -333,7 +333,7 @@ func (r *Router) applyLocked(d *inventory.Deployment, prev *inventory.View, now 
 // loose bound and no cap (the count cap, and with it the token condition of a
 // request that names no Workload; a Workload request's token condition holds).
 func (r *Router) stateLocked(d *inventory.Deployment, now time.Time) (balancer.State, int) {
-	st := balancer.State{Eligible: map[string]bool{}, Attrs: map[string]balancer.Attrs{}, CapValues: map[string]int{}, Budgets: map[string]int64{}}
+	st := balancer.State{Eligible: map[string]bool{}, Attrs: map[string]balancer.Attrs{}, CapValues: map[string]int{}, Budgets: map[string]balancer.Budget{}}
 	ready := 0
 	for _, i := range d.Members {
 		st.Members = append(st.Members, i.Key)
@@ -342,8 +342,8 @@ func (r *Router) stateLocked(d *inventory.Deployment, now time.Time) (balancer.S
 		// token condition stays in force with the cap at the value it has when in force (HBEP-5, Workloads, The count in tokens). A member with no
 		// budget known has none in the state, so it meets the count rule alone.
 		st.CapValues[i.Key] = i.Cap
-		if b, ok := i.TokenBudget(); ok {
-			st.Budgets[i.Key] = b
+		if perWorker, workers, ok := i.TokenBudget(); ok {
+			st.Budgets[i.Key] = balancer.Budget{PerWorker: perWorker, Workers: int64(workers)}
 		}
 		if i.Eligible && !r.pausedLocked(i.Key, now) {
 			st.Eligible[i.Key] = true

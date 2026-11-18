@@ -10,7 +10,9 @@ package balancer
 // cap is off and so is the second condition; the first stays, with the cap at its value when in force.
 //
 // Every expected admit or refuse below is a literal worked from those two inequalities in the comment beside it. None
-// comes from calling tokenFits, and the reduction's oracle is the count rule, u + 1 <= cap, never the inequality.
+// comes from calling tokenFits, and the reduction's oracle is the count rule, u + 1 <= cap, never the inequality. The one
+// test that does compare with a second computation (TestTheComparisonAgreesWithBigIntegerArithmetic) checks the 192-bit
+// ARITHMETIC against math/big on the same inequalities; the rule itself is pinned only by the typed rows.
 //
 // No test in this package may call t.Parallel (helpers_test.go).
 
@@ -18,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/rand/v2"
 	"testing"
 )
@@ -29,7 +32,8 @@ import (
 type tokRow struct {
 	name    string
 	cap     int
-	b       int64
+	b       int64 // B's per-worker factor, kvCacheTokens (0: no B known)
+	w       int64 // B's workers factor; 0 is 1
 	loads   []int64
 	u       int
 	partial bool
@@ -102,6 +106,32 @@ var tokRows = []tokRow{
 	{name: "partial: the unnamed shares leave room for a Workload request", cap: 4, b: 100, u: 3, partial: true, req: workload(25), admit: true},
 	// No B and the count cap off: nothing holds either kind.
 	{name: "partial: unknown B holds nothing", cap: 2, loads: []int64{1, 1, 1}, partial: true, req: workload(1), admit: true},
+
+	// --- A budget beyond what a product in int64 holds: the comparison is exact, so none of these is refused for its size.
+	// An idle Instance, cap 2, B = 2^62, nothing in flight: an unnamed request needs 2*0 + 1*B <= 2*B: admitted. (cap * B = 2^63 does
+	// not fit an int64; a plain product refused it.)
+	{name: "huge B: an idle Instance admits an unnamed request", cap: 2, b: 1 << 62, req: noWorkload, admit: true},
+	// u = 1, count 1 < 2: 2*0 + 2*B <= 2*B: admitted, the last count slot.
+	{name: "huge B: the second unnamed request fits", cap: 2, b: 1 << 62, u: 1, req: noWorkload, admit: true},
+	// u = 2: count 2 = cap: refused by the count (and 3*B > 2*B).
+	{name: "huge B: the third unnamed request is refused by the count", cap: 2, b: 1 << 62, u: 2, req: noWorkload, admit: false},
+	// B = MaxInt64 = 2^63 - 1, cap 2, N = 2^63 - 2 (one request): count 1 < 2. c = 1: 2*(N+c) + 0 = 2*(2^63 - 1) <= 2*B: admitted,
+	// N + c = B exactly.
+	{name: "B near MaxInt64: N plus c equals B", cap: 2, b: math.MaxInt64, loads: []int64{math.MaxInt64 - 1}, req: workload(1), admit: true},
+	// N = 2^63 - 1: c = 1 makes N + c = 2^63 = B + 1: 2*(B + 1) > 2*B: refused by one token.
+	{name: "B near MaxInt64: N plus c is one over B", cap: 2, b: math.MaxInt64, loads: []int64{math.MaxInt64}, req: workload(1), admit: false},
+	// u = 1: 2*(0 + c) + 1*B <= 2*B, so 2c <= B = 2^63 - 1, c <= 2^62 - 1 (2^62 - 1 = 4,611,686,018,427,387,903).
+	{name: "B near MaxInt64: the largest charge beside one unnamed request", cap: 2, b: math.MaxInt64, u: 1, req: workload(1<<62 - 1), admit: true},
+	// c = 2^62: 2c = 2^63 > 2^63 - 1: refused by one token.
+	{name: "B near MaxInt64: one token more beside one unnamed request", cap: 2, b: math.MaxInt64, u: 1, req: workload(1 << 62), admit: false},
+	// Two workers each reporting 2^62 tokens: B = 2^63, above any int64, and still a budget. At partial membership (the count cap off)
+	// with u = cap = 2: 2*(0 + 1) + 2*B <= 2*B is false: a Workload request with a positive charge is refused (it is never taken
+	// when the unnamed requests already hold the whole budget). A B turned unknown by the overflow would admit it.
+	{name: "partial: two workers of 2^62 each, the unnamed requests hold the budget", cap: 2, b: 1 << 62, w: 2, u: 2, partial: true, req: workload(1), admit: false},
+	// ... and with u = 1 it fits: 2*(0 + c) + 1*B <= 2*B, so c <= B / 2 = 2^62: c = 2^62 admitted,
+	{name: "partial: two workers of 2^62 each, half the budget", cap: 2, b: 1 << 62, w: 2, u: 1, partial: true, req: workload(1 << 62), admit: true},
+	// c = 2^62 + 1 refused by one token.
+	{name: "partial: two workers of 2^62 each, one token over half", cap: 2, b: 1 << 62, w: 2, u: 1, partial: true, req: workload(1<<62 + 1), admit: false},
 }
 
 // onlyMember is a filter admitting one member.
@@ -170,13 +200,17 @@ func (f *tokFix) load(m string, loads []int64, u int) {
 func probeState(row tokRow, mode pickMode) State {
 	s := State{
 		Members: []string{"m", "o"}, Eligible: map[string]bool{"m": true}, Percent: noBound,
-		CapValues: map[string]int{"m": row.cap}, Budgets: map[string]int64{},
+		CapValues: map[string]int{"m": row.cap}, Budgets: map[string]Budget{},
 	}
 	if !row.partial {
 		s.Caps = map[string]int{"m": row.cap}
 	}
 	if row.b > 0 {
-		s.Budgets["m"] = row.b
+		w := row.w
+		if w == 0 {
+			w = 1
+		}
+		s.Budgets["m"] = Budget{PerWorker: row.b, Workers: w}
 	}
 	if mode == spilled {
 		// The home is eligible and holds its one request against a cap of 1: every request is refused there by the count.
@@ -256,115 +290,226 @@ func TestAnAdmittedRequestIsCountedAsWhatItIs(t *testing.T) {
 	}
 }
 
-// The inequalities in int64 with an overflow guard (refuse, never wrap), at the edge of the type. Each row is worked by
-// hand; a wrapping implementation would admit every row marked as such.
-func TestTheInequalitiesRefuseOnOverflowAndNeverWrap(t *testing.T) {
+// The inequalities, EXACTLY, at the edge of the type (a plain int64 product wraps or refuses on each of these rows). Each verdict is
+// worked by hand from the inequality itself; B here is one worker's size unless w says otherwise.
+func TestTheInequalitiesAreExactAtTheEdgeOfTheType(t *testing.T) {
 	const two31, two61 = int64(1) << 31, int64(1) << 61
 	rows := []struct {
-		name         string
-		cap, b, n, u int64
-		c            int64
-		named        bool
-		admit        bool
-		why          string
+		name      string
+		cap, b, w int64
+		n, u      int64
+		c         int64
+		named     bool
+		admit     bool
+		why       string
 	}{
-		// cap = B = 2^31: cap*B = 2^62 fits. c = 2^31: cap*c = 2^62 <= 2^62: admitted, big but exact.
-		{"a large exact fit", two31, two31, 0, 0, two31, true, true, "2^62 <= 2^62"},
-		// c = 2^31 + 1: 2^62 + 2^31 > 2^62: refused, no overflow involved.
-		{"a large one over", two31, two31, 0, 0, two31 + 1, true, false, "2^62 + 2^31 > 2^62"},
-		// c = 2^33: cap*c = 2^64 does not fit; wrapped it is 0 <= 2^62 and would be admitted.
-		{"cap times charge overflows", two31, two31, 0, 0, 1 << 33, true, false, "cap*c = 2^64 wraps to 0"},
-		// cap = 1, B = 2^62, u = 4: u*B = 2^64 wraps to 0 and the request would be admitted.
-		{"u times B overflows", 1, 1 << 62, 0, 4, 1, true, false, "u*B = 2^64 wraps to 0"},
-		// cap = 2, B = 2^61, u = 2, c = 2^61: cap*(N+c) = 2^62 and u*B = 2^62 each fit, their sum 2^63 does not.
-		{"the two terms overflow when added", 2, two61, 0, 2, two61, true, false, "2^62 + 2^62 = 2^63 > MaxInt64"},
-		// N = MaxInt64, c = 1: N + c does not fit.
-		{"N plus c overflows", 1, 1 << 40, math.MaxInt64, 0, 1, true, false, "N + c = 2^63"},
-		// cap = B = 2^40: cap*B = 2^80 does not fit, whichever kind.
-		{"cap times B overflows, Workload", 1 << 40, 1 << 40, 0, 0, 1, true, false, "cap*B = 2^80"},
-		{"cap times B overflows, unnamed", 1 << 40, 1 << 40, 0, 0, 0, false, false, "cap*B = 2^80"},
-		// Unnamed: cap = 2, B = 2^61, N = 2^61: cap*N = 2^62 fits, (u+1)*B = 2^61 fits, the sum 2^62 + 2^61 > cap*B = 2^62: refused.
-		{"unnamed sum over without overflow", 2, two61, two61, 0, 0, false, false, "2^62 + 2^61 > 2^62"},
-		// Unnamed: u + 1 overflows when u = MaxInt64.
-		{"u plus 1 overflows", 1, 1, 0, math.MaxInt64, 0, false, false, "u + 1 = 2^63"},
-		// Unnamed: cap = 2^30 and B = 2^31 give cap*B = 2^61, which fits. N = 2^34 makes cap*N = 2^64, which wraps to 0, and
-		// then 0 + (0+1)*B <= 2^61 would admit it.
-		{"cap times N overflows", 1 << 30, two31, 1 << 34, 0, 0, false, false, "cap*N = 2^64 wraps to 0"},
-		// A negative value cannot come from the counts and is refused.
-		{"a negative charge is refused", 4, 100, 0, 0, -1, true, false, "c < 0"},
+		// cap = B = 2^31: cap*B = 2^62. c = 2^31: cap*c = 2^62 <= 2^62: admitted, big but exact.
+		{"a large exact fit", two31, two31, 1, 0, 0, two31, true, true, "2^62 <= 2^62"},
+		// c = 2^31 + 1: 2^62 + 2^31 > 2^62: refused, one token over.
+		{"a large one over", two31, two31, 1, 0, 0, two31 + 1, true, false, "2^62 + 2^31 > 2^62"},
+		// c = 2^33: cap*c = 2^64 > 2^62; wrapped it is 0 and would be admitted.
+		{"cap times charge is above 2^64", two31, two31, 1, 0, 0, 1 << 33, true, false, "cap*c = 2^64 > 2^62"},
+		// cap = 1, B = 2^62, u = 4: u*B = 2^64 and cap*B = 2^62: 1*1 + 2^64 > 2^62, refused (a wrapped u*B would admit it).
+		{"u times B is above 2^64", 1, 1 << 62, 1, 0, 4, 1, true, false, "1 + 2^64 > 2^62"},
+		// cap = 2, B = 2^61, u = 2, c = 2^61: 2*2^61 + 2*2^61 = 2^63 > 2*2^61 = 2^62: refused (the sum does not fit an int64).
+		{"the two terms sum to 2^63", 2, two61, 1, 0, 2, two61, true, false, "2^63 > 2^62"},
+		// N = MaxInt64, c = 1: N + c = 2^63; cap = 1, B = 2^40: 2^63 > 2^40: refused.
+		{"N plus c is 2^63", 1, 1 << 40, 1, math.MaxInt64, 0, 1, true, false, "2^63 > 2^40"},
+		// cap = B = 2^40, c = 1: cap*(N+c) = 2^40 <= cap*B = 2^80: ADMITTED, though cap*B does not fit an int64.
+		{"cap times B is 2^80, a Workload request", 1 << 40, 1 << 40, 1, 0, 0, 1, true, true, "2^40 <= 2^80"},
+		// unnamed, the same: 2^40 * 0 + 1 * 2^40 <= 2^80: admitted.
+		{"cap times B is 2^80, an unnamed request", 1 << 40, 1 << 40, 1, 0, 0, 0, false, true, "2^40 <= 2^80"},
+		// cap = 2, B = 2^61, N = 2^61: cap*N = 2^62, (u+1)*B = 2^61: 2^62 + 2^61 > cap*B = 2^62: refused.
+		{"unnamed sum over without overflow", 2, two61, 1, two61, 0, 0, false, false, "2^62 + 2^61 > 2^62"},
+		// u = MaxInt64, cap = 1: u + 1 = 2^63 > cap: refused.
+		{"u plus 1 is 2^63", 1, 1, 1, 0, math.MaxInt64, 0, false, false, "2^63 > 1"},
+		// cap = 2^30, B = 2^31, N = 2^34: cap*N = 2^64 > cap*B = 2^61: refused (wrapped, cap*N is 0).
+		{"cap times N is 2^64", 1 << 30, two31, 1, 1 << 34, 0, 0, false, false, "2^64 > 2^61"},
+		// cap = 2, B = 2^62, idle: 2*0 + 1*B <= 2*B: admitted (cap*B = 2^63 does not fit an int64).
+		{"an idle Instance at B = 2^62", 2, 1 << 62, 1, 0, 0, 0, false, true, "2^62 <= 2^63"},
+		// u = 1: 2*0 + 2*B <= 2*B: admitted. u = 2: 3*B > 2*B: refused.
+		{"one unnamed request at B = 2^62", 2, 1 << 62, 1, 0, 1, 0, false, true, "2*2^62 <= 2*2^62"},
+		{"two unnamed requests at B = 2^62", 2, 1 << 62, 1, 0, 2, 0, false, false, "3*2^62 > 2*2^62"},
+		// Two workers of 2^62: B = 2^63. u = cap = 2: 2*(0+1) + 2*B <= 2*B is false.
+		{"B = 2^63, the unnamed requests hold it all", 2, 1 << 62, 2, 0, 2, 1, true, false, "2 + 2*2^63 > 2*2^63"},
+		// B = 2^63 - 1, cap = 2^62, N = 0, u = 0, c = 2^63 - 1: cap*c = 2^62 * (2^63 - 1) <= cap*B: equal: admitted.
+		{"cap and B both near the top", 1 << 62, math.MaxInt64, 1, 0, 0, math.MaxInt64, true, true, "equal products"},
+		// c = 2^63 - 1 with N = 1: N + c = 2^63 > B: refused by one token.
+		{"cap and B both near the top, one over", 1 << 62, math.MaxInt64, 1, 1, 0, math.MaxInt64, true, false, "2^62 * 2^63 > 2^62 * (2^63 - 1)"},
+		// cap = MaxInt64 = u + 1: an unnamed request at u = cap - 1 with B = 2^63 - 1: (u+1)*B = cap*B: admitted.
+		{"cap at MaxInt64, the last slot", math.MaxInt64, math.MaxInt64, 1, 0, math.MaxInt64 - 1, 0, false, true, "cap*B <= cap*B"},
+		// A non-positive size or a negative count cannot come from the group and is refused.
+		{"a negative charge is refused", 4, 100, 1, 0, 0, -1, true, false, "c < 0"},
+		{"a zero workers factor is refused", 4, 100, 0, 0, 0, 1, true, false, "no budget"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			if got := tokenFits(row.cap, row.b, row.n, row.u, row.c, row.named); got != row.admit {
-				t.Fatalf("tokenFits(cap %d, B %d, N %d, u %d, c %d, named %v) = %v, want %v (%s)", row.cap, row.b, row.n, row.u, row.c, row.named, got, row.admit, row.why)
+			b := Budget{PerWorker: row.b, Workers: row.w}
+			if got := tokenFits(row.cap, b, row.n, row.u, row.c, row.named); got != row.admit {
+				t.Fatalf("tokenFits(cap %d, B %d x %d, N %d, u %d, c %d, named %v) = %v, want %v (%s)", row.cap, row.b, row.w, row.n, row.u, row.c, row.named, got, row.admit, row.why)
 			}
 		})
 	}
 }
 
-// An overflow-sized B and cap on a live group (cap = B = 2^40, so cap * B = 2^80, which no int64 holds): the request is
-// refused cleanly, nothing is reserved, and the member's counts do not move. Four rows, typed by hand:
+// The comparison's arithmetic against math/big, on the same two inequalities written as HBEP-5 writes them and evaluated without any
+// rearrangement. This checks the 128- and 192-bit carries, not the rule (the typed rows pin that): random inputs over the whole int64
+// range, and for each Workload case the charge at the edge, the largest the member admits and one more, built from the exact
+// quotient.
+func TestTheComparisonAgreesWithBigIntegerArithmetic(t *testing.T) {
+	rng := rand.New(rand.NewPCG(20261118, 783))
+	bi := func(v int64) *big.Int { return big.NewInt(v) }
+	pick := func() int64 {
+		switch rng.IntN(5) {
+		case 0:
+			return 1 + rng.Int64N(512)
+		case 1:
+			return 1 + rng.Int64N(1<<32)
+		case 2:
+			return math.MaxInt64 - rng.Int64N(4)
+		default:
+			return 1 + rng.Int64N(math.MaxInt64)
+		}
+	}
+	// exact is HBEP-5's two inequalities as written, in unbounded integers.
+	exact := func(limit int64, b Budget, n, u, c int64, named bool) bool {
+		whole := new(big.Int).Mul(bi(b.PerWorker), bi(b.Workers))
+		left := new(big.Int)
+		if named {
+			left.Mul(bi(limit), new(big.Int).Add(bi(n), bi(c)))
+			left.Add(left, new(big.Int).Mul(bi(u), whole))
+		} else {
+			left.Mul(bi(limit), bi(n))
+			left.Add(left, new(big.Int).Mul(new(big.Int).Add(bi(u), bi(1)), whole))
+		}
+		return left.Cmp(new(big.Int).Mul(bi(limit), whole)) <= 0
+	}
+	checked := 0
+	for i := range 100_000 {
+		limit, pw := pick(), pick()
+		w := int64(1 + rng.IntN(64))
+		if rng.IntN(8) == 0 {
+			w = math.MaxInt32
+		}
+		b := Budget{PerWorker: pw, Workers: w}
+		u := rng.Int64N(limit) // 0..cap-1; the last slot and the cap itself are drawn below
+		if rng.IntN(8) == 0 {
+			u = limit
+		}
+		n := rng.Int64N(pick())
+		c := rng.Int64N(pick()) + 1
+		for _, named := range []bool{false, true} {
+			if got, want := tokenFits(limit, b, n, u, c, named), exact(limit, b, n, u, c, named); got != want {
+				t.Fatalf("case %d: cap %d, B %d x %d, N %d, u %d, c %d, named %v: %v, exact arithmetic says %v", i, limit, pw, w, n, u, c, named, got, want)
+			}
+			checked++
+		}
+		// The edge, for one case in five: the largest charge the member admits, by bisection on the exact arithmetic, is admitted and
+		// the next one is refused.
+		if i%5 != 0 || !exact(limit, b, n, u, 0, true) {
+			continue
+		}
+		lo, hi := int64(0), int64(math.MaxInt64)
+		for lo < hi {
+			gap := hi - lo
+			mid := lo + gap/2 + gap%2 // the upper middle, written so that it cannot overflow
+			if exact(limit, b, n, u, mid, true) {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		if !tokenFits(limit, b, n, u, lo, true) {
+			t.Fatalf("case %d: cap %d, B %d x %d, N %d, u %d: the largest charge %d is refused", i, limit, pw, w, n, u, lo)
+		}
+		if lo < math.MaxInt64 && tokenFits(limit, b, n, u, lo+1, true) {
+			t.Fatalf("case %d: cap %d, B %d x %d, N %d, u %d: a charge of %d, one above the largest, is admitted", i, limit, pw, w, n, u, lo+1)
+		}
+		checked++
+	}
+	if checked < 200_000 {
+		t.Fatalf("only %d cases checked", checked)
+	}
+}
+
+// An overflow-sized B and cap on a live group (cap = B = 2^40, so cap * B = 2^80, which no int64 holds): the comparison is exact, so
+// each request meets its real verdict. Four rows, typed by hand from the inequalities:
 //
-//	full membership, a Workload request:    refused (its inequality overflows).
-//	full membership, an unnamed request:    refused (its inequality overflows).
-//	partial membership, a Workload request: refused (its inequality overflows, and it stays in force).
-//	partial membership, an unnamed request: admitted, since its condition is off below full membership, as before the budget.
-func TestAnOverflowSizedBudgetRefusesCleanlyThroughTheGroup(t *testing.T) {
+//	full membership, a Workload request, c = 1:     2^40 * 1 + 0 <= 2^40 * 2^40: admitted.
+//	full membership, an unnamed request:            2^40 * 0 + 1 * 2^40 <= 2^80: admitted.
+//	partial membership, a Workload request, c = 1:  the same, admitted.
+//	partial membership, an unnamed request:         admitted (its condition is off).
+//
+// and a Workload request whose charge is 2^41 beside a member that holds N = 2^80 - 1 cannot be built here (N is an int64), so the
+// refusing rows of the huge budgets are in the truth table.
+func TestAnOverflowSizedBudgetOnALiveGroupIsComparedNotRefused(t *testing.T) {
 	for _, row := range []struct {
 		name    string
 		partial bool
 		req     Charge
-		admit   bool
 	}{
-		{"full membership, a Workload request", false, workload(1), false},
-		{"full membership, an unnamed request", false, noWorkload, false},
-		{"partial membership, a Workload request", true, workload(1), false},
-		{"partial membership, an unnamed request", true, noWorkload, true},
+		{"full membership, a Workload request", false, workload(1)},
+		{"full membership, an unnamed request", false, noWorkload},
+		{"partial membership, a Workload request", true, workload(1)},
+		{"partial membership, an unnamed request", true, noWorkload},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f := newTokFix(t)
 			s := State{
 				Members: []string{"m", "o"}, Eligible: map[string]bool{"m": true}, Percent: noBound,
-				CapValues: map[string]int{"m": 1 << 40}, Budgets: map[string]int64{"m": 1 << 40},
+				CapValues: map[string]int{"m": 1 << 40}, Budgets: map[string]Budget{"m": {PerWorker: 1 << 40, Workers: 1}},
 			}
 			if !row.partial {
 				s.Caps = map[string]int{"m": 1 << 40}
 			}
 			f.g.Update(s)
 			r, err := f.g.TryPickFor(f.keyOnM, nil, row.req)
-			if row.admit {
-				if err != nil || r == nil || r.Member != "m" {
-					t.Fatalf("got %v, %v, want the request admitted on m", r, err)
-				}
-				return
+			if err != nil || r == nil || r.Member != "m" {
+				t.Fatalf("got %v, %v, want the request admitted on m", r, err)
 			}
-			if !errors.Is(err, ErrAllAtCap) || r != nil {
-				t.Fatalf("got %v, %v, want ErrAllAtCap and no reservation", r, err)
-			}
-			wantCounts(t, f.g, 0, "after the refusal")
-			wantCharged(t, f.g, "m", 0, 0, "after the refusal")
 		})
 	}
 }
 
-// The reduction (HBEP-5: with no Workload request in flight, the second condition is u + 1 <= cap, the count rule). The
-// oracle is the count rule itself, u + 1 <= cap, never the inequality. Fixed seed.
+// The reduction (HBEP-5: with no Workload request in flight, the second condition is u + 1 <= cap, the count rule), over the FULL
+// range: B's per-worker size uniform over 1..MaxInt64 with the edges 1, 2, 2^31, 2^32, 2^62 and MaxInt64 each drawn often, 1 to 64
+// workers (and 2^31 - 1), and cap from 1 to 512 in half the cases and over 1..MaxInt64 in the rest, with u from 0 to cap (near cap
+// when cap is large: cap - 2, cap - 1, cap, and one uniform). The oracle is the count rule itself, u + 1 <= cap, written as
+// u <= cap - 1 so that it cannot overflow, never the inequality. Fixed seed.
 func TestWithNoWorkloadRequestInFlightTheUnnamedConditionIsTheCountRule(t *testing.T) {
 	rng := rand.New(rand.NewPCG(20261118, 764))
-	const cases = 200_000
+	edges := []int64{1, 2, 1 << 31, 1 << 32, 1 << 62, math.MaxInt64}
+	const cases = 400_000
 	for i := range cases {
-		cap := 1 + rng.IntN(512)
-		b := 1 + rng.Int64N(1<<40)
-		u := rng.IntN(cap + 1)
-		want := u+1 <= cap // the count rule
-		if got := tokenFits(int64(cap), b, 0, int64(u), 0, false); got != want {
-			t.Fatalf("case %d: cap %d, B %d, u %d: the unnamed condition says %v, the count rule %v", i, cap, b, u, got, want)
+		var limit int64
+		if rng.IntN(2) == 0 {
+			limit = 1 + rng.Int64N(512)
+		} else {
+			limit = 1 + rng.Int64N(math.MaxInt64)
+		}
+		pw := 1 + rng.Int64N(math.MaxInt64)
+		if rng.IntN(4) == 0 {
+			pw = edges[rng.IntN(len(edges))]
+		}
+		w := int64(1 + rng.IntN(64))
+		if rng.IntN(16) == 0 {
+			w = math.MaxInt32
+		}
+		var u int64
+		if limit <= 512 {
+			u = rng.Int64N(limit + 1)
+		} else {
+			u = []int64{0, limit - 2, limit - 1, limit, rng.Int64N(limit)}[rng.IntN(5)]
+		}
+		want := u <= limit-1 // the count rule: u + 1 <= cap
+		if got := tokenFits(limit, Budget{PerWorker: pw, Workers: w}, 0, u, 0, false); got != want {
+			t.Fatalf("case %d: cap %d, B %d x %d, u %d: the unnamed condition says %v, the count rule %v", i, limit, pw, w, u, got, want)
 		}
 	}
 }
 
 // The same reduction through a live group, the whole path: with N = 0 a request that names no Workload is admitted exactly
-// when the member's count is below its cap, whether B is known or not.
+// when the member's count is below its cap, whether B is known or not, and however large B is.
 func TestWithNoWorkloadRequestInFlightAnUnnamedRequestMeetsTheCountRuleThroughTheGroup(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 764))
 	for i := range 600 {
@@ -375,12 +520,13 @@ func TestWithNoWorkloadRequestInFlightAnUnnamedRequestMeetsTheCountRuleThroughTh
 		f.load("m", nil, u)
 		row := tokRow{cap: cap, partial: false}
 		if known {
-			row.b = 1 + rng.Int64N(1<<40)
+			row.b = 1 + rng.Int64N(math.MaxInt64)
+			row.w = int64(1 + rng.IntN(8))
 		}
 		f.g.Update(probeState(row, direct))
 		r, err := f.g.TryPickFor(f.keyOnM, nil, noWorkload)
 		if want := u+1 <= cap; (err == nil) != want {
-			t.Fatalf("case %d: cap %d, B known %v, u %d: admitted %v (%v), the count rule says %v", i, cap, known, u, err == nil, err, want)
+			t.Fatalf("case %d: cap %d, B known %v (%d x %d), u %d: admitted %v (%v), the count rule says %v", i, cap, known, row.b, row.w, u, err == nil, err, want)
 		} else if want && r.Member != "m" {
 			t.Fatalf("case %d: admitted on %s, want m", i, r.Member)
 		}
@@ -393,7 +539,7 @@ func TestABudgetBelowOneIsUnknown(t *testing.T) {
 	f := newTokFix(t)
 	f.g.Update(State{
 		Members: []string{"m", "o"}, Eligible: map[string]bool{"m": true}, Percent: noBound,
-		Caps: map[string]int{"m": 4}, CapValues: map[string]int{"m": 4}, Budgets: map[string]int64{"m": 0},
+		Caps: map[string]int{"m": 4}, CapValues: map[string]int{"m": 4}, Budgets: map[string]Budget{"m": {PerWorker: 0, Workers: 1}},
 	})
 	// cap 4 and nothing in flight: a Workload request of 1,000,000 tokens would be refused by any B, and is admitted
 	// because B = 0 is no budget: the count rule alone.
