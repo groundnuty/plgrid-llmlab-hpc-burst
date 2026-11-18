@@ -38,6 +38,12 @@
 //     exit 2, nothing runs;
 //   - "cat > <file>" is the only redirection. It writes standard input to the
 //     file with mode 0666 &^ umask and needs the parent directory to exist;
+//   - "env SLURM_TIME_FORMAT=%s sbatch ..." is the one prefix, since a Command
+//     carries no environment: any other variable, value or command is refused. A
+//     call's Words keep the prefix; Call.Command is the command without it, and
+//     Count, CountFor and Gate go by that command, so Count("sbatch") counts a
+//     test and a submission alike (CountTestOnly and CountSubmits tell them
+//     apart);
 //   - commands: sbatch, srun, squeue, sacct, scancel, scontrol release, printenv,
 //     sha256sum, tail -c <n> and head -c <n> (at most 64 KiB), umask, mkdir -p, chmod, mv -f and mv -fT, rm -f, rm -rf and test -f.
 //     Anything else is exit 127, "command not found". Options the plugin never
@@ -99,6 +105,22 @@
 // reply and registers its job, held, when the next sbatch arrives, and
 // OutsideJob adds a job of the user that is no call, as the owner's other
 // projects would submit through the same login.
+//
+// # sbatch --test-only
+//
+// Beta (HBEP-4, Core operations, Estimate). "sbatch --test-only" answers on
+// standard error, exit 0, "sbatch: Job <next ID> to start at <T> using <n>
+// processors on nodes <node> in partition <p>", and submits nothing: it
+// registers no job, takes no job ID, consumes no scripted step and registers no
+// late job. The partition and QOS refusals are a submission's. <T> is epoch
+// seconds when the command carries SLURM_TIME_FORMAT=%s and, without it, local
+// text in Config.TimeZone as YYYY-MM-DDTHH:MM:SS with no zone marker. The
+// answer defaults to the clock's now, and SetTestOnlyStart, SetTestOnlyRaw
+// (a token verbatim, for the forms a plugin must not read), SetTestOnlyOutput
+// (no "to start at" line), FailTestOnly (exit 1) and HangTestOnly (waits at a
+// gate, with no lock held, until released or the context ends) set it. The call
+// is logged as a command that began, and Call.TestOnly tells it from a
+// submission.
 //
 // # Modelling choices the brief left open
 //

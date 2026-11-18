@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -108,6 +109,12 @@ func setTmpDir(dir string) string {
 // node feature its tmpDir needs, and is left out when the partition names none
 // (science-agent ruling, 1 Nov 2026, issue #125).
 func submitLine(s submission) (string, error) {
+	return Line(submitWords(s)...)
+}
+
+// submitWords are submitLine's words, before they are quoted into a line;
+// estimateLine builds on them.
+func submitWords(s submission) []string {
 	w := []string{"sbatch", "--parsable", "--job-name=" + s.tag, "--no-requeue"}
 	if s.hold {
 		w = append(w, "--hold")
@@ -135,7 +142,39 @@ func submitLine(s submission) (string, error) {
 		"--error="+path.Join(s.allocDir, agentapi.JobErrorName),
 		"--wrap="+bootstrapIn(s.agentPath, s.agentDigest, s.allocDir, s.tmpDir),
 	)
-	return Line(w...)
+	return w
+}
+
+// estimateJobName is the one job name an estimate runs under, in --job-name and in the paths that carry a tag. It is never a
+// live Allocation's tag: a --test-only call can leave an accounting record on a platform, and FindByTag reads accounting by job
+// name, so a phantom job under a live tag would be found as that Allocation's. No tag can equal it: a tag is hb-<n>-<h>, always
+// starting with "hb-" (v1alpha1.JobTag), and this name does not. It is fixed, not a suffix of the tag, which could push a long
+// tag past the profile's job-name length rule (a tag is already up to JobTagLength, 56, characters; this name is 17). No profile
+// sets a jobName.pattern today, and a platform that did would have its probe decide how the estimate reads there (HBEP-4,
+// Estimate). The name does not affect when Slurm would start the job.
+const estimateJobName = "hpcburst-estimate"
+
+// estimateEnvWord is the one environment assignment of an estimate's line: it
+// makes sbatch print the start as epoch seconds (HBEP-4, Core operations,
+// Estimate). A Command carries no environment, so it is the line's own prefix.
+const estimateEnvWord = "SLURM_TIME_FORMAT=%s"
+
+// estimateLine is Submit's line with the held flag taken out, --test-only added
+// and the epoch time format set:
+//
+//	env SLURM_TIME_FORMAT=%s sbatch --test-only --parsable ... (submitLine's options, never --hold)
+//
+// It asserts, before it returns a line the Runner could run, that --test-only is
+// one of the argv and that no --hold is: a line without --test-only would submit
+// a job, so it cannot be built (HBEP-4, Estimate: read-only).
+func estimateLine(s submission) (string, error) {
+	s.hold = false
+	w := submitWords(s)
+	words := append([]string{"env", estimateEnvWord, w[0], "--test-only"}, w[1:]...)
+	if !slices.Contains(words[3:], "--test-only") || slices.Contains(words, "--hold") {
+		return "", fmt.Errorf("the estimate's line lacks --test-only or holds --hold: it would submit a job, so it is not run")
+	}
+	return Line(words...)
 }
 
 // queueLine lists every job of the calling user (the Provider's cached

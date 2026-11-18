@@ -171,6 +171,8 @@ type Batch struct {
 	// late are the jobs a RegisteredLate Script lost the reply of and the
 	// scheduler registers at the next Submit (batch_late.go).
 	late []lateJob
+	// est are Estimate's controls (estimate.go).
+	est estimateControls
 }
 
 // NewBatch returns a fake Slurm that reads clock.
