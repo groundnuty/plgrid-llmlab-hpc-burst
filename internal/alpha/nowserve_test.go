@@ -285,16 +285,18 @@ func TestTheWarmStartIsShownOnlyByTheAgentsOwnLines(t *testing.T) {
 		"a start line with restartCount 1": {append([]string{start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
 		// A line of the agent's own that the check was not taught, or a staging line, before the start is no first execution (a foreign line, one that
 		// is not the agent's, is not: see TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine).
-		"an agent line nobody listed before it":    {append([]string{`time=2026-11-11T10:00:00Z level=INFO msg="an agent message the list does not know"`, start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"a staging line before the start":          {append([]string{imageLine(StagedAlreadyVerified, digest), start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"foreign lines, then a restarted agent":    {append([]string{"scheduler: an invented notice", start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"foreign lines and no start line":          {append([]string{"scheduler: an invented notice", pre}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"a read that ends before the first worker": {append([]string{start(0)}, warmLines...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
-		"no image line":                            {[]string{start(0), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown && e.FilesShown == 2 }},
-		"a checkpoint file missing":                {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.ImageShown && e.FilesShown == 1 && e.FilesOf == 2 }},
-		"another digest":                           {[]string{start(0), imageLine(StagedAlreadyVerified, "sha256:"+strings.Repeat("cd", 32)), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown }},
-		"another file":                             {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors.index.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.FilesShown == 1 }},
-		"a build, not a reuse":                     {[]string{start(0), build, fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried && !e.ImageShown }},
+		"an agent line nobody listed before it": {append([]string{`time=2026-11-11T10:00:00Z level=INFO msg="an agent message the list does not know"`, start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a staging line before the start":       {append([]string{imageLine(StagedAlreadyVerified, digest), start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"foreign lines, then a restarted agent": {append([]string{"scheduler: an invented notice", start(1)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"foreign lines and no start line":       {append([]string{"scheduler: an invented notice", pre}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		// MaxLeadingForeign is three: a fourth line that is not the agent's before its first is no log the check accounts for, even with a good start after it.
+		"four lines that are not the agent's first": {append([]string{"scheduler: an invented notice", "scheduler: an invented notice", "scheduler: an invented notice", "scheduler: an invented notice", start(0)}, append(warmLines, worker)...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"a read that ends before the first worker":  {append([]string{start(0)}, warmLines...), nil, func(e *WarmUnshownError) bool { return e.NotWhole }},
+		"no image line":             {[]string{start(0), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown && e.FilesShown == 2 }},
+		"a checkpoint file missing": {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.ImageShown && e.FilesShown == 1 && e.FilesOf == 2 }},
+		"another digest":            {[]string{start(0), imageLine(StagedAlreadyVerified, "sha256:"+strings.Repeat("cd", 32)), fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return !e.ImageShown }},
+		"another file":              {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), fileLine("model.safetensors.index.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.FilesShown == 1 }},
+		"a build, not a reuse":      {[]string{start(0), build, fileLine("config.json"), fileLine("model.safetensors"), worker}, nil, func(e *WarmUnshownError) bool { return e.Retried && !e.ImageShown }},
 		// "every" is the record's list less the skipped files, never the files the log mentions: a log that names only
 		// config.json matches every file it mentions, and not the list.
 		"every file from the log's own mentions": {[]string{start(0), imageLine(StagedAlreadyVerified, digest), fileLine("config.json"), worker}, nil, func(e *WarmUnshownError) bool { return e.FilesOf == 2 && e.FilesShown == 1 }},
@@ -679,7 +681,8 @@ func TestTheEndingSoonRuleIsExpectedForbiddenOrOptionalByTheLeaseAndTheWindow(t 
 // since the read is the file's head from its first byte and the staging window is anchored at the restartCount-0 start line; a slog line it was not
 // taught, a staging line, a restarted agent's start or no start at all there still fail (TestTheWarmStartIsShownOnlyByTheAgentsOwnLines's table). The
 // log below has the SHAPE of that run, with invented text and values: two foreign lines, a pre-start line, the start, agent lines of other messages among
-// pre-start lines, the staging, one more agent line, the worker's start and agent lines after it.
+// pre-start lines, the staging, one more agent line, the worker's start and agent lines after it. The reader takes at most MaxLeadingForeign such lines,
+// and only before the agent's first line.
 func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("ab", 32)
 	files := []string{"config.json", "model.safetensors"}
@@ -711,10 +714,24 @@ func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T
 	if e, log := judge(body...); e != nil || LeadingForeign(log) != 0 {
 		t.Errorf("a log that opens with the agent's own lines: %+v, %d leading lines", e, LeadingForeign(log))
 	}
-	// Foreign lines among the pre-start lines are skipped too; foreign lines after the start are agent-side noise and are not counted as leading.
-	if e, log := judge(foreign[0], pre, foreign[1], start, other(1), foreign[0], "stage: image "+digest+": "+StagedAlreadyVerified, "stage: checkpoint file config.json: "+StagedPresentMatching,
-		"stage: checkpoint file model.safetensors: "+StagedPresentMatching, worker); e != nil || LeadingForeign(log) != 2 {
-		t.Errorf("foreign lines among and after: %+v, %d leading lines, want shown and 2", e, LeadingForeign(log))
+	// The cap (the science agent's bound on #735, 18 Nov 2026): exactly MaxLeadingForeign (three) lines first are shown, counting three; a fourth is not the
+	// log of a first execution the check accounts for.
+	three := append([]string{foreign[0], foreign[0], foreign[1]}, body...)
+	if e, log := judge(three...); e != nil || LeadingForeign(log) != 3 {
+		t.Errorf("three lines that are not the agent's first: %+v, %d leading lines, want shown and 3", e, LeadingForeign(log))
+	}
+	if e, log := judge(append([]string{foreign[0]}, three...)...); e == nil || !e.NotWhole || LeadingForeign(log) != 4 {
+		t.Errorf("four lines that are not the agent's first: %+v, %d leading lines, want NotWhole and 4", e, LeadingForeign(log))
+	}
+	// A line that is not the agent's AFTER the agent's first line is no leading line, and not accepted: before the 18 Nov round the reader skipped one among
+	// the pre-start lines, and the cap flips that to NotWhole (the plan approved on #735). The same line after the start is agent-side noise, as before.
+	if e, log := judge(foreign[0], pre, foreign[1], start, other(1), "stage: image "+digest+": "+StagedAlreadyVerified, "stage: checkpoint file config.json: "+StagedPresentMatching,
+		"stage: checkpoint file model.safetensors: "+StagedPresentMatching, worker); e == nil || !e.NotWhole || LeadingForeign(log) != 1 {
+		t.Errorf("a line that is not the agent's among the pre-start lines: %+v, %d leading lines, want NotWhole and 1", e, LeadingForeign(log))
+	}
+	if e, log := judge(foreign[0], pre, start, other(1), foreign[1], "stage: image "+digest+": "+StagedAlreadyVerified, "stage: checkpoint file config.json: "+StagedPresentMatching,
+		"stage: checkpoint file model.safetensors: "+StagedPresentMatching, worker); e != nil || LeadingForeign(log) != 1 {
+		t.Errorf("a line that is not the agent's after the start: %+v, %d leading lines, want shown and 1", e, LeadingForeign(log))
 	}
 	// What is and is not foreign, by the parser: a plain line is; a slog line of a message the check was not taught, a stager line and a start line are not.
 	for line, want := range map[string]bool{
@@ -736,24 +753,98 @@ func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T
 
 // Through Run, the dry log whose first two lines are the scheduler's (the shape of the Sano serve run) still shows the warm start: no failure, no NOT RUN,
 // a PASS whose text says how many lines came first and not what they were. The control is the unlisted agent line before the start, which is NOT RUN
-// (TestAWarmStartTheAgentsLogDidNotShowIsNotRun, warm-unknown-first).
+// (TestAWarmStartTheAgentsLogDidNotShowIsNotRun, warm-unknown-first). Three lines are the most the check takes, and the text of the lines is in the
+// private record and in no text to post (the science agent's bound on #735, 18 Nov 2026).
 func TestARowALogThatOpensWithTheSchedulersLinesStillShowsTheWarmStart(t *testing.T) {
+	for _, name := range []string{"alpha-athena-now-serve", SanoServeName} {
+		for fault, n := range map[string]int{"warm-foreign-first": 2, "warm-foreign-three": 3} {
+			t.Run(name+"/"+fault, func(t *testing.T) {
+				row := rowOf(name)
+				cfg := Config{Row: row, Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+				rec, err := NewRecorder(cfg.Out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+				if err != nil || len(failures) != 0 {
+					t.Fatalf("failures %v, err %v; want a pass", failures, err)
+				}
+				posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+				if !strings.Contains(string(posts), name+": PASS") || !strings.Contains(string(posts), fmt.Sprintf("opened with %d line(s) that are not the agent's", n)) {
+					t.Errorf("the text to post does not say PASS with the count of the lines that came first:\n%s", posts)
+				}
+				leadingTextIsPrivate(t, cfg.Out, n)
+			})
+		}
+	}
+}
+
+// A fourth line that is not the agent's before its first is past the cap: NOT RUN through Run, with the first four lines in the private record and no line of
+// them in the text to post.
+func TestAFourthLineThatIsNotTheAgentsBeforeItsFirstIsNotRun(t *testing.T) {
 	for _, name := range []string{"alpha-athena-now-serve", SanoServeName} {
 		t.Run(name, func(t *testing.T) {
 			row := rowOf(name)
-			cfg := Config{Row: row, Dry: true, DryFault: "warm-foreign-first", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			cfg := Config{Row: row, Dry: true, DryFault: "warm-foreign-four", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
 			rec, err := NewRecorder(cfg.Out)
 			if err != nil {
 				t.Fatal(err)
 			}
 			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
-			if err != nil || len(failures) != 0 {
-				t.Fatalf("failures %v, err %v; want a pass", failures, err)
+			var w *WarmUnshownError
+			if !errors.Is(err, ErrWarmUnshown) || !errors.As(err, &w) || !w.NotWhole || !NotRun(row, err) || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v; want the NOT RUN of a log that is not the whole of the first start", failures, err)
 			}
-			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
-			if !strings.Contains(string(posts), name+": PASS") || !strings.Contains(string(posts), "opened with 2 line(s) that are not the agent's") || strings.Contains(string(posts), "invented scheduler notice") {
-				t.Errorf("the text to post does not say PASS with the count of the lines that came first, or names them:\n%s", posts)
-			}
+			leadingTextIsPrivate(t, cfg.Out, 4)
 		})
+	}
+}
+
+// leadingTextIsPrivate checks the run's output directory: record.json holds the text of the leading lines that are not the agent's, n of them (the invented
+// dryForeignLine), and posts.md holds none of it.
+func leadingTextIsPrivate(t *testing.T, out string, n int) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(out, RecordFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec struct {
+		Observation struct {
+			Warm struct {
+				LeadingText []string `json:"leadingText"`
+			} `json:"warm"`
+		} `json:"observation"`
+	}
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatalf("record.json: %v", err)
+	}
+	if got := rec.Observation.Warm.LeadingText; len(got) != n || got[0] != dryForeignLine {
+		t.Errorf("the private record holds %q, want %d lines of %q", got, n, dryForeignLine)
+	}
+	posts, _ := os.ReadFile(filepath.Join(out, PostsFile))
+	if strings.Contains(string(posts), "invented scheduler notice") || strings.Contains(string(posts), "slurmstepd") {
+		t.Errorf("the text to post carries the text of a line that is not the agent's:\n%s", posts)
+	}
+}
+
+// LeadingForeignText takes the lines at the head of the log that are not the agent's, the first four at most, each cut at 300 bytes, and stops at the agent's
+// first line; a log that opens with the agent's own line has none.
+func TestTheLeadingTextIsTheFirstFourLinesCutAt300Bytes(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	agent := `time=2026-11-11T10:00:00Z level=INFO msg="host-dialed: listening for the relays" control=1 serving=2`
+	for name, c := range map[string]struct {
+		log  string
+		want []string
+	}{
+		"none":                 {agent + "\n", nil},
+		"two then the agent's": {"a\nb\n" + agent + "\nc\n", []string{"a", "b"}},
+		"five: the first four": {"1\n2\n3\n4\n5\n" + agent + "\n", []string{"1", "2", "3", "4"}},
+		"a long line, cut":     {long + "\n" + agent + "\n", []string{long[:300]}},
+		"a cut inside a rune":  {strings.Repeat("a", 299) + "\u00e9\n" + agent + "\n", []string{strings.Repeat("a", 299)}},
+		"an empty log":         {"", nil},
+	} {
+		if got := LeadingForeignText([]byte(c.log)); !slices.Equal(got, c.want) {
+			t.Errorf("%s: LeadingForeignText = %q, want %q", name, got, c.want)
+		}
 	}
 }

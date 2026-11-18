@@ -393,19 +393,43 @@ const (
 	StagedFailedCheck = "failed its check"
 )
 
-// LeadingForeign is how many lines of the agent's log before its first start line are not the agent's (AgentLogLine.Foreign): counted for the text to
-// post, which says it, and never judged beyond that. It names no line.
+// MaxLeadingForeign is the most lines the warm start's check skips at the head of the agent's log, before its first line, because they are not the agent's
+// (AgentLogLine.Foreign): the science agent's bound on #735, 18 Nov 2026, on the relaxation that lets Sano's two scheduler lines come first. A fourth is no
+// longer a few lines of a scheduler or a shell: the log is not accounted for, and the warm start is not shown.
+const MaxLeadingForeign = 3
+
+// LeadingForeign is how many lines at the very head of the agent's log are not the agent's (AgentLogLine.Foreign): the lines the check skips before the
+// agent's first line, counted for the text to post, which says how many and never what. A foreign line after the agent's first line is not leading.
 func LeadingForeign(log []AgentLogLine) int {
 	n := 0
-	for _, l := range log {
-		if l.Kind == LineStart {
-			break
-		}
-		if l.Foreign {
-			n++
-		}
+	for n < len(log) && log[n].Foreign {
+		n++
 	}
 	return n
+}
+
+// leadingTextMax is how many bytes of each leading foreign line the private record keeps.
+const leadingTextMax = 300
+
+// LeadingForeignText is the text of the lines at the head of the agent's log that are not the agent's, the first MaxLeadingForeign+1 of them (so a refusal for
+// a fourth shows it), each cut at leadingTextMax bytes. It is for the run's PRIVATE record only (WarmObs.LeadingText, record.json): a scheduler's line can name a
+// directory, and so a login, which no post may carry, and the next run reads it there to confirm what the lines are.
+func LeadingForeignText(raw []byte) []string {
+	var out []string
+	text := strings.TrimSuffix(string(raw), "\n")
+	if text == "" {
+		return nil
+	}
+	for _, l := range strings.Split(text, "\n") {
+		if len(out) > MaxLeadingForeign || !parseAgentLine(l).Foreign {
+			break
+		}
+		if len(l) > leadingTextMax {
+			l = strings.ToValidUTF8(l[:leadingTextMax], "")
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 // The agent's own messages the warm start's check reads, each the msg of one slog line of the agent (pinned to their
@@ -605,6 +629,9 @@ type WarmObs struct {
 	Files       []string       `json:"files"`
 	Skipped     []string       `json:"skipped,omitempty"`
 	Log         []AgentLogLine `json:"log,omitempty"`
+	// LeadingText is the text of the lines at the head of the log that are not the agent's (LeadingForeignText). PRIVATE: it goes to the record (record.json)
+	// and to no text to post, since such a line can name a path.
+	LeadingText []string `json:"leadingText,omitempty"`
 	// Rehash is the staging's rehash, from the same log (RehashOf): information for the text to post, which the warm start's
 	// check never reads.
 	Rehash RehashObs `json:"rehash"`
@@ -615,6 +642,13 @@ type WarmObs struct {
 // pass the stage package's own (stage.SkippedFiles, PR #393's export), never a rule of this package's, and never one
 // read off the log.
 type SkipRule func(files []agentapi.FileDigest, loadFormat string) []bool
+
+// WithLog is the observation with the agent's log of the job read: whether it was read, its parsed lines, the rehash line, and the text of the leading lines that
+// are not the agent's (private, LeadingText). The live flows and the dry steps both fill a WarmObs through it, so one test run covers the one place.
+func (w WarmObs) WithLog(raw []byte) WarmObs {
+	w.LogRead, w.Log, w.Rehash, w.LeadingText = true, ParseAgentLog(raw), RehashOf(raw), LeadingForeignText(raw)
+	return w
+}
 
 // ExpectedWarmFiles is the set of checkpoint files of which every one must show "present and matching", from OUTSIDE
 // the log (the science agent's point of 11 Nov 2026 on #376): the checkpoint's own file list from the Instance's identity
@@ -651,11 +685,16 @@ func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
 	if !w.LogRead {
 		return e
 	}
-	// The log opens with the agent's pre-start lines and, before or among them, any lines that are not the agent's (the scheduler's or the shell's:
-	// the read is the file's head from its first byte, agentLogLine, so what comes first is the job's own first output). The first line of the agent's
-	// that is neither must be its start, restartCount 0: a staging line, an unlisted agent line or a restarted agent's start there is no first execution.
-	i := 0
-	for i < len(w.Log) && (w.Log[i].Kind == LinePreStart || w.Log[i].Foreign) {
+	// The log opens with at most MaxLeadingForeign lines that are not the agent's (the scheduler's or the shell's: the read is the file's head from its
+	// first byte, agentLogLine, so what comes first is the job's own first output), then the agent's pre-start lines. A foreign line after the agent's
+	// first line, or a fourth before it, is not accounted for. The first line of the agent's that is not a pre-start line must be its start, restartCount 0:
+	// a staging line, an unlisted agent line or a restarted agent's start there is no first execution, and that start is what proves the log whole.
+	i := LeadingForeign(w.Log)
+	if i > MaxLeadingForeign {
+		e.NotWhole = true
+		return e
+	}
+	for i < len(w.Log) && w.Log[i].Kind == LinePreStart {
 		i++
 	}
 	if i == len(w.Log) || w.Log[i].Kind != LineStart || w.Log[i].RestartCount != 0 {

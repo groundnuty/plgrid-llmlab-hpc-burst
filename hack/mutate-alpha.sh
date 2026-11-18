@@ -685,6 +685,15 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'nowserve.go@@	case l.RestartLoop:@@	case false && l.RestartLoop:'
   'nowserve.go@@	case l.InstanceRestarts > 0:@@	case false && l.InstanceRestarts > 0:'
   'nowserve.go@@	f := ladderChecks(o.Ladder)@@	f := []string(nil)'
+  # #735, 18 Nov 2026: the warm start's reader skips at most MaxLeadingForeign lines that are not the agent's, only before the agent's first line, and the
+  # text of the first four goes to the private record (WarmObs.LeadingText), cut at 300 bytes, and never to the text to post.
+  'nowserve.go@@	if i > MaxLeadingForeign {@@	if false {'
+  'nowserve.go@@	for i < len(w.Log) && w.Log[i].Kind == LinePreStart {@@	for i < len(w.Log) && (w.Log[i].Kind == LinePreStart || w.Log[i].Foreign) {'
+  'nowserve.go@@	if n := LeadingForeign(o.Warm.Log); n > 0 {@@	if n := LeadingForeign(o.Warm.Log); n > 0 {
+		fmt.Fprint(&b, o.Warm.LeadingText)'
+  'nowserve.go@@		if len(out) > MaxLeadingForeign || !parseAgentLine(l).Foreign {@@		if !parseAgentLine(l).Foreign {'
+  'nowserve.go@@const leadingTextMax = 300@@const leadingTextMax = 3000'
+  'nowserve.go@@RehashOf(raw), LeadingForeignText(raw)@@RehashOf(raw), nil'
   'liveobs.go@@			case r.Part == v1alpha1.PartInstance:@@			case false:'
   'liveobs.go@@		if in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonRestartLoop {@@		if in.Status.EndReason == v1alpha1.ReasonRestartLoop {'
   'now_flows_test.go@@	o.Ladder = LadderOf(r.watch.Last())@@	o.Ladder = LadderOf(nil)'

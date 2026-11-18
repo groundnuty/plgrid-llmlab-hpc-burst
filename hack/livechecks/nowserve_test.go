@@ -30,6 +30,7 @@ func TestRowAsNotRunsThroughTheScript(t *testing.T) {
 		{"warm-no-image", row + ": NOT RUN (the agent's own log did not show the warm start: the image already staged and verified: false; checkpoint files present and matching: 3 of 3; the run's other checks passed; not a failure)", true},
 		{"warm-cold-then-retry", row + ": NOT RUN (the agent's own log did not show the warm start: the first staging was built, failed a check or was tried again: not the first attempt's evidence; the run's other checks passed; not a failure)", true},
 		{"warm-no-start", row + ": NOT RUN (the agent's own log did not show the warm start: the log read is not the whole of the agent's first start to its first worker; the run's other checks passed; not a failure)", true},
+		{"warm-foreign-four", row + ": NOT RUN (the agent's own log did not show the warm start: the log read is not the whole of the agent's first start to its first worker; the run's other checks passed; not a failure)", true},
 	} {
 		t.Run(c.fault, func(t *testing.T) {
 			t.Parallel()

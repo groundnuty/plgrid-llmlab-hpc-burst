@@ -47,7 +47,7 @@ var dryFaults = map[string][]string{
 	"betabulk":   {"not-ready", "not-registered", "front-without-bulk", "control-took-bulk", "bulk-never-engaged", "bulk-twice", "counter-unread", "fallback", "control-fallback", "control-under-the-prediction", "control-at-the-prediction", "bulk-at-the-prediction", "bulk-above-the-prediction", "bulk-small-margin", "bulk-past-the-margin", "control-short-reply", "bulk-short-reply", "control-status", "bulk-status", "control-stream-cut", "bulk-stream-cut", "control-stream-short", "bulk-stream-short", "control-few-gaps", "bulk-few-gaps", "control-untimed", "control-cut", "bulk-cut", "invalid-and-cut", "finding-and-cut", "double-unnamed", "double-digest-short", "double-digest-upper", "shim-not-staged", "shim-agent-not-shipped", "shim-engine-not-double", "shim-agent-unread", "unattributed", "no-responses", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound"},
 	"betakeeper": {"window-too-short", "window-at-the-floor", "not-ready", "relays-unread-before", "relays-unread-after", "keeper-e-low", "controller-relays", "controller-relays-after", "relay-replaced-control", "relay-replaced-serving", "relay-seq-changed", "keeper-e-changed", "not-killed", "outcome-unseen", "outcome-late", "outcome-late-ended", "same-controller", "same-holder", "lease-not-risen", "lease-jumped", "fence-not-followed", "agent-not-reported", "agent-registration-changed", "unreachable", "instance-restarted", "cut", "incomplete", "short-stream", "past-deadline", "opened-after-kill", "outcome-at-90s", "outcome-at-60s", "outcome-in-the-margin", "ended-before-outcome", "ended-before-outcome-and-cut", "front-cut", "front-cuts-unread", "unattributed", "no-responses", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound"},
 	"betarouter": {"glibc-old-probe", "glibc-old-agent", "glibc-at-the-minimum", "glibc-one-under", "glibc-unread", "not-ready", "no-router-launch", "several-workers", "healthy-zero-at-ready", "healthy-absent-after-restart", "router-refused", "not-serving", "no-envoy", "two-envoys", "not-bare", "wrong-digest", "unread-executable", "no-pin", "no-rate", "bytes-short", "bytes-unfinished", "bytes-router-made", "bytes-no-stream-200", "bytes-no-chat-200", "bytes-past-bound", "control-router-alters", "control-both-refuse", "control-prompt-differs", "control-stream-ending", "control-incomplete", "control-ended-alike", "control-ended-router-only", "control-both-cut", "control-unavailable", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-climb", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound"},
-	"nowserve":   {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-instance-rung", "ladder-climb", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-foreign-first", "warm-truncated", "rehash-cold", "rehash-unread"},
+	"nowserve":   {"cut", "short-stream", "past-deadline", "unattributed", "no-responses", "no-restart", "two-restarts", "ladder-instance-rung", "ladder-climb", "wrong-identity", "events-missing", "events-unchecked", "gauge-problem", "not-ready", "untagged", "wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "pend-past-bound", "warm-no-image", "warm-file-missing", "warm-other-digest", "warm-other-file", "warm-unread", "warm-cold-then-retry", "warm-failed-then-retry", "warm-cancel-then-retry", "warm-failed-check", "warm-no-start", "warm-restarted", "warm-unknown-first", "warm-foreign-first", "warm-foreign-three", "warm-foreign-four", "warm-truncated", "rehash-cold", "rehash-unread"},
 	"tunnel":     {"short", "cut", "no-rate", "short-rate", "wrong-direction", "untagged", "wrong-partition", "adds-other-cluster", "default-lease", "short-lease", "duplicate-tag", "extra-allocation", "past-deadline", "past-drain", "no-drain-start", "stream-cut-error", "reconnect", "disconnected", "sparse-samples", "late-first-sample", "no-concurrency", "slow-streams", "no-idle-gap", "no-long-stream", "no-back-to-back", "no-load-rate", "slow-start", "no-large", "large-apart", "response-overlap", "no-upload-rate", "no-download-rate", "upload-not-under-load", "pend-past-bound"},
 }
 
@@ -844,6 +844,9 @@ func drySkip(files []agentapi.FileDigest, _ string) []bool {
 	return out
 }
 
+// dryForeignLine is the text of a line that is not the agent's, in the dry logs that open with some: invented, and long enough to name a directory.
+const dryForeignLine = "slurmstepd: an invented scheduler notice about a directory"
+
 // dryAgentLog is an agent's log of a warm start, written from the reason words and the agent's own messages (the
 // constants of nowserve.go, which warmpin_test.go pins): a pre-start line, the start line, the stager's lines in its
 // own form, a worker's start, and lines of other work around them. A fault takes a line away, names another digest or
@@ -858,10 +861,20 @@ func (d *drySteps) dryAgentLog() string {
 		restart = 1
 	}
 	var b strings.Builder
-	if d.fault("warm-foreign-first") {
-		// Two lines that are not the agent's before its first (the scheduler's, on Sano; issue #735): not evidence against the first execution, so the warm start is
-		// still shown, and the text to post says how many.
-		b.WriteString("slurmstepd: an invented scheduler notice about a directory\nslurmstepd: an invented scheduler notice about a directory\n")
+	// Lines that are not the agent's before its first (the scheduler's, on Sano; issue #735): two are not evidence against the first execution, so the warm start is
+	// still shown, and the text to post says how many; three are the most the check takes (MaxLeadingForeign); four are no log it accounts for. The text of each is
+	// invented, so that a test can look for it where it must not be (the text to post) and where it must be (the private record).
+	leading := 0
+	switch {
+	case d.fault("warm-foreign-first"):
+		leading = 2
+	case d.fault("warm-foreign-three"):
+		leading = 3
+	case d.fault("warm-foreign-four"):
+		leading = 4
+	}
+	for i := 0; i < leading; i++ {
+		b.WriteString(dryForeignLine + "\n")
 	}
 	b.WriteString("time=2026-11-02T09:00:00Z level=INFO msg=\"host-dialed: listening for the relays\" control=1 serving=2\n")
 	if d.fault("warm-unknown-first") {
@@ -922,8 +935,7 @@ func (d *drySteps) warm() WarmObs {
 		return w
 	}
 	log := []byte(d.dryAgentLog())
-	w.LogRead, w.Log, w.Rehash = true, ParseAgentLog(log), RehashOf(log)
-	return w
+	return w.WithLog(log)
 }
 
 func (d *drySteps) out(n int) string { return filepath.Join(d.root, fmt.Sprintf("job-%d.out", n)) }
