@@ -130,7 +130,7 @@ func restOfReport(warm *WarmUpResult) Report {
 				Name: "worker-0", Phase: PartRunning, PID: 4242, StartTime: &start, ExitCode: &exit, Generation: 1,
 				EngineSocket: "/tmp/hb-run/worker-0.sock", LogTail: strings.Repeat("<", MaxLogTailBytes),
 				Health: &Health{Time: start, ProbeOK: true, MetricsReadAt: &start, RunningRequests: Int64(12), WaitingRequests: Int64(3),
-					GeneratedTokens: Int64(1 << 40), KVCacheUsage: Float64(0.5),
+					GeneratedTokens: Int64(1 << 40), KVCacheUsage: Float64(0.5), KVCacheTokens: Int64(1 << 40),
 					Preemptions: Int64(1 << 40), PrefixCacheQueriedTokens: Int64(1 << 40), PrefixCacheHitTokens: Int64(1 << 40),
 					TimePerOutputTokenSecondsSum: Float64(1.2345678901234567e+300), TimePerOutputTokenCount: Int64(1 << 40),
 					ResponsesByStatus: map[string]int64{"200": 1200, "429": 3, "500": 2}},

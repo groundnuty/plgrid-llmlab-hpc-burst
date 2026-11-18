@@ -6,11 +6,19 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
+// DefaultKVCacheTokens is the KV cache size (agentapi.Health.KVCacheTokens)
+// every double built on metricsSample reports: 1<<20 tokens, the engine
+// double's default (internal/agent/enginedouble). A test that says anything
+// about "the smallest worker's" size sets its own values per worker
+// (Gauges.KVCacheTokens), never this one.
+const DefaultKVCacheTokens int64 = 1 << 20
+
 // metricsSample is a sample whose probe passed and whose /metrics read finished
 // at now: MetricsReadAt is now, and every gauge and counter is set, a zero
 // explicitly: the preemption counter, the two prefix-cache counters and the
 // sum and count of the time per output token (HBEP-8) are 0 here, as a real
-// vLLM exports them before any request. A double built on it reads as an
+// vLLM exports them before any request. Its KV cache size is
+// DefaultKVCacheTokens. A double built on it reads as an
 // engine whose metrics are current and known; the doubles that model an
 // unreadable /metrics (HealthMetricsUnreadable, HealthMetricsStale) do not use
 // it.
@@ -20,6 +28,7 @@ func metricsSample(now time.Time, running, waiting, tokens int64, kvCache float6
 		Time: now, ProbeOK: true, MetricsReadAt: &read,
 		RunningRequests: agentapi.Int64(running), WaitingRequests: agentapi.Int64(waiting),
 		GeneratedTokens: agentapi.Int64(tokens), KVCacheUsage: agentapi.Float64(kvCache),
+		KVCacheTokens:            agentapi.Int64(DefaultKVCacheTokens),
 		Preemptions:              agentapi.Int64(0),
 		PrefixCacheQueriedTokens: agentapi.Int64(0), PrefixCacheHitTokens: agentapi.Int64(0),
 		TimePerOutputTokenSecondsSum: agentapi.Float64(0), TimePerOutputTokenCount: agentapi.Int64(0),
@@ -176,6 +185,12 @@ type Gauges struct {
 	Running, Waiting int64
 	KVCache          float64
 	Flat             bool
+	// KVCacheTokens is the worker's KV cache size in tokens (agentapi.Health.KVCacheTokens); zero, which
+	// no engine reports, leaves the common sample's DefaultKVCacheTokens, so an existing literal that
+	// sets none never reads as 0 tokens. KVCacheUnknown leaves it nil instead: an engine that exports
+	// no such label.
+	KVCacheTokens  int64
+	KVCacheUnknown bool
 }
 
 // HealthGauges returns an engine whose probe passes and whose metrics are read at every sample, with the
@@ -189,6 +204,13 @@ func HealthGauges(gauges func(worker string) Gauges) func(time.Time, Process) ag
 		if !g.Flat {
 			counts[p.PID] += 1000
 		}
-		return metricsSample(now, g.Running, g.Waiting, counts[p.PID], g.KVCache)
+		h := metricsSample(now, g.Running, g.Waiting, counts[p.PID], g.KVCache)
+		switch {
+		case g.KVCacheUnknown:
+			h.KVCacheTokens = nil
+		case g.KVCacheTokens != 0:
+			h.KVCacheTokens = agentapi.Int64(g.KVCacheTokens)
+		}
+		return h
 	}
 }

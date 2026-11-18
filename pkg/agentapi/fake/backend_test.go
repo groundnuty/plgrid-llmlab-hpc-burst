@@ -325,7 +325,7 @@ func richReport() agentapi.Report {
 			Name: "worker-0", Phase: agentapi.PartExited, StartTime: &start, ExitCode: intp(3),
 			Health: &agentapi.Health{
 				ProbeOK: true, MetricsReadAt: &read, RunningRequests: i64p(4), WaitingRequests: i64p(1),
-				GeneratedTokens: i64p(70), KVCacheUsage: f64p(0.25), ResponsesByStatus: map[string]int64{"200": 5},
+				GeneratedTokens: i64p(70), KVCacheUsage: f64p(0.25), KVCacheTokens: i64p(400000), ResponsesByStatus: map[string]int64{"200": 5},
 				Preemptions:              i64p(2),
 				PrefixCacheQueriedTokens: i64p(300), PrefixCacheHitTokens: i64p(200),
 				TimePerOutputTokenSecondsSum: f64p(1.5), TimePerOutputTokenCount: i64p(30),
@@ -370,6 +370,7 @@ func scrambleReport(r *agentapi.Report) {
 	*w.Health.WaitingRequests = 99
 	*w.Health.GeneratedTokens = 99
 	*w.Health.KVCacheUsage = 0.99
+	*w.Health.KVCacheTokens = 99
 	*w.Health.Preemptions = 99
 	*w.Health.PrefixCacheQueriedTokens = 99
 	*w.Health.PrefixCacheHitTokens = 99
