@@ -27,7 +27,9 @@ const removalAfter = 7 * 24 * time.Hour
 // checkKeepLink is (c). The Operations are asserted GONE (NotFound) before the log is searched, since a link found while the
 // Operation still exists proves nothing about the removal. Before the clock moves each Operation is asserted Done, finished, and
 // free of the operation-unfinished finalizer, so that the delete of it cannot wait on one: a removal that left it deleting would
-// not be NotFound.
+// not be NotFound. That the finalizer was ever on is read from the log's files, not assumed: the lifecycle identity's update
+// that added it at the commit, and its later update that took it off at the finish, both before the removal. Without them an
+// Operation that never carried the finalizer would make "free of it" true of anything.
 func (s *scenario) checkKeepLink(t *testing.T) {
 	t.Helper()
 	w, rd, uid, name := s.world, s.rd, s.keptAlloc.UID, s.keptAlloc.Name
@@ -86,6 +88,15 @@ func (s *scenario) checkKeepLink(t *testing.T) {
 		}
 		if n == "end-b" {
 			removal = &evs[0]
+		}
+		added, released := finalizerCycle(set, w.lc.user, n)
+		switch {
+		case added == nil:
+			t.Errorf("no update of Operation %s by the lifecycle identity carries the %s finalizer: it was never on, so its absence before the removal proves nothing", n, v1alpha1.FinalizerOperationUnfinished)
+		case released == nil:
+			t.Errorf("no update of Operation %s by the lifecycle identity takes the %s finalizer off after the one that added it (%s)", n, v1alpha1.FinalizerOperationUnfinished, added.RequestReceivedTimestamp)
+		case !released.RequestReceivedTimestamp.Before(evs[0].RequestReceivedTimestamp):
+			t.Errorf("Operation %s: the finalizer came off at %s, not before its removal at %s", n, released.RequestReceivedTimestamp, evs[0].RequestReceivedTimestamp)
 		}
 	}
 	// The plan, as the log holds it: the Allocation's UID is a Keep that needs approval, with its cost.
@@ -147,4 +158,24 @@ func deletesUID(e auditEvent, uid types.UID) bool {
 		} `json:"preconditions"`
 	}
 	return len(e.RequestObject) > 0 && json.Unmarshal(e.RequestObject, &opts) == nil && opts.Preconditions.UID == string(uid)
+}
+
+// finalizerCycle finds, in the log's order, the lifecycle identity's update of the Operation whose body carries the
+// operation-unfinished finalizer (the commit adds it), and the first update after it whose body does not (the finish takes it
+// off). Either is nil when the log holds none.
+func finalizerCycle(set *logSet, lifecycleUser, name string) (added, released *auditEvent) {
+	for _, e := range set.find("update", "operations", "", name, lifecycleUser) {
+		e := e
+		var op v1alpha1.Operation
+		if len(e.RequestObject) == 0 || jsonUnmarshal(e.RequestObject, &op) != nil {
+			continue
+		}
+		switch has := controllerutil.ContainsFinalizer(&op, v1alpha1.FinalizerOperationUnfinished); {
+		case has && added == nil:
+			added = &e
+		case !has && added != nil && released == nil:
+			released = &e
+		}
+	}
+	return added, released
 }
