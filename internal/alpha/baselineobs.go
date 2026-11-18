@@ -77,9 +77,10 @@ type EngineSample struct {
 
 // Why a phase's generator was stopped before it ended.
 const (
-	StopGuard      = "llmlab-guard"
-	StopIneligible = "instance-ineligible"
-	StopBound      = "bound"
+	StopGuard       = "llmlab-guard"
+	StopGuardUnread = "llmlab-guard-unread"
+	StopIneligible  = "instance-ineligible"
+	StopBound       = "bound"
 )
 
 // PhaseObs is what one phase showed.
@@ -182,4 +183,6 @@ type RatioObs struct {
 	LongWords     int      `json:"longWords"`
 	// Invalid says the long shape could not be set from the reading, so P1-long was not run.
 	Invalid bool `json:"invalid"`
+	// Stopped says why the probe's generator was stopped or never started (StopGuardUnread, StopIneligible, StopBound), empty when it ended by itself.
+	Stopped string `json:"stopped,omitempty"`
 }

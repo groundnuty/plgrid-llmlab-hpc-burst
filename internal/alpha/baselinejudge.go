@@ -353,6 +353,9 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	// The ratio probe: one request at the served Instance alone, which only it can answer. A probe the Instance did not answer is a failed check; one that
 	// gave no prompt tokens, or a ratio at which no word count reaches the long range, leaves the long shape unset: INVALID, and P1-long was not run.
 	if o.Ratio.Needed {
+		if o.Ratio.Stopped == StopGuardUnread {
+			f("the front's per-provider request metric could not be read, so the %d-request guard could not run and the ratio probe's generator was stopped, or never started", LLMLabGuard)
+		}
 		switch {
 		case !o.Ratio.Sent:
 			f("the ratio probe's request has no usage record at the front, so the long shape was not measured")
@@ -438,6 +441,8 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 	switch po.Stopped {
 	case StopGuard:
 		f("LLMLab was asked for more than %d requests in one phase, so the generator was stopped", LLMLabGuard)
+	case StopGuardUnread:
+		f("the front's per-provider request metric could not be read, so the %d-request guard could not run and the generator was stopped, or never started", LLMLabGuard)
 	case StopIneligible:
 		f("the served Instance became ineligible, so the generator was stopped and the phase is not judged by what it measured")
 	case StopBound:
@@ -476,10 +481,16 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		f("%d generator record(s) name another route than the front's usage record of the same request", differ)
 	}
 	// The front's own count of LLMLab's requests, read live, against the records': two readings of one number.
-	if !po.MetricRead {
+	if !po.MetricRead && po.Stopped != StopGuardUnread {
 		f("the front's per-provider request metric was not read, so LLMLab's count was checked against nothing")
 	} else if int(po.LLMLabMetric) != len(llm) && po.Stopped == "" {
 		f("the front's request metric says LLMLab was asked %.0f time(s) and its usage records name %d", po.LLMLabMetric, len(llm))
+	}
+
+	// The FINAL count, from the front's own records of every request LLMLab answered in the phase's window, sent by the generator or not, above the guard FAILS
+	// the verdict, whatever the last poll said: the guard polls, and a burst between its last look and the generator's exit escapes it.
+	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard {
+		f("LLMLab answered %d requests in the phase by the front's own records, over the guard of %d", final, LLMLabGuard)
 	}
 
 	// A failed request: LLMLab's makes the run INVALID, the front's or an Instance's fails it; in the detach phase a 503 makes it INVALID.

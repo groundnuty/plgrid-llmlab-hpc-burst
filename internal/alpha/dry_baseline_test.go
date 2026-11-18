@@ -40,7 +40,12 @@ var baselineCases = []dryCase{
 	{"session-moves", "a session did not stay on its Instance"},
 	{"detach-skipped", "request(s) after it was detached"},
 	{"generator-names-another-route", "generator record(s) name another route than the front's usage record"},
-	{"metric-unread", "the front's per-provider request metric was not read"},
+	// The guard fails closed: a scrape that fails stops the phase, and one that fails before a phase means its generator is never started.
+	{"metric-unread", "the front's per-provider request metric could not be read, so the 144-request guard could not run"},
+	{"metric-unread-at-p2-start", "P2: the front's per-provider request metric could not be read, so the 144-request guard could not run"},
+	{"metric-unread-midphase", "P2: the front's per-provider request metric could not be read, so the 144-request guard could not run"},
+	// The guard polls; what LLMLab answered between its last look and the generator's exit is counted from the front's records.
+	{"llmlab-over-final-count", "LLMLab answered 150 requests in the phase by the front's own records, over the guard of 144"},
 	{"metric-disagrees", "the front's request metric says LLMLab was asked"},
 	{"unlisted-llmlab-request", "LLMLab answered a request the generator did not send"},
 	{"no-answer", "request(s) got no answer from the front"},
@@ -165,6 +170,7 @@ type dryBaseline struct {
 	calls            []string
 	configs          map[string][]byte
 	preBumped        bool
+	p1LongRowsRead   bool
 	phaseSamples     int
 	released         bool
 	readAfterRelease bool
@@ -342,6 +348,18 @@ func (w *dryBaseline) LLMLabCount(context.Context) (float64, bool) {
 	if w.d.fault("llmlab-over-its-guard") && w.phase.Name == PhaseP2 && w.reads == 1 {
 		done = 100
 	}
+	genDone := w.genDone()
+	if w.d.fault("llmlab-over-final-count") && w.phase.Name == PhaseP2 && !genDone {
+		done = min(done, 100) // every look of the guard saw at most 100: the rest came between its last look and the generator's exit
+	}
+	// The guard's scrape fails in P2: from its first look of the phase (metric-unread-midphase), or only the look that starts P2 (metric-unread-at-p2-start,
+	// the first read after P1-long's front records were read, which a phase does last).
+	if w.d.fault("metric-unread-midphase") && w.phase.Name == PhaseP2 && !genDone && w.reads >= 1 {
+		return w.cum + done, false
+	}
+	if w.d.fault("metric-unread-at-p2-start") && w.phase.Name == PhaseP1Long && w.p1LongRowsRead {
+		return 0, false // the look that starts P2, after P1-long's front records were read
+	}
 	if w.d.fault("metric-disagrees") && w.phase.Name == PhaseP2 {
 		done++
 	}
@@ -350,6 +368,19 @@ func (w *dryBaseline) LLMLabCount(context.Context) (float64, bool) {
 		g.looked(w.reads)
 	}
 	return w.cum + done, !w.d.fault("metric-unread")
+}
+
+// genDone says the current phase's generator has ended: the reads after it are the phase's final one and the next phase's first.
+func (w *dryBaseline) genDone() bool {
+	if len(w.gens) == 0 {
+		return false
+	}
+	select {
+	case <-w.gens[len(w.gens)-1].Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *dryBaseline) ServedEligible(context.Context) bool {
@@ -518,7 +549,7 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 	if w.d.fault("llmlab-after-the-detach") && ph.Kind == KindDetach {
 		instanceSessions, llmSessions = ph.Sessions-3, 3
 	}
-	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 {
+	if (w.d.fault("llmlab-over-its-guard") || w.d.fault("llmlab-over-final-count")) && ph.Name == PhaseP2 {
 		llmSessions = 150 // one request each: the guard is the metric's, past 144
 	}
 	step := 2*time.Second + ph.Think
@@ -550,7 +581,7 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		onLLMLab := i >= instanceSessions
 		isWaiting := !onLLMLab && waiting > 0 && i >= instanceSessions-waiting
 		turns := ph.Turns
-		if onLLMLab && w.d.fault("llmlab-over-its-guard") {
+		if onLLMLab && (w.d.fault("llmlab-over-its-guard") || w.d.fault("llmlab-over-final-count")) {
 			turns = 1
 		}
 		// A turn takes two seconds, on the Instance and on LLMLab, and the next starts after the think time.
@@ -635,6 +666,9 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 func (w *dryBaseline) FrontRows(_ context.Context, since time.Time, _ []string) ([]FrontRow, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.phase.Name == PhaseP1Long {
+		w.p1LongRowsRead = true
+	}
 	var out []FrontRow
 	for _, r := range w.rows {
 		if !r.Start.Before(since) {

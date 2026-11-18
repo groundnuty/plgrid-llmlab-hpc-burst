@@ -1226,7 +1226,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'baselinejudge.go@@func (j joinedRow) route(managed string) Route { return routeOfRow(j.Front, managed) }@@func (j joinedRow) route(managed string) Route {
 	return routeOfRow(FrontRow{Emitter: j.Gen.Emitter, Provider: j.Gen.Provider}, managed)
 }'
-  'baselineflow.go@@		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard {@@		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard && false {'
+  'baselineflow.go@@		if n-before > LLMLabGuard {@@		if n-before > LLMLabGuard && false {'
   'baselineflow.go@@			if err := w.DetachManaged(ctx); err != nil {@@			if err := error(nil); err != nil {'
   'steps_live_test.go@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration), InstanceCap: instanceCapOf(row)}@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration)}'
   # The baseline row's P0 before any job, the engine's waiting rule and the ratio's mapping (#764): the sustain count removed, the served deployment created before P0, a failed P0 that goes on, and the ratio ignored.
@@ -1237,6 +1237,12 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 	if o.P0, err = w.Probe(ctx); err != nil {'
   'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
   'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # #776's review, point 8: the guard fails closed (a failed first scrape starts no generator, a failed poll stops it) and the final count from the records counts.
+  'baselineflow.go@@	if !beforeOK {@@	if false && !beforeOK {'
+  'baselineflow.go@@		if !ok {
+			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed@@		if false {
+			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed'
+  'baselinejudge.go@@	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard {@@	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard && false {'
   # #776's review, point 2: a gate the served Instance did not answer stops the row before any phase.
   'baselineflow.go@@	if !gateAnswered(o.Gate) {@@	if false && !gateAnswered(o.Gate) {'
   # #776's review, point 1: P0's 200 is no answer unless it is a completed stream with tokens.

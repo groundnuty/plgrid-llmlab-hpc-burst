@@ -214,6 +214,13 @@ func waitUntil(ctx context.Context, w BaselineWorld, d, every time.Duration, con
 func runPhase(ctx context.Context, w BaselineWorld, s BaselineSettings, ph Phase) (PhaseObs, error) {
 	po := PhaseObs{Phase: ph, Start: w.Now()}
 	before, beforeOK := w.LLMLabCount(ctx)
+	if !beforeOK {
+		// The guard FAILS CLOSED: with no count of LLMLab's requests the 144-request guard cannot run, so the generator is never started (the science
+		// agent's ruling, #776's review, point 8). It is never a guard that is simply off for the phase.
+		po.Stopped, po.End = StopGuardUnread, w.Now()
+		s.logf("%s: the front's request metric could not be read, so the guard cannot run and the generator was not started", ph.Name)
+		return po, nil
+	}
 	if smp, ok := w.EngineSample(ctx); ok {
 		po.Engine = append(po.Engine, smp)
 	}
@@ -235,7 +242,13 @@ loop:
 			return po, ctx.Err()
 		case <-tick.C:
 		}
-		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard {
+		n, ok := w.LLMLabCount(ctx)
+		if !ok {
+			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed
+			gen.Stop()
+			break loop
+		}
+		if n-before > LLMLabGuard {
 			po.Stopped = StopGuard
 			gen.Stop()
 			break loop
@@ -262,7 +275,7 @@ loop:
 	if smp, ok := w.EngineSample(ctx); ok {
 		po.Engine = append(po.Engine, smp)
 	}
-	if after, ok := w.LLMLabCount(ctx); ok && beforeOK {
+	if after, ok := w.LLMLabCount(ctx); ok {
 		po.LLMLabMetric, po.MetricRead = after-before, true
 	}
 	ids := make([]string, 0, len(po.Gen))
@@ -320,6 +333,7 @@ func resolveLongShape(ctx context.Context, w BaselineWorld, s BaselineSettings, 
 	}
 	// A probe the served Instance did not answer is the gate's hole by a second door: the row stops before any phase, as a FAIL. A probe it answered whole with
 	// no prompt tokens only leaves the long shape unset (INVALID, P1-long not run).
+	o.Ratio.Stopped = po.Stopped
 	if !ratioAnswered(o.Ratio) || po.Stopped != "" {
 		o.StoppedBefore = "the ratio probe"
 		return phases, nil

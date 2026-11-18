@@ -704,3 +704,58 @@ func TestAFailedGateStopsTheRowBeforeAnyPhase(t *testing.T) {
 		t.Errorf("the ratio probe ran after a gate that gave an error: %v", st.baseline.calls)
 	}
 }
+
+// The 144-request guard FAILS CLOSED (the science agent's ruling, #776's review, point 8): a failed scrape of the front's per-provider request metric stops the
+// phase, and one that fails before a phase means that phase's generator is never started; it is never a guard that is off for the phase. And the FINAL count,
+// from the front's own records of every request LLMLab answered in the window, above 144 fails the verdict whatever the last poll said, since the guard polls
+// and a burst between its last look and the generator's exit escapes it.
+func TestTheLLMLabGuardFailsClosed(t *testing.T) {
+	started := func(calls []string) (names []string) {
+		for _, c := range calls {
+			if strings.HasPrefix(c, "StartGenerator ") {
+				names = append(names, strings.TrimPrefix(c, "StartGenerator "))
+			}
+		}
+		return names
+	}
+	for _, c := range []struct {
+		fault   string
+		started []string // the generators started, in order
+		stopped string   // the phase the guard's failed scrape ended, stopped or never started, if any
+	}{
+		// Every scrape fails: the first thing to need the guard is the ratio probe, whose generator is never started, and the row goes no further.
+		{"metric-unread", nil, ""},
+		// The scrape that starts P2 fails: P2's generator is never started, and nothing after it runs.
+		{"metric-unread-at-p2-start", []string{PhaseRatio, PhaseP1, PhaseP1Long}, PhaseP2},
+		// P2 starts, and its first poll's scrape fails: the generator is stopped, and nothing after it runs.
+		{"metric-unread-midphase", []string{PhaseRatio, PhaseP1, PhaseP1Long, PhaseP2}, PhaseP2},
+	} {
+		t.Run(c.fault, func(t *testing.T) {
+			out, failures, err, st := runBaselineDry(t, c.fault)
+			if err != nil || !strings.Contains(Summary(failures), "the front's per-provider request metric could not be read, so the 144-request guard could not run") {
+				t.Fatalf("failures %v, err %v: want a FAIL naming the guard that could not run", failures, err)
+			}
+			if got := started(st.baseline.calls); !slices.Equal(got, c.started) {
+				t.Errorf("the generators started were %v, want %v", got, c.started)
+			}
+			if slices.Contains(st.baseline.calls, "DetachManaged") {
+				t.Errorf("the managed ModelDeployment was detached after the guard failed")
+			}
+			for _, po := range obsOfRecord(t, out).Phases {
+				if (po.Stopped == StopGuardUnread) != (po.Phase.Name == c.stopped) {
+					t.Errorf("%s was stopped for %q, want the guard's failed scrape in %q alone", po.Phase.Name, po.Stopped, c.stopped)
+				}
+			}
+		})
+	}
+	// The final count: every poll saw at most 100, so the generator was never stopped, and the front's records name 150 requests of LLMLab's.
+	out, failures, err, _ := runBaselineDry(t, "llmlab-over-final-count")
+	if err != nil || !strings.Contains(Summary(failures), "LLMLab answered 150 requests in the phase by the front's own records, over the guard of 144") {
+		t.Fatalf("failures %v, err %v: want the final count to fail the verdict", failures, err)
+	}
+	for _, po := range obsOfRecord(t, out).Phases {
+		if po.Stopped != "" {
+			t.Errorf("%s was stopped for %q: the polls never saw the guard crossed, so only the final count can fail it", po.Phase.Name, po.Stopped)
+		}
+	}
+}

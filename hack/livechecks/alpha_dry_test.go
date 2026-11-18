@@ -176,7 +176,7 @@ var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unr
 // baselineFaults are the baseline row's failing faults (issue #764; internal/alpha, dry_baseline_test.go's baselineCases). Its INVALID faults are
 // baselineInvalidFaults, which end exit 3.
 var baselineFaults = []string{"llmlab-in-the-control", "llmlab-one-too-many-first-turns", "llmlab-spill-below-the-cap", "llmlab-over-its-guard", "llmlab-after-the-detach",
-	"detach-not-seen", "detach-skipped", "wrong-deployment-id", "ratio-probe-fails", "engine-waiting-thrice", "gate-503", "gate-engine-500", "gate-cut-200", "instance-ineligible", "engine-over-the-cap", "engine-waiting", "engine-preempts", "engine-unread", "front-503-in-the-control", "instance-fails",
+	"detach-not-seen", "detach-skipped", "wrong-deployment-id", "ratio-probe-fails", "engine-waiting-thrice", "gate-503", "gate-engine-500", "gate-cut-200", "metric-unread-at-p2-start", "metric-unread-midphase", "llmlab-over-final-count", "instance-ineligible", "engine-over-the-cap", "engine-waiting", "engine-preempts", "engine-unread", "front-503-in-the-control", "instance-fails",
 	"session-moves", "generator-names-another-route", "metric-unread", "metric-disagrees", "unlisted-llmlab-request", "no-answer", "no-record", "over-the-cap-in-flight", "no-gate",
 	"p0-not-sent", "p0-answered-by-an-instance", "p0-front-fails", "kv-unread", "no-routing-block", "two-instances", "hedged", "over-allocated", "managed-not-attached", "untagged",
 	"wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
