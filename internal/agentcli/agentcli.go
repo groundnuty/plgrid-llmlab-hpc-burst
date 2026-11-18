@@ -1,10 +1,12 @@
 // Package agentcli is the command line of HBEP-10's Operations and approvals: hpcburst scale, end,
-// release, confirm, approvals, approve and operation (issue #659, beta step 2). docs/agent-cli.md is its
-// contract: what each command sends, what it prints, and the shape of --json.
+// release, confirm, approvals, approve and operation (issue #659, beta step 2), and the inventory
+// (issue #662, beta step 5). docs/agent-cli.md is its contract: what each command sends, what it prints,
+// and the shape of --json.
 //
 // Every command acts as the caller, with the caller's own kubeconfig and nothing else (caller.go). The
 // commands write only Operations (create, and update to confirm) and Approvals (create), never a
-// ModelDeployment, an Allocation or an Instance. This package must not import internal/lifecycle: the
+// ModelDeployment, an Allocation or an Instance; hpcburst inventory writes nothing at all (inventory.go,
+// and the lister and printer of internal/inventory). This package must not import internal/lifecycle: the
 // lifecycle package's end-to-end test imports this one.
 package agentcli
 
@@ -31,6 +33,7 @@ const usage = `usage: hpcburst scale <md> --instances N [flags]
        hpcburst approvals [-A] [flags]
        hpcburst approve <operation> --plan <id> [flags]
        hpcburst operation <name> [flags]
+       hpcburst inventory [-n <namespace> | -A] [--owner <user>] [flags]
 (every command takes --kubeconfig, -n and --json; hpcburst <command> -h lists its flags)`
 
 // Env is what the commands read of the process, handed in so that no part of the package reads the
@@ -100,6 +103,8 @@ func (rt *cli) run(ctx context.Context, args []string, stdin io.Reader, stdout, 
 		return rt.cmdApprove(ctx, rest, stdout, stderr)
 	case "operation":
 		return rt.cmdOperation(ctx, rest, stdout, stderr)
+	case "inventory":
+		return rt.cmdInventory(ctx, rest, stdout, stderr)
 	}
 	fmt.Fprintf(stderr, "hpcburst: unknown command %q\n%s\n", args[0], usage)
 	return exitUsage

@@ -725,26 +725,26 @@ func TestAPassedOverProviderRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestAnExtraGetsNoMember (#616; agreed with k616): a deployment of two Instances on A and B makes R and M on A at
-// 08:00:00, M pending 10 h. Its count is lowered to 1 before R's job starts at 08:00:10, so R is chosen and M is
-// surplus, left alone within overAllocation's k of 1. A then holds R's wait, so M's hedge time is at its submission,
-// 08:00:10: without the filter it would get a member on B at once. It gets none through 08:10:00, and M stays live.
+// TestAnExtraGetsNoMember (#616; agreed with k616): with k = 1 and A and B allowed, a deployment of one makes R and PR 4's
+// extra X on A at 08:00:00, X's job pends 10 h and R's starts at 08:00:10 (the first Allocation by name takes the first
+// script, so the roles are the jobs', not the selection's). R is chosen, started and X is surplus, left alone within
+// overAllocation's k of 1. A then holds R's 0 s wait, so X's hedge time is its submission plus hedgeMinWait, 08:10:10:
+// without the filter its hedge would get a member on B then. It gets none through 08:20:00, and X stays live on A.
 func TestAnExtraGetsNoMember(t *testing.T) {
 	h := newHedgeRig(t)
 	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
 	h.Step()
 	md := mdSpec(hoMD)
 	onBoth(md)
-	md.Spec.Instances = 2
+	md.Spec.OverAllocation = ptrTo(int32(1))
 	h.create(md)
-	h.Step() // 08:00:00: R and M on A
+	h.Step() // 08:00:00: R and the extra X on A
 	onA := h.onProvider(hoMD, rigProvider)
 	if len(onA) != 2 {
-		t.Fatalf("%d Instances on A at 08:00:00, want R and M", len(onA))
+		t.Fatalf("%d Instances on A at 08:00:00, want R and the extra", len(onA))
 	}
-	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1 })
 	var m string
-	stepUntilClock(h.rig, hoT(8, 10, 0), 10*time.Second, func() {
+	stepUntilClock(h.rig, hoT(8, 20, 0), 10*time.Second, func() {
 		if n := len(h.onProvider(hoMD, hedgeB)); n != 0 {
 			t.Fatalf("at %s B has %d of the deployment's Instances: a surplus Instance's hedge grew", h.clock.Now().Format(time.TimeOnly), n)
 		}
@@ -755,7 +755,7 @@ func TestAnExtraGetsNoMember(t *testing.T) {
 		}
 	}
 	if m == "" {
-		t.Fatal("no pending surplus Instance left on A at 08:10:00: the fixture has no extra, so the test proves nothing")
+		t.Fatal("no pending surplus Instance left on A at 08:20:00: the extra was cancelled, so the test proves nothing")
 	}
 }
 
@@ -822,5 +822,54 @@ func TestASurplusHedgeGetsNoNewMember(t *testing.T) {
 		if in := h.instancesByName()[n]; in == nil || ended(in) {
 			t.Fatalf("member %s of the surplus hedge is gone or ended: growth must not touch it", n)
 		}
+	}
+}
+
+// TestASurplusHedgeKeepsItsMembersAcrossPasses is the full-pass version of TestASurplusHedgeGetsNoNewMember (#616, D9;
+// the science agent's rulings on #627 and #616). That row calls growHedges on its own because, before PR 4, a surplus hedge
+// of two never reached growth: step 7 took it whole first. Now it does, so the pass runs: the same state, hedgeWidth 3, A, B
+// and C allowed, instances 2, R and M1 on A at 08:00:00 and M1's hedge member M2 on B at 08:10:10, both pending 10 h; then
+// instances goes to 1 and overAllocation to 1 in one edit, so R is chosen and M1's hedge, M1 on A and M2 on B, is
+// surplus. k = 1 leaves one non-ready surplus Instance per Provider, and each member is the only one on its own: both
+// stay, member by member (D9), and across every pass to 08:40:10 (a pass a minute, the Providers syncing in each, so their
+// heartbeats stay fresh and C stays usable) growth adds no member on C, though C is usable and M1's hedge is due one.
+func TestASurplusHedgeKeepsItsMembersAcrossPasses(t *testing.T) {
+	h := newHedgeRig(t)
+	h.addProvider("example-c", "gpu-c", 4*time.Hour, nil, nil)
+	h.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 10 * time.Hour})
+	h.b.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Hour})
+	h.Step()
+	md := mdSpec(hoMD)
+	md.Spec.Providers.Names = []string{rigProvider, hedgeB, "example-c"}
+	md.Spec.Instances = 2
+	md.Spec.HedgeWidth = ptrTo(int32(3))
+	h.create(md)
+	h.Step() // 08:00:00: R and M1 on A
+	h.clock.Advance(10 * time.Second)
+	h.Step() // 08:00:10: R's job starts, M1 is submitted
+	stepUntilClock(h.rig, hoT(8, 10, 10), 10*time.Second, nil)
+	onB := h.onProvider(hoMD, hedgeB)
+	if len(onB) != 1 || onB[0].Annotations[v1alpha1.AnnotationHedgeGroup] == "" {
+		t.Fatalf("B has %+v at 08:10:10, want M1's hedge member: the fixture has no hedge of two, so the test proves nothing", onB)
+	}
+	m1, m2 := onB[0].Annotations[v1alpha1.AnnotationHedgeGroup], onB[0].Name
+	h.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.Instances = 1; m.Spec.OverAllocation = ptrTo(int32(1)) })
+	stepUntilClock(h.rig, hoT(8, 40, 10), time.Minute, func() {
+		for _, n := range []string{m1, m2} {
+			in := h.instancesByName()[n]
+			if in == nil || ended(in) {
+				t.Fatalf("at %s member %s of the surplus hedge is gone or ended: each member's Provider has room under k = 1", h.clock.Now().Format(time.TimeOnly), n)
+			}
+			if a, ok := h.allocation(in.Spec.AllocationRef.Name); !ok || !a.DeletionTimestamp.IsZero() {
+				t.Fatalf("at %s member %s of the surplus hedge is gone, ended or its Allocation released: each member's Provider has room under k = 1", h.clock.Now().Format(time.TimeOnly), n)
+			}
+		}
+		if n := len(h.onProvider(hoMD, "example-c")); n != 0 {
+			t.Fatalf("at %s C has %d of the deployment's Instances: growth added a member to a surplus hedge", h.clock.Now().Format(time.TimeOnly), n)
+		}
+	})
+	chosen := h.passOf(hoMD).primaries()
+	if len(chosen) != 1 || hedgeKey(chosen[0]) == m1 {
+		t.Fatalf("the chosen primaries are %v, want R alone: M1's hedge must be surplus, or the test proves nothing", names(chosen))
 	}
 }

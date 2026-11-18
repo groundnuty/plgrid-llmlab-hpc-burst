@@ -198,7 +198,7 @@ func TestSupervisedSetWithoutTheBulkPathIsUnchanged(t *testing.T) {
 	if len(plain) != 2 || plain[0].Name != "controller" || plain[1].Name != "frps" {
 		t.Fatalf("supervised set without the bulk path: %+v", plain)
 	}
-	wantCtl := []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}
+	wantCtl := []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig"}
 	if !slices.Equal(plain[0].Args, wantCtl) {
 		t.Errorf("the controller's command line without the bulk path\n got %q\nwant %q", plain[0].Args, wantCtl)
 	}

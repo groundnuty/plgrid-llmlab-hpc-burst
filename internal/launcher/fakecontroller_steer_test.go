@@ -31,7 +31,8 @@ func startFake(t *testing.T, dir string) *steerFake {
 		t.Fatal(err)
 	}
 	f := &steerFake{exited: make(chan struct{})}
-	cmd := exec.Command(fakeControllerBin(t), "--state-dir", t.TempDir(), "--port-base", "29220", "--health-addr", "127.0.0.1:29226")
+	cmd := exec.Command(fakeControllerBin(t), "--state-dir", t.TempDir(), "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+		"--kubeconfig", "/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/st/identities/system/hpcburst-provider.kubeconfig")
 	cmd.Env = []string{"FAKECTRL_DIR=" + dir}
 	cmd.Stderr = &f.stderr
 	if err := cmd.Start(); err != nil {

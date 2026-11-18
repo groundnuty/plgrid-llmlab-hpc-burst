@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -796,6 +797,11 @@ func TestUpStartsTheControllersAndWarnsOnALowHardLimit(t *testing.T) {
 			rep := &UpReport{}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
+			// The identities step needs an API server, which this test does not have: it is stood in for by
+			// one that leaves the placeholders the fixture wrote (controller_identities_test.go).
+			oldSteps := supervisorStartSteps
+			supervisorStartSteps.prepare = func(context.Context, layout, Ports, io.Writer) ([]ControllerIdentity, error) { return nil, nil }
+			defer func() { supervisorStartSteps = oldSteps }()
 			what, err := startControllers(ctx, f.l, f.ports, o, f.st, f.st.Controllers.Binary, f.st.FrontRun, nil, rep)
 			if err != nil {
 				t.Fatalf("startControllers failed at %q: %v", what, err)

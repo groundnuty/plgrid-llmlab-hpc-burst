@@ -95,9 +95,6 @@ func TestControllerBinaryPublishesToTheDurableLog(t *testing.T) {
 	api := startAPIServer(t)
 	ctx := context.Background()
 	c := api.client
-	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}); err != nil {
-		t.Fatal(err)
-	}
 	base := freeBlockWithLogPorts(t)
 	d := nodetest.NewDir(t, nodetest.Ports{Client: base + agentapi.EventLogPortOffset, Monitor: base + agentapi.EventLogMonitorPortOffset},
 		eventlog.Caps{Events: 16 << 20, Usage: 1 << 20})

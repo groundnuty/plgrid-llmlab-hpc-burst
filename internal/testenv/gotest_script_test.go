@@ -54,9 +54,11 @@ var (
 	lifecycleSlow3 = []string{"TestVerifyRefusedGenerationConfigStopsClass", "TestReadyInstanceStaysReadyWhenTunnelDrops",
 		"TestGateAMissTheFullRecordCantHoldSuspendsItsEntry", "TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases",
 		"TestTheTwoJobGuardKeepsALongWaitToTwoAllocations", "TestADeadStepLeavesTheDeploymentAtItsLastEnd"}
-	controllerFailover = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
-	envoyTimeouts      = []string{"TestEnvoyStreamIdleOutlivesTheDefault", "TestEnvoyClosesIdleUpstreamConnectionsFirst"}
-	hostDialedDry      = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
+	controllerFailover   = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
+	controllerIdentities = []string{"TestEachManagerOfTheBinaryRunsUnderItsOwnIdentity", "TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity",
+		"TestTheLifecycleIdentityStampsTheOwnerHashLabel", "TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan"}
+	envoyTimeouts = []string{"TestEnvoyStreamIdleOutlivesTheDefault", "TestEnvoyClosesIdleUpstreamConnectionsFirst"}
+	hostDialedDry = []string{"TestEachHostDialedFaultFailsTheRowThroughTheScript", "TestEveryHostDialedRowPassesThroughTheScriptOverTheFake",
 		"TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript", "TestADryHostDialedBinaryRefusesLiveSettings"}
 	otherDry = []string{"TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt", "TestADryBinaryRefusesLiveSettings", "TestAJobPendingPastTheBoundIsNotRunOnEveryRow",
 		"TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster", "TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun",
@@ -83,6 +85,7 @@ var groups = []group{
 	{"lifecycle-slow2", "./internal/lifecycle", "330s", lifecycleSlow2},
 	{"lifecycle-slow3", "./internal/lifecycle", "350s", lifecycleSlow3},
 	{"controller-failover", "./cmd/hpcburst-controller", "460s", controllerFailover},
+	{"controller-identities", "./cmd/hpcburst-controller", "150s", controllerIdentities},
 	{"envoy-timeouts", "./internal/agent", "1200s", envoyTimeouts},
 	{"livechecks-hostdialed", "./hack/livechecks", "150s", hostDialedDry},
 	{"livechecks-dry", "./hack/livechecks", "270s", otherDry},

@@ -208,7 +208,8 @@ func TestUpgrade(t *testing.T) {
 			// process's own argv shows the configuration was carried across.
 			pid := newRec.Entries[1].Proc.PID
 			got := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", pid)), "\x00"), "\x00")
-			want := []string{frontBin, "--config", frontCfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", frontHealthAddr, "--mode", "ssh"}
+			want := []string{frontBin, "--config", frontCfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", frontHealthAddr,
+				"--kubeconfig", filepath.Join(h.dir, "identities", "system", "hpcburst-front.kubeconfig"), "--mode", "ssh"}
 			if strings.Join(got, " ") != strings.Join(want, " ") {
 				t.Errorf("the front after the upgrade runs\n got %q\nwant %q", got, want)
 			}

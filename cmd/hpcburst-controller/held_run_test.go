@@ -15,7 +15,6 @@ package main
 // passed whenever no stranger came.
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
 	"net"
@@ -26,10 +25,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
@@ -76,10 +72,6 @@ func statusOf(url string) (code int, ok bool) {
 
 func TestControllerBinaryHoldsItsPortsAgainstAStranger(t *testing.T) {
 	api := startAPIServer(t)
-	ctx := context.Background()
-	if err := api.client.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}); err != nil {
-		t.Fatal(err)
-	}
 
 	t.Run("the start succeeds although a stranger tried the agent endpoint and the plugin first", func(t *testing.T) {
 		holdsOwnPorts(t, api, false)

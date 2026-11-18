@@ -1,6 +1,6 @@
-# The agent commands: Operations and approvals
+# The agent commands: Operations, approvals and the inventory
 
-`hpcburst scale`, `end`, `release`, `confirm`, `approvals`, `approve` and `operation` drive HBEP-10's Operations and Approvals without YAML. Each takes `--json` for agents. This page is the contract of those commands: what they send, what they print, and the shape of the JSON. The package is `internal/agentcli`.
+`hpcburst scale`, `end`, `release`, `confirm`, `approvals`, `approve` and `operation` drive HBEP-10's Operations and Approvals without YAML, and `hpcburst inventory` reads what the framework holds. Each takes `--json` for agents. This page is the contract of those commands: what they send, what they print, and the shape of the JSON. The package is `internal/agentcli`; the inventory's lister and printer are in `internal/inventory`.
 
 ## The commands
 
@@ -13,6 +13,7 @@
 | `hpcburst approvals [-A]` | lists the Operations the caller may approve and has not approved yet |
 | `hpcburst approve <operation> --plan <id>` | approves the plan with that ID |
 | `hpcburst operation <name>` | shows the plan, the phase, the conditions and the per-target report |
+| `hpcburst inventory [-n NS \| -A] [--owner USER]` | one read-only query: every ModelDeployment, Allocation and Instance the caller can read, each Provider's last read, and the Operations waiting for approval (see [The inventory](#the-inventory)) |
 
 `scale`, `end` and `release` also take `--key`, `--purpose`, `--timeout` (default `2m`), `-n` (the namespace) and `--json`. Every command takes `--kubeconfig`, `-n` and `--json`. A positional argument may come before or after the flags.
 
@@ -57,6 +58,7 @@ The output is the CLI's own structure, never the Kubernetes object. Every output
 | `confirm` | `{"schemaVersion": 1, "result": "confirmed" \| "alreadyConfirmed" \| "planChanged", "operation": Operation}` |
 | `approvals` | `{"schemaVersion": 1, "operations": [Approvable, ...]}` |
 | `approve` | `{"schemaVersion": 1, "result": "approved" \| "alreadyApproved", "approval": Approval}` |
+| `inventory` | the [Inventory](#inventory-json) |
 
 ### Operation
 
@@ -146,3 +148,75 @@ With several entries for one target the latest read wins. The entries are the Op
 ### Approval (`approve`)
 
 `{"name", "namespace", "operation", "planID", "approver": {"user", "groups"}}`. `approver` is what the API server reported for the caller.
+
+## The inventory
+
+`hpcburst inventory [-n NS | -A] [--owner USER] [--json]` is one query that reads the API and stores nothing. It lists what the caller can read, in four lists and a view of the Providers (HBEP-10, Inventory): every ModelDeployment, Allocation and Instance with its owner and purpose, the Allocations with their phase, Provider, hard end, retention and idle anchor, each Provider's last successful read with its age, and the Operations in `AwaitingApproval`. The package is `internal/inventory`: a lister that reads through the caller's client and returns rows, and a printer that turns rows into text or JSON. It takes the credential of every command above (`--kubeconfig`, else `$KUBECONFIG`, a controller's credential refused) and sends only reads: `list` calls, and the one SelfSubjectReview that says who the caller is.
+
+- **Scope.** `-n` names the namespace, else the kubeconfig's current context namespace, else `default`. `-A` lists every namespace, with one cluster-wide list per kind; the API server answers it only for a caller allowed to list that kind cluster-wide, and refuses it otherwise (exit 1, naming the kind). `-n` and `-A` together exit 2. Providers and PlatformProfiles have no namespace and are always read whole.
+- **`--owner USER`.** It selects by owner and leaves the rest of the query as it is. ModelDeployments are those whose owner annotation equals `USER`. Allocations and Instances are those with the label `hpcburst.groundnuty.github.io/owner-hash` equal to `u-` and the first 12 hex characters of the SHA-256 of `USER`, sent to the API server as a label selector. The marker below needs every Instance in scope, so with `--owner` the command also reads the Instances without the selector, and shows only the selected ones. Operations are those whose `spec.owner` is `USER`. Providers are not owned and are all listed. An empty `USER` exits 2. A ModelDeployment with no owner annotation is listed in the full view with its owner `unknown`, and only `--owner` leaves it out (`@hpc-burst-science-agent`, 17 Nov 2026, #662, S5). Allocations and Instances that the lifecycle controller created before it began to copy the owner carry no label and no annotation, so they read `unknown` and `--owner` leaves them out: nothing is backfilled, and each is replaced in time.
+- **Owner and purpose on a child are the child's own.** An Allocation or an Instance shows the annotations it carries. It never borrows its ModelDeployment's, so an object that predates the copy reads `unknown` under a deployment that has an owner.
+- **The clock** is read once per command. Every age is that time minus a recorded time.
+- **Order.** Each list is sorted by namespace, then name; Providers by name.
+
+Exit codes are the commands' above: `0`, `1` for a failure to read (the message names the kind and the API server's answer), `2` for a usage error.
+
+### What each row shows
+
+An `unknown` is a fact the framework should hold and the API does not show yet. A field that does not apply is left out. In the text, an unknown reads `unknown (<reason>)`.
+
+| Row | Shows |
+|---|---|
+| ModelDeployment | namespace and name; owner and purpose, from its annotations; `spec.instances`; the number of ready Instances, the controller's own count in `status.readyInstances`; `spec.endTime`; the Providers it uses |
+| Allocation | namespace and name; its ModelDeployment, by `spec.modelDeploymentRef`; owner and purpose from its OWN annotations; the phase; the Provider, by `spec.providerConfigRef`; the hard end, `status.atProvider.hardEnd`; the retention; the idle anchor; the marker `kept, no Instance` |
+| Instance | namespace and name; owner and purpose from its own annotations; the phase; its Allocation, by `spec.allocationRef` |
+| Provider | name; `status.lastSuccessfulStatusRead` and its age |
+| Operation | namespace and name; its ModelDeployment; the action; the plan ID; the owner (`spec.owner`) |
+
+- **The Providers a ModelDeployment uses** are those of its Allocations that are not Ended, Failed, Lost or Refused, joined by `spec.modelDeploymentRef` (never by a label, which a long name shortens). A deployment with none lists none: `[]`.
+- **The retention** is the Allocation's own policy: `mode` is `Keep` or `ReleaseWhenIdle`, and an unset mode is `Keep`. `until` is the policy's date and is left out when it sets none: a kept Allocation then runs to its deployment's end time, which the deployment's row shows. `idleLimit` is the policy's, left out unless it sets one. `profileMaxIdle` is the `maxIdle` of the PlatformProfile of the Allocation's Provider, which releases even a kept Allocation after that long idle; it is left out when the profile sets none, and `unknown` when the Provider or its profile cannot be read.
+- **The idle anchor** `idleSince` is the Allocation's `idle-since` annotation: the time it began to host no Instance. It is left out when the annotation is absent, which means the Allocation is not idle. An annotation that is not an RFC 3339 time reads `unknown`.
+- **The marker** `keptNoInstance` is `true` for capacity that is held with nothing serving, whatever keeps it: an Allocation whose job runs (phase `Running`), that carries the idle anchor, and that no live Instance (one that is not Ended) is on. It holds for every retention mode: `Keep`, a keep date, and `ReleaseWhenIdle` still inside its limit; the `retention` column says which. It is how a kept Allocation with no Instance stands out. Whether an Instance is on the Allocation is read from every Instance in scope, never from the `--owner` selection alone: an Instance that predates the owner label is not in that selection, so an Allocation of the owner's that hosts it must not look empty.
+- **The age** of a Provider's read is the command's clock minus `lastSuccessfulStatusRead`, whole seconds, as a Go duration (`1m30s`). A Provider that was never read shows both as `unknown`, and a read time after the command's clock shows the age as `unknown`.
+
+### Inventory (JSON)
+
+Times are RFC 3339 in UTC and durations are Go duration strings, as above. A value that may be unknown is its value, or `{"unknown": "<reason>"}`; it is never empty or zero. A field that does not apply is left out, and the lists are always arrays, `[]` when empty.
+
+```json
+{"schemaVersion": 1, "observedAt": "...", "scope": {"namespace": "..."} | {"allNamespaces": true}, "selectedOwner": "...",
+ "modelDeployments": [...], "allocations": [...], "instances": [...], "providers": [...], "operationsAwaitingApproval": [...]}
+```
+
+`observedAt` is the clock the command read once. `selectedOwner` is the `--owner` value, and is left out without it.
+
+**modelDeployments**
+
+| Field | Meaning |
+|---|---|
+| `namespace`, `name` | the ModelDeployment |
+| `owner`, `purpose` | the annotations; `{"unknown": "no owner annotation"}` and `{"unknown": "no purpose annotation"}` when absent or empty |
+| `instances` | `spec.instances` |
+| `readyInstances` | the number of ready Instances; `{"unknown": "the controller has not reported on the ModelDeployment yet"}` before the controller's first status write |
+| `endTime` | `spec.endTime`, left out when the deployment has none |
+| `providers` | the names of the Providers it uses, sorted, each once |
+
+**allocations**
+
+| Field | Meaning |
+|---|---|
+| `namespace`, `name` | the Allocation |
+| `modelDeployment` | the name in `spec.modelDeploymentRef`, or `{"unknown": "the Allocation names no ModelDeployment"}` |
+| `owner`, `purpose` | the Allocation's own annotations, as above |
+| `phase` | the observed phase, or `{"unknown": "no phase reported yet"}` |
+| `provider` | the name in `spec.providerConfigRef`, or `{"unknown": "the Allocation names no Provider"}` |
+| `hardEnd` | `status.atProvider.hardEnd`, or `{"unknown": "not observed yet"}` |
+| `retention` | `{"mode", "until", "idleLimit", "profileMaxIdle"}`: `mode` is always there; the others only when they apply (above) |
+| `idleSince` | the idle anchor (above) |
+| `keptNoInstance` | `true` for the marker (above), otherwise left out |
+
+**instances**: `{"namespace", "name", "owner", "purpose", "phase", "allocation"}`, with `phase` unknown as an Allocation's is and `allocation` the name in `spec.allocationRef`.
+
+**providers**: `{"name", "lastSuccessfulStatusRead", "age"}`. Each of the last two is a time or a duration, or `{"unknown": "never read"}`.
+
+**operationsAwaitingApproval**: `{"namespace", "name", "modelDeployment", "action", "planID", "owner"}`, one per Operation in phase `AwaitingApproval`. An Operation in any other phase is not listed. `planID` is `{"unknown": "the Operation has no plan"}` when the status holds none, which cannot happen in `AwaitingApproval`.

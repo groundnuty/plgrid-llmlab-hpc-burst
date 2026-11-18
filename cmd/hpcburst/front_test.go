@@ -227,7 +227,9 @@ func TestFrontSupervision(t *testing.T) {
 		t.Fatalf("the front (pid %d) is not a child of the supervisor (pid %d)", pid, sup.PID)
 	}
 	cmdline := strings.Split(strings.TrimRight(fileOf(fmt.Sprintf("/proc/%d/cmdline", pid)), "\x00"), "\x00")
-	wantArgv := []string{fb, "--config", cfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", healthAddr, "--mode", "ssh"}
+	// The front reads its own identity's kubeconfig, by path (HBEP-10, Audit; #660), never the admin one.
+	wantArgv := []string{fb, "--config", cfg, "--state-dir", h.dir, "--port-base", "29220", "--health-addr", healthAddr,
+		"--kubeconfig", filepath.Join(h.dir, "identities", "system", "hpcburst-front.kubeconfig"), "--mode", "ssh"}
 	if !slices.Equal(cmdline, wantArgv) {
 		t.Errorf("front argv\n got %q\nwant %q", cmdline, wantArgv)
 	}
