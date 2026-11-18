@@ -1,0 +1,85 @@
+# A trial: four of ci.yml's jobs run on the Sano HPC cluster, from self-hosted runners.
+#
+#   sano go                    ci.yml's go: gofmt, go vet, go test
+#   sano go own-timeout        ci.yml's go own-timeout: hack/go-test.sh own
+#   sano tidy                  ci.yml's tidy: go mod tidy -diff on an empty module cache
+#   sano crd and envtest       ci.yml's crd and envtest: hack/check.sh
+#
+# The names differ from ci.yml's, so the required checks (go, go own-timeout, tidy, crd and envtest, launcher-k3s)
+# are untouched: this workflow is an extra signal that nothing waits on. ci.yml is not changed.
+#
+# Each job has one step: the runner's SANO_CI_JOB script, which checks out this run's commit from github.com,
+# runs the job on a Sano compute node and returns the job's exit code. The script reads the job's steps out of
+# the commit's own ci.yml by step name, so the commands are ci.yml's. It sanitises everything it prints, because
+# this log is public. No marketplace action is used: their logs print runner paths. The first line of each step
+# only refuses to run when the runner has no SANO_CI_JOB: bash's own error for that would print the runner's path.
+# The last line is an exec: a cancelled step is signalled through the step's own bash, which would otherwise die and
+# leave the script, and its Slurm job, running (checked on Sano: the job ran to its time limit).
+#
+# Only a pull request from this repository runs here. A fork's code never reaches the cluster.
+#
+# A new push cancels the run in progress for the pull request, and a cancelled step cancels its Slurm job.
+# timeout-minutes covers the wait in Slurm's queue as well as the run (the script asks Slurm for 40 min for go and
+# go own-timeout, 20 for tidy and 55 for crd and envtest).
+
+name: ci-sano
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-sano-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # An explicit shell makes GitHub run bash with -e and -o pipefail, as in ci.yml.
+    shell: bash
+
+jobs:
+  go:
+    name: sano go
+    runs-on: [self-hosted, sano]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 70
+    steps:
+      - name: go on Sano
+        run: |
+          [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
+          exec "$SANO_CI_JOB" go
+
+  go-own:
+    name: sano go own-timeout
+    runs-on: [self-hosted, sano]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 70
+    steps:
+      - name: go own-timeout on Sano
+        run: |
+          [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
+          exec "$SANO_CI_JOB" go-own
+
+  tidy:
+    name: sano tidy
+    runs-on: [self-hosted, sano]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 40
+    steps:
+      - name: tidy on Sano
+        run: |
+          [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
+          exec "$SANO_CI_JOB" tidy
+
+  crd-envtest:
+    name: sano crd and envtest
+    runs-on: [self-hosted, sano]
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 90
+    steps:
+      - name: crd and envtest on Sano
+        run: |
+          [ -x "${SANO_CI_JOB:-}" ] || { echo "SANO_CI_JOB is not set to an executable script on this runner"; exit 1; }
+          exec "$SANO_CI_JOB" crd-envtest

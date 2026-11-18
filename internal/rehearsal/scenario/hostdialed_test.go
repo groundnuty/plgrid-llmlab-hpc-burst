@@ -41,7 +41,8 @@ type relayProc struct {
 }
 
 // relaysOf lists the controller's relays for a job: its ssh children whose
-// command line runs HBEP-6's relay line for the job.
+// command line runs HBEP-6's relay line for the job, with its --chdir (the
+// amendment of 18 Nov 2026, #735).
 func (r *rig) relaysOf(jobID string) map[agentapi.RelayChannel][]relayProc {
 	r.t.Helper()
 	out := map[agentapi.RelayChannel][]relayProc{}
@@ -52,7 +53,7 @@ func (r *rig) relaysOf(jobID string) map[agentapi.RelayChannel][]relayProc {
 		}
 		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
 		line := args[len(args)-1]
-		if !strings.HasPrefix(line, "srun -u --overlap --jobid="+jobID+" --ntasks=1 ") {
+		if !strings.HasPrefix(line, "srun -u --overlap --jobid="+jobID+" --ntasks=1 --chdir=/") {
 			continue
 		}
 		for _, ch := range agentapi.RelayChannels {

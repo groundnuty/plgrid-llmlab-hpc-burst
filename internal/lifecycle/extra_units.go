@@ -66,31 +66,32 @@ type unitAsk struct {
 	unitSizing
 }
 
-// future is the size of a handing-over primary's next replacement, which does not exist yet: the CURRENT spec's, and its
-// GPU count (zero when the spec cannot be sized).
-func (a unitAsk) future(md *v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, int32) {
+// future is the size of a handing-over primary's next replacement, which does not exist yet: the CURRENT spec's (zero when the
+// spec cannot be sized). Its GPU count is #756's (futureGPUs, or a reserved slot's gpus), the one rule that also says which QOS
+// the unit is charged to.
+func (a unitAsk) future(md *v1alpha1.ModelDeployment) v1alpha1.BatchParameters {
 	if md == nil || a.sizeOf == nil {
-		return v1alpha1.BatchParameters{}, 0
+		return v1alpha1.BatchParameters{}
 	}
 	b, err := a.sizeOf(md)
 	if err != nil {
-		return v1alpha1.BatchParameters{}, 0
+		return v1alpha1.BatchParameters{}
 	}
-	return b, b.GPUs
+	return b
 }
 
-// recorded is the size of the Allocation of an Instance that exists, from its RECORDED launch, never the spec's now, and
-// its GPU count, which the launch gives even when the size cannot be computed.
-func (a unitAsk) recorded(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, int32) {
-	gpus := in.Spec.Launch.GPUs * v1alpha1.LaunchWorkers(in.Spec.Launch)
+// recorded is the size of the Allocation of an Instance that exists, from its RECORDED launch, never the spec's now (zero when
+// it cannot be sized). Its GPU count is #756's (launchGPUs, or a reserved slot's gpus), which the launch gives even when the
+// size cannot be computed.
+func (a unitAsk) recorded(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) v1alpha1.BatchParameters {
 	if md == nil || a.sizeRecorded == nil {
-		return v1alpha1.BatchParameters{}, gpus
+		return v1alpha1.BatchParameters{}
 	}
 	b, err := a.sizeRecorded(md, in)
 	if err != nil {
-		return v1alpha1.BatchParameters{}, gpus
+		return v1alpha1.BatchParameters{}
 	}
-	return b, gpus
+	return b
 }
 
 // handoverReads are the reads an extra's unit set is made from, all made under the Provider's lock by the reserved count
@@ -174,16 +175,14 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		if s.kind == slotForOwnAllocation {
 			// An in-flight replacement exists: its own recorded launch sizes it.
 			var sz v1alpha1.BatchParameters
-			var gpus int32
 			if in := r.instanceOf(types.UID(s.uid)); in != nil {
-				sz, gpus = a.recorded(md, in)
+				sz = a.recorded(md, in)
 			}
-			add(extraUnit{uid: types.UID(s.uid), role: roleOwn, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: gpus})
+			add(extraUnit{uid: types.UID(s.uid), role: roleOwn, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: s.gpus})
 			continue
 		}
 		// A Running primary's or a winner's replacement does not exist yet: the current spec sizes it.
-		sz, gpus := a.future(md)
-		add(extraUnit{uid: types.UID(s.uid), role: roleHandover, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: gpus})
+		add(extraUnit{uid: types.UID(s.uid), role: roleHandover, deployment: s.deployment, key: s.key, reserved: true, size: a.future(md), gpus: s.gpus})
 	}
 	// addMember counts the member m of deployment key's view v, on this Provider, as a primary that will hand over: a unit
 	// when its deployment serves past m's drain start, judged by its Allocation's time limit, or, in flight, by its recorded
@@ -202,22 +201,21 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		if judged == nil {
 			// In flight: its own Allocation is not made yet, and its drain start is read from the time limit its
 			// recorded launch is sized for.
-			own, ogpus := a.recorded(md, m)
+			own := a.recorded(md, m)
 			judged = &v1alpha1.Allocation{}
 			judged.Spec.ForProvider.Batch = &own
 			if primary {
 				// A chosen primary in flight is an Instance that exists: its own Allocation, which no list shows yet, is
 				// charged to the caps at its recorded launch's size, beside its future replacement's, unless an expectation
 				// already sizes it (unitTerms). Its slot is held by that expectation, so it asks for none (reserved).
-				add(extraUnit{uid: m.UID, role: roleOwn, deployment: key, key: m.Namespace + "/" + m.Spec.AllocationRef.Name, reserved: true, size: own, gpus: ogpus})
+				add(extraUnit{uid: m.UID, role: roleOwn, deployment: key, key: m.Namespace + "/" + m.Spec.AllocationRef.Name, reserved: true, size: own, gpus: launchGPUs(m)})
 			}
 		}
 		if !holdsSlotOnceRunning(md, m, judged, *r.profile, time.Time{}) {
 			return
 		}
 		// Its replacement does not exist yet: the current spec sizes it.
-		sz, gpus := a.future(md)
-		add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: gpus})
+		add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: a.future(md), gpus: futureGPUs(md, m)})
 	}
 	// The chosen primaries that have not started, or have no Allocation yet, and the members of an unresolved replacement
 	// hedge.

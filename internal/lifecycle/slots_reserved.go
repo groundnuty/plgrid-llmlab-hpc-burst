@@ -49,6 +49,10 @@ type reservedSlot struct {
 	// winner marks a slot held from a replacement hedge's win, beside a predecessor that still serves on another
 	// Provider (the winner rule of reservedOn below), as against a chosen primary's own.
 	winner bool
+	// gpus is the GPU count of the Allocation the slot is held for: the holding Instance's launch, its GPUs times its
+	// workers, which is what the replacement is sized by. Under qosByGpus it says which QOS the slot is charged to
+	// (qosScope.reservedUnder); 0 is not known, and counts under every QOS. The extra's unit set reads it (extraUnits).
+	gpus int32
 }
 
 // before reports whether s's Instance is older than o's: by creation time, then by UID. Of two replacements
@@ -184,12 +188,12 @@ func reservedAndReadsFrom(ctx context.Context, r client.Reader, snap slotSnapsho
 				return nil, handoverReads{}, err
 			}
 			if md != nil && md.DeletionTimestamp.IsZero() {
-				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor})
+				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor, gpus: futureGPUs(md, in)})
 			}
 			continue
 		}
 		if _, made := allocs[allocKey]; countable(in) && !made && in.Annotations[v1alpha1.AnnotationPredecessor] != "" {
-			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation, created: in.CreationTimestamp.Time, uid: string(in.UID)})
+			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation, created: in.CreationTimestamp.Time, uid: string(in.UID), gpus: launchGPUs(in)})
 			continue
 		}
 		if profile == nil || !countable(in) || replaced[in.Namespace+"/"+in.Name] || surplus[in] {
@@ -230,9 +234,25 @@ func reservedAndReadsFrom(ctx context.Context, r client.Reader, snap slotSnapsho
 		if err != nil || !servesPast(md, ds) {
 			continue
 		}
-		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, uid: string(in.UID), winner: viaWin})
+		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, uid: string(in.UID), winner: viaWin, gpus: futureGPUs(md, in)})
 	}
 	return out, handoverReads{provider: provider, profile: profile, views: views, mds: mds, reserved: out}, nil
+}
+
+// futureGPUs is the GPU count of an Allocation that is not made yet and will be, for the deployment: a replacement or a
+// successor is sized at the deployment's CURRENT spec (the plan: tensor-parallel-size times pipeline-parallel-size times
+// workers), whatever the Instance it follows launched (HBEP-4, QOS limits: "charged to the QOS it would submit under").
+// An existing unit is charged at its own launch (launchGPUs) instead. A spec that gives no plan leaves the launch's count.
+func futureGPUs(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) int32 {
+	if plan, err := checkServed(md); err == nil && plan.gpus*plan.workers > 0 {
+		return plan.gpus * plan.workers
+	}
+	return launchGPUs(in)
+}
+
+// launchGPUs is the GPU count of the Allocation an Instance runs on: its launch's GPUs times its workers.
+func launchGPUs(in *v1alpha1.Instance) int32 {
+	return in.Spec.Launch.GPUs * v1alpha1.LaunchWorkers(in.Spec.Launch)
 }
 
 // deploymentView is one deployment's Instances on every Provider.

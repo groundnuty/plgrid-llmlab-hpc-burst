@@ -131,11 +131,7 @@ func (f *headroomFixture) h(t *testing.T) int {
 	}
 	c := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(f.objs...).Build()
 	p := &pass{r: &Reconciler{Client: c, Reader: c, Clock: pfake.NewClock(hoT(8, 0, 0))}, key: types.NamespacedName{Namespace: "ns", Name: "this"}, now: hoT(8, 0, 0)}
-	snap, err := readSlotSnapshot(context.Background(), c, "prov-x", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, err := p.headroomOf(&providerView{name: "prov-x"})(context.Background(), snap)
+	h, err := p.headroomOf(&providerView{name: "prov-x"})(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +562,7 @@ func TestAnExpectationThatLapsesDuringTheHeadroomScanStillCounts(t *testing.T) {
 	tab := newSlotTable()
 	tab.expect["prov"] = map[string]time.Time{"ns/k": now}
 	limit := int32(1)
-	hook := func(ctx context.Context, _ slotSnapshot) (int, error) {
+	hook := func(ctx context.Context) (int, error) {
 		k := &v1alpha1.Allocation{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "k"}}
 		k.Spec.ProviderConfigReference = providerRef("prov")
 		if err := c.Create(ctx, k); err != nil {
@@ -615,7 +611,7 @@ func TestTheCountAndTheHeadroomShareOneDeadline(t *testing.T) {
 	tab := newSlotTable()
 	limit := int32(5)
 	var headroomDeadline time.Time
-	hook := func(ctx context.Context, _ slotSnapshot) (int, error) {
+	hook := func(ctx context.Context) (int, error) {
 		headroomDeadline, _ = ctx.Deadline()
 		return 1, nil
 	}

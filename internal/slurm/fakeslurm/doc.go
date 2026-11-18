@@ -43,11 +43,12 @@
 //     Anything else is exit 127, "command not found". Options the plugin never
 //     sends are refused (exit 1), so an unexpected flag cannot pass silently;
 //   - srun is "srun [-u] --overlap --jobid=<digits> [--ntasks=1]
-//     [--time=<t>] <program> [args...]", the options in any order, each in the
-//     one form shown (--jobid=<id>, never "--jobid <id>"). The program and its
-//     words follow the first word that is not an option and are not read, so
-//     "bash -s" is the program's own. --overlap and --jobid are required,
-//     --ntasks takes only 1, and any other option is refused with exit 1. -u
+//     [--chdir=<dir>] [--time=<t>] <program> [args...]", the options in any
+//     order, each in the one form shown (--jobid=<id>, never "--jobid <id>").
+//     The program and its words follow the first word that is not an option
+//     and are not read, so "bash -s" is the program's own. --overlap and
+//     --jobid are required, --ntasks takes only 1, --chdir takes a clean
+//     absolute directory, and any other option is refused with exit 1. -u
 //     (unbuffered) is accepted and recorded; it changes nothing for Run, whose
 //     output comes back whole, and decides whether Stream line-buffers the
 //     step's standard output. The program's standard input is the Command's
@@ -262,9 +263,14 @@
 //     user that is RUNNING with a live process: the program, looked up on the
 //     PATH of the job's environment (not the test's), runs as a host process
 //     with the job's own environment (the one its batch shell got, SLURM_JOB_ID
-//     among it) and the submit directory as its working directory. Standard
-//     input is the Command's, and its standard output and error come back as
-//     the Result's, each capped at 16 MiB (a step that writes more is killed,
+//     among it) and the submit directory as its working directory, or the
+//     directory --chdir names, which must exist (exit 1, "srun: error:
+//     couldn't chdir to '<dir>': No such file or directory", nothing runs).
+//     RunMode.NoComputeHome stands for a cluster whose compute nodes have no
+//     home directory (Sano, #735): a step with no --chdir then starts in the
+//     login's HOME, which is not there, and fails the same way, exit 1, with
+//     the HOME in the message. Standard input is the Command's, and its
+//     standard output and error come back as the Result's, each capped at 16 MiB (a step that writes more is killed,
 //     exit 1). The exit status is the program's, or 128 plus the signal that
 //     ended it; a program that is not found is exit 127 and one that is not
 //     executable 126, as a shell says. Nothing runs in a refusal, exit 1 and
@@ -295,8 +301,9 @@
 //     makes Run return an error that wraps slurm.ErrTransport.
 //   - Session.Stream runs one srun line as a duplex stream, for HBEP-6's
 //     host-dialed relay (issue #298): "srun -u --overlap --jobid=<id>
-//     --ntasks=1 <agent> relay <channel>" with one multiplexed session over
-//     the step's standard input and output for the job's whole life. The line
+//     --ntasks=1 --chdir=<dir> <agent> relay <channel>" with one multiplexed
+//     session over the step's standard input and output for the job's whole
+//     life. The line
 //     must be exactly one simple command whose first word is srun, with no "
 //     && " and no redirection: a line that does not parse is exit 2, anything
 //     else that is not one srun command exit 1, each with a message on

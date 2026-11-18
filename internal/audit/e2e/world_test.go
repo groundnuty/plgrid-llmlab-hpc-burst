@@ -104,6 +104,26 @@ func (b *logBuffer) tail(n int) string {
 	return strings.Join(b.lines[from:], "\n")
 }
 
+// shiftClock is the real clock plus an offset a test advances: the lifecycle controller reads it for every decision, so a
+// jump of 7 days is one call, and in between it runs at the speed of the wall clock, as the objects' own timestamps do.
+type shiftClock struct {
+	mu  sync.Mutex
+	off time.Duration
+}
+
+func (c *shiftClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().UTC().Add(c.off)
+}
+
+// Advance moves the clock forward.
+func (c *shiftClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.off += d
+}
+
 // who is one identity of the run: its user name and groups as the API server reports them, and a client that acts
 // as it.
 type who struct {
@@ -122,6 +142,9 @@ type world struct {
 
 	// logs is what the controllers logged.
 	logs *logBuffer
+
+	// clock is the controller's clock (startLifecycle); the Provider's readiness is stamped by it.
+	clock *shiftClock
 
 	// logPath is the audit log's file; its directory also holds the rotated files.
 	logPath string
@@ -211,7 +234,7 @@ func newWorld(t *testing.T) *world {
 	if err := os.WriteFile(policy, audit.Policy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	w := &world{t: t, ctx: ctx, logs: &logBuffer{}, logPath: filepath.Join(dir, "audit", "audit.log"), state: filepath.Join(dir, "state")}
+	w := &world{t: t, ctx: ctx, clock: &shiftClock{}, logs: &logBuffer{}, logPath: filepath.Join(dir, "audit", "audit.log"), state: filepath.Join(dir, "state")}
 	ctrl.SetLogger(funcr.New(func(prefix, args string) { w.logs.line(prefix + " " + args) }, funcr.Options{}))
 	cp, err := testenv.Start(ctx, filepath.Join(dir, "cp"), testenv.Options{
 		BeforeControllerManager: installCRDs,
@@ -341,16 +364,25 @@ func (w *world) makeProvider() *v1alpha1.Provider {
 	return prov
 }
 
-// markProviderReady writes the status the Provider's controller would: Ready, with a recent successful read.
+// markProviderReady writes the status the Provider's controller would: Ready, with a read as recent as the controller's clock says.
 func (w *world) markProviderReady(prov *v1alpha1.Provider) {
 	t := w.t
 	t.Helper()
-	apimeta.SetStatusCondition(&prov.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPolled, LastTransitionTime: metav1.Now()})
-	readAt := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
-	prov.Status.LastSuccessfulStatusRead = &readAt
-	if err := w.admin.c.Status().Update(w.ctx, prov, client.FieldOwner(v1alpha1.FieldManagerProvider)); err != nil {
+	if err := w.refreshProvider(prov); err != nil {
 		t.Fatalf("mark the Provider ready: %v", err)
 	}
+}
+
+// refreshProvider reads the Provider again and stamps its readiness with the controller's clock.
+func (w *world) refreshProvider(prov *v1alpha1.Provider) error {
+	var cur v1alpha1.Provider
+	if err := w.admin.c.Get(w.ctx, client.ObjectKeyFromObject(prov), &cur); err != nil {
+		return err
+	}
+	apimeta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionProviderReady, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonPolled, LastTransitionTime: metav1.NewTime(w.clock.Now())})
+	readAt := metav1.NewTime(w.clock.Now().Truncate(time.Second))
+	cur.Status.LastSuccessfulStatusRead = &readAt
+	return w.admin.c.Status().Update(w.ctx, &cur, client.FieldOwner(v1alpha1.FieldManagerProvider))
 }
 
 // startLifecycle runs the real lifecycle controller's manager as the lifecycle identity, with its leader election on,

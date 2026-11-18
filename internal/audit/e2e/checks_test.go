@@ -20,10 +20,10 @@ func (s *scenario) checkLife(t *testing.T, set *logSet) {
 	w, planID, plannedA, purposeA, purposeB := s.world, s.planID, s.plannedA, s.purposeA, s.purposeB
 	// The Operation's create by its requester, at RequestResponse, with its spec and its purpose.
 	for _, c := range []struct {
-		name string
-		by   who
-		want string
-	}{{"end-a", w.a, purposeA}, {"end-b", w.b, purposeB}} {
+		name, deployment string
+		by               who
+		want             string
+	}{{"end-a", "md", w.a, purposeA}, {"end-b", "md2", w.b, purposeB}} {
 		evs := set.find("create", "operations", "", c.name, c.by.user)
 		if len(evs) != 1 {
 			t.Errorf("Operation %s: %d create events by %s, want 1", c.name, len(evs), c.by.user)
@@ -32,10 +32,10 @@ func (s *scenario) checkLife(t *testing.T, set *logSet) {
 		e := evs[0]
 		op := e.requestOperation(t)
 		if e.Level != "RequestResponse" || e.ResponseStatus.Code != 201 || len(e.ResponseObject) == 0 ||
-			op.Spec.Action != v1alpha1.OperationActionEnd || op.Spec.ModelDeploymentRef.Name != "md" || op.Spec.Owner != c.by.user ||
+			op.Spec.Action != v1alpha1.OperationActionEnd || op.Spec.ModelDeploymentRef.Name != c.deployment || op.Spec.Owner != c.by.user ||
 			op.Annotations[v1alpha1.AnnotationPurpose] != c.want {
-			t.Errorf("the create of %s is logged as %s (code %d, response %t), with spec %+v and purpose %q; want RequestResponse, 201, a response, the End of md owned by %s, purpose %q",
-				c.name, e.Level, e.ResponseStatus.Code, len(e.ResponseObject) > 0, op.Spec, op.Annotations[v1alpha1.AnnotationPurpose], c.by.user, c.want)
+			t.Errorf("the create of %s is logged as %s (code %d, response %t), with spec %+v and purpose %q; want RequestResponse, 201, a response, the End of %s owned by %s, purpose %q",
+				c.name, e.Level, e.ResponseStatus.Code, len(e.ResponseObject) > 0, op.Spec, op.Annotations[v1alpha1.AnnotationPurpose], c.deployment, c.by.user, c.want)
 		}
 	}
 	// The lifecycle identity's status write carries the plan (hasPlanWrite waited for one); never the person's or an
@@ -91,6 +91,64 @@ func (s *scenario) checkLife(t *testing.T, set *logSet) {
 				t.Errorf("a write of %s is logged at %s, want RequestResponse: %s", e.ObjectRef.Resource, e.Level, e)
 				return
 			}
+		}
+	}
+}
+
+// checkEnd is (b)'s execution: the approved End ran, and the log holds its outcome status write with the per-target outcomes, and
+// for each Allocation it released the release-cause update at level Request, naming the Operation, and then the delete. The log's
+// files are read, never the objects: the Operation and its Allocations are read back only to know which names to look for.
+func (s *scenario) checkEnd(t *testing.T, set *logSet) {
+	w := s.world
+	done := w.getOperation("end-a")
+	var outcomeWrite *auditEvent
+	for _, e := range set.find("update", "operations", "status", "end-a", w.lc.user) {
+		e := e
+		if op := e.requestOperation(t); op.Status.Phase == v1alpha1.OperationPhaseDone && len(op.Status.Targets) > 0 {
+			outcomeWrite = &e
+		}
+	}
+	if outcomeWrite == nil {
+		t.Fatalf("no status write of end-a by the lifecycle identity carries phase Done and the per-target outcomes")
+	}
+	if outcomeWrite.Level != "RequestResponse" {
+		t.Errorf("the outcome write is logged at %s, want RequestResponse", outcomeWrite.Level)
+	}
+	for _, o := range outcomeWrite.requestOperation(t).Status.Targets {
+		if o.State != v1alpha1.TargetStateDone {
+			t.Errorf("the logged outcome of %s %s is %s (%s), want Done", o.Kind, o.Name, o.State, o.Reason)
+		}
+	}
+	released := w.releasedAllocations(set, done)
+	if len(released) == 0 {
+		t.Fatalf("the plan names no Allocation that the End released")
+	}
+	for _, name := range released {
+		var cause, del *auditEvent
+		for _, e := range set.find("update", "allocations", "", name, w.lc.user) {
+			e := e
+			var a v1alpha1.Allocation
+			if jsonUnmarshal(e.RequestObject, &a) == nil && a.Annotations[v1alpha1.AnnotationReleaseCause] != "" && cause == nil {
+				cause = &e
+			}
+		}
+		if ds := set.find("delete", "allocations", "", name, w.lc.user); len(ds) > 0 {
+			del = &ds[0]
+		}
+		if cause == nil || del == nil {
+			t.Errorf("Allocation %s: cause write %v, delete %v in the log, want both", name, cause != nil, del != nil)
+			continue
+		}
+		var a v1alpha1.Allocation
+		_ = jsonUnmarshal(cause.RequestObject, &a)
+		if ns, op, uid, ok := v1alpha1.ParseReleaseCauseOperation(a.Annotations[v1alpha1.AnnotationReleaseCause]); !ok || ns != exampleNS || op != "end-a" || uid != done.UID {
+			t.Errorf("Allocation %s: the logged release cause is %q, want the Operation end-a %s", name, a.Annotations[v1alpha1.AnnotationReleaseCause], done.UID)
+		}
+		if cause.Level != "Request" || del.Level != "Request" {
+			t.Errorf("Allocation %s: the cause write is logged at %s and the delete at %s, want Request for both", name, cause.Level, del.Level)
+		}
+		if !cause.RequestReceivedTimestamp.Before(del.RequestReceivedTimestamp) && !cause.RequestReceivedTimestamp.Equal(del.RequestReceivedTimestamp) {
+			t.Errorf("Allocation %s: the cause write (%s) is not before the delete (%s): the cause must be logged before the delete", name, cause.RequestReceivedTimestamp, del.RequestReceivedTimestamp)
 		}
 	}
 }

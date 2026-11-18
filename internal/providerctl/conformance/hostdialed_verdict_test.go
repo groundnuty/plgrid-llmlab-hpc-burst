@@ -75,8 +75,8 @@ const (
 	checkReadable   = "the run's state"
 )
 
-// lineWords splits a relay line into the words srun got: srun -u --overlap --jobid=<job> --ntasks=1 <agent> relay
-// <channel> --dir <dir> --allocation <UID> --epoch <E> --seq <N> (agentapi.RelayLine).
+// lineWords splits a relay line into the words srun got: srun -u --overlap --jobid=<job> --ntasks=1 --chdir=<dir> <agent>
+// relay <channel> --dir <dir> --allocation <UID> --epoch <E> --seq <N> (agentapi.RelayLine).
 func lineWords(l string) []string { return strings.Fields(l) }
 
 // lineArg is the value after flag among the words, or "".
@@ -87,6 +87,16 @@ func lineArg(words []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+// relayFormLine reports whether a relay line's words are HBEP-6's form: srun -u --overlap --jobid=<the job> --ntasks=1
+// --chdir=<dir> <the staged agent> relay ..., with --chdir the same directory as the line's own --dir.
+func relayFormLine(w []string, o hostDialedObs) bool {
+	if len(w) < 8 || w[0] != "srun" || w[1] != "-u" || w[2] != "--overlap" || w[3] != "--jobid="+o.JobID || w[4] != "--ntasks=1" {
+		return false
+	}
+	chdir, ok := strings.CutPrefix(w[5], "--chdir=")
+	return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath && w[7] == agentapi.RelaySubcommand
 }
 
 // channelOf is a relay line's channel, the word after "relay", or "".
@@ -144,7 +154,9 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 		add(checkServing, true, "up: a stream the job opened crossed it to the serving port (%d stream(s))", srv.Joined)
 	}
 
-	// srun -u: every relay line's first words are srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent>.
+	// srun -u: every relay line's first words are srun -u --overlap --jobid=<the job> --ntasks=1 --chdir=<the Allocation's
+	// directory> <the staged agent> relay, the directory being the line's own --dir (HBEP-4 and HBEP-6, amended on 18 Nov
+	// 2026 for compute nodes with no home, #735). A line without --chdir is refused: it is not the form.
 	var bad []string
 	for _, ch := range agentapi.RelayChannels {
 		if byChannel[string(ch)] == 0 {
@@ -153,15 +165,15 @@ func judgeHostDialed(o hostDialedObs) []hostDialedCheck {
 	}
 	for _, l := range o.Lines {
 		w := lineWords(l)
-		if len(w) < 7 || w[0] != "srun" || w[1] != "-u" || w[2] != "--overlap" || w[3] != "--jobid="+o.JobID || w[4] != "--ntasks=1" || w[5] != o.AgentPath || w[6] != agentapi.RelaySubcommand {
-			bad = append(bad, "a "+postSafe(channelOf(w), o)+" relay ran a line that is not srun -u --overlap --jobid=<the job> --ntasks=1 <the agent> relay")
+		if !relayFormLine(w, o) {
+			bad = append(bad, "a "+postSafe(channelOf(w), o)+" relay ran a line that is not srun -u --overlap --jobid=<the job> --ntasks=1 --chdir=<the Allocation directory> <the agent> relay")
 			break
 		}
 	}
 	if len(bad) > 0 {
 		add(checkSrunU, false, "%s", strings.Join(bad, "; "))
 	} else {
-		add(checkSrunU, true, "every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 <the staged agent> relay <channel> (%d line(s)), so the step's output is not held for a newline, which the sessions' binary frames lack", len(o.Lines))
+		add(checkSrunU, true, "every relay ran srun -u --overlap --jobid=<the job> --ntasks=1 --chdir=<the Allocation directory> <the staged agent> relay <channel> (%d line(s)), so the step's output is not held for a newline, which the sessions' binary frames lack", len(o.Lines))
 	}
 
 	// The rendezvous: the agent's socket in a mode-700 directory of its own right under the job's TMPDIR. The line holds

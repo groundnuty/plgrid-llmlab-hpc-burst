@@ -270,7 +270,7 @@ func (p *pass) submitOn(pv *providerView, t *placeTarget, pred *v1alpha1.Instanc
 	}
 	// A missing primary refused on a Provider simply goes on to the next step: nothing is cancelled to make room for it,
 	// since an extra is admitted only with headroom for the primaries that need a slot (o.ask.headroom; #708).
-	ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.ask)
+	ok, holds, err := p.reserveSlotAs(pv, t.params.GPUs, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), &t.params, capsOf, o.quiet, o.ask)
 	if err != nil {
 		return stepStopped, err
 	}

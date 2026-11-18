@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -115,11 +116,15 @@ type slotTable struct {
 	// later check counts it before the list shows it. It is cleared wherever
 	// expect is (observe, release).
 	params map[string]map[string]v1alpha1.BatchParameters
+	// gpus holds, beside expect, the GPU count of each expected Allocation whose reservation counted per QOS
+	// (slotAsk.gpus), so a later per-QOS count knows which QOS it runs under before the list shows it
+	// (qosscope.go). It is cleared wherever expect is. A Provider with no qosByGpus never writes it.
+	gpus map[string]map[string]int32
 }
 
 func newSlotTable() *slotTable {
 	return &slotTable{listTimeout: listTimeout, locks: map[string]*sync.Mutex{}, expect: map[string]map[string]time.Time{},
-		params: map[string]map[string]v1alpha1.BatchParameters{}}
+		params: map[string]map[string]v1alpha1.BatchParameters{}, gpus: map[string]map[string]int32{}}
 }
 
 func (t *slotTable) slotLock(provider string) *sync.Mutex {
@@ -161,6 +166,7 @@ func (t *slotTable) observe(provider string, seen, listed map[string]bool, now t
 		if seen[k] || now.Sub(raised) >= expectationsTimeout {
 			delete(exp, k)
 			delete(t.params[provider], k)
+			delete(t.gpus[provider], k)
 		}
 	}
 	return slotCount{listed: listed, expected: len(exp)}
@@ -224,9 +230,22 @@ type slotAsk struct {
 	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
 	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
 	// deployments that the Provider allows, and 0 when there are none. It reads the other deployments' Instances and
-	// Allocations from the reservation's snapshot, its Providers and ModelDeployments through the uncached Reader, and adds
-	// to alsoLeave.
-	headroom func(ctx context.Context, snap slotSnapshot) (int, error)
+	// Allocations from the reservation's snapshot, which the context carries (withSlotSnapshot), its Providers and
+	// ModelDeployments through the uncached Reader, and adds to alsoLeave.
+	headroom func(ctx context.Context) (int, error)
+	// scope, when set (a Provider whose partition sets qosByGpus; qosscope.go), counts the per-user limits that
+	// belong to the QOS the new Allocation runs under over that QOS's Allocations only: limit and caps stay the
+	// Provider-wide ones, the partition QOS's and the host-dialed ceiling. gpus is the new Allocation's GPU count.
+	// qosAlsoLeave and qosHeadroom are alsoLeave and headroom counted over that QOS alone. All are zero for a
+	// Provider without qosByGpus, whose limits are counted as they always were.
+	// size, when set, is the new Allocation's size, recorded with its expectation whether or not params asks for the caps
+	// check: a primary's reservation carries it too, so a hedge member or an extra that asks before the primary's
+	// Allocation is listed counts it against the caps (review of #756, Astra 3; the race was in alpha too).
+	size         *v1alpha1.BatchParameters
+	scope        *qosScope
+	gpus         int32
+	qosAlsoLeave int
+	qosHeadroom  func(ctx context.Context) (int, error)
 }
 
 // slotAnswer is a reservation's answer.
@@ -250,13 +269,25 @@ type slotAnswer struct {
 	// capsWhy, when the reservation was refused for the per-user caps
 	// (slotAsk.params), says which and by how much.
 	capsWhy string
+	// scoped, when the reservation was refused for the submit limit of the asking Allocation's own QOS
+	// (slotAsk.scope), says so: count and reserved are then those of that QOS alone.
+	scoped bool
 }
 
 // reserveAsk reserves a slot as reserve does, counting the reserved slots the
 // question's profile and takers leave (counted), and reports on its holder.
 // With no limit and no holder nothing is read.
 func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, now func() time.Time) (slotAnswer, error) {
-	if q.limit == nil && q.holder == "" && q.params == nil {
+	qLimit := q.scope.submitLimit()
+	if q.limit == nil && qLimit == nil && q.holder == "" && q.params == nil {
+		if q.size != nil {
+			// Nothing is counted here, but the size is still recorded, so a hedge member or an extra that asks before this
+			// Allocation is listed counts it against the caps (capsFit).
+			l := t.slotLock(q.provider)
+			l.Lock()
+			defer l.Unlock()
+			t.noteSize(q, now())
+		}
 		return slotAnswer{ok: true}, nil
 	}
 	l := t.slotLock(q.provider)
@@ -266,12 +297,15 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	// what remains of listTimeout, so no primary of this Provider waits for two timeouts.
 	sctx, cancel := context.WithTimeout(ctx, t.listTimeout)
 	defer cancel()
-	rd, err := t.readBounded(sctx, r, q.provider, q.limit != nil || q.deployment != "", q.profile)
+	rd, err := t.readBounded(sctx, r, q.provider, q.limit != nil || qLimit != nil || q.deployment != "", q.profile)
 	if err != nil {
 		return slotAnswer{}, err
 	}
 	holds := q.holder != "" && rd.listed[q.holder]
-	if q.limit == nil && q.params == nil {
+	if q.limit == nil && qLimit == nil && q.params == nil {
+		if q.size != nil {
+			t.noteSize(q, now())
+		}
 		return slotAnswer{ok: true, holds: holds}, nil
 	}
 	// Read once the lock is held and the count's reads are back, as the reservation always did, and BEFORE the headroom's:
@@ -286,12 +320,20 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 			return slotAnswer{}, err
 		}
 	}
+	hctx := withSlotSnapshot(sctx, rd.snap) // the headroom's reads of the deployments come from the snapshot
 	if q.headroom != nil && q.limit != nil {
-		h, err := q.headroom(sctx, rd.snap)
+		h, err := q.headroom(hctx)
 		if err != nil {
 			return slotAnswer{}, err
 		}
 		q.alsoLeave += h
+	}
+	if q.qosHeadroom != nil && qLimit != nil {
+		h, err := q.qosHeadroom(hctx)
+		if err != nil {
+			return slotAnswer{}, err
+		}
+		q.qosAlsoLeave += h
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -309,8 +351,14 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 		q.alsoLeave += leave
 	}
 	if q.params != nil {
-		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], future, *q.params); !ok {
+		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], future, *q.params, nil); !ok {
 			return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, nil
+		}
+		// The per-user caps of the asking Allocation's own QOS count that QOS's Allocations alone.
+		if q.scope != nil && q.scope.hasLimits() {
+			if ok, why := capsFit(q.provider, q.scope.limits, rd, t.params[q.provider], future, *q.params, q.scope); !ok {
+				return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, nil
+			}
 		}
 	}
 	var n int
@@ -323,16 +371,22 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 			return slotAnswer{count: total, reserved: n, reservedBy: by, holds: holds}, nil
 		}
 	}
+	if qLimit != nil {
+		// The submit limit of the asking Allocation's own QOS counts the Allocations, the expectations and the
+		// reserved slots under that QOS alone (HBEP-7, Per-user limits).
+		nq, byq := counted(q.scope.reservedUnder(rd.reserved), q.key, q.takers, t.expect[q.provider])
+		totalQ := t.countUnder(q.provider, rd, q.scope) + nq
+		if totalQ+q.qosAlsoLeave >= int(*qLimit) {
+			return slotAnswer{count: totalQ, reserved: nq, reservedBy: byq, holds: holds, scoped: true}, nil
+		}
+	}
 	if t.expect[q.provider] == nil {
 		t.expect[q.provider] = map[string]time.Time{}
 	}
 	t.expect[q.provider][q.key] = at
-	if q.params != nil {
-		if t.params[q.provider] == nil {
-			t.params[q.provider] = map[string]v1alpha1.BatchParameters{}
-		}
-		t.params[q.provider][q.key] = *q.params
-	}
+	// The size is recorded for every reservation, a primary's too, until its Allocation is listed: a hedge member or an
+	// extra that asks before then counts it against the caps (capsFit).
+	t.recordSize(q)
 	return slotAnswer{ok: true, count: total, reserved: n, reservedBy: by, holds: holds}, nil
 }
 
@@ -347,12 +401,17 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 // deployment, the stricter reading (#616, Q9), so no new Allocation pends
 // behind a cap our own jobs hold. An Allocation with no batch parameters adds
 // nothing.
-func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected map[string]v1alpha1.BatchParameters, future []v1alpha1.BatchParameters, add v1alpha1.BatchParameters) (bool, string) {
-	gpus, cpus, mem := add.GPUs, add.CPUsPerTask, add.Memory.DeepCopy()
+func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected map[string]v1alpha1.BatchParameters, future []v1alpha1.BatchParameters, add v1alpha1.BatchParameters, scope *qosScope) (bool, string) {
+	gpus, cpus, memMiB := add.GPUs, add.CPUsPerTask, memMiBUp(add.Memory)
+	// With a scope, the caps are those of its QOS, and the sums run over the Allocations under it alone.
+	counts := func(b *v1alpha1.BatchParameters) bool { return scope == nil || scope.under(b.GPUs) }
 	sum := func(b *v1alpha1.BatchParameters) {
+		if !counts(b) {
+			return
+		}
 		gpus += b.GPUs
 		cpus += b.CPUsPerTask
-		mem.Add(b.Memory)
+		memMiB += memMiBUp(b.Memory)
 	}
 	for k, a := range rd.allocs {
 		if rd.listed[k] && a.Spec.ForProvider.Batch != nil {
@@ -374,13 +433,59 @@ func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected ma
 	if q := caps.MaxCPUsPerUser; q != nil && cpus > *q {
 		over = append(over, fmt.Sprintf("%d CPUs, above the %s %d of QOS %s", cpus, v1alpha1.LimitMaxCPUsPerUser, *q, caps.From[v1alpha1.LimitMaxCPUsPerUser]))
 	}
-	if q := caps.MaxMemPerUser; q != nil && mem.Cmp(*q) > 0 {
-		over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", mem.String(), v1alpha1.LimitMaxMemPerUser, q.String(), caps.From[v1alpha1.LimitMaxMemPerUser]))
+	// Each request is charged in whole MiB, rounded up, against the cap in whole MiB, rounded down, as the plugin sends and
+	// compares them: Slurm charges a 1.5 MiB request 2 MiB (review of #756, Astra 8).
+	if q := caps.MaxMemPerUser; q != nil && memMiB > q.Value()>>mibShift {
+		over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", resource.NewQuantity(memMiB<<mibShift, resource.BinarySI).String(), v1alpha1.LimitMaxMemPerUser, q.String(), caps.From[v1alpha1.LimitMaxMemPerUser]))
 	}
 	if len(over) == 0 {
 		return true, ""
 	}
-	return false, fmt.Sprintf("our Allocations on Provider %s with a new one would need %s", provider, strings.Join(over, " and "))
+	where := ""
+	if scope != nil {
+		where = " under QOS " + scope.qos
+	}
+	return false, fmt.Sprintf("our Allocations on Provider %s%s with a new one would need %s", provider, where, strings.Join(over, " and "))
+}
+
+// noteSize records, for a reservation that counts nothing (its Provider has no submit limit to reach), the expectation of
+// its Allocation with its size, and drops the Provider's expectations that have outlived expectationsTimeout, since no count
+// observes them here. The caller holds the Provider's lock.
+func (t *slotTable) noteSize(q slotAsk, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for k, raised := range t.expect[q.provider] {
+		if at.Sub(raised) >= expectationsTimeout {
+			delete(t.expect[q.provider], k)
+			delete(t.params[q.provider], k)
+			delete(t.gpus[q.provider], k)
+		}
+	}
+	if t.expect[q.provider] == nil {
+		t.expect[q.provider] = map[string]time.Time{}
+	}
+	t.expect[q.provider][q.key] = at
+	t.recordSize(q)
+}
+
+// recordSize keeps the new Allocation's size, and its GPU count when the Provider counts per QOS, with its expectation.
+func (t *slotTable) recordSize(q slotAsk) {
+	rec := q.size
+	if rec == nil {
+		rec = q.params
+	}
+	if rec != nil {
+		if t.params[q.provider] == nil {
+			t.params[q.provider] = map[string]v1alpha1.BatchParameters{}
+		}
+		t.params[q.provider][q.key] = *rec
+	}
+	if q.scope != nil && q.gpus > 0 {
+		if t.gpus[q.provider] == nil {
+			t.gpus[q.provider] = map[string]int32{}
+		}
+		t.gpus[q.provider][q.key] = q.gpus
+	}
 }
 
 // release gives back the slot reserved for the Allocation key: its creation
@@ -391,6 +496,7 @@ func (t *slotTable) release(provider, key string) {
 	defer t.mu.Unlock()
 	delete(t.expect[provider], key)
 	delete(t.params[provider], key)
+	delete(t.gpus[provider], key)
 }
 
 // count returns the Provider's count against its submit limit now, excluding
@@ -411,24 +517,54 @@ func (t *slotTable) count(ctx context.Context, r client.Reader, provider string,
 // its own reserved slot, held for the very replacement being judged, never
 // keeps that replacement from running beside it.
 func (t *slotTable) countAsk(ctx context.Context, r client.Reader, q slotAsk, now time.Time, skip ...string) (n, reserved int, by []string, err error) {
+	c, err := t.countScoped(ctx, r, q, now, skip...)
+	return c.n, c.reserved, c.by, err
+}
+
+// askCounts is countScoped's answer: the Provider-wide count, how many of it are reserved slots and the deployments
+// that hold them, and, for a question with a scope, the same counted over the scope's QOS alone.
+type askCounts struct {
+	n, reserved int
+	by          []string
+	nq          int
+	reservedQ   int
+	byQ         []string
+}
+
+// countScoped is countAsk, and, with q.scope, the count over the scope's QOS alone too (nq, reservedQ and byQ): the
+// Allocations that hold a slot, the expectations and the reserved slots that run under that QOS, without those in
+// skip. Without a scope its Provider-wide counts are countAsk's, unchanged.
+func (t *slotTable) countScoped(ctx context.Context, r client.Reader, q slotAsk, now time.Time, skip ...string) (askCounts, error) {
 	l := t.slotLock(q.provider)
 	l.Lock()
 	defer l.Unlock()
 	rd, err := t.readBounded(ctx, r, q.provider, true, q.profile)
 	if err != nil {
-		return 0, 0, nil, err
+		return askCounts{}, err
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(q.provider, rd.seen, rd.listed, now)
-	n = c.total()
+	n := c.total()
 	for _, k := range skip {
 		if t.holds(q.provider, k, c) {
 			n--
 		}
 	}
-	reserved, by = counted(rd.reserved, "", q.takers, t.expect[q.provider])
-	return n + reserved, reserved, by, nil
+	var out askCounts
+	out.reserved, out.by = counted(rd.reserved, "", q.takers, t.expect[q.provider])
+	out.n = n + out.reserved
+	if q.scope != nil {
+		nq := t.countUnder(q.provider, rd, q.scope)
+		for _, k := range skip {
+			if t.holds(q.provider, k, c) && t.keyUnder(q.provider, rd, q.scope, k) {
+				nq--
+			}
+		}
+		out.reservedQ, out.byQ = counted(q.scope.reservedUnder(rd.reserved), "", q.takers, t.expect[q.provider])
+		out.nq = nq + out.reservedQ
+	}
+	return out, nil
 }
 
 // slotReads are the reads a count is made from, under the Provider's lock.
@@ -526,11 +662,30 @@ func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []st
 	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, extraAsk{})
 }
 
-// reserveSlotWith is reserveSlotFor with an extra's ask: the admission headroom (slotAsk.headroom) and what the unit set of
-// the handovers it leaves room for needs (slotAsk.deployment, unitExclude, unitSizing). The zero extraAsk is every other ask.
+// reserveSlotWith is reserveSlotFor with an extra's ask (extraAsk): the admission headroom (slotAsk.headroom) and what the
+// unit set of the handovers it leaves room for needs (slotAsk.deployment, unitExclude, unitSizing). The zero extraAsk is every
+// other ask. The new Allocation's GPU count, which says which QOS it runs under where the partition sets qosByGpus, is the
+// params' when given, else the plan's.
 func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, x extraAsk) (ok, holds bool, err error) {
-	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits, headroom: x.headroom, deployment: x.deployment, unitExclude: x.exclude, unitSizing: x.sizing}
+	gpus := p.plan.gpus * p.plan.workers
+	if params != nil {
+		gpus = params.GPUs
+	}
+	return p.reserveSlotAs(pv, gpus, name, holder, takers, params, params, quiet, x)
+}
+
+// reserveSlotAs is reserveSlotWith for an Allocation of gpus GPUs. size is the new Allocation's size, recorded with its
+// expectation always; params, when set, is the same size asked for the caps check as well. Where the Provider's
+// partition sets qosByGpus the view is resolved for that count first (providerView.forGPUs): the Provider-wide limit
+// is the partition QOS's and the host-dialed ceiling, and the QOS the Allocation runs under counts its own.
+func (p *pass) reserveSlotAs(pv *providerView, gpus int32, name, holder string, takers []string, size, params *v1alpha1.BatchParameters, quiet bool, x extraAsk) (ok, holds bool, err error) {
+	rv, err := pv.forGPUs(gpus)
+	if err != nil {
+		return false, false, fmt.Errorf("reserve a slot on Provider %s: %w", pv.name, err)
+	}
+	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: rv.limits.MaxSubmitPerUser,
+		params: params, size: size, caps: rv.limits, headroom: x.headroom, deployment: x.deployment, unitExclude: x.exclude, unitSizing: x.sizing,
+		scope: rv.scope, gpus: gpus, qosHeadroom: x.qosHeadroom}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}
@@ -546,8 +701,17 @@ func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []s
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}
-	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations still holding a slot, at its %s%s", pv.name, a.count-a.reserved, submitLimitText(pv), reservedText(a.reserved, a.reservedBy))
+	if a.scoped {
+		p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations under QOS %s still holding a slot, at its %s%s", pv.name, a.count-a.reserved, rv.scope.qos, scopedLimitText(rv.scope), reservedText(a.reserved, a.reservedBy))
+		return false, a.holds, nil
+	}
+	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations still holding a slot, at its %s%s", pv.name, a.count-a.reserved, submitLimitText(rv), reservedText(a.reserved, a.reservedBy))
 	return false, a.holds, nil
+}
+
+// scopedLimitText names the submit limit of the QOS a scope counts, as submitLimitText names a Provider's.
+func scopedLimitText(sc *qosScope) string {
+	return fmt.Sprintf("%s %d of QOS %s", v1alpha1.LimitMaxSubmitPerUser, *sc.limits.MaxSubmitPerUser, sc.limits.From[v1alpha1.LimitMaxSubmitPerUser])
 }
 
 // reserveTime is the clock's time, as a pass reads it: whole seconds, UTC. A

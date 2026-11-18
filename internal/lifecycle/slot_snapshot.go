@@ -27,6 +27,24 @@ type slotSnapshot struct {
 	insts []*v1alpha1.Instance
 }
 
+// slotSnapshotKey is the context key a reservation carries its snapshot under, so the headroom's callbacks (slotAsk.headroom,
+// qosHeadroom), whose signature is a context alone, derive their reads from it.
+type slotSnapshotKey struct{}
+
+// withSlotSnapshot returns ctx carrying the snapshot.
+func withSlotSnapshot(ctx context.Context, s slotSnapshot) context.Context {
+	return context.WithValue(ctx, slotSnapshotKey{}, s)
+}
+
+// snapshotOf returns the snapshot the context carries, which a reservation puts there. A call made with none (a test, or a
+// caller outside a reservation) has one read now, as a reservation would read it.
+func snapshotOf(ctx context.Context, r client.Reader, provider string) (slotSnapshot, error) {
+	if s, ok := ctx.Value(slotSnapshotKey{}).(slotSnapshot); ok {
+		return s, nil
+	}
+	return readSlotSnapshot(ctx, r, provider, true)
+}
+
 // readSlotSnapshot lists the Allocations of every namespace and then, with withInstances, the Instances of every
 // namespace. provider only words an error.
 func readSlotSnapshot(ctx context.Context, r client.Reader, provider string, withInstances bool) (slotSnapshot, error) {

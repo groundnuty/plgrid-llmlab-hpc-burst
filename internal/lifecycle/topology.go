@@ -38,6 +38,15 @@ type providerView struct {
 	// its partition's qos and its own qos, in Slurm's order
 	// (v1alpha1.EffectiveQOSLimits; HBEP-4, QOS limits).
 	limits v1alpha1.QOSLimits
+	// hostDialed is whether the controller runs in host-dialed mode, which caps the Provider's submit limit
+	// at HostDialedMaxAllocations (hostDialedLimits).
+	hostDialed bool
+	// jobLimits and scope are set only on a view resolved for a GPU count (forGPUs) of a Provider whose partition
+	// sets qosByGpus: the QOS limits of the job's QOS, which size an Allocation, and how the per-user limits that
+	// belong to that QOS are counted (qosscope.go). Then limits holds only the Provider-wide ones: the partition
+	// QOS's and the host-dialed ceiling. Both are nil for every other Provider, whose limits are as they were.
+	jobLimits *v1alpha1.QOSLimits
+	scope     *qosScope
 	// tooShort, when set, says why the Provider's time limit cannot host an
 	// Instance: it is not longer than the lead an Instance needs, so the
 	// Provider takes no new Allocation (Degraded, PartitionTooShort; HBEP-7,
@@ -155,12 +164,23 @@ func (r *Reconciler) providerViewOf(ctx context.Context, n string, p *v1alpha1.P
 	}
 	pv.partition = partition
 	pv.class, pv.hasClass = pv.partition.AcceleratorClass, true
-	limits, err := v1alpha1.EffectiveQOSLimits(&prof.Spec, pv.partition, p.Spec.QOS)
+	jobQOS := p.Spec.QOS
+	if len(partition.QOSByGPUs) > 0 {
+		// The QOS has one source (HBEP-4, The Slurm dialect): the partition's qosByGpus. A Provider that also
+		// sets qos is refused by ReadProfile, so no Allocation could be submitted on it: say so here.
+		if jobQOS != "" {
+			pv.problem = fmt.Sprintf("Provider %s sets qos %q, but partition %s of PlatformProfile %s sets qosByGpus, which chooses the QOS by GPU count: the QOS has one source (HBEP-4, The Slurm dialect)", n, jobQOS, partition.Name, prof.Name)
+			return pv, nil
+		}
+		// With no QOS chosen yet, only the partition QOS's limits apply (forGPUs adds the job QOS's).
+	}
+	limits, err := v1alpha1.EffectiveQOSLimits(&prof.Spec, pv.partition, jobQOS)
 	if err != nil {
 		pv.problem = fmt.Sprintf("Provider %s: PlatformProfile %s: %v", n, prof.Name, err)
 		return pv, nil
 	}
 	pv.limits = limits
+	pv.hostDialed = r.Config.HostDialed
 	if r.Config.HostDialed {
 		pv.limits = hostDialedLimits(limits)
 	}
@@ -244,56 +264,78 @@ func partitionSizingFor(pv *providerView, perWorker, workers int32, leaseLimit *
 	if workers > 1 {
 		needs = fmt.Sprintf("the deployment needs %d GPUs (workersPerInstance %d times %d, tensor-parallel-size times pipeline-parallel-size)", gpus, workers, perWorker)
 	}
+	// The job's QOS comes first: where the partition sets qosByGpus the GPU count chooses it, and its limits, its
+	// 3-day wall among them, are the ones that bound the Allocation (HBEP-4, QOS limits; #745). A count above the
+	// list's last entry has no QOS and is refused, never capped.
+	pv, err := pv.forGPUs(gpus)
+	if err != nil {
+		return v1alpha1.BatchParameters{}, refuse("%s, %v (HBEP-4, The Slurm dialect)", needs, err)
+	}
+	lim := pv.sizingLimits()
 	part := pv.partition
-	maxGPUs, known := v1alpha1.MaxAllocationGPUs(part, pv.limits)
+	bound, known := v1alpha1.AllocationGPUBound(part, lim)
 	if !known || part.CPUsPerGPU == nil || part.MemPerGPU == nil {
 		return v1alpha1.BatchParameters{}, fmt.Errorf("PlatformProfile %s does not give gpusPerNode (nor does a QOS maxGpusPerUser), cpusPerGpu and memPerGpu for partition %s", pv.profile.Name, part.Name)
 	}
-	if gpus > maxGPUs {
-		// An effective maxGpusPerUser of 0 refuses every GPU count here: the
-		// Provider cannot host the Instance (`@hpc-burst-science-agent`,
-		// 1 Nov 2026, from PR 1's review).
-		if q := pv.limits.MaxGPUsPerUser; q != nil && (part.GPUsPerNode == nil || *q < *part.GPUsPerNode) {
-			return v1alpha1.BatchParameters{}, refuse("%s, above the %s %d of QOS %s on Provider %s (partition %s); a parallel size is refused, never capped (HBEP-7, Provisioning)", needs, v1alpha1.LimitMaxGPUsPerUser, *q, pv.limits.From[v1alpha1.LimitMaxGPUsPerUser], pv.name, part.Name)
+	if gpus > bound.Most {
+		// An effective maxGpusPerUser of 0 refuses every GPU count here: the Provider cannot host the Instance
+		// (`@hpc-burst-science-agent`, 1 Nov 2026, from PR 1's review).
+		switch bound.By {
+		case v1alpha1.LimitMaxGPUsPerUser, v1alpha1.LimitMaxGPUsPerJob:
+			return v1alpha1.BatchParameters{}, refuse("%s, above the %s %d of QOS %s on Provider %s (partition %s); a parallel size is refused, never capped (HBEP-7, Provisioning)", needs, bound.By, bound.Most, lim.From[bound.By], pv.name, part.Name)
+		case v1alpha1.GPUBoundQOSByGPUs:
+			return v1alpha1.BatchParameters{}, refuse("%s, above the %d of the last qosByGpus entry of partition %s (HBEP-4, The Slurm dialect)", needs, bound.Most, part.Name)
 		}
-		return v1alpha1.BatchParameters{}, refuse("%s, above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", needs, *part.GPUsPerNode, part.Name)
+		return v1alpha1.BatchParameters{}, refuse("%s, above the %d per node of partition %s; alpha Instances are single-node (HBEP-7, Provisioning)", needs, bound.Most, part.Name)
 	}
-	lim, bound, err := allocationTimeLimit(pv, leaseLimit)
+	tl, tlBound, err := allocationTimeLimit(pv, leaseLimit)
 	if err != nil {
 		return v1alpha1.BatchParameters{}, err
 	}
-	if lim < time.Minute {
+	if tl < time.Minute {
 		// A known limit under a minute is PartitionTooShort (checkTimeLimits);
 		// no Allocation is ever sized for it, whatever the caller does.
-		return v1alpha1.BatchParameters{}, fmt.Errorf("the time limit %s, set by %s on partition %s, is under a minute: Slurm counts whole minutes", lim, bound, part.Name)
+		return v1alpha1.BatchParameters{}, fmt.Errorf("the time limit %s, set by %s on partition %s, is under a minute: Slurm counts whole minutes", tl, tlBound, part.Name)
 	}
+	// CPUs and memory are capped at the effective per-job and per-user caps (HBEP-4, Submission, GPU sizing; #745).
 	cpus := gpus * *part.CPUsPerGPU
-	if q := pv.limits.MaxCPUsPerUser; q != nil && cpus > *q {
-		if *q < 1 {
-			return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %d, which leaves an Allocation no CPU", pv.limits.From[v1alpha1.LimitMaxCPUsPerUser], pv.name, v1alpha1.LimitMaxCPUsPerUser, *q)
+	for _, c := range []struct {
+		cap  *int32
+		name string
+	}{{lim.MaxCPUsPerUser, v1alpha1.LimitMaxCPUsPerUser}, {lim.MaxCPUsPerJob, v1alpha1.LimitMaxCPUsPerJob}} {
+		if c.cap != nil && cpus > *c.cap {
+			if *c.cap < 1 {
+				return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %d, which leaves an Allocation no CPU", lim.From[c.name], pv.name, c.name, *c.cap)
+			}
+			cpus = *c.cap
 		}
-		cpus = *q
 	}
 	mem := part.MemPerGPU.DeepCopy()
 	mem.Mul(int64(gpus))
-	if q := pv.limits.MaxMemPerUser; q != nil {
+	for _, c := range []struct {
+		cap  *resource.Quantity
+		name string
+	}{{lim.MaxMemPerUser, v1alpha1.LimitMaxMemPerUser}, {lim.MaxMemPerJob, v1alpha1.LimitMaxMemPerJob}} {
+		if c.cap == nil {
+			continue
+		}
 		// Slurm counts memory in whole MiB. The provider rounds a request up and
 		// a cap down (internal/slurm: a job never gets less than it asked for
 		// and never more than the cap), so a request is checked against the cap
 		// in whole MiB, rounded down: a request equal to a decimal-unit cap such
 		// as 100G rounds up above the cap's 95,367 MiB and would be refused for
 		// ever (review of PR 171, Astra B2).
-		capMiB := q.Value() >> mibShift
+		capMiB := c.cap.Value() >> mibShift
 		if capMiB < 1 {
 			// --mem=0 asks Slurm for a node's whole memory: never send it.
-			return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %s, which leaves an Allocation no memory", pv.limits.From[v1alpha1.LimitMaxMemPerUser], pv.name, v1alpha1.LimitMaxMemPerUser, q.String())
+			return v1alpha1.BatchParameters{}, fmt.Errorf("QOS %s on Provider %s sets %s %s, which leaves an Allocation no memory", lim.From[c.name], pv.name, c.name, c.cap.String())
 		}
 		if mem.Value() > capMiB<<mibShift {
 			mem = *resource.NewQuantity(capMiB<<mibShift, resource.BinarySI)
 		}
 	}
 	return v1alpha1.BatchParameters{
-		Partition: part.Name, TimeLimit: formatMinutes(lim), GPUs: gpus,
+		Partition: part.Name, TimeLimit: formatMinutes(tl), GPUs: gpus,
 		CPUsPerTask: cpus, Memory: mem, Nodes: 1, AgentDigest: pv.agentDigest,
 	}, nil
 }
@@ -319,7 +361,8 @@ func allocationTimeLimit(pv *providerView, leaseLimit *v1alpha1.Duration) (time.
 		}
 		lease = &d
 	}
-	lim, bound, ok := v1alpha1.AllocationTimeLimit(maxT, pv.limits.MaxWall, lease)
+	maxWall := pv.sizingLimits().MaxWall
+	lim, bound, ok := v1alpha1.AllocationTimeLimit(maxT, maxWall, lease)
 	switch {
 	case bound == "":
 		// None of the three is set: the profile cannot give a time limit.
@@ -329,7 +372,7 @@ func allocationTimeLimit(pv *providerView, leaseLimit *v1alpha1.Duration) (time.
 		// a known, unusably short limit, not an absent one: the caller marks
 		// the Provider too short, naming the bound and its raw value (review
 		// of PR 171, Astra B3).
-		return rawBound(bound, maxT, pv.limits.MaxWall, lease), bound, nil
+		return rawBound(bound, maxT, maxWall, lease), bound, nil
 	}
 	return lim, bound, nil
 }
@@ -353,3 +396,7 @@ func rawBound(bound v1alpha1.TimeLimitBound, maxTime, maxWall, leaseLimit *time.
 
 // mibShift converts bytes to MiB.
 const mibShift = 20
+
+// memMiBUp is a memory request in the whole MiB Slurm charges for it: rounded up, as the plugin sends it (--mem=<MiB>M,
+// internal/slurm checkRequest). The aggregate checks sum these, never raw bytes.
+func memMiBUp(q resource.Quantity) int64 { return (q.Value() + (1<<mibShift - 1)) >> mibShift }

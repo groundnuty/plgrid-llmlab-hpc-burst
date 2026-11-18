@@ -33,7 +33,7 @@ func (p *pass) createExtras(placed []string) error {
 		if pv == nil {
 			continue
 		}
-		ask, ok := p.extraChecks(pv, nil)
+		ask, ok := p.extraChecks(pv, nil, p.plan.gpus*p.plan.workers)
 		if !ok {
 			continue
 		}
@@ -95,23 +95,31 @@ type extraAsk struct {
 	// sizing reads the Provider under the Provider's lock and returns how the unit set sizes an Allocation on it
 	// (sizingUnderLock), never from the pass's own read before the lock.
 	sizing func(context.Context) (unitSizing, error)
-	// headroom is the admission headroom (headroomOf), read under the Provider's lock by the reservation.
-	headroom func(context.Context, slotSnapshot) (int, error)
+	// headroom is the admission headroom (headroomOf), read under the Provider's lock by the reservation, and qosHeadroom the
+	// same over the Allocations under the extra's own QOS alone, set where the partition sets qosByGpus (headroomWhere).
+	headroom    func(context.Context) (int, error)
+	qosHeadroom func(context.Context) (int, error)
 }
 
 // extraChecks are the extra's checks on a Provider, in ONE place for createExtras, which makes the extra, and
 // ensureAllocation, which retries one whose Allocation's create was cut short, so the two never drift (#708, finding 4):
 // the bound, the admission headroom (headroom) and what the unit set of the handovers needs of the reservation: the
-// asking deployment, the Instance to leave out, and how to size a deployment's replacement and an Instance's Allocation here, read under the lock. The slot beyond the
-// handovers and the room the per-user caps keep for their replacements are read by the reservation itself, from the unit set
-// (extraUnits), and the caps and the silence are its own, asked with params and quiet. exclude is the Instance that retries
-// (nil for a new extra). ok is false when the bound refuses.
-func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (ask extraAsk, ok bool) {
+// asking deployment, the Instance to leave out, and how to size a deployment's replacement and an Instance's Allocation here,
+// read under the lock. The slot beyond the handovers and the room the per-user caps keep for their replacements are read by
+// the reservation itself, from the unit set (extraUnits), Provider-wide and, where the partition sets qosByGpus, over the
+// units under the extra's own QOS (slotAsk.scope), and the caps and the silence are its own, asked with params and quiet.
+// exclude is the Instance that retries (nil for a new extra). ok is false when the bound refuses. gpus is the extra's GPU
+// count: where the Provider's partition sets qosByGpus it says which QOS the extra runs under, and the headroom is then asked
+// a second time over the Allocations under that QOS alone (qosHeadroom; HBEP-7, Per-user limits).
+func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance, gpus int32) (ask extraAsk, ok bool) {
 	if !p.extraBoundWithout(pv, exclude) {
 		return extraAsk{}, false
 	}
 	ask = extraAsk{deployment: p.key.Namespace + "/" + p.key.Name, headroom: p.headroomOf(pv),
 		sizing: p.sizingUnderLock(pv.name)}
+	if rv, err := pv.forGPUs(gpus); err == nil && rv.scope != nil {
+		ask.qosHeadroom = p.headroomWhere(pv, rv.scope)
+	}
 	if exclude != nil {
 		ask.exclude = exclude.UID
 	}
@@ -185,8 +193,20 @@ func (p *pass) sizingUnderLock(name string) func(context.Context) (unitSizing, e
 // Each other deployment is read ONCE, under the Provider's lock. A spec edit that lands between that read and
 // the deployment's own pass (its instances raised, its providers or end time changed) is not seen by this count: the next
 // pass reads it afresh, which bounds the error to one pass, and nothing is cancelled for it (#725, from #708's review).
-func (p *pass) headroomOf(pv *providerView) func(context.Context, slotSnapshot) (int, error) {
-	return func(ctx context.Context, snap slotSnapshot) (int, error) {
+func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
+	return p.headroomWhere(pv, nil)
+}
+
+// headroomWhere is headroomOf counting, with a scope, only the other deployments whose missing primary would run
+// under the scope's QOS: the extra's admission headroom over the Allocations under its own QOS alone (HBEP-7,
+// Per-user limits). A deployment whose size cannot be read counts, so the headroom never falls short. Both read the
+// deployments' Instances and Allocations from the reservation's snapshot (snapshotOf).
+func (p *pass) headroomWhere(pv *providerView, sc *qosScope) func(context.Context) (int, error) {
+	return func(ctx context.Context) (int, error) {
+		snap, err := snapshotOf(ctx, p.r.Reader, pv.name)
+		if err != nil {
+			return 0, err
+		}
 		var mds v1alpha1.ModelDeploymentList
 		if err := p.r.Reader.List(ctx, &mds); err != nil {
 			return 0, fmt.Errorf("list ModelDeployments for the extra's headroom: %w", err)
@@ -210,6 +230,12 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context, slotSnapshot) 
 			}
 			allowed, err := selectedProviderNames(md.Spec.Providers, provs.Items)
 			if err != nil || !slices.Contains(allowed, pv.name) {
+				continue
+			}
+			if sc != nil {
+				// Each missing primary is charged to the QOS it will run under: an existing pending unit at its OWN
+				// launch, a unit not made yet at the current spec (shortageUnder).
+				h += shortageUnder(snap, md, sc)
 				continue
 			}
 			h += shortageOfDeployment(snap, md)
@@ -246,6 +272,48 @@ func shortageOfDeployment(snap slotSnapshot, md *v1alpha1.ModelDeployment) int {
 	v := snap.deploymentView(md.Namespace, v1alpha1.LabelValue(md.Name))
 	v.key = md.Namespace + "/" + md.Name
 	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances))
+}
+
+// shortageUnder is shortageOfDeployment counting only the missing primaries that will run under the scope's QOS: a
+// missing primary that already has an Instance (made, its Allocation not yet) will be sized at that Instance's own launch,
+// so it is charged at its own GPU count; one not made yet is sized at the deployment's current spec (HBEP-7, Per-user
+// limits). A spec that gives no plan counts its unmade primaries, so the count never falls short.
+func shortageUnder(snap slotSnapshot, md *v1alpha1.ModelDeployment, sc *qosScope) int {
+	v := snap.deploymentView(md.Namespace, v1alpha1.LabelValue(md.Name))
+	v.key = md.Namespace + "/" + md.Name
+	sel := selectionOfView(md, v)
+	has := 0
+	var pending []int32 // the GPU count of each existing unit that has no Allocation yet
+	for _, u := range sel.units() {
+		made := false
+		for _, m := range u.members {
+			if sel.allocOf(m) != nil {
+				made = true
+				break
+			}
+		}
+		if made {
+			has++
+		} else {
+			pending = append(pending, launchGPUs(u.first))
+		}
+	}
+	short := max(int(md.Spec.Instances)-has, 0)
+	current := int32(0) // 0: not known, counted under every QOS
+	if plan, err := checkServed(md); err == nil {
+		current = plan.gpus * plan.workers
+	}
+	n := 0
+	for i := range short {
+		gpus := current
+		if i < len(pending) {
+			gpus = pending[i]
+		}
+		if sc.under(gpus) {
+			n++
+		}
+	}
+	return n
 }
 
 // notYetRunning reports whether the Allocation has not started and still may: its phase is none, Submitting,

@@ -1,8 +1,8 @@
 package fakeslurm
 
-// New. "srun [-u] --overlap --jobid=<id> [--ntasks=1] [--time=<t>] <program>
-// [args...]": a step in the session user's own running job, run as a host
-// process (run mode only). The step's process lives in srunstep.go; Stream,
+// New. "srun [-u] --overlap --jobid=<id> [--ntasks=1] [--chdir=<dir>]
+// [--time=<t>] <program> [args...]": a step in the session user's own running
+// job, run as a host process (run mode only). The step's process lives in srunstep.go; Stream,
 // the streaming form of the same command, in srunstream.go.
 
 import (
@@ -27,17 +27,18 @@ import (
 // srunArgs is a parsed srun command line.
 type srunArgs struct {
 	jobID   int
-	minutes int  // --time in minutes, rounded up; 0 for none
-	unbuf   bool // -u: standard output is not held back until a newline (Stream)
+	minutes int    // --time in minutes, rounded up; 0 for none
+	unbuf   bool   // -u: standard output is not held back until a newline (Stream)
+	chdir   string // --chdir: the step's working directory, absolute; "" for none (the step starts where srun was started)
 	program string
 	args    []string
 }
 
 // parseSrun reads the options before the program and takes the rest as the
 // program's own words. It returns the message of the first problem, or "".
-// Only -u, --overlap, --jobid=<digits>, --ntasks=1 and --time=<t> are known,
-// in any order; any other option is refused, so one the plugin should never
-// send cannot pass silently. The program's own options (bash -s) follow its name
+// Only -u, --overlap, --jobid=<digits>, --ntasks=1, --chdir=<dir> and
+// --time=<t> are known, in any order; any other option is refused, so one the
+// plugin should never send cannot pass silently. The program's own options (bash -s) follow its name
 // and are not read.
 func parseSrun(args []string) (srunArgs, string) {
 	var a srunArgs
@@ -60,6 +61,11 @@ func parseSrun(args []string) (srunArgs, string) {
 			if val != "1" {
 				return a, fmt.Sprintf("--ntasks=%s: the fake runs one task", val)
 			}
+		case name == "--chdir" && hasVal:
+			if !path.IsAbs(val) || path.Clean(val) != val {
+				return a, fmt.Sprintf("--chdir=%s: the fake takes a clean absolute directory", val)
+			}
+			a.chdir = val
 		case name == "--time" && hasVal:
 			m, err := parseTimeLimit(val)
 			if err != nil {
@@ -67,7 +73,7 @@ func parseSrun(args []string) (srunArgs, string) {
 			}
 			a.minutes = m
 		default:
-			return a, fmt.Sprintf("the fake takes only -u, --overlap, --jobid=<id>, --ntasks=1 and --time=<t> before the program, not %q", args[i])
+			return a, fmt.Sprintf("the fake takes only -u, --overlap, --jobid=<id>, --ntasks=1, --chdir=<dir> and --time=<t> before the program, not %q", args[i])
 		}
 	}
 	switch {
@@ -94,17 +100,18 @@ func allDigits(s string) bool {
 	return true
 }
 
-// stepPlan is a checked srun line: the options, the job's execution and the
-// program's path.
+// stepPlan is a checked srun line: the options, the job's execution, the
+// program's path and the directory the step starts in.
 type stepPlan struct {
 	a    srunArgs
 	r    *jobRun
 	prog string
+	dir  string
 }
 
 // planStep reads an srun line's words and runs srun's checks in order: the
-// options, run mode, the job and the program. On a refusal it has written the
-// message to standard error and returns its exit code with ok false, and
+// options, run mode, the job, the step's directory and the program. On a
+// refusal it has written the message to standard error and returns its exit code with ok false, and
 // nothing has started. The caller holds mu.
 func (sh *shell) planStep(args []string) (pl stepPlan, code int, ok bool) {
 	a, msg := parseSrun(args)
@@ -124,6 +131,10 @@ func (sh *shell) planStep(args []string) (pl stepPlan, code int, ok bool) {
 		// reached for this job"); the line around it is the fake's own.
 		return pl, sh.fail(1, "srun: error: Unable to create step for job %d: Step limit reached for this job", a.jobID), false
 	}
+	dir, msg := sh.stepDir(a, r)
+	if msg != "" {
+		return pl, sh.fail(1, "srun: error: %s", msg), false
+	}
 	r.j.steps++
 	prog, err := lookPath(a.program, envValue(r.env, "PATH"), r.submitDir)
 	if err != nil {
@@ -133,13 +144,37 @@ func (sh *shell) planStep(args []string) (pl stepPlan, code int, ok bool) {
 		}
 		return pl, sh.fail(code, "srun: error: execve(): %s: %s", a.program, errnoText(err)), false
 	}
-	return stepPlan{a: a, r: r, prog: prog}, 0, true
+	return stepPlan{a: a, r: r, prog: prog, dir: dir}, 0, true
+}
+
+// stepDir is the directory a step starts in, or the reason it cannot. With
+// --chdir it is that directory, which must exist on the node (the fake's file
+// system is the one real tree, so it is looked up in it). Without it a real
+// step starts where srun was started, the login node's directory: the job's
+// submit directory here, which is the login's HOME. Where compute nodes have
+// no home directory (RunMode.NoComputeHome: Sano's) that directory is not on
+// the node, and the step fails to start, as Slurm's does, so only a line with
+// --chdir to a directory that exists there runs (#735's probe 1).
+func (sh *shell) stepDir(a srunArgs, r *jobRun) (string, string) {
+	noDir := func(dir string) (string, string) {
+		return "", fmt.Sprintf("couldn't chdir to '%s': No such file or directory", dir)
+	}
+	if a.chdir == "" {
+		if sh.p.run.NoComputeHome {
+			return noDir(r.submitDir)
+		}
+		return r.submitDir, ""
+	}
+	if fi, err := os.Stat(a.chdir); err != nil || !fi.IsDir() {
+		return noDir(a.chdir)
+	}
+	return a.chdir, ""
 }
 
 // spec is the step's start, read from the job under mu.
 func (pl stepPlan) spec(p *Platform) stepSpec {
 	return stepSpec{
-		path: pl.prog, argv0: pl.a.program, args: pl.a.args, dir: pl.r.submitDir, env: stepEnv(pl.r.env, p.run.StepEnv),
+		path: pl.prog, argv0: pl.a.program, args: pl.a.args, dir: pl.dir, env: stepEnv(pl.r.env, p.run.StepEnv),
 		proc: p.knobs.proc, sweepLimit: p.knobs.sweepLimit, sweepInterval: p.knobs.sweepInterval,
 	}
 }

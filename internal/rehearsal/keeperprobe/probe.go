@@ -95,7 +95,8 @@ type RelayLine struct {
 }
 
 // RelayLineOf parses process pid's command line as a relay's ssh, whose last
-// argument is HBEP-6's srun -u --overlap line; ok is false for any other.
+// argument is HBEP-6's srun -u --overlap line, with its --chdir; ok is false
+// for any other.
 func RelayLineOf(pid int) (RelayLine, bool) {
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
 	if err != nil {
@@ -103,11 +104,12 @@ func RelayLineOf(pid int) (RelayLine, bool) {
 	}
 	args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
 	f := strings.Fields(args[len(args)-1])
-	if len(f) < 8 || strings.Join(f[:3], " ") != "srun -u --overlap" || !strings.HasPrefix(f[3], "--jobid=") || f[4] != "--ntasks=1" || f[6] != agentapi.RelaySubcommand {
+	// srun -u --overlap --jobid=<job> --ntasks=1 --chdir=<dir> <agent> relay <channel> ...
+	if len(f) < 9 || strings.Join(f[:3], " ") != "srun -u --overlap" || !strings.HasPrefix(f[3], "--jobid=") || f[4] != "--ntasks=1" || !strings.HasPrefix(f[5], "--chdir=/") || f[7] != agentapi.RelaySubcommand {
 		return RelayLine{}, false
 	}
-	l := RelayLine{Job: strings.TrimPrefix(f[3], "--jobid="), Ch: agentapi.RelayChannel(f[7]), Epoch: -1, Seq: -1}
-	for i := 8; i+1 < len(f); i++ {
+	l := RelayLine{Job: strings.TrimPrefix(f[3], "--jobid="), Ch: agentapi.RelayChannel(f[8]), Epoch: -1, Seq: -1}
+	for i := 9; i+1 < len(f); i++ {
 		switch f[i] {
 		case "--epoch":
 			l.Epoch, _ = strconv.ParseInt(f[i+1], 10, 64)

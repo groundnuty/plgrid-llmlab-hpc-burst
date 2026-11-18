@@ -41,7 +41,7 @@ func startWithLastArg(t *testing.T, line string) int {
 }
 
 func TestRelayLineOfReadsAnSshsRemoteCommand(t *testing.T) {
-	base := "srun -u --overlap --jobid=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand + " " + string(agentapi.RelayServing)
+	base := "srun -u --overlap --jobid=424242 --ntasks=1 --chdir=/s/alloc/hb-x hb-agent " + agentapi.RelaySubcommand + " " + string(agentapi.RelayServing)
 	for _, c := range []struct {
 		name  string
 		line  string
@@ -52,13 +52,16 @@ func TestRelayLineOfReadsAnSshsRemoteCommand(t *testing.T) {
 		{"with its fence", base + " --epoch 2147483700 --seq 3", true, 2147483700, 3},
 		{"without its fence", base, true, -1, -1},
 		{"with the epoch alone", base + " --epoch 9", true, 9, -1},
-		{"not srun", "sleep -u --overlap --jobid=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand + " " + string(agentapi.RelayServing), false, 0, 0},
-		{"another subcommand", "srun -u --overlap --jobid=424242 --ntasks=1 hb-agent not-a-relay serving", false, 0, 0},
+		{"not srun", "sleep -u --overlap --jobid=424242 --ntasks=1 --chdir=/s/alloc/hb-x hb-agent " + agentapi.RelaySubcommand + " " + string(agentapi.RelayServing), false, 0, 0},
+		{"another subcommand", "srun -u --overlap --jobid=424242 --ntasks=1 --chdir=/s/alloc/hb-x hb-agent not-a-relay serving", false, 0, 0},
 		{"too short", "srun -u --overlap --jobid=424242", false, 0, 0},
-		{"one word short of a channel", "srun -u --overlap --jobid=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand, false, 0, 0},
+		{"one word short of a channel", "srun -u --overlap --jobid=424242 --ntasks=1 --chdir=/s/alloc/hb-x hb-agent " + agentapi.RelaySubcommand, false, 0, 0},
 		{"a dangling flag", base + " --epoch", true, -1, -1},
-		{"another word where the job is", "srun -u --overlap --jobx=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
-		{"another ntasks", "srun -u --overlap --jobid=424242 --ntasks=2 hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
+		{"another word where the job is", "srun -u --overlap --jobx=424242 --ntasks=1 --chdir=/s/alloc/hb-x hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
+		{"another ntasks", "srun -u --overlap --jobid=424242 --ntasks=2 --chdir=/s/alloc/hb-x hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
+		{"the old line, without --chdir", "srun -u --overlap --jobid=424242 --ntasks=1 hb-agent " + agentapi.RelaySubcommand + " serving --epoch 1 --seq 1", false, 0, 0},
+		{"another word where --chdir is", "srun -u --overlap --jobid=424242 --ntasks=1 --time=1 hb-agent " + agentapi.RelaySubcommand + " serving --epoch 1", false, 0, 0},
+		{"a relative --chdir", "srun -u --overlap --jobid=424242 --ntasks=1 --chdir=alloc hb-agent " + agentapi.RelaySubcommand + " serving", false, 0, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l, ok := RelayLineOf(startWithLastArg(t, c.line))
@@ -83,7 +86,7 @@ func TestRelayLineOfReadsAnSshsRemoteCommand(t *testing.T) {
 
 func TestRelayChildrenAreTheRelaysSshOfAProcess(t *testing.T) {
 	// A parent that has two children, one a relay's ssh and one another process.
-	line := "srun -u --overlap --jobid=7 --ntasks=1 hb-agent " + agentapi.RelaySubcommand + " " + string(agentapi.RelayControl) + " --epoch 5 --seq 1"
+	line := "srun -u --overlap --jobid=7 --ntasks=1 --chdir=/s/alloc/hb-x hb-agent " + agentapi.RelaySubcommand + " " + string(agentapi.RelayControl) + " --epoch 5 --seq 1"
 	relay := startWithLastArg(t, line)
 	other := startWithLastArg(t, "an ordinary argument")
 	kids := RelayChildren(os.Getpid())

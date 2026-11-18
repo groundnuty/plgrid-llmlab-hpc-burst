@@ -33,11 +33,10 @@
 //     "//rbac:resources group/resource ..." on the call's line or the line above names the resources it serves. A call of
 //     this kind with no annotation is a problem.
 //
-// A call in code that nothing calls (a function whose client parameter no call fills: the Operation removal controller until
-// #660 wires it, helpers only tests call) is not live: Result.Dead lists it, and its rights are not counted. When something
-// calls the function, its calls are read like any other and the role must grant them; when a live function loses its last
-// caller, the rights it needed are rules nothing calls. A test lists the only code allowed to be in that state (the removal
-// controller's), so a call the scan wrongly takes for unreached fails it.
+// A call in code that nothing calls (a function whose client parameter no call fills, such as a helper only tests call) is not
+// live: Result.Dead lists it, and its rights are not counted. When something calls the function, its calls are read like any
+// other and the role must grant them; when a live function loses its last caller, the rights it needed are rules nothing calls.
+// A test asserts that no call of the module is in that state, so a call the scan wrongly takes for unreached fails it.
 //
 // What this does not prove. A struct type's client fields are followed across every value of the type, so a type that two
 // identities fill would give each the other's calls through it. A fallback that only a test takes ("if reader == nil {
