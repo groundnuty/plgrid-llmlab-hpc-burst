@@ -620,6 +620,59 @@ func TestTheWorkerRestartWaitConsultsTheLadderWhereItFails(t *testing.T) {
 	}
 }
 
+// The ending-soon rule (EndingSoonAt; the science agent's ruling on #735, 18 Nov 2026), over (the lease, the drain window, the ready time, the window's end).
+// Every instant is worked from the job's start t0 by hand: the drain start is t0 + lease - drain window, and HBEP-7's condition first holds one hour before it
+// (or at ready, if later). The band is one status interval (EndingSoonBand), and the cases at its edges are written from it, so removing the band fails them.
+func TestTheEndingSoonRuleIsExpectedForbiddenOrOptionalByTheLeaseAndTheWindow(t *testing.T) {
+	t0 := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) time.Time { return t0.Add(d) }
+	band := EndingSoonBand
+	if band != 15*time.Second {
+		t.Fatalf("the band is %s: one status interval is the agent's 15 s report interval (pkg/agentapi/protocol.go:101)", band)
+	}
+	m := time.Minute
+	// Sano's drain start is at 106 - 15 = 91 minutes, so the condition first holds at 31 minutes; Athena's at 48 - 7 = 41, before ready.
+	const sano, athena = 91 * time.Minute, 41 * time.Minute
+	for name, c := range map[string]struct {
+		drain, ready, end time.Duration
+		want              EndingSoonVerdict
+	}{
+		"Athena's real case: the 48-minute lease, ready at 3, the read at 14": {athena, 3 * m, 14 * m, EndingSoonExpected},
+		"Sano's real case: the 106-minute lease, ready at 4, the read at 12":  {sano, 4 * m, 12 * m, EndingSoonForbidden},
+		"the same Sano run, read at 30 minutes, a minute before the hour":     {sano, 4 * m, 30 * m, EndingSoonForbidden},
+		// The boundary of exactly one hour: the drain start is one hour away at the window's end. It is in the band, so neither judged.
+		"exactly one hour away at the end":      {sano, 4 * m, 31 * m, EndingSoonOptional},
+		"the band's lower edge: expected":       {sano, 4 * m, 31*m + band, EndingSoonExpected},
+		"one nanosecond inside it: neither":     {sano, 4 * m, 31*m + band - 1, EndingSoonOptional},
+		"the band's upper edge: forbidden":      {sano, 4 * m, 31*m - band, EndingSoonForbidden},
+		"one nanosecond inside it: neither too": {sano, 4 * m, 31*m - band + 1, EndingSoonOptional},
+		"well past the boundary":                {sano, 4 * m, 60 * m, EndingSoonExpected},
+		// Ready later than the boundary: the condition first holds at ready, not an hour before the drain start.
+		"ready after the boundary, read a minute later": {sano, 40 * m, 41 * m, EndingSoonExpected},
+		"ready within the band of the read":             {sano, 40 * m, 40*m + band - 1, EndingSoonOptional},
+		// An Instance whose window ends before it is ready could not have raised it.
+		"a window that ends before ready": {sano, 20 * m, 10 * m, EndingSoonForbidden},
+	} {
+		if got := EndingSoonAt(at(c.ready), at(c.drain), at(c.end)); got != c.want {
+			t.Errorf("%s: %d, want %d (0 optional, 1 expected, 2 forbidden)", name, got, c.want)
+		}
+	}
+	// The two rows' own leases and drain windows, through the package's own clock (DrainWindow, never the controller's): Athena's row keeps expecting
+	// the event, Sano's forbids it, over a window from the ready of a run that follows the post (ready within minutes, read within 20).
+	for _, c := range []struct {
+		row  Row
+		want EndingSoonVerdict
+	}{{NowServeRow(), EndingSoonExpected}, {SanoServeRow(), EndingSoonForbidden}} {
+		tm := c.row.Clock()
+		drain := c.row.Lease - DrainWindow(tm.MaxRequestDuration, tm.DrainMargin, 0)
+		for _, end := range []time.Duration{10 * m, 15 * m, 20 * m} {
+			if got := EndingSoonAt(at(3*m), at(drain), at(end)); got != c.want {
+				t.Errorf("%s: a drain start at %s, ready at 3 min, the read at %s: %d, want %d", c.row.Name, drain, end, got, c.want)
+			}
+		}
+	}
+}
+
 // Sano's job standard error opens with lines that are not the agent's, written before it runs (issue #735, the serve row of 18 Nov 2026: the agent's log
 // was read, 37 lines, its rehash line said 14 of 14 files, and the check judged the read "not the whole of the agent's first start" because two lines
 // stood before its first pre-start line). The reader skips lines that are not in slog's text form and not stager lines before the agent's first line,

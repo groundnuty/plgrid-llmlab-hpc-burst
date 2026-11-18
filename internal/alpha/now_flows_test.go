@@ -61,7 +61,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	o.Gauges = r.nowGauges(in)
 	o.WorkerRestart = r.workerRestart(ctx, p, in)
 	in = r.current(in)
-	o.Events = r.nowEvents(in)
+	o.Events = r.nowEvents(in, o.ReadyAt, o.DrainStart)
 	// The run is over: the deployment goes, and the cluster's record shows its job ended.
 	r.endDeployment(ctx, p)
 	tags, err := r.runTags()
@@ -261,19 +261,25 @@ func (r *liveRun) nowGauges(in v1alpha1.Instance) ObsCheck {
 // nowEvents holds the run's events to HBEP-8 through obscheck. The expected set is written here from HBEP-8's Reasons
 // table (Events, "Reasons in alpha") and HBEP-7's rules, for this row's steps, never from what
 // the run emitted (issue #193, Verifications that prove nothing): the agent registered (started); the Instance verified,
-// qualified and warmed up (ready); its drain start under an hour away with no replacement ready, in a one-job row of a
-// 48-minute lease, from its ready on (ending-soon, HBEP-7, Events and conditions); and the worker-rung restart (failing). Forbidden: a
-// handover, since no replacement was ever ready. What else the run raised is not judged here beyond its form (obscheck.EventProblems holds every typed event
-// to HBEP-8's form). It waits, bounded, for every expected event, then reads the forbidden ones and the form once.
-func (r *liveRun) nowEvents(in v1alpha1.Instance) ObsCheck {
+// qualified and warmed up (ready); and the worker-rung restart (failing). The ending-soon event is expected or forbidden by HBEP-7's rule
+// (README.md:797), computed from the Instance's ready time and drain start and the window's end (EndingSoonAt): expected where the drain start
+// comes under an hour away within the window (Athena's 48-minute lease), forbidden where it does not (Sano's 106-minute one), and judged neither
+// way within one status interval of the boundary. Forbidden besides: a handover, since no replacement was ever ready. What else the run raised is
+// not judged here beyond its form (obscheck.EventProblems holds every typed event to HBEP-8's form). It waits, bounded, for every expected event, then
+// reads the forbidden ones and the form once; the window's end for the forbidden side is that read, so an event the wait let the condition reach is
+// never forbidden.
+func (r *liveRun) nowEvents(in v1alpha1.Instance, ready, drainStart time.Time) ObsCheck {
 	inst := func(action, reason, why string) obscheck.WantEvent {
 		return obscheck.WantEvent{Action: action, Reason: reason, Kind: "Instance", Namespace: in.Namespace, Name: in.Name, Controller: obscheck.LifecycleController, Why: why}
 	}
+	endingSoon := inst("ending-soon", v1alpha1.EventReasonNoReplacementReady, "ready with its drain start under an hour away and no replacement ready (HBEP-7:797)")
 	want := []obscheck.WantEvent{
 		inst("started", v1alpha1.ReasonAgentRegistered, "the agent registers (Instance start)"),
 		inst("ready", "Ready", "verified, qualified and warmed up (Instance start)"),
-		inst("ending-soon", "NoReplacementReady", "ready with its drain start under an hour away and no replacement ready (HBEP-7:547)"),
 		inst("failing", v1alpha1.ReasonWorkerRestart, "the worker-rung restart (HBEP-7, Health and restarts)"),
+	}
+	if EndingSoonAt(ready, drainStart, time.Now()) == EndingSoonExpected {
+		want = append(want, endingSoon)
 	}
 	forbid := []obscheck.WantEvent{{Action: "replaced", Reason: v1alpha1.EventReasonHandedOver, Kind: "Instance", Namespace: in.Namespace, Name: in.Name,
 		Why: "no replacement was ever ready in a one-job row"}}
@@ -286,6 +292,11 @@ func (r *liveRun) nowEvents(in v1alpha1.Instance) ObsCheck {
 			break
 		}
 		time.Sleep(time.Second)
+	}
+	if EndingSoonAt(ready, drainStart, time.Now()) == EndingSoonForbidden {
+		endingSoon.Why = "the drain start is more than an hour away for the whole run (HBEP-7:797)"
+		forbid = append(forbid, endingSoon)
+		missing, problems = obscheck.EventProblems(stack.Events(r.t, r.c), want, forbid)
 	}
 	c := ObsCheck{Checked: true, Problems: problems}
 	for _, m := range missing {

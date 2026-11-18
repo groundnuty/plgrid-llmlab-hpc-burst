@@ -95,6 +95,50 @@ func NowStageRow() Row {
 		PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow}
 }
 
+// HBEP-7's ending-soon event (Events and conditions, hbep/0007-lifecycle-controller/README.md:797): raised "when a ready Instance's drain start is less
+// than an hour away and no replacement is ready". Row A's steps expect it, and whether a run must have seen it depends on the lease: on Athena's plgrid-now
+// (a 48-minute lease, the drain start under an hour away from the Instance's ready on) it must; on Sano's 106-minute lease the drain start is over an hour
+// away for the first 31 minutes of the job, so a run that ends in 12 minutes must NOT have seen it (the science agent's ruling on #735, 18 Nov 2026). The
+// rule below is computed from the Instance's ready time, its drain start (the recorded lease end less the drain window: a lease and a window, never what the
+// run emitted, issue #193) and the end of the observed window.
+
+// EndingSoonLead is how far before its drain start HBEP-7's condition begins to hold: "less than an hour away".
+const EndingSoonLead = time.Hour
+
+// EndingSoonBand is the dead band at the boundary, one status interval: the agent reports at least this often (agentapi.ReportInterval,
+// pkg/agentapi/protocol.go:101-103) and the controller acts on what it has reported, so when the condition begins to hold within this long of the
+// window's end, the controller may not have raised the event yet (or, by clock skew, may raise it a moment early). The run then judges neither way.
+const EndingSoonBand = agentapi.ReportInterval
+
+// EndingSoonVerdict is what the rule asks of a run.
+type EndingSoonVerdict int
+
+const (
+	// EndingSoonOptional: the condition began to hold within EndingSoonBand of the window's end; the event may be there or not.
+	EndingSoonOptional EndingSoonVerdict = iota
+	// EndingSoonExpected: the condition had held for at least EndingSoonBand before the window's end, so the event must be there.
+	EndingSoonExpected
+	// EndingSoonForbidden: the condition begins to hold at least EndingSoonBand after the window's end, so the event must not be there.
+	EndingSoonForbidden
+)
+
+// EndingSoonAt is the rule at the end of an observed window: the Instance ready at ready, its drain start at drainStart, the window ending at end.
+// The condition first holds at the later of ready and one hour before the drain start (due). It is expected when due is at least EndingSoonBand before
+// end, forbidden when due is at least EndingSoonBand after it, and optional between (both edges of the band are the expected and forbidden cases).
+func EndingSoonAt(ready, drainStart, end time.Time) EndingSoonVerdict {
+	due := drainStart.Add(-EndingSoonLead)
+	if due.Before(ready) {
+		due = ready
+	}
+	switch {
+	case !due.After(end.Add(-EndingSoonBand)):
+		return EndingSoonExpected
+	case !due.Before(end.Add(EndingSoonBand)):
+		return EndingSoonForbidden
+	}
+	return EndingSoonOptional
+}
+
 // HBEP3Tag is an Allocation's job tag computed from HBEP-3 (Allocation and job identity), here and not with the
 // contracts' helper, as the rehearsal's part 3 does (internal/rehearsal/scenario, part3_requeue_test.go): hb-<n>-<h>,
 // <n> the name cut to its first 40 characters, <h> the first 12 hex characters of the SHA-256 of
