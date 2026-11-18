@@ -514,7 +514,7 @@ Sano's `gpu` partition has two nodes, one with 4 and one with 8 NVIDIA A100 80GB
 - after the engine was killed, the worker was ready again in 3 min 24 s in the serve row and 3 min 40 s in the handover row. A hand launch from a cold read of the weights took 142 s from exec to ready, with a KV cache of about 1.07 million tokens, which holds about 32 sessions of 32k tokens;
 - a long stream ran at the engine's own rate, about 91 tokens/s;
 - the relay between your host and a job carried medians of 65 to 113 MiB/s in each direction, with a round trip of 0.4 to 0.5 ms from the development host;
-- the throughput gate's reference is Sano's `expectedPerformance` entry, which is TBD: the reference run.
+- the throughput gate's reference is Sano's `expectedPerformance` entry for the example: 12.33 ms per output token and 399 ms to the first token at 8 sessions, the slowest of three warm runs on 8-GPU nodes (it applies to the 4-GPU nodes too, within the entry's tolerance). `Qwen/Qwen3-VL-8B-Instruct` has one as well, 13.68 ms and 429 ms. A spec that changes the deployment ID or the shape matches no entry, and the gate then records only.
 
 **A handover** ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover) moves the Instance to its successor before the job's time limit. The handover row on Sano ran one: 2 of 2 streams in flight at the drain start finished, and none was cut.
 
