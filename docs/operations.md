@@ -602,6 +602,7 @@ A ModelDeployment that allows two or more batch Providers hedges: when a missing
 
   Lowering the width applies to members added after it and cancels none, so it releases nothing that already runs.
 - **What to read.** While a hedge has no winner, `Progressing` names its Providers ("hedge <first member> spans Providers A, B"). Each loser raises a `replaced` event with reason `HedgeLost` regarding it, with the winner in `related`, and a cancelled loser's Allocation carries the release cause `Instance <loser> ended: hedge lost to <winner>, on Provider <Provider> (hedge <first member>)`. A hedge sets no `Degraded` reason of its own, and a Provider it passes over (not `Ready`, too short, its class paused, its per-user caps or submit slots full) sets none either.
+- **A kept loser is reused.** A kept hedge loser or a ranked-out Allocation takes the deployment's next missing primary before any new submission, and a replacement when it drains at least an Instance's lead (the drain window plus `handoverMargin` plus `health.startTimeout`) after the Instance it replaces ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Provisioning, Where).
 
 ### A controller restart
 
