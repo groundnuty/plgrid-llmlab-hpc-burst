@@ -14,8 +14,9 @@ import (
 // verification, qualification or warm-up failed, its registration or start timed out, or its job was requeued,
 // failed or lost. A failed verification counts when it is a rehash, staging or node fault; a settings contradiction
 // or a shape misfit adds none, since it faults the spec and stops the class (recordStartOutcomes reads the
-// verification record for it). Nor does an Instance ended before ready by a hedge loss, a scale-down, a shutdown or a
-// deletion. A class keeps its latest MaxStartOutcomes, each keyed by its Allocation's UID, so a restarted controller
+// verification record for it). Nor does an Instance ended before ready by a hedge loss at the win, a scale-down, a
+// shutdown or a deletion. A hedge's started loser kept as a candidate (#616, PR 5) that ends HedgeLost at its
+// ranking point passed every check, and adds a success. A class keeps its latest MaxStartOutcomes, each keyed by its Allocation's UID, so a restarted controller
 // counts none twice; its rate is failures of count, shown from one outcome.
 
 // endOutcome is what an Instance's end before ready adds: a failure, a success, or nothing. Every end reason the
@@ -39,7 +40,7 @@ var endOutcome = map[string]string{
 	v1alpha1.ReasonRankedOut: v1alpha1.StartOutcomeReady,
 	// Ended by the controller's own decision, or for no fault of a start: no outcome.
 	v1alpha1.ReasonDrained:                     "", // a scale-down, a shutdown, a deletion, a drain
-	v1alpha1.ReasonHedgeLost:                   "",
+	v1alpha1.ReasonHedgeLost:                   "", // a loser ended at the win; a marked candidate's end is a success (startOutcomeOf)
 	v1alpha1.ReasonSpecUnsupported:             "", // its Allocation can never be placed: the spec's, not a start's
 	v1alpha1.ReasonAllocationRefused:           "", // refused at submission: its job never started
 	string(v1alpha1.ConditionSubmittedAsOther): "", // submitted under another identity: the configuration's, not a start's
@@ -65,7 +66,14 @@ func startOutcomeOf(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) (v1alpha1
 	if !ended(in) || in.Status.EndTime == nil {
 		return v1alpha1.StartOutcome{}, false
 	}
-	switch endOutcome[in.Status.EndReason] {
+	result := endOutcome[in.Status.EndReason]
+	// A hedge's started loser kept as a candidate (candidateOf) passed every check before its ranking point, where
+	// it ended HedgeLost with its Allocation kept: a success, as one ranked out before ready is (HBEP-7, How k
+	// adjusts, Recorded; Hedging's started losers). A started loser ended at the win carries no mark, and no outcome.
+	if in.Status.EndReason == v1alpha1.ReasonHedgeLost && candidateOf(in) != "" {
+		result = v1alpha1.StartOutcomeReady
+	}
+	switch result {
 	case v1alpha1.StartOutcomeReady:
 		o.Result, o.Time = v1alpha1.StartOutcomeReady, *in.Status.EndTime
 	case v1alpha1.StartOutcomeFailed:

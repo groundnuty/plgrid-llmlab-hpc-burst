@@ -48,6 +48,14 @@
 #     a group runs its tests by -run, and -run matches the top-level name only;
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
+#   - controller-identities: four of the same package's tests that prove the controllers' own identities
+#     (issue #660, HBEP-10 Audit): each starts a control plane of its own and asks the API server what the three
+#     identities may do, who the binary's managers run as, how a lost Operation commit is recovered under the
+#     lifecycle identity, and that its writes stamp the owner label. Every other test of the package runs
+#     under those identities too, through the harness; these four are the ones about the identities. Their
+#     49 s (13.0, 11.2, 13.6 and 11.5 s in the go job of the head that added them, run 44203460856) had taken
+#     the package's run to 384 s in the go job and 388 s in the crd and envtest job, over the 380 s trim line,
+#     under the 400 s of the worst of three;
 #   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
 #     minutes of the package's run: a worker that is silent for 310 s, past Envoy's 5 minute stream idle
 #     timeout, and an upstream connection that idles 50 s before Envoy closes it (issue #429). Both wait on
@@ -108,6 +116,8 @@ cd "$root" || exit 1
 # 17 Nov 2026): 20.3 s, 14.6 s, 13.8 s and 13.4 s for the four serial tests and 53.9 s for the two parallel
 # ones, which is the part of the package's run that their top-level lines do not carry (432.2 s less the
 # 378.3 s of the top-level lines). That is 115.9 s, which gives 350 s.
+# Issue #660's controller-identities takes the four tests' times in the go job of run 44203460856 (18 Nov 2026,
+# the head that added them): 13.0 s, 11.2 s, 13.6 s and 11.5 s, 49.3 s, which gives 150 s.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
@@ -118,6 +128,7 @@ groups=(
   "lifecycle-slow2|./internal/lifecycle|TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry TestRetentionNoneOutlivesHardEnd TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart TestMetricsNoProgressNeedsFreshKnownCounters TestNoOverlapModeBoundaries TestRetentionJobEndsAndLeavesListing TestTunnelDownAloneRestartsNothing TestMetricsDrainEndsOnAKnownZeroReadAfterTheDrainBegan|330s"
   "lifecycle-slow3|./internal/lifecycle|TestVerifyRefusedGenerationConfigStopsClass TestReadyInstanceStaysReadyWhenTunnelDrops TestGateAMissTheFullRecordCantHoldSuspendsItsEntry TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases TestTheTwoJobGuardKeepsALongWaitToTwoAllocations TestADeadStepLeavesTheDeploymentAtItsLastEnd|350s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
+  "controller-identities|./cmd/hpcburst-controller|TestEachManagerOfTheBinaryRunsUnderItsOwnIdentity TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity TestTheLifecycleIdentityStampsTheOwnerHashLabel TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan|150s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
   "livechecks-dry|./hack/livechecks|TestEveryAlphaRowPassesItsDryRunAndEveryFaultFailsIt TestADryBinaryRefusesLiveSettings TestAJobPendingPastTheBoundIsNotRunOnEveryRow TestALiveRunWithNoListenerFailsLoudlyAndUsesNoCluster TestAnAccountingRowWithNoSlotThatPendedPastItsWaitIsNotRun TestEveryRowThatPostsNamesWhereTheFrontRanAndRefusesWithoutIt TestACatchUpThatCannotTellIsAFailureOnATwoJobRow TestASecondJobThatNeverStartedIsNotRunOnTheTwoJobRows TestEveryReachRowReportsEachOutcomeThroughTheScript TestADryReachBinaryRefusesLiveSettingsAndARealGateway TestAReachRowWhoseSlotIsHeldIsNotRun|270s"

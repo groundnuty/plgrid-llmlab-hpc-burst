@@ -109,6 +109,10 @@ type UpReport struct {
 	SupervisorPID    int    `json:"supervisor_pid,omitempty"`
 	ControllerBin    string `json:"controller_bin,omitempty"`
 	ControllerHealth string `json:"controller_health,omitempty"`
+	// ControllerIdentities are the identities up issued for the controllers and the front, one token each
+	// into <state>/identities/system/<name>.kubeconfig (controller_identities.go; HBEP-10, Audit). Never
+	// the tokens. Set once they were issued, even when the supervisor then failed to start.
+	ControllerIdentities []ControllerIdentity `json:"controller_identities,omitempty"`
 	// FrontHealth is the address of the front's /healthz when a front runs.
 	FrontHealth string `json:"front_health,omitempty"`
 	// FrpsPorts are frps's bind, tcpmux and web ports when frps runs.
@@ -532,7 +536,11 @@ func startControllers(ctx context.Context, l layout, ports Ports, o UpOptions, s
 		rep.Warnings = append(rep.Warnings, noFrpsWarning)
 		logf(o.Log, "%s", noFrpsWarning)
 	}
-	if err := startSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log); err != nil {
+	// The controllers' identities are made ready right before the supervisor starts, with k3s ready and
+	// every earlier step of up done (controller_identities.go): the one function upgrade calls too.
+	ids, err := startControllerSupervisor(ctx, l, st, argv, superviseStartTimeout, o.Log)
+	rep.ControllerIdentities = ids
+	if err != nil {
 		return "controllers", err
 	}
 	rep.SupervisorPID, rep.ControllerBin, rep.ControllerHealth = st.Procs[len(st.Procs)-1].PID, ctrlBin, ports.ControllerAddr()

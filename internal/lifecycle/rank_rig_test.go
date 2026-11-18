@@ -1,9 +1,8 @@
 package lifecycle
 
 // HBEP-7's over-allocation Test plan rows that the selection and the ranking answer (Over-allocation and
-// qualification (beta), How it counts and The ranking point; #616, PR 3). PR 4 creates the extra; here each extra X
-// is seeded through the package's own create path (seedExtra, provisionWith with no predecessor and no hedge), as
-// #611's tests seed a hedge's second member.
+// qualification (beta), How it counts and The ranking point; #616, PR 3 and PR 4). The extra X is created by PR 4's
+// own pass, in the pass that makes P (rkRig.start); no row seeds it.
 //
 // The fixture is HBEP-7's: one batch Provider A (the rig's), a 12 h limit, drainWindow 2 h 10 min and handoverMargin
 // 30 min (the rig's defaults), instances 1, overAllocation 1, targetSessions 8, typical context 1,024, typical output
@@ -25,6 +24,7 @@ package lifecycle
 // as (total - first token) / (127 tokens), so 20 ms, 18.0 ms and 17.9 ms are exact (rkWarmUp).
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -175,46 +175,52 @@ func (h *rkRig) stepTo(target time.Time, each time.Duration, fn func()) {
 	}
 }
 
-// rkXWait is the queue wait of an extra seeded at 08:00:20 that should start at 08:15:20: X is created one pass
-// after P, so the provider submits its job at 08:00:30, and the 15 min of the rows' "X starts at 00:15" are 14 min
-// 50 s of wait. Seeding it after P's submission also fixes which job takes which scripted wait, which two Allocations
-// created in one pass do not (the fake provider submits in the order of their random names).
-const rkXWait = 14*time.Minute + 50*time.Second
+// rkXWait is the queue wait of the extra X for a start at 00:15: PR 4's pass makes X in the pass that makes P, at
+// 08:00:10, and the provider submits both jobs at 08:00:20, so the 15 min of the rows' "X starts at 00:15" are a wait
+// of 15 min.
+const rkXWait = 15 * time.Minute
 
-// start creates the deployment, steps to 08:00:10, which makes its missing primary P, and to 08:00:20, which submits
-// P's job, and then seeds the extra X. scripts are the queue waits the jobs get in the order they are submitted:
-// P's, X's, then any replacement's.
+// start creates the deployment and steps to 08:00:10, where its pass makes its missing primary P and, beside it, the
+// extra X (PR 4), and to 08:00:20, where the provider submits both jobs. scripts are the queue waits the jobs get in
+// the order they are submitted: P's, X's, then any replacement's. The fake provider submits in the order of the
+// Allocations' random names, so the roles are fixed by that order and not by which of the two the selection chooses
+// while both pend from the same second (the UID decides that, and nothing observable depends on it until a job
+// starts): P is the Instance whose Allocation sorts first and takes the first script, X the other (rkRoles).
 func (h *rkRig) start(edit func(*v1alpha1.ModelDeployment), scripts ...pfake.Script) (p, x string) {
 	h.t.Helper()
+	roles := h.startN(edit, 2, scripts...)
+	return roles[0], roles[1]
+}
+
+// startN is start for a deployment with n primaries and the one extra: it returns the n+1 Instances in the order of
+// their Allocations' names, which is the order they take the scripts (rkRoles).
+func (h *rkRig) startN(edit func(*v1alpha1.ModelDeployment), n int, scripts ...pfake.Script) []string {
+	h.t.Helper()
 	h.batch.Enqueue(scripts...)
-	h.create(rkMD(edit))
+	h.create(rkMD(func(md *v1alpha1.ModelDeployment) {
+		md.Spec.Instances = int32(n - 1)
+		if edit != nil {
+			edit(md)
+		}
+	}))
 	h.tick(10 * time.Second)
 	h.tick(10 * time.Second)
 	ins := h.instances(hoMD)
-	if len(ins) != 1 || !h.clock.Now().Equal(rkAt(0, 0, 20)) {
-		h.t.Fatalf("at %s, %d Instances, want the missing primary's one at 08:00:20", h.clock.Now().Format(time.TimeOnly), len(ins))
+	if len(ins) != n || !h.clock.Now().Equal(rkAt(0, 0, 20)) {
+		h.t.Fatalf("at %s, %d Instances, want the missing primaries and the extra, %d, made in the pass at 08:00:10", h.clock.Now().Format(time.TimeOnly), len(ins), n)
 	}
-	return ins[0].Name, h.seedExtra()
+	return rkRoles(ins)
 }
 
-// seedExtra makes the extra through the create path PR 4's pass uses, and returns its Instance's name.
-func (h *rkRig) seedExtra() string {
-	h.t.Helper()
-	have := map[string]bool{}
-	for _, in := range h.instances(hoMD) {
-		have[in.Name] = true
+// rkRoles names the Instances in the order of their Allocations' names: the order the fake provider submits their jobs
+// in, so the order they take the rig's scripts.
+func rkRoles(ins []v1alpha1.Instance) []string {
+	sort.Slice(ins, func(i, j int) bool { return ins[i].Spec.AllocationRef.Name < ins[j].Spec.AllocationRef.Name })
+	out := make([]string, len(ins))
+	for i := range ins {
+		out[i] = ins[i].Name
 	}
-	p := h.passOf(hoMD)
-	if ok, err := p.provisionWith(nil, placeOpts{only: rigProvider}); err != nil || !ok {
-		h.t.Fatalf("seeding the extra: placed %v, %v", ok, err)
-	}
-	for _, in := range h.instances(hoMD) {
-		if !have[in.Name] {
-			return in.Name
-		}
-	}
-	h.t.Fatal("the seeded extra is not among the Instances")
-	return ""
+	return out
 }
 
 // alloc returns the name of the Instance's Allocation, remembered from the first time it is asked, so that it is

@@ -80,6 +80,11 @@ type boundaryCase struct {
 	noOverlap, queued bool
 	// why is the text the NoOverlapSlot message holds.
 	why string
+	// extra is whether PR 4 makes its extra beside the primary at k = 1: the extra's own slot and caps checks, by hand.
+	// The submit limits of 2 and 1 leave no slot beyond the primary's own handover (1 + 1 + 1 > 2); a cap that holds
+	// two jobs lets the extra be made (1 GPU + 1 GPU = 2, 16 + 16 = 32 CPUs, 120Gi + 120Gi = 240Gi) and one that holds
+	// one refuses it.
+	extra bool
 }
 
 // TestNoOverlapModeBoundaries runs HBEP-7's timeline of handover_test.go (the
@@ -99,25 +104,35 @@ func TestNoOverlapModeBoundaries(t *testing.T) {
 		{name: "submit limit 2 leaves one slot beside the primary", qos: v1alpha1.QOSProfile{Name: "example-s2", MaxSubmitPerUser: i32(2)}},
 		{name: "submit limit 1 leaves none", qos: v1alpha1.QOSProfile{Name: "example-s1", MaxSubmitPerUser: i32(1)},
 			noOverlap: true, why: "no free submit slot for a replacement: 1 Allocations still holding a slot, at its maxSubmitPerUser 1 of QOS example-s1"},
-		{name: "GPU cap 2 fits one GPU and one GPU", qos: v1alpha1.QOSProfile{Name: "example-g2", MaxGPUsPerUser: i32(2)}},
+		{name: "GPU cap 2 fits one GPU and one GPU", qos: v1alpha1.QOSProfile{Name: "example-g2", MaxGPUsPerUser: i32(2)}, extra: true},
 		{name: "GPU cap 1 does not", qos: v1alpha1.QOSProfile{Name: "example-g1", MaxGPUsPerUser: i32(1)},
 			noOverlap: true, queued: true, why: "need 2 GPUs, above the maxGpusPerUser 1 of QOS example-g1"},
-		{name: "CPU cap 32 fits 16 and 16", qos: v1alpha1.QOSProfile{Name: "example-c32", MaxCPUsPerUser: i32(32)}},
+		{name: "CPU cap 32 fits 16 and 16", qos: v1alpha1.QOSProfile{Name: "example-c32", MaxCPUsPerUser: i32(32)}, extra: true},
 		{name: "CPU cap 31 does not", qos: v1alpha1.QOSProfile{Name: "example-c31", MaxCPUsPerUser: i32(31)},
 			noOverlap: true, queued: true, why: "need 32 CPUs, above the maxCpusPerUser 31 of QOS example-c31"},
-		{name: "memory cap 240Gi fits 120Gi and 120Gi", qos: v1alpha1.QOSProfile{Name: "example-m240", MaxMemPerUser: memQ("240Gi")}},
+		{name: "memory cap 240Gi fits 120Gi and 120Gi", qos: v1alpha1.QOSProfile{Name: "example-m240", MaxMemPerUser: memQ("240Gi")}, extra: true},
 		{name: "memory cap 239Gi does not", qos: v1alpha1.QOSProfile{Name: "example-m239", MaxMemPerUser: memQ("239Gi")},
 			noOverlap: true, queued: true, why: "240Gi of memory, above the maxMemPerUser 239Gi of QOS example-m239"},
 	} {
-		t.Run(tc.name, func(t *testing.T) { runBoundaryCase(t, tc) })
+		// Each limit runs without the extra and with PR 4's, where it makes one (boundaryCase.extra): a kept ranked-out
+		// extra beside the primary must not change the mode, and its Allocation, which drains with the primary, never
+		// takes the replacement (warmFor).
+		t.Run(tc.name, func(t *testing.T) { runBoundaryCase(t, tc, false) })
+		if tc.extra {
+			t.Run(tc.name+", k 1 with the extra", func(t *testing.T) { runBoundaryCase(t, tc, true) })
+		}
 	}
 }
 
-func runBoundaryCase(t *testing.T, tc boundaryCase) {
+func runBoundaryCase(t *testing.T, tc boundaryCase, extra bool) {
 	rg := newRig(t, append(qosOpts([]v1alpha1.QOSProfile{tc.qos}, "", tc.qos.Name), withMaxTime(4*time.Hour))...)
-	// The primary starts at once; whatever is submitted after it waits 3 h.
-	rg.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 3 * time.Hour})
-	p := hoStart(rg, nil)
+	// The primary starts at once, and so does the extra, if there is one; whatever is submitted after them waits 3 h.
+	if extra {
+		rg.batch.Enqueue(pfake.Script{}, pfake.Script{}, pfake.Script{QueueWait: 3 * time.Hour})
+	} else {
+		rg.batch.Enqueue(pfake.Script{}, pfake.Script{QueueWait: 3 * time.Hour})
+	}
+	p := hoStartK(rg, nil, extra)
 
 	// 09:19:30, the replacement's planned time.
 	hoStepTo(rg, hoT(9, 19, 20), time.Minute, nil)

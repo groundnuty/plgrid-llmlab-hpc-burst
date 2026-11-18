@@ -156,9 +156,10 @@ type supervised struct {
 
 // supervisedSet is what the supervisor runs, from the record the launcher wrote. The controller's
 // command line is the contract with cmd/hpcburst-controller, and these are exactly its flags: it
-// fills an agentapi.Host from --state-dir and --port-base, and takes the kubeconfig, the
-// credentials directory and the agent builds from there. The front flags go only to a launcher
-// that recorded a front.
+// fills an agentapi.Host from --state-dir and --port-base, and takes the credentials directory and
+// the agent builds from there; its kubeconfigs are the controller identities' (--kubeconfig and
+// --provider-kubeconfig, issued at every start, controller_identities.go). The front flags go only to
+// a launcher that recorded a front.
 func (s *State) supervisedSet(l layout) ([]supervised, error) {
 	if s.Controllers == nil {
 		return nil, errors.New("the launcher record names no controller binary: nothing to supervise")
@@ -167,7 +168,11 @@ func (s *State) supervisedSet(l layout) ([]supervised, error) {
 		return nil, errors.New("the launcher record has no controller port")
 	}
 	health := s.Ports.ControllerAddr()
-	args := []string{"--state-dir", l.dir, "--port-base", strconv.Itoa(s.Ports.Base()), "--health-addr", health}
+	// The controller reads its own identities' kubeconfigs, by path: one for the lifecycle and verification
+	// managers and the agent API, one for the Provider managers (HBEP-10, Audit; #660). Never a token.
+	args := []string{"--state-dir", l.dir, "--port-base", strconv.Itoa(s.Ports.Base()), "--health-addr", health,
+		"--kubeconfig", l.controllerKubeconfig(ControllerLifecycleIdentity),
+		"--provider-kubeconfig", l.controllerKubeconfig(ControllerProviderIdentity)}
 	if s.Front.Set() {
 		args = append(args, "--front-mode", s.Front.Mode)
 		// Host-dialed mode records no address: the host dials the jobs (HBEP-6, Dial-home modes).

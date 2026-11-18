@@ -289,6 +289,9 @@ func TestControllerSupervision(t *testing.T) {
 		"--state-dir", h.dir,
 		"--port-base", "29220",
 		"--health-addr", "127.0.0.1:29226",
+		// The controller reads its two identities' kubeconfigs, by path, which up issued (HBEP-10, Audit; #660).
+		"--kubeconfig", filepath.Join(h.dir, "identities", "system", "hpcburst-lifecycle.kubeconfig"),
+		"--provider-kubeconfig", filepath.Join(h.dir, "identities", "system", "hpcburst-provider.kubeconfig"),
 		"--front-mode", "direct", "--front-addr", "front.example.test:8443",
 	}
 	var gotArgv []string

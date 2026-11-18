@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "operation": {
+    "name": "end-m",
+    "namespace": "team",
+    "action": "End",
+    "modelDeployment": "m",
+    "end": {
+      "delete": false
+    },
+    "owner": "system:serviceaccount:hpcburst-agents:agent-a",
+    "phase": "Planned",
+    "conditions": [
+      {
+        "type": "Executable",
+        "status": "False",
+        "reason": "NotConfirmed",
+        "message": "planned: waiting for the owner to confirm plan fedcba9876543210",
+        "lastTransitionTime": "2026-11-20T10:00:01Z"
+      }
+    ],
+    "plan": {
+      "id": "fedcba9876543210",
+      "observedAt": "2026-11-20T10:00:00Z",
+      "modelDeployment": {
+        "name": "m",
+        "uid": "uid-m",
+        "generation": 4
+      },
+      "targets": [
+        {
+          "kind": "ModelDeployment",
+          "name": "m",
+          "uid": "uid-m",
+          "effect": "SetEndTime",
+          "needsApproval": false,
+          "cost": {
+            "note": "no HPC capacity held"
+          }
+        }
+      ]
+    },
+    "confirmWith": "hpcburst confirm end-m --plan fedcba9876543210 -n team"
+  }
+}
