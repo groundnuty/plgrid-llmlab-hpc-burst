@@ -46,8 +46,8 @@ func validBatch() *v1alpha1.BatchParameters {
 }
 
 // validWorkload returns a workload with only the required fields.
-func validWorkload() *v1alpha1.Workload {
-	return &v1alpha1.Workload{
+func validWorkload() *v1alpha1.DeploymentWorkload {
+	return &v1alpha1.DeploymentWorkload{
 		ContextTokens:  v1alpha1.ContextTokens{Typical: 8192},
 		OutputTokens:   v1alpha1.OutputTokens{Typical: 1024},
 		TargetSessions: 8,
@@ -72,8 +72,8 @@ func installCRDs(ctx context.Context, cl client.Client) error {
 	if err != nil {
 		return err
 	}
-	if len(crds) != 8 {
-		return fmt.Errorf("want 8 CRD manifests in config/crd, found %d", len(crds))
+	if len(crds) != 9 {
+		return fmt.Errorf("want 9 CRD manifests in config/crd, found %d", len(crds))
 	}
 	return crdinstall.InstallAndWait(ctx, cl, crds)
 }

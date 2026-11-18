@@ -31,7 +31,7 @@ func gateMD(edit ...func(*v1alpha1.ModelDeployment)) *v1alpha1.ModelDeployment {
 	md := mdSpec("md")
 	s := md.Spec.Source.Served
 	s.Flags = append(s.Flags, v1alpha1.EngineFlag{Name: "max-num-seqs", Value: "16"})
-	md.Spec.Workload = &v1alpha1.Workload{
+	md.Spec.Workload = &v1alpha1.DeploymentWorkload{
 		ContextTokens: v1alpha1.ContextTokens{Typical: 1024}, OutputTokens: v1alpha1.OutputTokens{Typical: 128}, TargetSessions: 8,
 	}
 	for _, e := range edit {

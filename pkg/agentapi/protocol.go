@@ -53,7 +53,7 @@ const (
 	MaxBodyBytes = 4 << 20
 
 	// MaxTargetSessions is the most concurrent requests a warm-up round sends:
-	// the CRD's maximum for Workload.TargetSessions, so WarmUpRequest cannot
+	// the CRD's maximum for DeploymentWorkload.TargetSessions, so WarmUpRequest cannot
 	// ask for more. A round holds at most 4 + 1 + MaxTargetSessions timings (the
 	// four fixed shapes, the tool call, the concurrent requests).
 	MaxTargetSessions = 1024

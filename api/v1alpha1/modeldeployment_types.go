@@ -298,6 +298,7 @@ type ModelDeploymentSpec struct {
 	//
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:XValidation:rule="!self.contains('#')",message="a model name never contains '#': a request's model name splits a Workload off at its only '#' (HBEP-3, Grammar)"
 	Model string `json:"model"`
 
 	// Source says what is served: a checkpoint on our engine, or a catalog
@@ -392,7 +393,23 @@ type ModelDeploymentSpec struct {
 	// the controller reads). A served deployment needs one.
 	//
 	// +optional
-	Workload *Workload `json:"workload,omitempty"`
+	Workload *DeploymentWorkload `json:"workload,omitempty"`
+
+	// Workloads names the Workloads in this ModelDeployment's namespace that it
+	// serves; empty serves every Workload of its model (HBEP-7; HBEP-5, Workloads).
+	// A name that is no Workload of its model in this namespace serves nothing and
+	// sets no condition, a stated limit. It is a routing input only: warm-up and
+	// qualification keep spec.workload, so an edit releases nothing, and the capacity
+	// guard accepts an agent's edit of it (HBEP-11). Each name once; a CEL rule refuses a
+	// repeated name. The list is atomic (`@hpc-burst-science-agent`, 18 Nov 2026, #764 Q2).
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y == x))",message="spec.workloads lists each Workload once (HBEP-7; HBEP-5, Workloads)"
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Workloads []string `json:"workloads,omitempty"`
 
 	// Routing holds the front's settings for this deployment (HBEP-5,
 	// Configuration; HBEP-11, API). Absent, it takes its defaults, so the
@@ -476,13 +493,13 @@ type LoadBound struct {
 // +kubebuilder:validation:XValidation:rule="self.matches('^[0-9]+([.][0-9]{1,2})?$')",message="a load bound has at most two decimal places: write 1.25, not 1.005"
 type LoadFactor string
 
-// Workload is a deployment's request shapes (HBEP-7, What the controller
-// reads). Every shape must fit: each context length with the typical output,
-// and the typical context with the longest output. A shape that does not fit
-// is an error, never shortened; the lifecycle controller checks the declared
-// shapes against a declared max-model-len before it provisions (Degraded,
-// reason SpecUnsupported).
-type Workload struct {
+// DeploymentWorkload is a deployment's request shapes (HBEP-7, What the
+// controller reads). Every shape must fit: each context length with the
+// typical output, and the typical context with the longest output. A shape that
+// does not fit is an error, never shortened; the lifecycle controller checks
+// the declared shapes against a declared max-model-len before it provisions
+// (Degraded, reason SpecUnsupported).
+type DeploymentWorkload struct {
 	// ContextTokens are the context lengths, in tokens.
 	ContextTokens ContextTokens `json:"contextTokens"`
 
@@ -508,8 +525,8 @@ type Workload struct {
 	ToolCalls *bool `json:"toolCalls,omitempty"`
 }
 
-// MaxTargetSessions is the largest Workload.TargetSessions the schema admits,
-// equal to agentapi.MaxTargetSessions (a test checks they agree).
+// MaxTargetSessions is the largest DeploymentWorkload.TargetSessions the schema
+// admits, equal to agentapi.MaxTargetSessions (a test checks they agree).
 const MaxTargetSessions = 1024
 
 // ContextTokens are a workload's context lengths. When both are set, typical

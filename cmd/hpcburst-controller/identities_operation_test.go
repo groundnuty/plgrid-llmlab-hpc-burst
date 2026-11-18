@@ -85,7 +85,7 @@ func TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity(t *te
 			// No Provider by that name: the deployment provisions nothing and asks the Hub nothing, and the Operations step
 			// runs all the same.
 			Providers: v1alpha1.ProviderSelection{Names: []string{"absent-provider"}},
-			Workload: &v1alpha1.Workload{
+			Workload: &v1alpha1.DeploymentWorkload{
 				ContextTokens: v1alpha1.ContextTokens{Typical: 4096}, OutputTokens: v1alpha1.OutputTokens{Typical: 512}, TargetSessions: 4,
 			},
 		},

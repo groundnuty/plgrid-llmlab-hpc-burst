@@ -102,7 +102,7 @@ func deploymentFor(owner, name string, instances int32) *v1alpha1.ModelDeploymen
 			}},
 			Instances: instances,
 			Providers: v1alpha1.ProviderSelection{Names: []string{"helios-a"}},
-			Workload: &v1alpha1.Workload{
+			Workload: &v1alpha1.DeploymentWorkload{
 				ContextTokens: v1alpha1.ContextTokens{Typical: 8192}, OutputTokens: v1alpha1.OutputTokens{Typical: 1024}, TargetSessions: 8,
 			},
 		},

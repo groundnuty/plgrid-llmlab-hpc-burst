@@ -42,7 +42,7 @@ func TestTheLifecycleIdentityStampsTheOwnerHashLabel(t *testing.T) {
 			Instances: 1,
 			// No Provider by that name: nothing is provisioned, and the label sync runs all the same, first in every pass.
 			Providers: v1alpha1.ProviderSelection{Names: []string{"absent-provider"}},
-			Workload: &v1alpha1.Workload{
+			Workload: &v1alpha1.DeploymentWorkload{
 				ContextTokens: v1alpha1.ContextTokens{Typical: 4096}, OutputTokens: v1alpha1.OutputTokens{Typical: 512}, TargetSessions: 4,
 			},
 		},

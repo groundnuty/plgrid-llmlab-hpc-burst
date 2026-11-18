@@ -404,7 +404,7 @@ func frontTestMD() *v1alpha1.ModelDeployment {
 			}},
 			Instances: 1,
 			Providers: v1alpha1.ProviderSelection{Names: []string{"helios-a"}},
-			Workload:  &v1alpha1.Workload{ContextTokens: v1alpha1.ContextTokens{Typical: 8192}, OutputTokens: v1alpha1.OutputTokens{Typical: 1024}, TargetSessions: 8},
+			Workload:  &v1alpha1.DeploymentWorkload{ContextTokens: v1alpha1.ContextTokens{Typical: 8192}, OutputTokens: v1alpha1.OutputTokens{Typical: 1024}, TargetSessions: 8},
 		},
 	}
 }

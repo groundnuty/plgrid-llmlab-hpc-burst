@@ -191,8 +191,8 @@ func startAPIServer(t *testing.T) *apiServer {
 			t.Errorf("system port check: %v", err)
 		}
 	})
-	if len(env.CRDs) != 8 {
-		t.Fatalf("installed %d CRDs, want the 8 of config/crd", len(env.CRDs))
+	if len(env.CRDs) != 9 {
+		t.Fatalf("installed %d CRDs, want the 9 of config/crd", len(env.CRDs))
 	}
 	// envtest polls discovery for the CRDs' resources (up to 10 s); this adds that each is Established and that a list of its kind answers,
 	// the one rule for "served" the other rigs use (crdinstall; issue #600).

@@ -125,7 +125,7 @@ func lcDeployment() *v1alpha1.ModelDeployment {
 			}},
 			Instances: 1,
 			Providers: v1alpha1.ProviderSelection{Names: []string{testProvider}},
-			Workload: &v1alpha1.Workload{ContextTokens: v1alpha1.ContextTokens{Typical: 4096},
+			Workload: &v1alpha1.DeploymentWorkload{ContextTokens: v1alpha1.ContextTokens{Typical: 4096},
 				OutputTokens: v1alpha1.OutputTokens{Typical: 512}, TargetSessions: 4},
 		},
 	}
