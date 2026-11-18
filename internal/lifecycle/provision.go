@@ -520,6 +520,14 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	pv := p.pvOf(in.Labels)
 	name := in.Spec.AllocationRef.Name
 	handover := in.Annotations[v1alpha1.AnnotationPredecessor] != ""
+	// This Instance's lease is judged at its own launch, which its Allocation is sized by (partitionSizingFor below), not at
+	// the deployment's current plan (atLaunch).
+	if atOwn := p.atLaunch(pv, in); atOwn != nil && atOwn.tooShort != pv.tooShort {
+		if atOwn.tooShort != "" {
+			p.degrade(v1alpha1.ReasonPartitionTooShort, "%s", atOwn.tooShort)
+		}
+		pv = atOwn
+	}
 	if pv != nil && handover {
 		if reason, why := lastingCause(pv); reason != "" {
 			return p.end(in, nil, reason, fmt.Sprintf("its Allocation %s was never made and can't be: %s", name, why), true)
