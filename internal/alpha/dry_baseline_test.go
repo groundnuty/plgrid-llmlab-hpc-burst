@@ -174,7 +174,7 @@ func (d *drySteps) Baseline(ctx context.Context, p Plan) (BaselineObs, error) {
 	}
 	w := &dryBaseline{d: d, p: p, cap: cap}
 	d.baseline = w
-	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, Logf: p.Logf})
+	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, WaitingPoll: time.Millisecond, Logf: p.Logf})
 	if err != nil {
 		return BaselineObs{}, err
 	}
