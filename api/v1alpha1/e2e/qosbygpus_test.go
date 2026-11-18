@@ -244,7 +244,7 @@ func TestQOSByGPUsAnEmptyListIsRefused(t *testing.T) {
 	empty := edit(t, obj, []any{}, "spec", "partitions", 0, "qosByGpus")
 	empty = edit(t, empty, uniq("sano"), "metadata", "name")
 	_, err := strictCreate(t, empty)
-	requireRefused(t, err, "qosByGpus", "must have at least 1 items")
+	requireRefused(t, err, "qosByGpus", "should have at least 1 items")
 	// The control: the shipped list, one entry or four, is admitted.
 	ok := edit(t, obj, uniq("sano"), "metadata", "name")
 	if _, err := strictCreate(t, ok); err != nil {
