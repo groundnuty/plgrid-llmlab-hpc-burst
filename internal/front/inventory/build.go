@@ -47,7 +47,11 @@ func Build(s Snapshot, in Inputs) *View {
 	for i := range s.Workloads {
 		o := &s.Workloads[i]
 		w := &Workload{Key: o.Namespace + "/" + o.Name, Namespace: o.Namespace, Name: o.Name, Model: o.Spec.Model,
-			Charge: int64(o.Spec.Shape.ContextTokens.Typical) + int64(o.Spec.Shape.OutputTokens.Typical)}
+			Charge:       int64(o.Spec.Shape.ContextTokens.Typical) + int64(o.Spec.Shape.OutputTokens.Typical),
+			ManagedFirst: o.Spec.RouteOrder == v1alpha1.RouteManagedFirst}
+		if o.Spec.ManagedSessions != nil {
+			w.ManagedSessions = int(*o.Spec.ManagedSessions)
+		}
 		if v.Workloads[w.Model] == nil {
 			v.Workloads[w.Model] = map[string][]*Workload{}
 		}

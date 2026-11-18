@@ -19,6 +19,9 @@ type target struct {
 	dep     *inventory.Deployment
 	res     *balancer.Reservation
 	managed *inventory.ManagedTarget
+	// mres is the managed target's reservation: it carries the Workload's count for a request that names one, and the in-flight series for every
+	// request (managedRes).
+	mres *managedRes
 	// workload is the name of the Workload the request resolved to, "" when it
 	// named none (HBEP-5, Workloads); the usage record carries it.
 	workload string
@@ -38,6 +41,12 @@ type Resolution struct {
 	// an Instance's token budget (HBEP-5, Workloads, The count in tokens). A request keeps the definition it came with, so an edit of the Workload
 	// changes no request already resolved (the science agent's Q15 ruling on #764).
 	charge int64
+	// managedFirst and managedMax are the Workload's route order and managedSessions as it had them when the request resolved: a request keeps the
+	// definition it came with, whatever an edit does meanwhile (the science agent's Q15 ruling). managedFirst is set only with a managedSessions above
+	// 0, which admission requires of ManagedFirst; a ManagedFirst Workload with none, which no admitted object is, is routed as OwnFirst. managedMax 0
+	// is no bound on the overflow.
+	managedFirst bool
+	managedMax   int
 }
 
 // load is the charge a choice reserves for a request with this resolution: the Workload's c, named, or the zero value for a request that named none.
@@ -45,7 +54,7 @@ func (res *Resolution) load() balancer.Charge {
 	if res == nil {
 		return balancer.Charge{}
 	}
-	return balancer.Charge{Named: true, Tokens: res.charge}
+	return balancer.Charge{Named: true, Tokens: res.charge, Workload: res.Name}
 }
 
 // key is the target's name for pauses and exclusion.
@@ -56,11 +65,15 @@ func (t *target) key() string {
 	return t.inst.Key
 }
 
-// release ends the target's reservation; safe to call more than once.
+// release ends the target's reservation, an Instance's or a managed target's; safe to call more than once.
 func (t *target) release() {
-	if t != nil && t.res != nil {
+	if t == nil {
+		return
+	}
+	if t.res != nil {
 		t.res.Release()
 	}
+	t.mres.release()
 }
 
 // routeError is a row of HBEP-5's Errors table raised while choosing.
@@ -143,16 +156,46 @@ func (r *Router) chooseInstanceAgain(ctx context.Context, n naming.Name, res *Re
 }
 
 // chooseAmong chooses a target. res is nil for a request's first choice, which looks up the Workload the name or the header names; it is the first
-// choice's Resolution for every later one, which then reuses it.
+// choice's Resolution for every later one, which then reuses it. A request that names no Workload takes the ModelDeployments' group queue when it must
+// wait, as before; one that does takes its Workload's own FIFO and, toward a managed target, its Workload's count (workload_route.go).
 func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
-	// A request waits for one rebuild, two at most under a barging reader
-	// (#417; lockFresh). The view it
-	// routes on may be a rebuild behind the transports: a target whose
-	// registration was taken away since has no dialer when the proxy asks for
-	// one, and a dialer it holds carries the epoch it was handed in, which the
-	// dial checks after frps's 200 and before any byte (Tunnel.Dialer,
-	// Tunnel.dial; HBEP-5, Reachability). So no route is served from a view older
-	// than its epoch.
+	if res == nil {
+		p, rerr := r.plan(n, nil, key, exclude, withManaged)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if p.res == nil {
+			if r.beforePick != nil {
+				r.beforePick()
+			}
+			return r.chooseUnnamed(ctx, p)
+		}
+		res = p.res
+	}
+	return r.chooseNamed(ctx, n, res, key, exclude, withManaged)
+}
+
+// plan is what one attempt to place a request reads from the view: the Resolution of its Workload (nil when it names none), the ModelDeployments that
+// may serve it with their groups, the model's ring, and the managed targets that are eligible for it now.
+type plan struct {
+	n           naming.Name
+	key         string
+	exclude     []string
+	withManaged bool
+	res         *Resolution
+	serving     []*inventory.Deployment
+	ring        *balancer.Ring
+	groups      map[string]*balancer.Group
+	managed     []*inventory.ManagedTarget
+	wname       string
+}
+
+// plan reads the view for one attempt. A request waits for one rebuild, two at most under a barging reader (#417; lockFresh). The view it routes on
+// may be a rebuild behind the transports: a target whose registration was taken away since has no dialer when the proxy asks for one, and a dialer it
+// holds carries the epoch it was handed in, which the dial checks after frps's 200 and before any byte (Tunnel.Dialer, Tunnel.dial; HBEP-5,
+// Reachability). So no route is served from a view older than its epoch. res is nil for a request's first choice, which looks up the Workload the name
+// or the header names; it is that choice's Resolution for every later attempt, a retry's, a resend's or a waiter's, which reuses it.
+func (r *Router) plan(n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*plan, *routeError) {
 	r.lockFresh()
 	v := r.view
 	if v == nil {
@@ -221,32 +264,23 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution
 		}
 	}
 	r.mu.Unlock()
-	if r.beforePick != nil {
-		r.beforePick()
-	}
+	return &plan{n: n, key: key, exclude: exclude, withManaged: withManaged, res: res, serving: serving, ring: ring, groups: groups, managed: managed, wname: wname}, nil
+}
 
-	ch := res.load()
-	tg, wait := r.chooseServed(serving, ring, groups, n, key, exclude, ch)
+// chooseUnnamed places a request that names no Workload: our own ModelDeployments, then an eligible managed target, then the group queue of the
+// first deployment on the walk that has an eligible Instance (HBEP-5, Request path step 5). It is unchanged by the Workload build.
+func (r *Router) chooseUnnamed(ctx context.Context, p *plan) (*target, *routeError) {
+	tg, wait := r.chooseServed(p.serving, p.ring, p.groups, p.n, p.key, p.exclude, balancer.Charge{})
 	if tg != nil {
-		tg.workload, tg.wres = wname, res
 		return tg, nil
 	}
-	if len(managed) > 0 {
-		tg := chooseManaged(managed, key)
-		tg.workload, tg.wres = wname, res
-		return tg, nil
+	if len(p.managed) > 0 {
+		return r.managedTarget(nil, p), nil
 	}
 	if wait == nil {
-		return nil, errNoReadyTarget(n.Model).forWorkload(wname)
+		return nil, errNoReadyTarget(p.n.Model)
 	}
-	tg, rerr := r.waitServed(ctx, wait, groups[wait.Key], m, n, key, exclude, ch)
-	if tg != nil {
-		tg.workload, tg.wres = wname, res
-	}
-	if rerr != nil {
-		rerr.workload = wname
-	}
-	return tg, rerr
+	return r.waitServed(ctx, wait, p.groups[wait.Key], p.n, p.key, p.exclude, balancer.Charge{})
 }
 
 // servingSet is the ModelDeployments a request may resolve to: all of the
@@ -274,7 +308,8 @@ func servingSet(m *inventory.Model, wl *inventory.Workload) ([]*inventory.Deploy
 
 // newResolution records the serving set a Workload resolved to.
 func newResolution(wl *inventory.Workload, served []*inventory.Deployment, sources []*inventory.ManagedSource) *Resolution {
-	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, serving: map[string]bool{}, charge: wl.Charge}
+	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, serving: map[string]bool{}, charge: wl.Charge,
+		managedFirst: wl.ManagedFirst && wl.ManagedSessions > 0, managedMax: wl.ManagedSessions}
 	for _, d := range served {
 		res.serving[d.Key] = true
 	}
@@ -398,7 +433,9 @@ func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ri
 				inst = r.instance(res.Member)
 			}
 			if inst == nil {
-				res.Release()
+				// Quiet: the caller may hold a Workload's mutex (workload_route.go), which a wake would take again. The member is not
+				// routable now, so the give-back frees no capacity a waiting request could use.
+				res.ReleaseQuiet()
 				continue
 			}
 			return &target{inst: inst, dep: d, res: res}, nil
@@ -411,7 +448,7 @@ func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ri
 
 // waitServed holds the request in the deployment's FIFO for at most
 // queueTimeout (HBEP-5, Load bound and cap).
-func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *balancer.Group, m *inventory.Model, n naming.Name, key string, exclude []string, ch balancer.Charge) (*target, *routeError) {
+func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *balancer.Group, n naming.Name, key string, exclude []string, ch balancer.Charge) (*target, *routeError) {
 	byInst := map[string]*inventory.Instance{}
 	for _, i := range d.Members {
 		byInst[i.Key] = i
@@ -428,28 +465,31 @@ func (r *Router) waitServed(ctx context.Context, d *inventory.Deployment, g *bal
 		}
 		if inst == nil {
 			res.Release()
-			return nil, errNoReadyTarget(m.Name)
+			return nil, errNoReadyTarget(n.Model)
 		}
 		return &target{inst: inst, dep: d, res: res}, nil
 	}
+	return nil, waitError(ctx, d, "an Instance of "+d.Key, "every Instance of "+d.Key+" is at its cap")
+}
+
+// waitError is the answer for a request whose wait ended with no placement. If its context ended, the client went away, or the front cut the request
+// while it waited: its own deadline (maxRequestDuration below queueTimeout) or its shutdown. A front cut is answered and attributed, never an empty
+// response (PR #95 review: Astra B10). Otherwise queueTimeout passed: 503 capacity. forWhat completes "the request was cut while it waited for ..." and
+// full is the capacity message. dep is the ModelDeployment the request waited for, nil for a Workload's FIFO, whose record names none (Q10).
+func waitError(ctx context.Context, dep *inventory.Deployment, forWhat, full string) *routeError {
 	if ctx.Err() != nil {
-		// The client went away, or the front cut the request while it
-		// waited: its own deadline (maxRequestDuration below queueTimeout)
-		// or its shutdown. A front cut is answered and attributed, never
-		// an empty response (PR #95 review: Astra B10).
 		cut := cutOf(ctx)
 		if cut == cutClient {
-			return nil, &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
+			return &routeError{status: statusClientClosed, code: "client_closed", message: "the client went away while the request waited"}
 		}
 		if cut == cutFrontShutdown {
-			return nil, &routeError{status: http.StatusServiceUnavailable, code: codeShuttingDown, detail: detailOf(cut), retryAfter: "5", cutBy: cut, dep: d,
+			return &routeError{status: http.StatusServiceUnavailable, code: codeShuttingDown, detail: detailOf(cut), retryAfter: "5", cutBy: cut, dep: dep,
 				message: "the front is shutting down; send the request again"}
 		}
-		return nil, &routeError{status: http.StatusGatewayTimeout, code: codeRequestTimeout, detail: detailOf(cut), cutBy: cut, dep: d,
-			message: "the request was cut while it waited for an Instance of " + d.Key + ": " + detailOf(cut)}
+		return &routeError{status: http.StatusGatewayTimeout, code: codeRequestTimeout, detail: detailOf(cut), cutBy: cut, dep: dep,
+			message: "the request was cut while it waited for " + forWhat + ": " + detailOf(cut)}
 	}
-	return nil, &routeError{status: http.StatusServiceUnavailable, code: codeCapacity, retryAfter: "10", dep: d,
-		message: "every Instance of " + d.Key + " is at its cap"}
+	return &routeError{status: http.StatusServiceUnavailable, code: codeCapacity, retryAfter: "10", dep: dep, message: full}
 }
 
 // instance looks a member up in the current view.
@@ -474,8 +514,20 @@ func (r *Router) instance(key string) *inventory.Instance {
 	return nil
 }
 
+// managedTarget is the target for the key's home among the plan's eligible managed targets, counted in flight (the series). ws is the request's
+// Workload, nil for a request that names none; its count is reserved by the caller, under its mutex (takeManagedLocked), before this is called.
+func (r *Router) managedTarget(ws *wlState, p *plan) *target {
+	t := chooseManaged(p.managed, p.key)
+	t.mres = &managedRes{r: r, ws: ws, workload: p.wname, provider: t.managed.Provider, deployment: t.managed.Deployment}
+	r.metrics.inFlightAdd(p.wname, t.managed.Provider, t.managed.Deployment, "", +1)
+	t.workload, t.wres = p.wname, p.res
+	return t
+}
+
 // chooseManaged takes the key's home on a ring of the managed targets, with
-// no bound: LLMLab's capacity cannot be read (HBEP-5, The LLMLab route).
+// no bound: LLMLab's capacity cannot be read (HBEP-5, The LLMLab route). A
+// Workload's managedSessions bounds it by a count the caller reserves
+// (takeManagedLocked).
 func chooseManaged(ts []*inventory.ManagedTarget, key string) *target {
 	keys := make([]string, len(ts))
 	byKey := map[string]*inventory.ManagedTarget{}

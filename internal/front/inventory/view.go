@@ -86,6 +86,10 @@ type Workload struct {
 	// The count in tokens): shape.contextTokens.typical plus shape.outputTokens.typical, as the Workload had it when
 	// this view was built.
 	Charge int64
+	// ManagedFirst is spec.routeOrder ManagedFirst, false for OwnFirst, the default and the value of a Workload that sets none; ManagedSessions is
+	// spec.managedSessions, 0 when it is unset. Both are as the Workload had them when this view was built (HBEP-5, Workloads, Route order).
+	ManagedFirst    bool
+	ManagedSessions int
 }
 
 // ManagedSource is a managed-source ModelDeployment that attaches a model.

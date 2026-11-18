@@ -8,9 +8,11 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/enginetest"
 )
 
-// A request that names a Workload and waits at the front for an Instance of the Workload's deployment (HBEP-5, Load bound and cap; the Workload's own
-// FIFO is a later part of the build) keeps its Workload: served after the wait it is recorded under it, and refused after the wait with 503 capacity
-// it is too, since the Workload had resolved. The wait is on observable state, the router's count of waiters, never on a window.
+// A request that names a Workload and waits at the front for a route of the Workload (HBEP-5, Workloads, Waiting: its own FIFO, which holds it in place of
+// a ModelDeployment's queue) keeps its Workload: served after the wait it is recorded under it, and refused after the wait with 503 capacity it is too,
+// since the Workload had resolved. The refusal's record has modelDeployment null and workload set, and its error names the Workload and no deployment
+// (the science agent's ruling Q10 on #764: the request waited for the Workload's routes, not for one deployment). The wait is on observable state, the
+// router's count of waiters, never on a window.
 
 // waitFix is md-a with one Instance, a-0, at routing.instanceCap 1 and listing alpha, and one request of alpha held on it, so the Instance is at its
 // cap. It returns the fix and the release of the held request.
@@ -60,13 +62,13 @@ func TestAWorkloadRequestRefusedAfterWaitingIsRecordedAndCountedUnderItsWorkload
 	errWaitFor(t, "the request to wait at the front", func() bool { return f.router.Status().Waiting == 1 })
 	resp, body := waiter.wait(t) // past queueTimeout, 503 capacity
 	checkError(t, resp, body, wantError{status: 503, code: "capacity", retryAfter: "10"})
-	if !strings.Contains(body, "ns/md-a") {
-		t.Errorf("the error does not name the ModelDeployment ns/md-a: %s", body)
+	if !strings.Contains(body, "Workload alpha") || strings.Contains(body, "md-a") {
+		t.Errorf("the error does not name the Workload alpha, or names a ModelDeployment: %s", body)
 	}
 	rec := f.record(resp.Header.Get("hpcburst-request-id"))
 	wantWorkload(t, "refused after the wait", rec, str("alpha"))
-	if rec.Status != 503 || rec.ModelDeployment != "ns/md-a" {
-		t.Errorf("record: status %d modelDeployment %q, want 503 and ns/md-a", rec.Status, rec.ModelDeployment)
+	if rec.Status != 503 || rec.ModelDeployment != "" {
+		t.Errorf("record: status %d modelDeployment %q, want 503 and none (null)", rec.Status, rec.ModelDeployment)
 	}
 	// The series: a refusal before a target was chosen has empty provider and model_deployment, and the Workload it had resolved.
 	wantSample(t, scrape(t, f.metrics), 1, mRequests, "code", "503", "endpoint", "chat", "provider", "", "model_deployment", "", "workload", "alpha")

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,6 +20,9 @@ import (
 // (Metrics, Front metrics): they reach past S2's first token after 1,100 s and
 // the 2 h default maxRequestDuration.
 var ttftBuckets = []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200}
+
+// speedBuckets are HBEP-8's buckets for the output speed of one stream, in tokens per second (Metrics, Front metrics).
+var speedBuckets = []float64{1, 2, 5, 10, 20, 50, 100, 200, 500}
 
 // FreeBytesFunc returns the free space of the file system that holds dir, in
 // bytes available to the front.
@@ -38,6 +42,13 @@ type Metrics struct {
 	cuts     *prometheus.CounterVec
 	pauses   *prometheus.CounterVec
 	ttft     *prometheus.HistogramVec
+	// inFlight, waiting and speed are the series of the Workload build (HBEP-8, Front metrics): the requests in flight per route and per Instance, the
+	// requests waiting in a FIFO, and the output tokens per second of each completed stream that carried usage.
+	inFlight *prometheus.GaugeVec
+	speed    *prometheus.HistogramVec
+	// router is the router the waiting series is read from (attach).
+	mu     sync.Mutex
+	router *Router
 	// bulk counts bulk dispatches and fallbacks (enableBulk); nil without the bulk path.
 	bulk *prometheus.CounterVec
 }
@@ -73,8 +84,17 @@ func NewMetrics(sink *usage.Sink, dir string, free FreeBytesFunc, events *eventc
 			Help:    "Time from the request's arrival to its first content event, from live traffic. A request without a first token is not observed. workload is the request's resolved Workload, empty for a request that names none.",
 			Buckets: ttftBuckets,
 		}, []string{"provider", "model_deployment", "endpoint", "workload"}),
+		inFlight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "hpcburst_front_in_flight",
+			Help: "Requests in flight per route and per Instance, from dispatch to completion, as the balancer counts them. instance_uid is empty for a managed target, and workload for a request that names none. An Instance's series goes when it leaves its group.",
+		}, []string{"workload", "provider", "model_deployment", "instance_uid"}),
+		speed: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "hpcburst_front_output_tokens_per_second",
+			Help:    "Output tokens per second of each completed stream that carried usage: its output tokens over the time from its first token to its end. A stream without usage, or one whose first token is its end, is not observed. workload is the request's resolved Workload, empty for a request that names none.",
+			Buckets: speedBuckets,
+		}, []string{"workload", "provider", "model_deployment"}),
 	}
-	m.reg.MustRegister(m.requests, m.cuts, m.pauses, m.ttft, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	m.reg.MustRegister(m.requests, m.cuts, m.pauses, m.ttft, m.inFlight, m.speed, &waitingCollector{m: m}, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	if events != nil {
 		events.Zero(eventcount.ControllerFront, RaisedEvents())
 		m.reg.MustRegister(events)
@@ -194,6 +214,77 @@ func (m *Metrics) observe(r usage.Record) {
 	}
 	if r.FirstTokenMs != nil {
 		m.ttft.WithLabelValues(provider, dep, endpoint, workload).Observe(float64(*r.FirstTokenMs) / 1000)
+	}
+	if v, ok := outputSpeed(r); ok {
+		m.speed.WithLabelValues(workload, provider, dep).Observe(v)
+	}
+}
+
+// outputSpeed is the output tokens per second of a completed stream that carried usage: the record's completion tokens over the time from its first
+// token to its end (HBEP-8, Front metrics). It is not defined, so the stream is not observed, for a request that is not a stream, one that was cut or
+// that failed (its end is not a completion), one with no usage (the engine's counts are the only ones used: a stream without them has none), one with
+// no first token, and one whose first token is its end.
+func outputSpeed(r usage.Record) (float64, bool) {
+	if !r.Stream || r.CutBy != nil || r.Finish == nil || r.CompletionTokens == nil || r.FirstTokenMs == nil || r.CountsSource == nil || *r.CountsSource != "engine" {
+		return 0, false
+	}
+	switch *r.Finish {
+	case "cut", "truncated", "error", "failed":
+		return 0, false
+	}
+	span := r.DurationMs - *r.FirstTokenMs
+	if span <= 0 || *r.CompletionTokens < 0 {
+		return 0, false
+	}
+	return float64(*r.CompletionTokens) / (float64(span) / 1000), true
+}
+
+// attach tells the metrics which router the waiting series is read from.
+func (m *Metrics) attach(r *Router) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.router = r
+	m.mu.Unlock()
+}
+
+// inFlightAdd counts a request on a route: +1 when it is reserved, -1 when it is released. instanceUID is empty for a managed target.
+func (m *Metrics) inFlightAdd(workload, provider, deployment, instanceUID string, delta int) {
+	if m == nil {
+		return
+	}
+	m.inFlight.WithLabelValues(workload, provider, deployment, instanceUID).Add(float64(delta))
+}
+
+// inFlightGone drops every in-flight series of an Instance that has left its group.
+func (m *Metrics) inFlightGone(instanceUID string) {
+	if m == nil || instanceUID == "" {
+		return
+	}
+	m.inFlight.DeletePartialMatch(prometheus.Labels{"instance_uid": instanceUID})
+}
+
+// waitingCollector exports hpcburst_front_waiting from one read of the router at each scrape: a ModelDeployment's group queue has an empty workload
+// label, and a Workload's FIFO an empty model_deployment label (the science agent's ruling Q10). A series is exported for each live group and for each
+// Workload that has had a request, 0 when its queue is empty, and goes with the group or the Workload.
+type waitingCollector struct{ m *Metrics }
+
+var descWaiting = prometheus.NewDesc("hpcburst_front_waiting", "Requests waiting in the front's FIFO: a ModelDeployment's queue, with an empty workload, for a request that names no Workload; a Workload's own FIFO, with an empty model_deployment, for one that does.", []string{"workload", "model_deployment"}, nil)
+
+// Describe implements prometheus.Collector.
+func (c *waitingCollector) Describe(ch chan<- *prometheus.Desc) { ch <- descWaiting }
+
+// Collect implements prometheus.Collector.
+func (c *waitingCollector) Collect(ch chan<- prometheus.Metric) {
+	c.m.mu.Lock()
+	r := c.m.router
+	c.m.mu.Unlock()
+	if r == nil {
+		return
+	}
+	for _, s := range r.waitingSamples() {
+		ch <- prometheus.MustNewConstMetric(descWaiting, prometheus.GaugeValue, float64(s.n), s.workload, s.deployment)
 	}
 }
 

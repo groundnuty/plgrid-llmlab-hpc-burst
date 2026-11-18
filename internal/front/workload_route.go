@@ -1,0 +1,439 @@
+package front
+
+import (
+	"context"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/balancer"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/naming"
+)
+
+// The Workloads' state at the front: each Workload's count of requests in flight on managed targets and its own FIFO of requests that no route can take
+// (HBEP-5, Workloads: Route order, Waiting; HBEP-764, the science agent's rulings Q5, Q6, Q9, Q13 and Q15 on #764).
+//
+// LOCK ORDER (Q6). A Workload's mutex is taken BEFORE any group's mutex, never the reverse, and a group delivers its wake to the Workload FIFOs only
+// AFTER it has released its own mutex (balancer.Group's OnFree and OnChange). In full, from the outermost:
+//
+//	passMu          one wake pass at a time, so the FIFOs are served in the order of their oldest request's arrival (Q5)
+//	wlState.mu      one Workload's mutex: its managed count and its FIFO
+//	Router.mu       the view, which a placement reads and a rebuild replaces
+//	Group.mu        one ModelDeployment's balancer
+//
+// wlMu, which guards the registry of Workload states, is a leaf: nothing is taken while it is held. Nothing that holds Router.mu or a Group.mu takes
+// a Workload's mutex or passMu or waits for one. The rebuild runs under Router.mu and calls Group.Update, whose wake would otherwise take a Workload's
+// mutex, so the wake from a rebuild is handed off (wakeAsync), and the wake from a completion, which holds no lock, runs in the completing goroutine
+// after the group's mutex is released (wakeNow). A give-back made under a Workload's mutex is quiet (Reservation.ReleaseQuiet), since a wake would
+// take that mutex again.
+
+// wlState is one Workload's state, kept by the router under the Workload's namespace and name: it outlives the router's rebuilds, and goes only when the
+// Workload has left the view and nothing of it is in flight or waiting (Q15).
+type wlState struct {
+	r   *Router
+	key string // namespace/name
+
+	// mu is the Workload's mutex (LOCK ORDER above). It guards managed, queue and dead; a request's count is reserved and released under it, once, as
+	// the balancer's reservations are under the group's.
+	mu sync.Mutex
+	// managed is the Workload's requests in flight on managed targets, all of its managed targets together.
+	managed int
+	// queue is the Workload's FIFO, oldest first. Only its head is placed (strict: a younger waiter never passes an older one).
+	queue []*wlWaiter
+	// dead says the state has been dropped from the registry (pruneWorkloads): a request that finds it set asks for a new one.
+	dead bool
+
+	// waiting is len(queue) and headSeq the arrival number of its head (0: empty), kept for readers that must not take mu: the series, the status and
+	// the wake pass's order.
+	waiting atomic.Int64
+	headSeq atomic.Uint64
+}
+
+// lock takes the Workload's mutex. onWlContended, set by tests only, runs in a caller that finds it held, before it waits.
+func (ws *wlState) lock() {
+	if ws.mu.TryLock() {
+		return
+	}
+	if h := ws.r.onWlContended; h != nil {
+		h()
+	}
+	ws.mu.Lock()
+}
+
+// wlWaiter is a request waiting in a Workload's FIFO with what its every attempt needs. It carries the Resolution it arrived with, so an edit of the
+// Workload changes neither its charge nor its route order nor its bound (Q15).
+type wlWaiter struct {
+	seq         uint64 // arrival number, over all the Workloads' FIFOs
+	n           naming.Name
+	res         *Resolution
+	key         string
+	exclude     []string
+	withManaged bool
+	ch          chan *target // buffered: a placement never blocks
+}
+
+// enqueueLocked appends a request to the FIFO. The caller holds mu.
+func (ws *wlState) enqueueLocked(p *plan) *wlWaiter {
+	w := &wlWaiter{seq: ws.r.wlSeq.Add(1), n: p.n, res: p.res, key: p.key, exclude: slices.Clone(p.exclude), withManaged: p.withManaged, ch: make(chan *target, 1)}
+	ws.queue = append(ws.queue, w)
+	ws.syncQueueLocked()
+	return w
+}
+
+// popHeadLocked takes the head out of the FIFO, which was placed.
+func (ws *wlState) popHeadLocked() {
+	ws.queue = ws.queue[1:]
+	ws.syncQueueLocked()
+	ws.r.wlActive.Add(-1)
+}
+
+// removeLocked takes a waiter that gave up out of the FIFO. It reports whether it was there, and whether it was the head.
+func (ws *wlState) removeLocked(w *wlWaiter) (removed, wasHead bool) {
+	i := slices.Index(ws.queue, w)
+	if i < 0 {
+		return false, false
+	}
+	ws.queue = slices.Delete(ws.queue, i, i+1)
+	ws.syncQueueLocked()
+	ws.r.wlActive.Add(-1)
+	return true, i == 0
+}
+
+func (ws *wlState) syncQueueLocked() {
+	ws.waiting.Store(int64(len(ws.queue)))
+	if len(ws.queue) == 0 {
+		ws.headSeq.Store(0)
+		ws.queue = nil
+		return
+	}
+	ws.headSeq.Store(ws.queue[0].seq)
+}
+
+// managedRes is the reservation of a request on a managed target. For a request that names a Workload it holds one unit of the Workload's count, reserved
+// under the Workload's mutex by takeManagedLocked and given back under it by release, exactly once however the request ends; every managed request is
+// counted in the in-flight series.
+type managedRes struct {
+	r        *Router
+	ws       *wlState // nil: the request names no Workload, so it has no count
+	workload string
+	provider string
+	// deployment is the managed target's ModelDeployment.
+	deployment string
+	done       atomic.Bool
+}
+
+// release gives the reservation back. Only the first call counts. A completion on a managed target frees a route of its Workload, so its FIFO is woken.
+func (m *managedRes) release() {
+	if m == nil || !m.done.CompareAndSwap(false, true) {
+		return
+	}
+	m.r.metrics.inFlightAdd(m.workload, m.provider, m.deployment, "", -1)
+	if m.ws == nil {
+		return
+	}
+	m.ws.lock()
+	m.ws.managed--
+	m.ws.mu.Unlock()
+	m.r.wakeNow()
+}
+
+// wlAcquire returns the state of the Workload a Resolution names, creating it at the first request.
+func (r *Router) wlAcquire(res *Resolution) *wlState {
+	key := res.Namespace + "/" + res.Name
+	r.wlMu.Lock()
+	defer r.wlMu.Unlock()
+	ws := r.wls[key]
+	if ws == nil {
+		ws = &wlState{r: r, key: key}
+		r.wls[key] = ws
+		r.wlN.Add(1)
+	}
+	return ws
+}
+
+// lockWorkload takes the mutex of the Workload's state, asking for a new state when the one it found was dropped meanwhile.
+func (r *Router) lockWorkload(res *Resolution) *wlState {
+	for {
+		ws := r.wlAcquire(res)
+		ws.lock()
+		if !ws.dead {
+			return ws
+		}
+		ws.mu.Unlock()
+	}
+}
+
+// chooseNamed places a request that names a Workload, the attempt of its first choice or of a retry (res is its Resolution): the Workload's route order
+// over our ModelDeployments and the managed targets, and else the Workload's own FIFO. While that FIFO holds a request, a new one queues behind it
+// without trying a route (strict), and a request is tried and queued in one critical section, so a wake that comes between the two cannot be missed.
+func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
+	// An arrival counts as active before it reads the view, so no wake pass skips on seeing none: a rebuild whose wake finds nothing active has changed the
+	// view before this request reads it (wakeNow, wakeAsync).
+	r.wlActive.Add(1)
+	ws := r.lockWorkload(res)
+	p, rerr := r.plan(n, res, key, exclude, withManaged)
+	if rerr != nil {
+		ws.mu.Unlock()
+		r.wlActive.Add(-1)
+		return nil, rerr
+	}
+	if r.beforePick != nil {
+		r.beforePick()
+	}
+	if len(ws.queue) == 0 {
+		tg, canWait := r.tryNamedLocked(ws, p)
+		if tg != nil {
+			ws.mu.Unlock()
+			r.wlActive.Add(-1)
+			return tg, nil
+		}
+		if !canWait {
+			ws.mu.Unlock()
+			r.wlActive.Add(-1)
+			return nil, errNoReadyTarget(n.Model).forWorkload(p.wname)
+		}
+	}
+	w := ws.enqueueLocked(p)
+	ws.mu.Unlock()
+	return r.waitNamed(ctx, ws, w)
+}
+
+// tryNamedLocked tries every route of the Workload once, in its route order, with the Workload's mutex held. It reserves nothing when it places nothing.
+// canWait says a route exists that may free: one of our Instances that is eligible and full, or an eligible managed target at the Workload's bound
+// (Q9: a full managed target with none of ours eligible waits in the Workload's FIFO, then 503 capacity).
+func (r *Router) tryNamedLocked(ws *wlState, p *plan) (tg *target, canWait bool) {
+	if h := r.holdAttempt; h != nil {
+		h()
+	}
+	res := p.res
+	if res.managedFirst {
+		if tg = r.takeManagedLocked(ws, p); tg != nil {
+			return tg, false
+		}
+	}
+	tg, wait := r.chooseServed(p.serving, p.ring, p.groups, p.n, p.key, p.exclude, res.load())
+	if tg != nil {
+		tg.workload, tg.wres = p.wname, res
+		return tg, false
+	}
+	if !res.managedFirst {
+		if tg = r.takeManagedLocked(ws, p); tg != nil {
+			return tg, false
+		}
+	}
+	return nil, wait != nil || len(p.managed) > 0
+}
+
+// takeManagedLocked reserves the Workload's count and returns a managed target when one is eligible and the Workload is below its managedSessions (no
+// bound: no limit). The check and the reservation are one critical section under the Workload's mutex, so two requests at the last slot cannot both
+// pass it.
+func (r *Router) takeManagedLocked(ws *wlState, p *plan) *target {
+	if len(p.managed) == 0 {
+		return nil
+	}
+	if max := p.res.managedMax; max > 0 && ws.managed >= max {
+		return nil
+	}
+	if h := r.afterManagedCheck; h != nil {
+		h()
+	}
+	ws.managed++
+	return r.managedTarget(ws, p)
+}
+
+// waitNamed holds a request in its Workload's FIFO for at most queueTimeout (HBEP-5, Workloads, Waiting). A wake places the head by tryHead and sends
+// the target on w.ch.
+func (r *Router) waitNamed(ctx context.Context, ws *wlState, w *wlWaiter) (*target, *routeError) {
+	qctx, cancel := context.WithTimeout(ctx, r.cfg.QueueTimeout.D())
+	defer cancel()
+	select {
+	case tg := <-w.ch:
+		return tg, nil
+	case <-qctx.Done():
+	}
+	ws.lock()
+	removed, wasHead := ws.removeLocked(w)
+	ws.mu.Unlock()
+	if !removed {
+		// Placed just as it gave up: hand the reservation back.
+		(<-w.ch).release()
+	}
+	if wasHead {
+		// The waiter behind it is the head now, and may fit a route that was free all along.
+		r.wakeNow()
+	}
+	name := w.res.Name
+	return nil, waitError(ctx, nil, "a route of the Workload "+name, "every route of the Workload "+name+" is at its limit").forWorkload(name)
+}
+
+// wakeNow runs a wake pass in the calling goroutine, which must hold no lock: a completion's goroutine, after the group's or the Workload's mutex is
+// released. It skips only when no request is active, and an arrival counts as active before it reads the view.
+func (r *Router) wakeNow() {
+	if r.wlActive.Load() == 0 {
+		return
+	}
+	r.wakePass()
+}
+
+// wakeAsync hands a wake pass to a goroutine of its own: the rebuild's, which runs under Router.mu and so may not take a Workload's mutex. Wakes that
+// come while a pass runs are folded into one more pass. It skips only when no Workload state exists, which is when there is nothing to wake or drop.
+func (r *Router) wakeAsync() {
+	if r.wlActive.Load() == 0 && r.wlN.Load() == 0 {
+		return
+	}
+	r.wakeAgain.Store(true)
+	if !r.wakeRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		for {
+			for r.wakeAgain.Swap(false) {
+				r.wakePass()
+			}
+			r.wakeRunning.Store(false)
+			if !r.wakeAgain.Load() || !r.wakeRunning.CompareAndSwap(false, true) {
+				return
+			}
+		}
+	}()
+}
+
+// wakePass tries the head of each Workload's FIFO, the Workloads in the order of their oldest request's arrival, until none places. It runs after the
+// group's own waiters were placed (Release and Update place them under the group's mutex, before the hooks that lead here), so a freed slot goes to a
+// ModelDeployment's own waiters, which name no Workload, first, and then to the Workloads' FIFOs (Q5; HBEP-5, Workloads, Waiting). One pass at a time.
+func (r *Router) wakePass() {
+	if h := r.beforeWake; h != nil {
+		h()
+	}
+	r.passMu.Lock()
+	defer r.passMu.Unlock()
+	for {
+		placed := false
+		for _, ws := range r.wlByHead() {
+			if r.tryHead(ws) {
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			break
+		}
+	}
+	r.pruneWorkloads()
+}
+
+// wlByHead is the Workloads whose FIFO holds a request, the one with the oldest head first.
+func (r *Router) wlByHead() []*wlState {
+	type headed struct {
+		ws  *wlState
+		seq uint64
+	}
+	r.wlMu.Lock()
+	var hs []headed
+	for _, ws := range r.wls {
+		if seq := ws.headSeq.Load(); seq != 0 {
+			hs = append(hs, headed{ws, seq})
+		}
+	}
+	r.wlMu.Unlock()
+	sort.Slice(hs, func(i, j int) bool { return hs[i].seq < hs[j].seq })
+	out := make([]*wlState, len(hs))
+	for i, h := range hs {
+		out[i] = h.ws
+	}
+	return out
+}
+
+// tryHead tries the head of one Workload's FIFO against the view as it is now, under the Workload's mutex, and delivers the target when it places. A
+// head whose serving set has gone, or whose routes are all taken, keeps its place.
+func (r *Router) tryHead(ws *wlState) bool {
+	ws.lock()
+	defer ws.mu.Unlock()
+	if len(ws.queue) == 0 {
+		return false
+	}
+	w := ws.queue[0]
+	p, rerr := r.plan(w.n, w.res, w.key, w.exclude, w.withManaged)
+	if rerr != nil {
+		return false
+	}
+	tg, _ := r.tryNamedLocked(ws, p)
+	if tg == nil {
+		return false
+	}
+	ws.popHeadLocked()
+	w.ch <- tg
+	return true
+}
+
+// pruneWorkloads drops the state of each Workload that has left the view and has nothing in flight or waiting: its FIFO has drained (Q15).
+func (r *Router) pruneWorkloads() {
+	r.mu.Lock()
+	known := r.wlKnown
+	r.mu.Unlock()
+	r.wlMu.Lock()
+	all := make([]*wlState, 0, len(r.wls))
+	for _, ws := range r.wls {
+		if !known[ws.key] {
+			all = append(all, ws)
+		}
+	}
+	r.wlMu.Unlock()
+	for _, ws := range all {
+		ws.lock()
+		if !ws.dead && len(ws.queue) == 0 && ws.managed == 0 {
+			ws.dead = true
+			r.wlMu.Lock()
+			if r.wls[ws.key] == ws {
+				delete(r.wls, ws.key)
+				r.wlN.Add(-1)
+			}
+			r.wlMu.Unlock()
+		}
+		ws.mu.Unlock()
+	}
+}
+
+// wlWaitingTotal is the requests waiting in the Workloads' FIFOs.
+func (r *Router) wlWaitingTotal() int {
+	r.wlMu.Lock()
+	defer r.wlMu.Unlock()
+	n := 0
+	for _, ws := range r.wls {
+		n += int(ws.waiting.Load())
+	}
+	return n
+}
+
+// waitSample is one sample of the waiting series.
+type waitSample struct {
+	workload, deployment string
+	n                    int
+}
+
+// waitingSamples is the requests waiting in each live group's queue and in each Workload's FIFO.
+func (r *Router) waitingSamples() []waitSample {
+	r.lockAsReader()
+	groups := make(map[string]*balancer.Group, len(r.groups))
+	for k, g := range r.groups {
+		groups[k] = g
+	}
+	r.mu.Unlock()
+	var out []waitSample
+	for k, g := range groups {
+		out = append(out, waitSample{deployment: k, n: g.Waiting()})
+	}
+	// The label is the Workload's name, as on every other series, and two Workloads of one name in different namespaces (of different models) share it.
+	byName := map[string]int{}
+	r.wlMu.Lock()
+	for _, ws := range r.wls {
+		byName[ws.key[strings.IndexByte(ws.key, '/')+1:]] += int(ws.waiting.Load())
+	}
+	r.wlMu.Unlock()
+	for name, n := range byName {
+		out = append(out, waitSample{workload: name, n: n})
+	}
+	return out
+}
