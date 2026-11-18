@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "operation": {
+    "name": "rel-m",
+    "namespace": "default",
+    "action": "Release",
+    "modelDeployment": "m",
+    "release": {
+      "allocations": ["alloc-a", "alloc-b"]
+    },
+    "owner": "system:serviceaccount:hpcburst-agents:agent-a",
+    "confirmedPlan": "0011223344556677",
+    "phase": "PartlyFailed",
+    "conditions": [
+      {
+        "type": "Executable",
+        "status": "False",
+        "reason": "PartlyFailed",
+        "message": "1 of 2 targets failed",
+        "lastTransitionTime": "2026-11-20T11:00:00Z"
+      }
+    ],
+    "plan": {
+      "id": "0011223344556677",
+      "observedAt": "2026-11-20T10:00:00Z",
+      "modelDeployment": {
+        "name": "m",
+        "uid": "uid-m",
+        "generation": 2
+      },
+      "targets": [
+        {
+          "kind": "Allocation",
+          "name": "alloc-a",
+          "uid": "uid-alloc-a",
+          "provider": "helios",
+          "effect": "ReleaseKept",
+          "needsApproval": false
+        },
+        {
+          "kind": "Allocation",
+          "name": "alloc-b",
+          "uid": "uid-alloc-b",
+          "provider": "helios",
+          "effect": "ReleaseKept",
+          "needsApproval": false
+        }
+      ]
+    },
+    "targets": [
+      {
+        "kind": "Allocation",
+        "name": "alloc-a",
+        "uid": "uid-alloc-a",
+        "state": "Done",
+        "lastTransitionTime": "2026-11-20T10:30:00Z"
+      },
+      {
+        "kind": "Allocation",
+        "name": "alloc-b",
+        "uid": "uid-alloc-b",
+        "state": "Failed",
+        "reason": "CancelRefused",
+        "message": "the provider refused the cancel",
+        "lastTransitionTime": "2026-11-20T11:00:00Z"
+      }
+    ]
+  }
+}

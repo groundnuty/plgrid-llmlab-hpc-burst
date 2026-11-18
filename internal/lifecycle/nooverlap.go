@@ -167,7 +167,11 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 // deployment that takes the replacement of pred, of the given size: one that
 // provisioning would place it on (warmFor, the one predicate, so placement and
 // this decision agree), or one whose agent has not registered again yet after
-// the controller's restart, which provisioning waits for.
+// the controller's restart, which provisioning waits for, but only until the
+// replacement's start deadline (deferralEnd): an unregistered spare is room
+// beside no longer than the placement waits for it, or the mode, and the
+// queued successor it would make, would be held past ReplacementLate (Astra's
+// review of #724, point 2).
 //
 // A registered warm Allocation counts as room beside from the moment this pass reads it until an Instance is placed on
 // it, a short window: another placement of the deployment, or the Allocation's release, can take it in between. The
@@ -175,7 +179,11 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 // replacement that finds the warm Allocation gone then meets the ordinary slot and caps checks (#725, from #724's review).
 func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) bool {
 	warm, deferUntil := p.warmFor(pv, params, pred)
-	return warm != nil || !deferUntil.IsZero()
+	if warm != nil {
+		return true
+	}
+	_, waits := p.deferralEnd(pred, placeOpts{}, deferUntil)
+	return waits
 }
 
 // slotFor reports whether the Provider's count leaves a free submit slot,

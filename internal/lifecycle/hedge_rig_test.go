@@ -339,15 +339,18 @@ func TestAStartedLoserIsKept(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		edit  func(*v1alpha1.ModelDeployment)
+		opts  []rigOption
 		after time.Duration // when it is released after the win; 0 for kept
 	}{
-		{"Keep", nil, 0},
+		{"Keep", nil, nil, 0},
 		{"ReleaseWhenIdle 15 min", func(md *v1alpha1.ModelDeployment) {
 			md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(15 * time.Minute)}
-		}, 15 * time.Minute},
+		}, nil, 15 * time.Minute},
+		// HBEP-7's third policy of this row: under Keep, a profile's maxIdle of 30 min releases it 30 min after the win.
+		{"Keep under a profile maxIdle of 30 min", nil, []rigOption{withProfile(func(s *v1alpha1.PlatformProfileSpec) { s.MaxIdle = dur(30 * time.Minute) })}, 30 * time.Minute},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			h := newHedgeRig(t)
+			h := newHedgeRig(t, c.opts...)
 			h.batch.Enqueue(pfake.Script{}, pfake.Script{})
 			reservedStart(h.rig, hoMD, func(md *v1alpha1.ModelDeployment) {
 				seededOnly(md)

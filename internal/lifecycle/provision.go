@@ -63,12 +63,9 @@ func (p *pass) canProvision() bool {
 	return p.md != nil && p.specErr == "" && p.r.Config.FrontConfigured && !p.shutdown
 }
 
-// provision places one Instance: a new primary (pred nil) or the replacement of
-// pred. It tries pred's Provider first, then the allowed Providers in order,
-// taking the first usable one whose class has a current ID and is neither
-// stopped nor paused. On a Provider with a warm Allocation of this deployment
-// that has lease enough, it places the Instance there (HBEP-7, open question
-// 14). It returns false when no Provider could take it.
+// provision places one Instance: a new primary (pred nil) or the replacement of pred, by the order
+// placementOrder gives (HBEP-7, Provisioning, Where; open question 14 for warm Allocations). It returns false when
+// no Provider could take it.
 func (p *pass) provision(pred *v1alpha1.Instance) (bool, error) {
 	return p.provisionWith(pred, placeOpts{})
 }
@@ -117,6 +114,10 @@ type placeOpts struct {
 	// handovers), the replacements its caps check counts and the admission headroom, read under the Provider's lock.
 	// Set with extra, on the Provider named by only.
 	ask extraAsk
+	// deadline, when set, is the start deadline of the replacement a hedge member is for, which the pass read from
+	// the hedge's need: a deferral never runs past it. It carries the deadline of a replacement hedge whose
+	// predecessor is gone, which a nil predecessor cannot give (growHedges; Astra's review of #724, point 3).
+	deadline time.Time
 }
 
 // placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
@@ -143,6 +144,12 @@ func (p *pass) createInstanceUnderLock(pv *providerView, cid *classID, pred *v1a
 	return p.createInstance(pv, cid, pred, allocName, o)
 }
 
+// provisionWith places one Instance by the steps placementOrder gives: the first that places it ends the walk. A warm
+// step that finds an unregistered warm Allocation (warmStep: stepDeferred) holds the NEW SUBMISSIONS that come
+// after it, and no more: the walk goes on to the later warm steps, so a registered spare on a later Provider is still
+// taken, and retention cannot release it during the wait (HBEP-7, Provisioning, Where; amendment #719 as reworded,
+// and Astra's review of #724, point 4). With nothing placed and a hold standing, the placement is deferred until the
+// hold's end. It returns false when no step could take it.
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
@@ -150,100 +157,45 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 	if o.extra {
 		o.quiet = true // see placeOpts.extra
 	}
-	order := p.providers
-	if pred != nil {
-		if pv := p.pvOf(pred.Labels); pv != nil {
-			order = append([]*providerView{pv}, order...)
+	var holdUntil time.Time // when the submissions held by a deferral may go on; zero: none are held
+	hold := func(until time.Time) {
+		if holdUntil.IsZero() || until.Before(holdUntil) {
+			holdUntil = until
 		}
 	}
-	for _, pv := range order {
-		if !pv.usable() || pv.tooShort != "" || pv.name == o.skip || o.skipProviders[pv.name] || (o.only != "" && pv.name != o.only) {
+	steps := p.placementOrder(pred, o)
+	for i, st := range steps {
+		if st.kind == stepSubmit && !holdUntil.IsZero() {
+			continue // held: a warm Allocation of this deployment is awaited
+		}
+		t := p.targetOf(st.pv, o, st.kind == stepSubmit)
+		if t == nil {
 			continue
 		}
-		cid := p.ids[pv.class]
-		if cid == nil || cid.id == "" || cid.blocked != "" {
-			continue
-		}
-		if paused, until := p.loopPaused(pv.class, pv.settings); paused {
-			if !o.quiet {
-				p.degrade(v1alpha1.ReasonRestartLoop, "provisioning in class %s/%s pauses until %s after repeated failures", pv.class.GPUModel, pv.class.CPUArch, until.UTC().Format(time.RFC3339))
-			}
-			p.at(until)
-			continue
-		}
-		params, err := partitionSizingFor(pv, p.plan.gpus, p.plan.workers, p.md.Spec.LeaseLimit)
-		if err != nil {
-			if o.quiet {
+		var res stepResult
+		var until time.Time
+		var err error
+		switch {
+		case st.kind == stepWarm:
+			res, until, err = p.warmStep(st.pv, t, pred, o)
+		default:
+			if until, ok := p.waitsForWarmBefore(pred, st, steps[i+1:], o); ok {
+				hold(until)
 				continue
 			}
-			var u *unsupported
-			if asUnsupported(err, &u) {
-				if p.sizingRefused == nil {
-					p.sizingRefused = map[string]string{}
-				}
-				p.sizingRefused[pv.name] = u.msg
-			} else {
-				p.degrade(v1alpha1.ReasonProviderUnavailable, "Provider %s: %v", pv.name, err)
-			}
+			res, err = p.submitOn(st.pv, t, pred, o)
+		}
+		if res == stepDeferred {
+			hold(until)
 			continue
 		}
-		warm, deferUntil := p.warmFor(pv, params, pred)
-		if warm == nil && !deferUntil.IsZero() {
-			p.at(deferUntil)
-			p.deferred = true
-			return false, nil
+		if res != stepPassed || err != nil {
+			return res == stepPlaced, err
 		}
-		if warm != nil {
-			// An Instance placed on a warm Allocation creates no Allocation, so nothing is marked: the mark
-			// is written once, in an Allocation's create request, and an existing one is never marked later
-			// (HBEP-7, Handover, No-overlap mode: "fixed at creation"). A reusable warm Allocation also
-			// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
-			if err := p.placeOnWarm(pv, cid, pred, warm, o); err != nil {
-				if errors.Is(err, errDeploymentGone) {
-					return false, nil
-				}
-				return false, err
-			}
-			return true, nil
-		}
-		name, err := randomName(pv.name)
-		if err != nil {
-			return false, err
-		}
-		// The slot is reserved before the Instance, the durable intent, so
-		// no two workers both pass the count (slots.go).
-		//
-		// The queued-successor mark is judged from this same read: whether the primary's Allocation
-		// still holds its slot is what the reservation's own list says (reserveSlotFor). A replacement
-		// takes its predecessor's reserved slot (slots_reserved.go; HBEP-7, Per-user limits).
-		var capsOf *v1alpha1.BatchParameters
-		if o.caps {
-			capsOf = &params
-		}
-		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.ask)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			continue
-		}
-		if err := p.createInstance(pv, cid, pred, name, o); err != nil {
-			p.releaseSlot(pv, name)
-			if errors.Is(err, errDeploymentGone) {
-				return false, nil
-			}
-			return false, err
-		}
-		if err := p.createAllocation(pv, name, params, markValue(holds, o.successorOf)); err != nil {
-			if errors.Is(err, errDeploymentGone) {
-				return false, nil // the Instance made just before it is the deleted deployment's to end
-			}
-			return true, err
-		}
-		// A new Allocation, a submission: capacity() reads where the missing primaries made one (the extra goes
-		// to those Providers only; a placement on a warm Allocation, which returned above, is none).
-		p.submitted = append(p.submitted, pv.name)
-		return true, nil
+	}
+	if !holdUntil.IsZero() {
+		p.at(holdUntil)
+		p.deferred = true // a placement that waits is not a missing Provider
 	}
 	return false, nil
 }
