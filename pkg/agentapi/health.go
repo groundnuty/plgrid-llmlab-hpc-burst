@@ -24,7 +24,9 @@ func Float64(v float64) *float64 { return &v }
 // are current. They all come from the one /metrics read that MetricsReadAt
 // dates, so the judgement is the same for every one of them and looks at none
 // of their values. When it is false the controller treats all of them as
-// unknown and takes no gauge-based action.
+// unknown and takes no gauge-based action. KVCacheTokens is not among them: it
+// is fixed for the engine process's life and carried past failed reads, so it
+// is not judged here and stays valid while the metrics are stale.
 //
 // The arguments are what the controller holds about the sample: reportTime is
 // the Time of the Report that carried it (the agent's clock), receivedAt is

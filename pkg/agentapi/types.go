@@ -465,7 +465,8 @@ type WorkerReport struct {
 // TimePerOutputTokenCount and ResponsesByStatus. A read
 // of it can fail while the probe passes, so a sample says which values it
 // holds and when they were read, and never fills a value it does not have
-// (`@hpc-burst-science-agent`, 31 Oct 2026):
+// (`@hpc-burst-science-agent`, 31 Oct 2026). KVCacheTokens is the one value
+// that is not a reading of the latest successful read (see its field):
 //
 //   - An absent value is unknown. The gauges and counters are pointers, so a
 //     sample that left one out decodes to nil and never to zero, which would
@@ -507,6 +508,19 @@ type Health struct {
 	// KVCacheUsage is the KV cache's use, from 0 to 1; nil is unknown, not
 	// zero.
 	KVCacheUsage *float64 `json:"kvCacheUsage,omitempty"`
+	// KVCacheTokens is the engine's KV cache size in tokens, the label
+	// kv_cache_size_tokens of vllm:cache_config_info (HBEP-7, The KV cache
+	// size; HBEP-764, R4). Unlike every other value here it is fixed for the
+	// engine process's life, so the agent reads it once, when the engine is
+	// ready, keeps it for that process and reports it in every sample, past a
+	// failed /metrics read too: it is not one of the values the sample's
+	// MetricsReadAt dates, and MetricsFresh does not judge it. A new engine
+	// process starts without it, until its own first read. nil is unknown,
+	// never 0: an engine that exports no such label (it runs with
+	// disable-log-stats), or one whose label is not a positive number, leaves
+	// it nil, and the agent takes no other series as a fallback
+	// (`@hpc-burst-science-agent`, 18 Nov 2026, #764, Q4).
+	KVCacheTokens *int64 `json:"kvCacheTokens,omitempty"`
 	// Preemptions is the engine's cumulative count of preempted requests
 	// (vllm:num_preemptions_total). It is a counter since the process started,
 	// like GeneratedTokens, so a restart starts it again at 0. nil is unknown,

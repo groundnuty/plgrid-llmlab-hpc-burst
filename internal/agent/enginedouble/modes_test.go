@@ -16,6 +16,7 @@ func TestParseModes(t *testing.T) {
 		{"", func(*Config) {}},
 		{"kv-low", func(c *Config) { c.KVCacheTokens = 1000 }},
 		{"kv-low,slow-first=200ms", func(c *Config) { c.KVCacheTokens = 1000; c.SlowFirst = 200 * time.Millisecond }},
+		{"kv-tokens=400000", func(c *Config) { c.KVCacheTokens = 400000 }},
 		{" greedy-diverge=40 , greedy-repeat ", func(c *Config) { c.GreedyDiverge, c.GreedyDivergeAt, c.GreedyRepeat = true, 40, true }},
 		{"greedy-diverge=0", func(c *Config) { c.GreedyDiverge = true }},
 		{"loop-above=2000", func(c *Config) { c.LoopAbove = 2000 }},
@@ -28,6 +29,7 @@ func TestParseModes(t *testing.T) {
 		{"reasoning-forever", func(c *Config) { c.ReasoningForever = true }},
 		{"reports-nothing,health-fail,errors-only,stall", func(c *Config) { c.ReportsNothing, c.HealthFail, c.ErrorsOnly, c.Stall = true, true, true, true }},
 		{"no-prefix-cache-metrics,no-tpot", func(c *Config) { c.OmitPrefixCacheMetrics, c.OmitTPOT = true, true }},
+		{"no-cache-config-info", func(c *Config) { c.OmitCacheConfigInfo = true }},
 		{"no-tpot-sum", func(c *Config) { c.OmitTPOTSum = true }},
 		{"no-tpot-count", func(c *Config) { c.OmitTPOTCount = true }},
 		{"report-max-model-len=4096", func(c *Config) { c.ReportedMaxModelLen = 4096 }},
@@ -57,6 +59,9 @@ func TestParseModesRefusesWhatItDoesNotKnow(t *testing.T) {
 		"die-on=":                   "needs the marker",
 		"fail-on":                   "needs the marker",
 		"kv-low=3":                  "takes no value",
+		"kv-tokens":                 "needs a number",
+		"kv-tokens=0":               "below 1",
+		"kv-tokens=big":             "not a number",
 		"slow-first":                "needs a duration",
 		"slow-first=fast":           "not a duration",
 		"slow-first=-1s":            "negative",
@@ -81,6 +86,7 @@ func TestParseModesRefusesWhatItDoesNotKnow(t *testing.T) {
 		"no-tpot-sum=1":             "takes no value",
 		"no-tpot-count=1":           "takes no value",
 		"no-prefix-cache-metrics=1": "takes no value",
+		"no-cache-config-info=1":    "takes no value",
 	} {
 		_, err := ParseModes(in)
 		if err == nil || !strings.Contains(err.Error(), why) || !strings.Contains(err.Error(), in) {

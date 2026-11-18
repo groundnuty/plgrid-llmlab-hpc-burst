@@ -91,6 +91,7 @@ type Config struct {
 	OmitTPOT               bool // no vllm:request_time_per_output_token_seconds histogram at all
 	OmitTPOTSum            bool // the histogram lacks its _sum line (the _count and buckets stay)
 	OmitTPOTCount          bool // the histogram lacks its _count line (the _sum and buckets stay)
+	OmitCacheConfigInfo    bool // no vllm:cache_config_info, as with disable-log-stats; unlike ReportsNothing, nothing else goes
 
 	// Startup modes, read by Main only.
 	StartDelay   time.Duration // create the socket only after this

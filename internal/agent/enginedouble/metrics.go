@@ -198,7 +198,7 @@ func (h *handler) metrics(w http.ResponseWriter) {
 			sample(tpotName+"_sum", base, tpot.sum)
 		}
 	}
-	if !h.cfg.ReportsNothing {
+	if !h.cfg.ReportsNothing && !h.cfg.OmitCacheConfigInfo {
 		metric("vllm:cache_config_info", "gauge", "Information of the LLMEngine CacheConfig")
 		sample("vllm:cache_config_info", h.cacheConfigLabelText(), 1)
 	}

@@ -229,6 +229,36 @@ func TestToolMalformedAndNoToolCall(t *testing.T) {
 	}
 }
 
+// no-cache-config-info drops vllm:cache_config_info and nothing else: /version, max_model_len and the
+// fingerprint stay, and the other series of /metrics are all there (reports-nothing drops those too).
+func TestNoCacheConfigInfoDropsOnlyThatSeries(t *testing.T) {
+	modes, err := ParseModes("no-cache-config-info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgFor()
+	cfg.OmitCacheConfigInfo = modes.OmitCacheConfigInfo
+	s := serve(t, cfg)
+	m := string(s.get("/metrics").body)
+	if strings.Contains(m, "cache_config_info") {
+		t.Error("/metrics has cache_config_info")
+	}
+	for _, want := range []string{"vllm:num_requests_running", "vllm:kv_cache_usage_perc", "vllm:num_preemptions_total"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("/metrics lacks %s: the mode dropped more than cache_config_info", want)
+		}
+	}
+	if r := s.get("/version"); r.status != 200 {
+		t.Errorf("/version: HTTP %d, want 200", r.status)
+	}
+	if res := s.chat(chatBody(2, nil)); res.SystemFingerprint == nil || *res.SystemFingerprint != "fp-enginedouble" {
+		t.Errorf("system_fingerprint = %v, want fp-enginedouble", res.SystemFingerprint)
+	}
+	if d := string(serve(t, cfgFor()).get("/metrics").body); !strings.Contains(d, `kv_cache_size_tokens="1048576"`) {
+		t.Errorf("the default engine's /metrics lacks kv_cache_size_tokens=\"1048576\"")
+	}
+}
+
 func TestReportsNothing(t *testing.T) {
 	modes, err := ParseModes("reports-nothing")
 	if err != nil {

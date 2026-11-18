@@ -234,7 +234,11 @@ func (m metrics) responsesByStatus() map[string]int64 {
 // and the KV cache's use, a fraction, is the largest
 // (`@hpc-burst-science-agent`, 31 Oct 2026). A real vLLM with prefix caching
 // off exports both prefix-cache counters at 0, a pointer to 0 here, while an
-// engine that omits their lines is nil.
+// engine that omits their lines is nil. The KV cache size is the one reading
+// of vllm:cache_config_info's kv_cache_size_tokens label (kvCacheTokens): the
+// engine exports it with every scrape, and the agent keeps the first one it
+// reads for the process's life (recordHealth), so a later failed read does not
+// lose it.
 func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	m, err := c.metrics(ctx)
 	if err != nil {
@@ -253,6 +257,7 @@ func (c *Client) Sample(ctx context.Context) (agentapi.Health, error) {
 	if kv, ok := m.max(metricKVUsage); ok {
 		h.KVCacheUsage = agentapi.Float64(kv)
 	}
+	h.KVCacheTokens = m.kvCacheTokens()
 	// The status label is taken verbatim (agentapi.Health.ResponsesByStatus).
 	// vLLM v0.32.0 groups it into classes: serve/instrumentator/metrics.py,
 	// lines 64-74, builds its Instrumentator without
@@ -273,6 +278,20 @@ func (m metrics) cacheConfig() map[string]string {
 		return nil
 	}
 	return ss[0].labels
+}
+
+// kvCacheTokens is the engine's KV cache size in tokens, for agentapi.Health.KVCacheTokens: the label
+// kv_cache_size_tokens of vllm:cache_config_info, and nothing else. It is nil when the engine reports no
+// such series or the label is not a positive number ("None", empty, text, 0, a negative one, a number
+// past int64); never 0. It takes no fallback: kvCapacity's num_gpu_blocks times block_size, which
+// qualification uses, is not read here (HBEP-7, The KV cache size; `@hpc-burst-science-agent`, 18 Nov
+// 2026, #764, Q4).
+func (m metrics) kvCacheTokens() *int64 {
+	n, err := strconv.ParseInt(m.cacheConfig()["kv_cache_size_tokens"], 10, 64)
+	if err != nil || n < 1 {
+		return nil
+	}
+	return agentapi.Int64(n)
 }
 
 // kvCapacity is the KV capacity the engine reported at start-up, in tokens:
