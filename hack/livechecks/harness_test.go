@@ -208,7 +208,10 @@ func (w *world) writeSettings(mutate func(m map[string]string)) {
 		"ACCOUNT_SANO_GPU":             "SEEDACCT-sano",
 		// The Sano rows' Provider staging directory (issue #735): account data, which must never reach the screen (a leak seed below).
 		"LIVE_SANO_STAGING_DIR": "/SEEDSTAGE/hb-stage",
+		// The baseline row's generator binary (issue #764): an executable regular file, which the script only checks; the row runs it by this path.
+		"LIVE_STUDYLOAD_BIN": filepath.Join(w.dir, "studyload"),
 	}
+	write(w.t, m["LIVE_STUDYLOAD_BIN"], "#!/bin/sh\nexit 0\n", 0o700)
 	for _, p := range []string{llmlab, m["LIVE_CONF_CREDENTIALS_HELIOS"], m["LIVE_CONF_CREDENTIALS_ATHENA"], m["LIVE_CONF_CREDENTIALS_SANO"]} {
 		write(w.t, p, "key SEEDKEY\n", 0o600)
 	}
@@ -549,5 +552,5 @@ func lines(s string) []string {
 // by default (the one that has run there; their profile lists it alone, issue #735). The script takes direct mode for the Sano rows too, and sano_test.go
 // runs them in it with exactMode.
 func hostDialedOnly(row string) bool {
-	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover"
+	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover" || row == "beta-sano-llmlab-baseline"
 }

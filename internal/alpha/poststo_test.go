@@ -29,10 +29,11 @@ func TestTheRowsThatNamedIssue93PostToTheAlphaListAlone(t *testing.T) {
 // list, which every row's result belongs to; #376, the plgrid-now hour rows' plan and build, which rows A and B and the
 // pre-staging row post to as well; #94, the Helios real-engine run, which alpha-helios-nooverlap names; and, since 13 Nov 2026,
 // #522, beta's tracker, which the beta rows post to (#521); and, since 18 Nov 2026, #735, Sano as a Provider, which the Sano rows post to
-// as checklist ticks (the science agent's plan there: "post the results here as checklist ticks"). No closed issue is
+// as checklist ticks (the science agent's plan there: "post the results here as checklist ticks"); and, since 18 Nov 2026, #764, HBEP-764's end-to-end
+// test, which the baseline row posts to (its item 4). No closed issue is
 // on it, and no row has an exception: the reach and host-dialed rows post to #145 and name their closed origin issue in the
 // text (Row.Origin; the science agent's ruling of 12 Nov 2026 on #145).
-var openPostTargets = []string{"#145", "#376", "#94", "#522", "#735"}
+var openPostTargets = []string{"#145", "#376", "#94", "#522", "#735", "#764"}
 
 var issueRef = regexp.MustCompile(`#[0-9]+`)
 

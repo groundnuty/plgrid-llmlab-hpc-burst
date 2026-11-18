@@ -503,16 +503,19 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || [ "${SLOT[$n]:--}" != - ] || return 1'
   'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  [ "${SWAIT[$n]:--}" = - ] || return 1'
   'hack/live-checks.sh@@  [ -n "${HOST[$n]:-}" ] || return 1@@  true'
-  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) false ;; *) false ;; esac'
-  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac@@  true'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) false ;; *) false ;; esac'
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac@@  true'
   # #735: the Sano serve row's first clock is cut at its deployment's first end (one job, no start wait), so its NOT RUN at that bound is accepted like a tunnel row's; without it a queue wait reads as FAIL.
-  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac'
-  # #735, PR 1a: a Sano row refuses ssh mode alone (its compute nodes have no home directory for ssh mode's key), in the config and in the script; direct mode is taken, since the
-  # first study dials Sano in it. The rule widened back to "host-dialed alone" refuses direct; a rule that is never true takes ssh.
+  'hack/live-checks.sh@@  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve|beta-sano-llmlab-baseline) true ;; *) false ;; esac@@  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac'
+  # #735, PR 1a: a Sano row (the alpha and the beta rows alike, the baseline row included) refuses ssh mode alone (its compute nodes have no home directory for ssh mode's key), in the config
+  # and in the script; direct mode is taken, since the first study dials Sano in it. The rule widened back to "host-dialed alone" refuses direct; a rule that is never true takes ssh; a rule
+  # that leaves the beta rows out takes ssh on the baseline row.
   'config.go@@	if row.Cluster == "sano" && cfg.DialHomeMode == "ssh" {@@	if row.Cluster == "sano" && cfg.DialHomeMode != "host-dialed" {'
   'config.go@@	if row.Cluster == "sano" && cfg.DialHomeMode == "ssh" {@@	if false {'
+  'config.go@@	if row.Cluster == "sano" && cfg.DialHomeMode == "ssh" {@@	if strings.HasPrefix(row.Name, "alpha-") && row.Cluster == "sano" && cfg.DialHomeMode == "ssh" {'
   'hack/live-checks.sh@@      if [ "${mode:-}" = ssh ]; then@@      if [ "$host_dialed" != 1 ]; then'
   'hack/live-checks.sh@@      if [ "${mode:-}" = ssh ]; then@@      if false; then'
+  'hack/live-checks.sh@@    alpha-sano-*|beta-sano-*)@@    alpha-sano-*)'
   'hack/live-checks.sh@@  [ "$CLEAN_LEFT" -eq 0 ] || verdict=1@@  [ "$CLEAN_LEFT" -eq 0 ] || [ "$NOT_RUN" = 1 ] || verdict=1'
   'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=1'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-'
@@ -1227,6 +1230,54 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'nowserve.go@@	b.WriteString(rehashLine("the job", o.Warm))@@	_ = rehashLine'
   'nownooverlap.go@@	b.WriteString(rehashLine("the successor'"'"'s job", o.WarmSuccessor))@@	_ = o.WarmSuccessor'
   'internal/agent/converge.go@@"bytes", r.Bytes, "ms", r.Duration.Milliseconds())@@"bytes", r.Bytes, "millis", r.Duration.Milliseconds())'
+  # HBEP-764 item 4, the baseline row (baseline.go, #764): the cap constant, the judge's source of a route, the LLMLab guard, the detach, and the routing block.
+  'baseline.go@@	CapSano   = 11@@	CapSano   = 12'
+  'baselinejudge.go@@func (j joinedRow) route(managed string) Route { return routeOfRow(j.Front, managed) }@@func (j joinedRow) route(managed string) Route {
+	return routeOfRow(FrontRow{Emitter: j.Gen.Emitter, Provider: j.Gen.Provider}, managed)
+}'
+  'baselineflow.go@@		if n-before > LLMLabGuard {@@		if n-before > LLMLabGuard && false {'
+  'baselineflow.go@@			if err := w.DetachManaged(ctx); err != nil {@@			if err := error(nil); err != nil {'
+  'steps_live_test.go@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration), InstanceCap: instanceCapOf(row)}@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration)}'
+  # The baseline row's P0 before any job, the engine's waiting rule and the ratio's mapping (#764): the sustain count removed, the served deployment created before P0, a failed P0 that goes on, and the ratio ignored.
+  'baseline.go@@	EngineWaitingSustain = 3@@	EngineWaitingSustain = 1'
+  'baselineflow.go@@	if o.P0, err = w.Probe(ctx); err != nil {@@	if _, err = w.StartServed(ctx); err != nil {
+		return o, err
+	}
+	if o.P0, err = w.Probe(ctx); err != nil {'
+  'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
+  'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
+  'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
+  'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
+  # #776's review, point 5: the cap-spill rule's tick (0 rejects a healthy burst), guard 2 (a failed dial in a phase) and the front log's privacy (the post prints the matches).
+  'baseline.go@@	ArrivalTick = time.Millisecond@@	ArrivalTick = 0'
+  'baselinejudge.go@@		case po.DialFailures > 0:@@		case false:'
+  'baselinejudge.go@@%d dial failures for our Instance\n", po.DialLines, po.DialFailures)@@%d dial failures for our Instance %v\n", po.DialLines, po.DialFailures, po.DialFailed)'
+  # The guard's read must have found the front's lines: no parsed line is INVALID (the empty-log row), the parsed count is counted, and a line with no message is not one.
+  'baselinejudge.go@@		case po.DialLines == 0:@@		case false:'
+  'baseline.go@@		parsed++@@		parsed += 0'
+  'baseline.go@@		if json.Unmarshal(line, &l) != nil || l.Msg == "" {@@		if json.Unmarshal(line, &l) != nil {'
+  # #776's review, point 6: the detach phase passes only on the front's own waiting count reaching 2 and returning to 0.
+  'baselinejudge.go@@			if maxWaiting < LLMLabK {@@			if maxWaiting < 1 {'
+  'baselinejudge.go@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 {@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 && false {'
+  # #776's review, point 3: the control and the long phase need all N sessions, N requests in flight at once on the Instance, and N of them in the long range.
+  'baselinejudge.go@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < cap {@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < 0 {'
+  'baselinejudge.go@@			if peak, _, _ := inFlightStats(served, -1); peak < cap {@@			if peak, _, _ := inFlightStats(served, -1); peak < 0 {'
+  'baselinejudge.go@@			if peak, _, _ := inFlightStats(long, -1); peak < cap {@@			if peak, _, _ := inFlightStats(long, -1); peak < 0 {'
+  # #776's review, point 4: P2's expectation is the constants' (N = cap + k, exactly k distinct first-turn sessions), never the override's.
+  'baselinejudge.go@@		k := LLMLabK@@		k := ph.Sessions - cap'
+  'baselinejudge.go@@		case len(first) != k:@@		case len(first) != k && false:'
+  'baselinejudge.go@@		case ph.Sessions != cap+k:@@		case false:'
+  # #776's review, point 8: the guard fails closed (a failed first scrape starts no generator, a failed poll stops it) and the final count from the records counts.
+  'baselineflow.go@@	if !beforeOK {@@	if false && !beforeOK {'
+  'baselineflow.go@@		if !ok {
+			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed@@		if !ok && false {
+			po.Stopped = StopGuardUnread // a scrape that fails stops the phase: the guard fails closed'
+  'baselinejudge.go@@	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard {@@	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard && false {'
+  # #776's review, point 2: a gate the served Instance did not answer stops the row before any phase.
+  'baselineflow.go@@	if !gateAnswered(o.Gate) {@@	if false && !gateAnswered(o.Gate) {'
+  # #776's review, point 1: P0's 200 is no answer unless it is a completed stream with tokens.
+  'baselinejudge.go@@	case !p0Completed(o.P0.Row):@@	case false && !p0Completed(o.P0.Row):'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"
