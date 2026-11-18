@@ -3,6 +3,8 @@ package alpha
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,11 +35,14 @@ const (
 	envPending    = "HPCBURST_ALPHA_PENDING_MAX_SECONDS"
 	envLease      = "HPCBURST_ALPHA_LEASE_MINUTES"
 	envRunID      = "HPCBURST_ALPHA_RUN_ID"
+	// envStagingDir is the Provider's own spec.stagingDir, for the rows whose profile has none (Row.ProviderStaging; #757, #735). It is account
+	// data: a cluster path carries a user name, so no message or log of this package names its value.
+	envStagingDir = "HPCBURST_ALPHA_STAGING_DIR"
 )
 
 // liveEnv are the settings only a live run has. A dry run refuses to start
 // when any is set: a dry pass must never stand for a live one.
-var liveEnv = []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envKey, envListen}
+var liveEnv = []string{envAccount, envCreds, envHostLock, envControlDir, envBinDir, envBuildDir, envMode, envAddr, envKey, envListen, envStagingDir}
 
 // Config is a run's settings. The account, the credentials file and the
 // dial-home key are paths and names that never reach a log.
@@ -67,6 +72,9 @@ type Config struct {
 	DialHomeListen string
 	// Profile names the row's shipped platform profile (profiles/<name>.yaml).
 	Profile string
+	// StagingDir is the Provider's own spec.stagingDir, for a row with ProviderStaging: the live run's staging root on the shared file
+	// system, from HPCBURST_ALPHA_STAGING_DIR. It is never logged.
+	StagingDir string
 	// RunID names the run's Provider and deployment, and so begins every job
 	// tag of the run (TagPrefix): hack/live-checks.sh draws it and cleans up
 	// by it.
@@ -161,6 +169,17 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	cfg.BinDir, cfg.BuildDir = need(envBinDir), need(envBuildDir)
 	cfg.DialHomeMode = need(envMode)
 	cfg.DialHomeListen, cfg.Profile = getenv(envListen), need(envProfile)
+	// The Provider's own staging directory: required by a row whose profile has none, refused for a row that does not take one, so that a
+	// stray setting never reads as if it applied. Only its shape is checked, and no message holds its value.
+	if row.ProviderStaging {
+		if cfg.StagingDir = need(envStagingDir); cfg.StagingDir != "" {
+			if err := CheckStagingDir(cfg.StagingDir); err != nil {
+				bad = append(bad, envStagingDir+": "+err.Error())
+			}
+		}
+	} else if getenv(envStagingDir) != "" {
+		bad = append(bad, envStagingDir+" is set for a row whose profile gives the staging directory")
+	}
 	switch cfg.DialHomeMode {
 	case "host-dialed":
 		// The host dials the jobs through the login node, so the mode has no address and needs no key
@@ -175,6 +194,11 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 		cfg.DialHomeAddr, cfg.DialHomeKey = need(envAddr), need(envKey)
 	default:
 		bad = append(bad, envMode+" must be direct, ssh or host-dialed")
+	}
+	// Sano's compute nodes have no home directory, where ssh mode's agent reads its key, so its profile lists host-dialed alone (profiles/sano.yaml,
+	// dialHomeModes; HBEP-4), and these rows run in no other mode: ReadProfile refuses ssh there. (direct is untested on Sano, not refused by the profile.)
+	if row.Cluster == "sano" && cfg.DialHomeMode != "host-dialed" {
+		bad = append(bad, envMode+" must be host-dialed for "+row.Name+": Sano's profile lists no other dial-home mode")
 	}
 	// The keeper row tests the relay keeper, which runs the relays of host-dialed mode alone (HBEP-6, The relay keeper): another mode has none.
 	if row.Name == BetaKeeperName && cfg.DialHomeMode != "host-dialed" {
@@ -226,4 +250,26 @@ func joinBad(bad []string) error {
 		return nil
 	}
 	return fmt.Errorf("%s", strings.Join(bad, "; "))
+}
+
+// stagingDirForm is the form a Provider's spec.stagingDir takes (api/v1alpha1, ProviderSpec.StagingDir): an absolute path, or one that
+// starts with an environment variable, of letters, digits and ._:=,/-.
+var stagingDirForm = regexp.MustCompile(`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`)
+
+// stagingDirReadable is what the rows add to that form: no ':', '=' or ','. The CRD takes them, but the warm-start reader puts the path of the job's standard
+// error on a command line unquoted and refuses any character outside letters, digits and "._/-" (safePath, in the live flow), after the run has spent
+// its GPU time and with its evidence unread (the review of PR 770). So the row refuses them at its first line.
+var stagingDirReadable = regexp.MustCompile(`^[^:=,]*$`)
+
+// CheckStagingDir holds a Provider's stagingDir to the form the CRD gives it, and to the rows' own rule on top of it, before anything is built: a value the
+// API would refuse, or the harness could not read the agent's log by, fails the run at its first line instead of at the first Provider, or at the end of a
+// run. The errors name no part of the value.
+func CheckStagingDir(dir string) error {
+	if !stagingDirForm.MatchString(dir) || slices.Contains(strings.Split(dir, "/"), "..") || len(dir) > 1024 {
+		return fmt.Errorf("is not an absolute path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment")
+	}
+	if !stagingDirReadable.MatchString(dir) {
+		return fmt.Errorf("has a ':', '=' or ',' in it: the Provider's CRD takes them, but the rows read the agent's log by this path, which a command line carries unquoted, and refuse them")
+	}
+	return nil
 }

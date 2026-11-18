@@ -17,6 +17,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -61,7 +62,7 @@ func (r *liveRun) NowServe(ctx context.Context, p Plan) (NowServeObs, error) {
 	o.Gauges = r.nowGauges(in)
 	o.WorkerRestart = r.workerRestart(ctx, p, in)
 	in = r.current(in)
-	o.Events = r.nowEvents(in)
+	o.Events = r.nowEvents(in, o.ReadyAt, o.DrainStart)
 	// The run is over: the deployment goes, and the cluster's record shows its job ended.
 	r.endDeployment(ctx, p)
 	tags, err := r.runTags()
@@ -142,7 +143,7 @@ func (r *liveRun) warmOf(ctx context.Context, in v1alpha1.Instance, files []agen
 		r.t.Logf("the agent's log of the job could not be read for the warm start: %v", err)
 		return w
 	}
-	w.LogRead, w.Log, w.Rehash = true, ParseAgentLog(b), RehashOf(b)
+	w = w.WithLog(b)
 	r.t.Logf("%s: the agent's log of the job, read whole up to %d bytes: %d lines; the rehash read %t: %d of %d files, %d bytes, %d ms",
 		r.cfg.Row.Name, agentLogMax, len(w.Log), w.Rehash.Read, w.Rehash.Files, w.Rehash.Listed, w.Rehash.Bytes, w.Rehash.MS)
 	return w
@@ -261,37 +262,63 @@ func (r *liveRun) nowGauges(in v1alpha1.Instance) ObsCheck {
 // nowEvents holds the run's events to HBEP-8 through obscheck. The expected set is written here from HBEP-8's Reasons
 // table (Events, "Reasons in alpha") and HBEP-7's rules, for this row's steps, never from what
 // the run emitted (issue #193, Verifications that prove nothing): the agent registered (started); the Instance verified,
-// qualified and warmed up (ready); its drain start under an hour away with no replacement ready, in a one-job row of a
-// 48-minute lease, from its ready on (ending-soon, HBEP-7, Events and conditions); and the worker-rung restart (failing). Forbidden: a
-// handover, since no replacement was ever ready. What else the run raised is not judged here beyond its form (obscheck.EventProblems holds every typed event
-// to HBEP-8's form). It waits, bounded, for every expected event, then reads the forbidden ones and the form once.
-func (r *liveRun) nowEvents(in v1alpha1.Instance) ObsCheck {
-	inst := func(action, reason, why string) obscheck.WantEvent {
-		return obscheck.WantEvent{Action: action, Reason: reason, Kind: "Instance", Namespace: in.Namespace, Name: in.Name, Controller: obscheck.LifecycleController, Why: why}
-	}
-	want := []obscheck.WantEvent{
-		inst("started", v1alpha1.ReasonAgentRegistered, "the agent registers (Instance start)"),
-		inst("ready", "Ready", "verified, qualified and warmed up (Instance start)"),
-		inst("ending-soon", "NoReplacementReady", "ready with its drain start under an hour away and no replacement ready (HBEP-7:547)"),
-		inst("failing", v1alpha1.ReasonWorkerRestart, "the worker-rung restart (HBEP-7, Health and restarts)"),
-	}
-	forbid := []obscheck.WantEvent{{Action: "replaced", Reason: v1alpha1.EventReasonHandedOver, Kind: "Instance", Namespace: in.Namespace, Name: in.Name,
-		Why: "no replacement was ever ready in a one-job row"}}
-	var missing []obscheck.WantEvent
-	var problems []string
+// qualified and warmed up (ready); and the worker-rung restart (failing). The ending-soon event is Athena's unconditionally, as before #735 (its
+// 48-minute lease always puts the drain start under an hour away), and on Sano's serve row HBEP-7's rule (README.md:797), computed from the Instance's
+// ready time and drain start and the window's end (EndingSoonAt): expected where the drain start comes under an hour away within the window, forbidden
+// where it does not (Sano's 106-minute lease), and judged neither way within one status interval of the boundary. Forbidden besides: a handover, since
+// no replacement was ever ready. What else the run raised is not judged here beyond its form (obscheck.EventProblems holds every typed event to
+// HBEP-8's form). It waits, bounded, for every expected event, and both sets are drawn at the time of each read, so the verdict of the last read, the
+// final snapshot, is the one that stands (pollNowEvents).
+func (r *liveRun) nowEvents(in v1alpha1.Instance, ready, drainStart time.Time) ObsCheck {
 	deadline, _ := stack.BoundedDeadline(r.t, stack.WaitDeadline)
-	for {
-		missing, problems = obscheck.EventProblems(stack.Events(r.t, r.c), want, forbid)
-		if len(missing) == 0 || !time.Now().Before(deadline) {
-			break
-		}
-		time.Sleep(time.Second)
-	}
+	sets := nowEventSets(in, r.cfg.Row.Name, ready, drainStart)
+	missing, problems := pollNowEvents(func() []eventsv1.Event { return stack.Events(r.t, r.c) }, sets, time.Now, func(d time.Duration) { time.Sleep(d) }, deadline)
 	c := ObsCheck{Checked: true, Problems: problems}
 	for _, m := range missing {
 		c.Missing = append(c.Missing, m.String()+" ("+m.Why+")")
 	}
 	return c
+}
+
+// nowEventSets returns the expected and the forbidden events of an Instance at a time: the ones a row always has, and the ending-soon event on the side
+// the row's rule (EndingSoonOf) puts it at that time, the window ending there.
+func nowEventSets(in v1alpha1.Instance, rowName string, ready, drainStart time.Time) func(at time.Time) (want, forbid []obscheck.WantEvent) {
+	inst := func(action, reason, why string) obscheck.WantEvent {
+		return obscheck.WantEvent{Action: action, Reason: reason, Kind: "Instance", Namespace: in.Namespace, Name: in.Name, Controller: obscheck.LifecycleController, Why: why}
+	}
+	return func(at time.Time) (want, forbid []obscheck.WantEvent) {
+		want = []obscheck.WantEvent{
+			inst("started", v1alpha1.ReasonAgentRegistered, "the agent registers (Instance start)"),
+			inst("ready", "Ready", "verified, qualified and warmed up (Instance start)"),
+			inst("failing", v1alpha1.ReasonWorkerRestart, "the worker-rung restart (HBEP-7, Health and restarts)"),
+		}
+		forbid = []obscheck.WantEvent{{Action: "replaced", Reason: v1alpha1.EventReasonHandedOver, Kind: "Instance", Namespace: in.Namespace, Name: in.Name,
+			Why: "no replacement was ever ready in a one-job row"}}
+		switch EndingSoonOf(rowName, ready, drainStart, at) {
+		case EndingSoonExpected:
+			want = append(want, inst("ending-soon", v1alpha1.EventReasonNoReplacementReady, "ready with its drain start under an hour away and no replacement ready (HBEP-7:797)"))
+		case EndingSoonForbidden:
+			forbid = append(forbid, inst("ending-soon", v1alpha1.EventReasonNoReplacementReady, "the drain start is more than an hour away for the whole run (HBEP-7:797)"))
+		}
+		return want, forbid
+	}
+}
+
+// pollNowEvents reads the events until every expected one is there or the deadline passes, a second apart, and returns what the last read found
+// missing and wrong. The sets are drawn again at each read, at its own time: an expectation that is not yet due when the polling begins (the ending-soon
+// event inside the dead band at the boundary) may be due at the last read, and then a missing one is missing; one that was due and is forbidden at the
+// last read is judged then. The clock, the sleep and the events are arguments so that a test can drive it.
+func pollNowEvents(events func() []eventsv1.Event, sets func(at time.Time) (want, forbid []obscheck.WantEvent), clock func() time.Time, sleep func(time.Duration), deadline time.Time) (missing []obscheck.WantEvent, problems []string) {
+	at := clock()
+	for {
+		want, forbid := sets(at)
+		missing, problems = obscheck.EventProblems(events(), want, forbid)
+		if len(missing) == 0 || !at.Before(deadline) {
+			return missing, problems
+		}
+		sleep(time.Second)
+		at = clock()
+	}
 }
 
 // ourJobFor is ourJob, its failures naming the step that needs it.
