@@ -18,6 +18,7 @@ type auditEvent struct {
 		Username string `json:"username"`
 	} `json:"user"`
 	ObjectRef struct {
+		APIGroup  string `json:"apiGroup"`
 		Resource  string `json:"resource"`
 		Namespace string `json:"namespace"`
 		Name      string `json:"name"`
@@ -26,7 +27,8 @@ type auditEvent struct {
 	ResponseStatus struct {
 		Code int `json:"code"`
 	} `json:"responseStatus"`
-	hasBody bool // requestObject or responseObject is present
+	hasBody    bool // requestObject or responseObject is present
+	hasRequest bool // requestObject is present: a Request-level event has it and no responseObject
 }
 
 // readAudit returns the text of the audit log and its events; a line that is not a JSON object fails
@@ -56,7 +58,7 @@ func readAudit(t testing.TB, path string, completeOnly bool) (string, []auditEve
 		}
 		_, req := fields["requestObject"]
 		_, resp := fields["responseObject"]
-		e.hasBody = req || resp
+		e.hasBody, e.hasRequest = req || resp, req
 		evs = append(evs, e)
 	}
 	return string(b), evs
