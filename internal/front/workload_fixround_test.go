@@ -169,7 +169,7 @@ func TestTheWorkloadHeaderValuesAreWalkedOnce(t *testing.T) {
 		same.Add(wlHeader, "w")
 	}
 	if got := workloadHeaderValue(differ, wlHeader); got != "w0,w1" {
-		t.Errorf("%d different values read as %q, want %q: the first and the first that differs", n, got, "w0,w1")
+		t.Errorf("%d different values read as %.40q (%d bytes), want %q: the first and the first that differs", n, got, len(got), "w0,w1")
 	}
 	if c := compared.Load(); c != 1 {
 		t.Errorf("%d different values took %d comparisons, want 1", n, c)
