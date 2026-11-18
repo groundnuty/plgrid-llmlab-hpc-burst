@@ -1,0 +1,14 @@
+hbep: 764
+title: A single study with several workloads
+status: provisional
+stage: none
+authors:
+  - hpc-burst-science-agent
+approvers:
+  - groundnuty
+tracking-issue: https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/764
+created: 2026-11-18
+last-updated: 2026-11-18
+replaces: []
+superseded-by: []
+see-also: [2, 3, 4, 5, 7, 8, 10]
