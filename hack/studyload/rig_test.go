@@ -68,11 +68,13 @@ func (g *rig) record(ev enginedouble.LogEvent) {
 	g.mu.Unlock()
 }
 
-// enter registers an arriving request, and reports whether its session is new (a first-turn request).
+// enter registers an arriving request, and reports whether it is a first-turn request: one whose conversation is a single message. That
+// is read from the request itself, not from its session ID, so a generator that shared one ID among sessions still fills the barrier
+// (and the distinct-ID assertions, not the barrier, then fail it).
 func (g *rig) enter(s *seenReq) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	first := len(g.bySess[s.session]) == 0
+	first := len(s.roles) == 1
 	g.bySess[s.session] = append(g.bySess[s.session], s)
 	if first {
 		g.firsts++
