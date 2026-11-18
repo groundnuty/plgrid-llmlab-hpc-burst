@@ -75,7 +75,9 @@ type Router struct {
 	wlKnown  map[string]bool
 	// wlOrphan says some Workload state is of a Workload that has left the view, so that a completion or a waiter that gives up runs a wake pass, which
 	// drops the state once it is empty (pruneWorkloads). It is set by a rebuild and cleared by a pass, both under mu (recomputeOrphanLocked).
-	wlOrphan  atomic.Bool
+	wlOrphan atomic.Bool
+	// wakeGen counts the wake requests, whether or not a pass ran for them (chooseNamed).
+	wakeGen   atomic.Uint64
 	wakeAgain atomic.Bool
 	// wakeRunning says a goroutine of wakeAsync runs.
 	wakeRunning atomic.Bool
@@ -87,6 +89,8 @@ type Router struct {
 	holdAttempt       func()
 	afterManagedCheck func()
 	onWlContended     func()
+	// beforeEnqueue runs under a Workload's mutex just before a request that no route could take is put in its FIFO.
+	beforeEnqueue func()
 
 	// The coalesced rebuilds of a burst of registration changes (#417). dirty
 	// says a registration changed since the last rebuild began; running, that a

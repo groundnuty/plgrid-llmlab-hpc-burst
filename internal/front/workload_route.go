@@ -167,12 +167,15 @@ func (r *Router) lockWorkload(res *Resolution) *wlState {
 
 // chooseNamed places a request that names a Workload, the attempt of its first choice or of a retry (res is its Resolution): the Workload's route order
 // over our ModelDeployments and the managed targets, and else the Workload's own FIFO. While that FIFO holds a request, a new one queues behind it
-// without trying a route (strict), and a request is tried and queued in one critical section, so a wake that comes between the two cannot be missed.
+// without trying a route (strict), and a request is tried and queued in one critical section. A wake pass lists only the Workloads whose FIFO holds a
+// request, so a wake that comes between the try and the enqueue finds none for this Workload and skips it; the arrival counts the wake requests that came
+// meanwhile (wakeGen) and, when there were any, runs a pass of its own once it is queued (found by the tests of the wakes: the lost wake).
 func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
 	// An arrival counts as active before it reads the view, so no wake pass skips on seeing none: a rebuild whose wake finds nothing active has changed the
 	// view before this request reads it (wakeNow, wakeAsync).
 	r.wlActive.Add(1)
 	ws := r.lockWorkload(res)
+	gen := r.wakeGen.Load() // before the view is read
 	p, rerr := r.plan(n, res, key, exclude, withManaged)
 	if rerr != nil {
 		ws.mu.Unlock()
@@ -195,8 +198,14 @@ func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution
 			return nil, errNoReadyTarget(n.Model).forWorkload(p.wname)
 		}
 	}
+	if h := r.beforeEnqueue; h != nil {
+		h()
+	}
 	w := ws.enqueueLocked(p)
 	ws.mu.Unlock()
+	if r.wakeGen.Load() != gen {
+		r.wakeNow()
+	}
 	return r.waitNamed(ctx, ws, w)
 }
 
@@ -271,6 +280,7 @@ func (r *Router) waitNamed(ctx context.Context, ws *wlState, w *wlWaiter) (*targ
 // wakeNow runs a wake pass in the calling goroutine, which must hold no lock: a completion's goroutine, after the group's or the Workload's mutex is
 // released. It skips only when no request is active, and an arrival counts as active before it reads the view.
 func (r *Router) wakeNow() {
+	r.wakeGen.Add(1)
 	if r.wlActive.Load() == 0 && !r.wlOrphan.Load() {
 		return
 	}
@@ -294,6 +304,7 @@ func (r *Router) recomputeOrphanLocked() {
 // wakeAsync hands a wake pass to a goroutine of its own: the rebuild's, which runs under Router.mu and so may not take a Workload's mutex. Wakes that
 // come while a pass runs are folded into one more pass. It skips only when no Workload state exists, which is when there is nothing to wake or drop.
 func (r *Router) wakeAsync() {
+	r.wakeGen.Add(1)
 	if r.wlActive.Load() == 0 && r.wlN.Load() == 0 {
 		return
 	}
