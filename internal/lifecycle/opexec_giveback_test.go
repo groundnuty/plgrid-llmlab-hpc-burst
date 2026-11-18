@@ -225,6 +225,44 @@ func TestAHedgeWithItsMembersAndReplacementIsOneUntakenUnit(t *testing.T) {
 	}
 }
 
+// A started hedge loser kept as an over-allocation candidate (#721) is still a member of the hedge its Scale committed it in: the
+// give-back counts that hedge once (HBEP-10, The report: a hedge, with its members and replacement, is one unit), not once more under
+// the candidate's own ranking key. W and L are committed targets of a Scale to one, both failed finally with JobStartedSinceCommit and
+// both live; L carries the candidate mark naming W. The expected counts are literals. The controls are two members of two different
+// hedges, which are two units, with and without the candidate mark.
+func TestAKeptCandidateStaysOneUntakenUnitWithItsHedgesWinner(t *testing.T) {
+	for _, c := range []struct {
+		name           string
+		wGroup, lGroup string // the hedge group each carries: the first member carries none
+		candidate      bool   // L carries the candidate mark naming W
+		want           int
+		reason         string
+	}{
+		{"the loser carries the hedge group", "", "w", true, 1, "a kept candidate and its hedge's winner are one unit"},
+		{"the winner carries the hedge group", "l", "", true, 1, "a kept candidate and its hedge's winner are one unit, whichever member is first"},
+		{"two different hedges", "", "", false, 2, "two members of two hedges are two units"},
+		{"two different hedges, the second a candidate", "", "", true, 2, "the candidate mark alone merges nothing: two hedges are two units"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, l := standInstance2("w", c.wGroup, ""), standInstance2("l", c.lGroup, "")
+			l.Status.Phase = v1alpha1.InstanceStarting
+			if c.candidate {
+				l.Annotations[annotationCandidateOf] = "w"
+			}
+			p := &pass{insts: []*v1alpha1.Instance{w, l}}
+			op := executingOp("scale", scaleOp(1), nil)
+			var outcomes []v1alpha1.TargetOutcome
+			for _, in := range p.insts {
+				op.Status.Committed = append(op.Status.Committed, v1alpha1.CommittedTarget{Kind: v1alpha1.TargetKindInstance, Name: in.Name, UID: in.UID})
+				outcomes = append(outcomes, v1alpha1.TargetOutcome{Kind: v1alpha1.TargetKindInstance, Name: in.Name, UID: in.UID, State: v1alpha1.TargetStateFailed, Reason: reasonJobStartedSinceCommit})
+			}
+			if got := p.untakenUnits(op, outcomes); got != c.want {
+				t.Errorf("%d untaken units, want %d: %s", got, c.want, c.reason)
+			}
+		})
+	}
+}
+
 // standInstance2 is a live Instance named name, a member of the hedge first (when not empty), the replacement of pred (when not empty).
 func standInstance2(name, first, pred string) *v1alpha1.Instance {
 	in := &v1alpha1.Instance{}

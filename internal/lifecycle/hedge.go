@@ -71,15 +71,22 @@ func waitingCandidate(in *v1alpha1.Instance) bool {
 	return candidateOf(in) != "" && in.Status.ReadyTime == nil && !ended(in)
 }
 
-// hedgeKey is the hedge an Instance belongs to: its AnnotationHedgeGroup, or its own name for a first member or a
-// hedge of one. A kept started loser, which carries annotationCandidateOf, is a hedge of one of its own from the
-// win on, under a key no member's can be: it is ranked against its hedge's winner and is no part of the hedge's
-// count, so the winner is never read as a member beside it (hedgeWinner would keep choosing the earlier ready
-// member, and resolveHedges would end the candidate once it served).
+// hedgeKey is the hedge an Instance belongs to, as the reconcile loop reads it: its memberHedgeKey, except that a kept
+// started loser, which carries annotationCandidateOf, is a hedge of one of its own from the win on, under a key no
+// member's can be: it is ranked against its hedge's winner and is no part of the hedge's count, so the winner is never
+// read as a member beside it (hedgeWinner would keep choosing the earlier ready member, and resolveHedges would end the
+// candidate once it served).
 func hedgeKey(in *v1alpha1.Instance) string {
 	if candidateOf(in) != "" {
 		return "candidate/" + in.Name
 	}
+	return memberHedgeKey(in)
+}
+
+// memberHedgeKey is the hedge an Instance was made a member of: its AnnotationHedgeGroup, or its own name for a first
+// member or a hedge of one. It has no candidate override: it names the hedge a member was committed in, which a kept
+// candidate's own key (hedgeKey) is not, since that key is for ranking alone (#721).
+func memberHedgeKey(in *v1alpha1.Instance) string {
 	if k := in.Annotations[v1alpha1.AnnotationHedgeGroup]; k != "" {
 		return k
 	}
