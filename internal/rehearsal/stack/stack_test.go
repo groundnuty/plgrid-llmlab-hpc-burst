@@ -265,7 +265,7 @@ func TestServedDeploymentAs(t *testing.T) {
 // The usage record's member names are HBEP-5's, written out here from the scenario's own reading of them: UsageRow is
 // the front's own type, so a member renamed there would still decode in a run that read it through that type alone.
 func TestUsageRowReadsTheWireNames(t *testing.T) {
-	wire := `{"counter":7,"requestID":"r","startTime":"s","endTime":"e","path":"/p","requestedModel":"m","provider":"pr",
+	wire := `{"counter":7,"requestID":"r","startTime":"s","endTime":"e","path":"/p","requestedModel":"m","level":"model","workload":"wl","provider":"pr",
 		"modelDeployment":"md","deploymentID":"d","instance":"i","instanceUID":"u","emitter":"em","status":200,"stream":true,
 		"finish":"f","cutBy":"c","errorCode":"x","completionTokens":3,"durationMs":9,"firstTokenMs":4}`
 	var r UsageRow
@@ -274,10 +274,10 @@ func TestUsageRowReadsTheWireNames(t *testing.T) {
 	}
 	if r.Counter != 7 || r.RequestID != "r" || r.StartTime != "s" || r.EndTime != "e" || r.Path != "/p" || r.RequestedModel != "m" ||
 		r.Provider != "pr" || r.ModelDeployment != "md" || r.DeploymentID != "d" || r.Instance != "i" || r.InstanceUID != "u" ||
-		r.Emitter != "em" || r.Status != 200 || !r.Stream || r.DurationMs != 9 {
+		r.Emitter != "em" || r.Status != 200 || !r.Stream || r.DurationMs != 9 || r.Level != "model" {
 		t.Errorf("the plain members: %+v", r)
 	}
-	if r.Finish == nil || *r.Finish != "f" || r.CutBy == nil || *r.CutBy != "c" || r.ErrorCode == nil || *r.ErrorCode != "x" ||
+	if r.Workload == nil || *r.Workload != "wl" || r.Finish == nil || *r.Finish != "f" || r.CutBy == nil || *r.CutBy != "c" || r.ErrorCode == nil || *r.ErrorCode != "x" ||
 		r.CompletionTokens == nil || *r.CompletionTokens != 3 || r.FirstTokenMs == nil || *r.FirstTokenMs != 4 {
 		t.Errorf("the optional members: %+v", r)
 	}
