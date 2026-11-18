@@ -291,7 +291,7 @@ type WarmUpRequest struct {
 	Shapes    Shapes `json:"shapes"`
 	ToolCalls bool   `json:"toolCalls,omitempty"`
 	// TargetSessions is the number of concurrent requests in a round, at most
-	// MaxTargetSessions (the CRD's maximum for Workload.TargetSessions). The
+	// MaxTargetSessions (the CRD's maximum for DeploymentWorkload.TargetSessions). The
 	// bound keeps the report that holds every round of every request inside
 	// WarmUpBudgetBytes.
 	TargetSessions int32 `json:"targetSessions"`

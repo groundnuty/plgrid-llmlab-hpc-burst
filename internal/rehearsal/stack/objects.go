@@ -134,7 +134,7 @@ func ServedDeploymentAs(d Served, tm Timing, engineEnv ...v1alpha1.EnvVar) *v1al
 			// warm Allocation until its hard end. 10 s is the scaled idle limit.
 			RetentionPolicy: &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: Dur("10s")},
 			Routing:         &v1alpha1.Routing{MaxRequestDuration: Dur(tm.MaxRequest)},
-			Workload: &v1alpha1.Workload{
+			Workload: &v1alpha1.DeploymentWorkload{
 				ContextTokens: v1alpha1.ContextTokens{Typical: 512},
 				// Longest defaults to 4096, which with the typical context
 				// would not fit max-model-len 4096 (HBEP-7: every shape fits).
