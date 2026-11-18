@@ -3,17 +3,23 @@ package e2e
 // ONE combined run (issue #660, PR B; plan 5a). The real lifecycle controller runs on its own ServiceAccount's token
 // against a test API server that writes the audit log under the embedded policy with rotation at 1 MB. Two agents
 // and the person act through their own credentials: agent A's Operation is planned by the controller, confirmed by
-// A, and approved by the person; agent B makes an Operation of its own; a Secret is created. Every assertion reads
+// A, and approved by the person, and then executed; agent B makes an End of its own that keeps a started Allocation; a Secret is created. Every assertion reads
 // the API server's audit log FILES (the plain one and the rotated gzip ones), each event under its own user.username.
 //
 // What each part shows, and what it does not (the phases are in this file, their assertions in checks_test.go, the size
-// report in size_test.go and the rotation in rotation_test.go):
+// report in size_test.go, the rotation in rotation_test.go and the Keep link in removal_test.go):
 //   - (b) the Operation's life: the create by the requester at RequestResponse with its spec and purpose, the lifecycle
 //     identity's operations/status write with the plan, the confirm, the Approval's create by the approver with its
-//     plan ID, and the two agents under different user names, neither the administrator's;
+//     plan ID, and the two agents under different user names, neither the administrator's; then the approved End's
+//     execution: its outcome status writes, and for each Allocation it released the release-cause update at Request level
+//     and then the delete;
 //   - (e) a Secret whose value is a random marker is created, read and patched, and the marker, in its raw and
 //     base64 forms, is in no log file, plain or gunzipped, as a whole token; the same matcher finds a marker placed in an
 //     Operation's logged body, so a clean result is not a matcher that cannot see a body;
+//   - (c) the Keep link: after the controller's clock moves 7 days the removal takes both finished Operations (asserted
+//     GONE, not deleting, before the log is read), and the log's FILES still hold the plan that lists md2's kept Allocation by
+//     its UID as a Keep with needsApproval and its cost, then that Allocation's release (retention's own cause write, and
+//     the delete by that UID), both at Request level;
 //   - (d) the log rotates, with more rotated files than the old maxbackup=3 kept, each a gzip file and none removed,
 //     the first request's line still found in the oldest file;
 //   - the controllers' Lease reads and renewals are not in the log (rule 1, None), shown beside a renewal that did
@@ -60,6 +66,7 @@ func TestTheAuditLogOfAnOperationsLifeAndItsRotation(t *testing.T) {
 	s.secret()
 	set := s.waitLife()
 	t.Run("b: each write under its own identity, at its level, with its content", func(t *testing.T) { s.checkLife(t, set) })
+	t.Run("b2: the End's outcome writes, and each Allocation's release cause at Request level, then its delete", func(t *testing.T) { s.checkEnd(t, set) })
 	t.Run("rule 3: the lifecycle's update of an Allocation is logged at Request, with its body", func(t *testing.T) { s.checkAllocationWrite(t, set) })
 	t.Run("S3: the controllers' reads of the framework's kinds are Metadata, and no body carries managedFields", func(t *testing.T) { s.checkReadsAreMetadata(t, set) })
 	t.Run("e: the Secret's requests are logged at Metadata, and its content is not in any file", func(t *testing.T) { s.checkSecretLogged(t, set) })
@@ -67,6 +74,7 @@ func TestTheAuditLogOfAnOperationsLifeAndItsRotation(t *testing.T) {
 	t.Run("size: the log per Operation and per minute of an idle controller", func(t *testing.T) {
 		s.world.reportSize(t, s.rd, s.windowStart, s.windowEnd, 2)
 	})
+	t.Run("c: the Keep link survives the Operation's removal", s.checkKeepLink)
 	t.Run("d: rotation keeps every file, gzipped", func(t *testing.T) { s.world.rotation(t, s.rd) })
 	t.Run("e: after the rotation, in every file", s.checkSecretAfterRotation)
 	t.Run("no controller identity was refused", s.checkNoRefusals)
@@ -78,7 +86,7 @@ func newScenario(t *testing.T) *scenario {
 	w := newWorld(t)
 	s := &scenario{world: w, rd: newReader(w.logPath), prov: w.makeProvider()}
 	w.keepProviderFresh(s.prov)
-	w.startLifecycle(nil)
+	w.startLifecycle(w.clock)
 	return s
 }
 
@@ -103,7 +111,8 @@ func (s *scenario) deploy() {
 	})
 }
 
-// operations has agents A and B create their Operations, A confirm its plan and the person approve it.
+// operations has agents A and B create their Operations (A's End of md, B's End of md2), each confirm its plan and the person
+// approve both, and waits until each End has run to Done.
 func (s *scenario) operations() {
 	t, w := s.t, s.world
 	t.Helper()
@@ -113,33 +122,43 @@ func (s *scenario) operations() {
 	purposeB := "note " + randomHex(t, 16) // (e)'s control: the same kind of marker, in an Operation's purpose, which IS logged
 	markerB := strings.TrimPrefix(purposeB, "note ")
 
-	opA := endOperation("end-a", w.a, purposeA)
+	opA := endOperation("end-a", "md", w.a, purposeA)
 	if err := w.a.c.Create(w.ctx, opA); err != nil {
 		t.Fatalf("agent A creates its Operation: %v", err)
 	}
-	opB := endOperation("end-b", w.b, purposeB)
+	opB := endOperation("end-b", "md2", w.b, purposeB)
 	if err := w.b.c.Create(w.ctx, opB); err != nil {
 		t.Fatalf("agent B creates its Operation: %v", err)
 	}
 	plannedA := w.waitPlan("end-a")
-	w.waitPlan("end-b")
+	plannedB := w.waitPlan("end-b")
 	planID := plannedA.Status.Plan.ID
 
-	// A confirms the plan it read, and the person approves it, each as itself.
-	var fresh v1alpha1.Operation
-	if err := w.a.c.Get(w.ctx, client.ObjectKeyFromObject(opA), &fresh); err != nil {
-		t.Fatal(err)
+	// Each agent confirms the plan it read, and the person approves each, as itself.
+	for _, c := range []struct {
+		by      who
+		op      *v1alpha1.Operation
+		planned *v1alpha1.Operation
+		ap      string
+	}{{w.a, opA, plannedA, "ap-person"}, {w.b, opB, plannedB, "ap-person-b"}} {
+		var fresh v1alpha1.Operation
+		if err := c.by.c.Get(w.ctx, client.ObjectKeyFromObject(c.op), &fresh); err != nil {
+			t.Fatal(err)
+		}
+		fresh.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: c.planned.Status.Plan.ID}
+		if err := c.by.c.Update(w.ctx, &fresh); err != nil {
+			t.Fatalf("%s confirms its plan: %v", c.by.name, err)
+		}
+		if err := w.admin.c.Create(w.ctx, w.approval(c.ap, c.planned, c.planned.Status.Plan.ID, w.admin)); err != nil {
+			t.Fatalf("the person's Approval of %s: %v", c.op.Name, err)
+		}
 	}
-	fresh.Spec.Confirm = &v1alpha1.OperationConfirm{PlanID: planID}
-	if err := w.a.c.Update(w.ctx, &fresh); err != nil {
-		t.Fatalf("agent A confirms its plan: %v", err)
+	for _, name := range []string{"end-a", "end-b"} {
+		eventually(t, 90*time.Second, "the controller counts the Approval of "+name+" and commits the plan", func() (bool, string) {
+			return operationCommitted(w.getOperation(name))
+		})
+		w.waitDone(s.rd, name)
 	}
-	if err := w.admin.c.Create(w.ctx, w.approval("ap-person", plannedA, planID, w.admin)); err != nil {
-		t.Fatalf("the person's Approval: %v", err)
-	}
-	eventually(t, 90*time.Second, "the controller counts the Approval and commits the plan", func() (bool, string) {
-		return operationCommitted(w.getOperation("end-a"))
-	})
 	windowEnd := time.Now()
 	s.plannedA, s.planID, s.purposeA, s.purposeB, s.markerB, s.secretMarker, s.windowStart, s.windowEnd =
 		plannedA, planID, purposeA, purposeB, markerB, secretMarker, windowStart, windowEnd
@@ -147,8 +166,8 @@ func (s *scenario) operations() {
 
 // operationCommitted says whether the controller has counted the Approval: it commits an approved plan and executes it, so the
 // Operation's Executable reason is Executing (or Done, once its targets are over), or its phase is Executing, PartlyFailed or
-// Done. The message reports the phase and the condition either way. It does not wait for Done: this world has no Provider
-// controller to carry a release out.
+// Done. The message reports the phase and the condition either way. It does not wait for Done: waitDone does, and says what
+// each target's outcome is when it does not come.
 func operationCommitted(op *v1alpha1.Operation) (bool, string) {
 	c := apimeta.FindStatusCondition(op.Status.Conditions, v1alpha1.ConditionExecutable)
 	cond := "no Executable condition"
@@ -194,6 +213,8 @@ func (s *scenario) waitLife() *logSet {
 			len(s.find("create", "approvals", "", "ap-person", w.admin.user)) > 0 &&
 			hasPlanWrite(s, w.lc.user, "end-a", planID) &&
 			hasIdleWrite(s, w.lc.user, name) &&
+			len(w.releasedAllocations(s, w.getOperation("end-a"))) > 0 && hasDoneWrite(s, w.lc.user, "end-a") &&
+			hasDoneWrite(s, w.lc.user, "end-b") &&
 			len(s.find("create", "secrets", "", "audit-secret", w.admin.user)) > 0 &&
 			len(s.find("patch", "secrets", "", "audit-secret", w.admin.user)) > 0 &&
 			len(s.find("get", "secrets", "", "audit-secret", w.admin.user)) > 0

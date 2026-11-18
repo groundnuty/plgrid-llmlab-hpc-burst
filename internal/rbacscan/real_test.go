@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -116,18 +117,37 @@ func TestTheScanSeesEachIdentityAtWork(t *testing.T) {
 		count[lifecycle], lifecycle, count[provider], provider, count[front], front, len(res.Entries), len(res.Dead))
 }
 
-// The calls in code that nothing calls are not counted, so a call the scan wrongly takes for unreached would pass unread.
-// Today the only code of that kind is the Operation removal controller (opttl.go), which the lifecycle manager does not wire
-// yet (#660's removal PR wires it, and its calls are then read like any other). Any other call the scan finds dead fails here,
-// until it is looked at and listed.
-func TestOnlyTheOperationRemovalIsInCodeNothingCalls(t *testing.T) {
+// The calls in code that nothing calls are not counted, so a call the scan wrongly takes for unreached would pass unread. The
+// module has none: the Operation removal controller (opttl.go), which was the one allowed to be in that state, is wired into the
+// lifecycle manager (#660), and its calls are read like any other (its delete of an Operation is the lifecycle role's rule). Any
+// call the scan finds dead fails here, until it is looked at and either removed or explained here.
+func TestNoCallOfTheModuleIsInCodeNothingCalls(t *testing.T) {
 	res, _ := realResult(t)
 	for _, d := range res.Dead {
-		if !strings.HasPrefix(d, "internal/lifecycle/opttl.go:") {
-			t.Errorf("a call in code the scan takes for unreached, which is not the Operation removal controller's: %s\n"+
-				"If nothing really calls it, list it here with the reason; if something does, the scan lost the call.", d)
+		t.Errorf("a call in code the scan takes for unreached: %s\n"+
+			"If nothing really calls it, list it here with the reason; if something does, the scan lost the call.", d)
+	}
+}
+
+// The removal controller's delete of an Operation is a live site of the lifecycle identity, found at opttl.go's own call now that
+// the lifecycle manager wires the controller, and the lifecycle role grants it: the check above is clean with it, and this names
+// the site, so a scan that lost it (the controller unwired, or its client no longer followed) fails here and not silently.
+func TestTheOperationRemovalsDeleteIsALiveSiteThatTheLifecycleRoleGrants(t *testing.T) {
+	res, roles := realResult(t)
+	want := Triple{Group: v1alpha1.Group, Resource: "operations", Verb: "delete"}
+	var found []string
+	for _, st := range res.Sites {
+		if st.Ident == lifecycle && strings.HasPrefix(st.Pos, "internal/lifecycle/opttl.go:") && slices.Contains(st.Need, want) {
+			found = append(found, st.Pos+" "+st.What)
 		}
 	}
+	if len(found) == 0 {
+		t.Errorf("the scan found no site of %s in internal/lifecycle/opttl.go that needs %s", lifecycle, want)
+	}
+	if !roles[lifecycle][want] {
+		t.Errorf("the role of %s does not grant %s", lifecycle, want)
+	}
+	t.Logf("%s needs %s at: %s", lifecycle, want, strings.Join(found, "; "))
 }
 
 // Every rule of every role is a mutant: with one verb removed, the check fails and names a call site that needs it (for a
