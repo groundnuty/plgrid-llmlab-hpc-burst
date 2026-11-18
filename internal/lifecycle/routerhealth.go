@@ -59,26 +59,34 @@ func verifiedGeneration(in *v1alpha1.Instance) *int64 {
 	return &g
 }
 
+// routerHealthy is the workers the router holds healthy and not ejected, from a report that echoes the
+// desired router generation: none once the router has exited. ok is false when the report says nothing
+// current. It is the one set healthyCount counts and the KV cache size's smallest value is taken over
+// (kvcache.go).
+func routerHealthy(in *v1alpha1.Instance, av agentView) (names []string, ok bool) {
+	rr := currentRouter(in, av)
+	switch {
+	case rr == nil:
+		return nil, false
+	case rr.Phase == agentapi.PartExited || rr.Phase == agentapi.PartStopped:
+		return nil, true
+	case rr.Phase != agentapi.PartRunning || rr.ClustersReadAt == nil:
+		return nil, false
+	}
+	for _, w := range rr.Workers {
+		if w.Healthy && !w.Ejected {
+			names = append(names, w.Name)
+		}
+	}
+	return names, true
+}
+
 // healthyCount is the router's healthy workers from a report that echoes the desired router generation:
 // the workers it holds healthy and not ejected while it runs, and 0 once it has exited. ok is false when
 // the report says nothing current.
 func healthyCount(in *v1alpha1.Instance, av agentView) (int32, bool) {
-	rr := currentRouter(in, av)
-	switch {
-	case rr == nil:
-		return 0, false
-	case rr.Phase == agentapi.PartExited || rr.Phase == agentapi.PartStopped:
-		return 0, true
-	case rr.Phase != agentapi.PartRunning || rr.ClustersReadAt == nil:
-		return 0, false
-	}
-	var n int32
-	for _, w := range rr.Workers {
-		if w.Healthy && !w.Ejected {
-			n++
-		}
-	}
-	return n, true
+	names, ok := routerHealthy(in, av)
+	return int32(len(names)), ok
 }
 
 // writeHealthyWorkers writes status.healthyWorkers when a current report changes it.

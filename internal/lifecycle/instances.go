@@ -474,6 +474,10 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 	if err := p.writeHealthyWorkers(in, av); err != nil {
 		return err
 	}
+	// The KV cache size the agent reports, whatever the router (kvcache.go).
+	if err := p.writeKVCacheTokens(in, alloc, av); err != nil {
+		return err
+	}
 	if in.Status.Phase == v1alpha1.InstanceDraining {
 		return p.draining(in, alloc, av)
 	}
