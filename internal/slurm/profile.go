@@ -129,6 +129,7 @@ func (r *ProfileReader) Read(ctx context.Context, name string) (Validated, error
 					v.Profile.Partition = p
 					checkPartition(fmt.Sprintf("spec.partitions[%d]", i), p, bad)
 					checkPartitionQOS(fmt.Sprintf("spec.partitions[%d]", i), s, p, bad)
+					checkQOSByGPUs(fmt.Sprintf("spec.partitions[%d]", i), s, p, v.Settings.QOS, bad)
 					checkDialHomeModes(p, r.DialHomeMode, bad)
 				}
 			}
@@ -181,6 +182,35 @@ func checkPartitionQOS(field string, s v1alpha1.PlatformProfileSpec, p v1alpha1.
 	}
 	if _, ok := v1alpha1.FindQOS(&s, p.QOS); !ok {
 		bad(field+".qos", "%q is not listed in the profile's qos", p.QOS)
+	}
+}
+
+// checkQOSByGPUs checks a partition's qosByGpus (HBEP-4, The Slurm dialect, The
+// QOS by GPU count; #745): the Provider sets no qos of its own beside it, since
+// the list is then the QOS's one source and only ReadProfile reads the Provider
+// and its profile together; and the list is what the CRD's rules say, checked
+// again so a stored object is never trusted blindly: the gpus are positive and
+// strictly increasing, and each qos is a safe value listed in the profile's
+// qos. The safe pattern is checked because the chosen qos goes into a command.
+func checkQOSByGPUs(field string, s v1alpha1.PlatformProfileSpec, p v1alpha1.PartitionProfile, providerQOS string, bad func(string, string, ...any)) {
+	if len(p.QOSByGPUs) == 0 {
+		return
+	}
+	if providerQOS != "" {
+		bad("provider.spec.qos", "is %q, but partition %q sets qosByGpus, which chooses the QOS by GPU count: the QOS has one source, so the Provider sets none", providerQOS, p.Name)
+	}
+	prev := int32(0)
+	for i, e := range p.QOSByGPUs {
+		f := fmt.Sprintf("%s.qosByGpus[%d]", field, i)
+		if e.GPUs < 1 || e.GPUs <= prev {
+			bad(f+".gpus", "is %d; qosByGpus must be strictly increasing from 1", e.GPUs)
+		}
+		prev = e.GPUs
+		if err := CheckValue("qos", e.QOS); err != nil {
+			bad(f+".qos", "%v", err)
+		} else if _, ok := v1alpha1.FindQOS(&s, e.QOS); !ok {
+			bad(f+".qos", "%q is not listed in the profile's qos", e.QOS)
+		}
 	}
 }
 

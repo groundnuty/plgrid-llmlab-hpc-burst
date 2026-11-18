@@ -19,7 +19,7 @@
 # compile is its own step, to one fixed test-binary path per package, and the binary then runs: so MUTATE_ALPHA_BUILD_LOCK,
 # a lock file, is taken (flock -o) around each compile only, never around a test run.
 #
-# Five kinds, by the file they change:
+# Six kinds, by the file they change:
 #   internal/alpha (a bare file name)           go test ./internal/alpha
 #   internal/alpha/alpha_live_test.go           the row's test as the script runs it: an alpha test binary is built from
 #                                               the mutated package, and the dry runs of hack/livechecks run that binary
@@ -29,6 +29,8 @@
 #                                               test binaries to spare it two builds per mutant.
 #   internal/rehearsal/...                      go test of internal/rehearsal, the sshd sweep's guard tests only (issue #308):
 #                                               they start no sshd and send no signal, every send going to a sink that records it
+#   pkg/agentapi/...                            go test of pkg/agentapi (no sshd, no rig): the relay line's words (#735). The end-to-end
+#                                               half, internal/hostdial's no-home row, needs sshd: run it by hand, with the mutant in place
 #
 # It edits files in the working tree and restores each from a copy it makes first, also on any exit, so run it
 # on a checkout with no uncommitted change to them. Run it under a memory cap (docs/development.md). Each run has an external bound
@@ -1075,6 +1077,14 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # body's waits, and the script's rows, their builds and environment, and the reach rows' refusal in host-dialed mode.
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@w[0] != "srun" || w[1] != "-u" ||@@w[0] != "srun" ||'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@w[2] != "--overlap" || w[3] != "--jobid="+o.JobID ||@@w[2] != "--overlap" ||'
+  # #735 (the amendment of 18 Nov 2026): the relay line carries --chdir=<its own --dir>, and the check holds both rules.
+  'internal/providerctl/conformance/hostdialed_verdict_test.go@@return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath@@return ok && chdir != "" && w[6] == o.AgentPath'
+  'internal/providerctl/conformance/hostdialed_verdict_test.go@@return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath@@return ok && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath'
+  'internal/providerctl/conformance/hostdialed_verdict_test.go@@return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath && w[7] == agentapi.RelaySubcommand@@return (w[5] == o.AgentPath && w[6] == agentapi.RelaySubcommand) || (ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath && w[7] == agentapi.RelaySubcommand)'
+  # #735: the relay line drops --chdir, or takes another directory for it; pkg/agentapi's literal tests judge these, and internal/hostdial's
+  # no-home row (TestHostDialedRelaysStartWhereComputeNodesHaveNoHome) judges the first end to end, by hand on Sano.
+  'pkg/agentapi/relay.go@@"--ntasks=1", "--chdir=" + a.Dir, agentPath,@@"--ntasks=1", agentPath,'
+  'pkg/agentapi/relay.go@@"--ntasks=1", "--chdir=" + a.Dir, agentPath,@@"--ntasks=1", "--chdir=/", agentPath,'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@		if byChannel[string(ch)] == 0 {@@		if byChannel[string(ch)] < 0 {'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@regexp.MustCompile(`^hb-relay-[0-9]+$`)@@regexp.MustCompile(`^hb-relay-.*$`)'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@if ctl.Sessions < 1 || srv.Sessions < 1 {@@if srv.Sessions < 1 {'
@@ -1227,6 +1237,7 @@ compile_of() {
   case $1 in
     internal/providerctl/*) compile_tests internal/providerctl/conformance "$tmp/conf.test" && compile_tests "$pkg" "$tmp/pkg.test" ;;
     internal/rehearsal/*) compile_tests internal/rehearsal "$tmp/reh.test" ;;
+    pkg/agentapi/*) compile_tests pkg/agentapi "$tmp/api.test" ;;
     *.go) compile_tests "$pkg" "$tmp/pkg.test" ;;
   esac
 }
@@ -1243,10 +1254,10 @@ script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlpha
 # (CleanupMargin), so at 120s every wait on state failed at once and the unmutated tests failed, which counted every mutant
 # of the package as killed (#285).
 tests_of() {
-  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test rehbin=$tmp/reh.test
+  local names=${2:-} pkgbin=$tmp/pkg.test confbin=$tmp/conf.test rehbin=$tmp/reh.test apibin=$tmp/api.test
   local bin=(-test.count=1 -test.timeout 300s -test.failfast) sel=(-failfast -run "$script_tests") dry=PendingPastTheBound
   local rbin=(-test.count=1 -test.timeout 300s -test.failfast -test.run "$rehearsal_tests")
-  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test rehbin=$tmp/base-reh.test; fi
+  if [ -n "$names" ]; then pkgbin=$tmp/base-pkg.test confbin=$tmp/base-conf.test rehbin=$tmp/base-reh.test apibin=$tmp/base-api.test; fi
   if [ -n "$names" ] && [ "$names" != control ]; then
     dry=$names bin=(-test.count=1 -test.timeout 300s -test.run "$names") sel=(-run "$names")
     rbin=(-test.count=1 -test.timeout 300s -test.run "$names")
@@ -1257,6 +1268,7 @@ tests_of() {
     "$pkg"/alpha_live_test.go) tests=(env HPCBURST_LIVECHECKS_ALPHA_TEST="$pkgbin" go test -count=1 -timeout 9m -run "$dry" ./hack/livechecks) ;;
     internal/providerctl/*) tests=(bash -c 'cd "$1/internal/providerctl/conformance" && "$2" "${@:5}" && cd "$1/$3" && "$4" "${@:5}"' _ "$here" "$confbin" "$pkg" "$pkgbin" "${bin[@]}") ;;
     internal/rehearsal/*) tests=(bash -c 'cd "$1/internal/rehearsal" && "$2" "${@:3}"' _ "$here" "$rehbin" "${rbin[@]}") ;;
+    pkg/agentapi/*) tests=(bash -c 'cd "$1/pkg/agentapi" && "$2" "${@:3}"' _ "$here" "$apibin" "${bin[@]}") ;;
     *) tests=(bash -c 'cd "$1/$2" && "$3" "${@:4}"' _ "$here" "$pkg" "$pkgbin" "${bin[@]}") ;;
   esac
 }
@@ -1299,6 +1311,7 @@ kind_of() {
     "$pkg"/alpha_live_test.go) printf "the dry runs'" ;;
     internal/providerctl/*) printf "the conformance package's" ;;
     internal/rehearsal/*) printf "the rehearsal package's" ;;
+    pkg/agentapi/*) printf "the agentapi package's" ;;
     *) printf "the package's" ;;
   esac
 }
@@ -1315,6 +1328,7 @@ baseline() {
   case $1 in
     internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
     internal/rehearsal/*) cp "$tmp/reh.test" "$tmp/base-reh.test" ;;
+    pkg/agentapi/*) cp "$tmp/api.test" "$tmp/base-api.test" ;;
     *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
   esac
   tests_of "$1"

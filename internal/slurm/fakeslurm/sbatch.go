@@ -48,6 +48,10 @@ type sbatchSpec struct {
 	minutes, cpus, nodes, gpus                      int
 	memMiB                                          int64
 	hold, requeue, parsable, testOnly               bool
+	// cpusGiven and memGiven are whether --cpus-per-task and --mem were sent: a
+	// job_submit plugin can require them (jobsubmit.go), and cpus and memMiB
+	// hold defaults when they were not.
+	cpusGiven, memGiven bool
 }
 
 var gresGPU = regexp.MustCompile(`^gpu(?::([0-9]+))?$`)
@@ -95,11 +99,13 @@ func (s *sbatchSpec) parseNumbers(p parsed) error {
 		if s.cpus, err = strconv.Atoi(v); err != nil || s.cpus < 1 {
 			return fmt.Errorf("invalid cpus-per-task %q", v)
 		}
+		s.cpusGiven = true
 	}
 	if v, ok := p.get("mem"); ok {
 		if s.memMiB, err = parseMem(v); err != nil {
 			return err
 		}
+		s.memGiven = true
 	}
 	if v, ok := p.get("gres"); ok {
 		m := gresGPU.FindStringSubmatch(v)
@@ -151,6 +157,10 @@ func (sh *shell) sbatch(args []string) int {
 	step := sh.p.nextStep()
 	sh.p.registerLate(sh.now) // a job whose reply was lost earlier registers now (qos.go)
 	if text := sh.p.policyRefusal(sh.s.user, spec); text != "" {
+		sh.stderr.WriteString(text)
+		return 1
+	}
+	if text := sh.p.jobSubmitRefusal(spec); text != "" {
 		sh.stderr.WriteString(text)
 		return 1
 	}

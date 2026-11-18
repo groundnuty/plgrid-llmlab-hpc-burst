@@ -36,6 +36,15 @@ type RunMode struct {
 	// batch script's, so a test can give its steps another TMPDIR than the
 	// job's, as a cluster may (HBEP-6, The rendezvous).
 	StepEnv map[string]string
+	// NoComputeHome is a cluster whose compute nodes have no home directory
+	// (Sano's, #735's probe 1): srun from the login node starts a step in the
+	// directory it was started in, the login's HOME, so a step without
+	// --chdir fails to start ("couldn't chdir to '<HOME>': No such file or
+	// directory", exit 1, nothing runs), and one with --chdir runs in that
+	// directory. A --chdir to a directory that does not exist fails the same
+	// way with or without this option; the option only decides the line with
+	// no --chdir. Batch jobs are not affected: they start where sbatch says.
+	NoComputeHome bool
 	// JobVars are the job variables the cluster sets inside jobs (HBEP-4,
 	// Submission: tmpDir), such as Helios's MEMFS for a job that requests -C
 	// memfs.

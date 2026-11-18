@@ -11,20 +11,24 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
-// checkGPUs refuses a GPU count above the most one Allocation may ask for:
-// the smaller of the partition's gpusPerNode, the node's hardware, and the QOS
-// limits' maxGpusPerUser, each when set (v1alpha1.MaxAllocationGPUs). The
-// refusal names the bound that is the smaller. A count above it is refused,
-// never capped. With neither set there is no bound (a CPU partition).
+// checkGPUs refuses a GPU count above the most one Allocation may ask for
+// (v1alpha1.AllocationGPUBound): the smallest of the partition's gpusPerNode,
+// the node's hardware, the last entry's gpus of its qosByGpus, and the QOS
+// limits' maxGpusPerUser and maxGpusPerJob, each when set. The refusal names
+// the bound that is the smallest. A count above it is refused, never capped.
+// With none set there is no bound (a CPU partition).
 func checkGPUs(gpus int32, part v1alpha1.PartitionProfile, limits v1alpha1.QOSLimits) error {
-	most, ok := v1alpha1.MaxAllocationGPUs(part, limits)
-	if !ok || gpus <= most {
+	b, ok := v1alpha1.AllocationGPUBound(part, limits)
+	if !ok || gpus <= b.Most {
 		return nil
 	}
-	if m := limits.MaxGPUsPerUser; m != nil && (part.GPUsPerNode == nil || *m < *part.GPUsPerNode) {
-		return refuse("gpus %d is above maxGpusPerUser %d of qos %q", gpus, *m, limits.From[v1alpha1.LimitMaxGPUsPerUser])
+	switch b.By {
+	case v1alpha1.LimitMaxGPUsPerUser, v1alpha1.LimitMaxGPUsPerJob:
+		return refuse("gpus %d is above %s %d of qos %q", gpus, b.By, b.Most, limits.From[b.By])
+	case v1alpha1.GPUBoundQOSByGPUs:
+		return refuse("gpus %d is above the %d of the last qosByGpus entry of partition %q", gpus, b.Most, part.Name)
 	}
-	return refuse("gpus %d is above gpusPerNode %d of partition %q", gpus, *part.GPUsPerNode, part.Name)
+	return refuse("gpus %d is above gpusPerNode %d of partition %q", gpus, b.Most, part.Name)
 }
 
 // checkTimeLimit refuses a time limit above the smallest of the partition's

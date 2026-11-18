@@ -30,7 +30,9 @@ func checkJobID(id string) error {
 // submission is one sbatch call, after the request has been checked.
 type submission struct {
 	tag, partition, account string
-	// qos is the Provider's qos, sent as --qos; "" sends no flag at all.
+	// qos is the job's QOS, sent as --qos: the Provider's qos, or the one the
+	// partition's qosByGpus chooses for the GPU count (v1alpha1.QOSForGPUs); ""
+	// sends no flag at all.
 	qos                 string
 	hold                bool
 	minutes             int64

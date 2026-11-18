@@ -373,11 +373,16 @@ func (e *external) accepted(ctx context.Context, a *v1alpha1.Allocation, claim v
 // limit, and whether the job is held (HBEP-8, Allocation events). It names no job
 // ID, account or grant.
 func (e *external) submittedNote(a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord) string {
-	qos := e.v.Settings.QOS
+	b := a.Spec.ForProvider.Batch
+	// The QOS the job was sent under: where the partition sets qosByGpus, the one its list chooses for the GPU count,
+	// which the plugin sends (v1alpha1.QOSForGPUs); else the Provider's qos, or the association's default.
+	qos, err := v1alpha1.QOSForGPUs(e.v.Profile.Partition, e.v.Settings.QOS, b.GPUs)
+	if err != nil {
+		qos = e.v.Settings.QOS
+	}
 	if qos == "" {
 		qos = "the association's default"
 	}
-	b := a.Spec.ForProvider.Batch
 	return fmt.Sprintf("the job was submitted by attempt %d to partition %s, QOS %s, time limit %s, held: %t",
 		claim.Attempt, b.Partition, qos, b.TimeLimit, e.hold())
 }

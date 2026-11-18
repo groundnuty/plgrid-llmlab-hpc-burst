@@ -15,7 +15,7 @@ import (
 // with ServerAliveInterval=10 and ServerAliveCountMax=3, and the line is one
 // argument after "--".
 func TestRelayArgs(t *testing.T) {
-	args := RelayArgs("/c/relay.conf", "srun -u --overlap --jobid=1 --ntasks=1 /s/hb-agent relay control")
+	args := RelayArgs("/c/relay.conf", "srun -u --overlap --jobid=1 --ntasks=1 --chdir=/s/alloc/hb-x /s/hb-agent relay control")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"BatchMode=yes", "ServerAliveInterval=10", "ServerAliveCountMax=3", "ControlMaster=no", "ControlPath=none",
 		"ClearAllForwardings=yes", "IdentityAgent=none", "StrictHostKeyChecking=yes", "EscapeChar=none"} {
@@ -29,7 +29,7 @@ func TestRelayArgs(t *testing.T) {
 	if strings.Contains(joined, "ProxyCommand") || strings.Contains(joined, "ControlMaster=yes") || strings.Contains(joined, "ControlPath=/") {
 		t.Errorf("the relay's ssh would use or make a master: %s", joined)
 	}
-	if n := len(args); args[n-2] != "--" || args[n-1] != "srun -u --overlap --jobid=1 --ntasks=1 /s/hb-agent relay control" || args[n-3] != alias || args[n-4] != "-T" {
+	if n := len(args); args[n-2] != "--" || args[n-1] != "srun -u --overlap --jobid=1 --ntasks=1 --chdir=/s/alloc/hb-x /s/hb-agent relay control" || args[n-3] != alias || args[n-4] != "-T" {
 		t.Errorf("the relay's ssh does not end with -T, the host, -- and the line: %s", joined)
 	}
 }

@@ -134,14 +134,18 @@ func ParseRelayArgs(args []string) (RelayArgs, error) {
 // RelayLine is the command line a relay runs on the login node (HBEP-6,
 // Dial-home modes, host-dialed mode):
 //
-//	srun -u --overlap --jobid=<job> --ntasks=1 <agent binary> relay <channel> --dir <dir> --allocation <UID> --epoch <E> --seq <N>
+//	srun -u --overlap --jobid=<job> --ntasks=1 --chdir=<dir> <agent binary> relay <channel> --dir <dir> --allocation <UID> --epoch <E> --seq <N>
 //
 // -u is required: without it srun held output that ends without a newline
 // until the stream closed (probe of 9 Nov 2026), and with it the task's
 // standard output is a pty with OPOST cleared, which carried all 256 byte
-// values unchanged. agentPath is the staged agent binary's absolute path on
+// values unchanged. --chdir is the Allocation directory again, the same value
+// as --dir: srun from the login node starts the step in the login home, and a
+// compute node with no home (Sano, #735's probe 1) refuses that with
+// "couldn't chdir". agentPath is the staged agent binary's absolute path on
 // the cluster (StagingDir joined with StagedAgentPath). Every word is plain,
-// so none needs quoting.
+// so none needs quoting; the directory passed the same safe-path check as
+// --dir (a.Validate), so it has no space or quote either.
 func RelayLine(jobID, agentPath string, a RelayArgs) (string, error) {
 	var errs []error
 	if !jobIDForm.MatchString(jobID) {
@@ -156,7 +160,7 @@ func RelayLine(jobID, agentPath string, a RelayArgs) (string, error) {
 	if err := errors.Join(errs...); err != nil {
 		return "", err
 	}
-	return strings.Join(append([]string{"srun", "-u", "--overlap", "--jobid=" + jobID, "--ntasks=1", agentPath, RelaySubcommand}, a.words()...), " "), nil
+	return strings.Join(append([]string{"srun", "-u", "--overlap", "--jobid=" + jobID, "--ntasks=1", "--chdir=" + a.Dir, agentPath, RelaySubcommand}, a.words()...), " "), nil
 }
 
 // RelaySocketFileName is the rendezvous file in the Allocation's directory:

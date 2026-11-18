@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -55,7 +56,12 @@ func keepRelay(t *testing.T, ctx context.Context, ch agentapi.RelayChannel, allo
 				return
 			}
 			words := strings.Fields(line)
-			cmd := exec.Command(self, words[6:]...) // the agent binary's own words: relay <ch> --dir ...
+			prog := slices.Index(words, self) // srun's own words come before the program; its words are relay <ch> --dir ...
+			if prog < 1 || words[prog+1] != agentapi.RelaySubcommand {
+				t.Errorf("the relay line %q does not run the agent binary %q as relay", line, self)
+				return
+			}
+			cmd := exec.Command(self, words[prog+1:]...)
 			cmd.Env = append(os.Environ(), "HB_TEST_ROLE="+roleAgent, "SLURM_JOB_ID="+eJobID)
 			in, _ := cmd.StdinPipe()
 			out, _ := cmd.StdoutPipe()
