@@ -171,7 +171,7 @@ func TestMetricRequestsMoveWithTheStatusAndTheEndpoint(t *testing.T) {
 	f := newScFix(t, scOpts{})
 	f.prSend(t, scChat, errChatBody(scModel, false, "hi"))
 	ss := scrape(t, f.metrics)
-	wantSample(t, ss, 1, mRequests, "code", "200", "endpoint", "chat", "provider", "helios-a", "model_deployment", "ns/md")
+	wantSample(t, ss, 1, mRequests, "code", "200", "endpoint", "chat", "provider", "helios-a", "model_deployment", "ns/md", "workload", "")
 	f.prSend(t, scChat, errChatBody(scModel, false, "again"))
 
 	// A wrong key: refused before routing.
@@ -198,11 +198,11 @@ func TestMetricRequestsMoveWithTheStatusAndTheEndpoint(t *testing.T) {
 	f.waitRecord(resp.Header.Get("hpcburst-request-id"))
 
 	ss = scrape(t, f.metrics)
-	wantSample(t, ss, 2, mRequests, "code", "200", "endpoint", "chat", "provider", "helios-a", "model_deployment", "ns/md")
-	wantSample(t, ss, 1, mRequests, "code", "401", "endpoint", "chat", "provider", "", "model_deployment", "")
-	wantSample(t, ss, 1, mRequests, "code", "503", "endpoint", "chat", "provider", "", "model_deployment", "")
-	wantSample(t, ss, 1, mRequests, "code", "200", "endpoint", "models", "provider", "", "model_deployment", "")
-	wantSample(t, ss, 1, mRequests, "code", "404", "endpoint", "other", "provider", "", "model_deployment", "")
+	wantSample(t, ss, 2, mRequests, "code", "200", "endpoint", "chat", "provider", "helios-a", "model_deployment", "ns/md", "workload", "")
+	wantSample(t, ss, 1, mRequests, "code", "401", "endpoint", "chat", "provider", "", "model_deployment", "", "workload", "")
+	wantSample(t, ss, 1, mRequests, "code", "503", "endpoint", "chat", "provider", "", "model_deployment", "", "workload", "")
+	wantSample(t, ss, 1, mRequests, "code", "200", "endpoint", "models", "provider", "", "model_deployment", "", "workload", "")
+	wantSample(t, ss, 1, mRequests, "code", "404", "endpoint", "other", "provider", "", "model_deployment", "", "workload", "")
 }
 
 // TestEndpointLabel: the endpoint label's values for the paths the front
@@ -242,8 +242,8 @@ func TestMetricCutsMoveWithCutBy(t *testing.T) {
 	// starts at 0).
 	zeros := scrape(t, f.metrics)
 	for _, by := range []string{"front_deadline", "front_idle", "front_headers", "tunnel", "upstream", "lease_end", "client", "front_shutdown"} {
-		wantSample(t, zeros, 0, mCuts, "cut_by", by, "provider", "helios-a", "model_deployment", "ns/md")
-		wantSample(t, zeros, 0, mCuts, "cut_by", by, "provider", "", "model_deployment", "")
+		wantSample(t, zeros, 0, mCuts, "cut_by", by, "provider", "helios-a", "model_deployment", "ns/md", "workload", "")
+		wantSample(t, zeros, 0, mCuts, "cut_by", by, "provider", "", "model_deployment", "", "workload", "")
 	}
 	f.engines[0].Set(enginetest.Behaviour{Tokens: 3})
 	f.prSend(t, scChat, errChatBody(scModel, false, "whole"))
@@ -292,10 +292,10 @@ func TestMetricCutsMoveWithCutBy(t *testing.T) {
 	_ = first
 
 	ss = scrape(t, f.metrics)
-	wantSample(t, ss, 1, mCuts, "cut_by", "upstream", "provider", "helios-a", "model_deployment", "ns/md")
-	wantSample(t, ss, 1, mCuts, "cut_by", "client", "provider", "helios-a", "model_deployment", "ns/md")
-	wantSample(t, ss, 1, mCuts, "cut_by", "front_deadline", "provider", "", "model_deployment", "")
-	wantSample(t, ss, 1, mRequests, "code", "504", "endpoint", "chat", "provider", "", "model_deployment", "")
+	wantSample(t, ss, 1, mCuts, "cut_by", "upstream", "provider", "helios-a", "model_deployment", "ns/md", "workload", "")
+	wantSample(t, ss, 1, mCuts, "cut_by", "client", "provider", "helios-a", "model_deployment", "ns/md", "workload", "")
+	wantSample(t, ss, 1, mCuts, "cut_by", "front_deadline", "provider", "", "model_deployment", "", "workload", "")
+	wantSample(t, ss, 1, mRequests, "code", "504", "endpoint", "chat", "provider", "", "model_deployment", "", "workload", "")
 }
 
 // TestMetricPausesCountEachPause: three failed requests in a row pause the
@@ -327,7 +327,7 @@ func TestMetricPausesCountEachPause(t *testing.T) {
 // 400 s, lands in the 600 s bucket. A stream with no content event adds none.
 func TestMetricTimeToFirstTokenIsObservedPerStream(t *testing.T) {
 	f := newScFix(t, scOpts{})
-	labels := []string{"provider", "helios-a", "model_deployment", "ns/md", "endpoint", "chat"}
+	labels := []string{"provider", "helios-a", "model_deployment", "ns/md", "endpoint", "chat", "workload", ""}
 	bucket := func(le string) []string { return append([]string{"le", le}, labels...) }
 
 	f.engines[0].Set(enginetest.Behaviour{Tokens: 3, FirstToken: 3 * time.Second})
@@ -438,9 +438,9 @@ func TestMetricEventCountersStartAtZeroWhenTargetsBecomeKnown(t *testing.T) {
 	cutBys := []string{"front_deadline", "front_idle", "front_headers", "tunnel", "upstream", "lease_end", "client", "front_shutdown"}
 	ss := scrape(t, f.metrics)
 	for _, by := range cutBys {
-		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "", "model_deployment", "")
-		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "helios-a", "model_deployment", "ns/md")
-		wantNoSample(t, ss, mCuts, "cut_by", by, "provider", "helios-b", "model_deployment", "ns/md2")
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "", "model_deployment", "", "workload", "")
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "helios-a", "model_deployment", "ns/md", "workload", "")
+		wantNoSample(t, ss, mCuts, "cut_by", by, "provider", "helios-b", "model_deployment", "ns/md2", "workload", "")
 	}
 	wantSample(t, ss, 0, mPauses, "provider", "helios-a", "model_deployment", "ns/md")
 	wantNoSample(t, ss, mPauses, "provider", "helios-b", "model_deployment", "ns/md2")
@@ -456,8 +456,8 @@ func TestMetricEventCountersStartAtZeroWhenTargetsBecomeKnown(t *testing.T) {
 	f.apply()
 	ss = scrape(t, f.metrics)
 	for _, by := range cutBys {
-		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "helios-b", "model_deployment", "ns/md2")
-		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "llmlab-a", "model_deployment", "ns/md-managed")
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "helios-b", "model_deployment", "ns/md2", "workload", "")
+		wantSample(t, ss, 0, mCuts, "cut_by", by, "provider", "llmlab-a", "model_deployment", "ns/md-managed", "workload", "")
 	}
 	wantSample(t, ss, 0, mPauses, "provider", "helios-b", "model_deployment", "ns/md2")
 	wantSample(t, ss, 0, mPauses, "provider", "llmlab-a", "model_deployment", "ns/md-managed")

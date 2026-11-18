@@ -17,10 +17,14 @@ import (
 // passes its path; a change needs a restart. Durations are Go duration
 // strings ("2h", "30m").
 type Config struct {
-	ClientListen        string   `json:"clientListen,omitempty"`
-	DialHomeListen      string   `json:"dialHomeListen,omitempty"`
-	ClientKeysFile      string   `json:"clientKeysFile"`
-	SessionHeaders      []string `json:"sessionHeaders,omitempty"`
+	ClientListen   string   `json:"clientListen,omitempty"`
+	DialHomeListen string   `json:"dialHomeListen,omitempty"`
+	ClientKeysFile string   `json:"clientKeysFile"`
+	SessionHeaders []string `json:"sessionHeaders,omitempty"`
+	// WorkloadHeader is the request header that names a Workload (beta,
+	// proposed; HBEP-5, Parameters: workloadHeader, and Workloads, Naming it).
+	// The front drops it before a request goes upstream.
+	WorkloadHeader      string   `json:"workloadHeader,omitempty"`
 	MaxRequestDuration  Duration `json:"maxRequestDuration,omitempty"`
 	IdleTimeout         Duration `json:"idleTimeout,omitempty"`
 	ConnectTimeout      Duration `json:"connectTimeout,omitempty"`
@@ -92,6 +96,7 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 // it: known issue KI-0001 (register/known-issues.yaml).
 const (
 	DefaultClientListen        = "127.0.0.1:8000"
+	DefaultWorkloadHeader      = "x-hpcburst-workload"
 	DefaultMaxRequestDuration  = 2 * time.Hour
 	DefaultIdleTimeout         = 30 * time.Minute
 	DefaultConnectTimeout      = 10 * time.Second
@@ -141,6 +146,7 @@ func (c Config) WithDefaults() Config {
 		}
 	}
 	setStr(&c.ClientListen, DefaultClientListen)
+	setStr(&c.WorkloadHeader, DefaultWorkloadHeader)
 	setDur(&c.MaxRequestDuration, DefaultMaxRequestDuration)
 	setDur(&c.IdleTimeout, DefaultIdleTimeout)
 	setDur(&c.ConnectTimeout, DefaultConnectTimeout)
@@ -212,6 +218,10 @@ func (c Config) Validate() error {
 			probs = append(probs, "sessionHeaders holds an empty name")
 		}
 	}
+	// A name no request header can have would never match, so no request would name a Workload by it and none would be told.
+	if !isHeaderName(c.WorkloadHeader) {
+		probs = append(probs, fmt.Sprintf("workloadHeader %q is not an HTTP header name", c.WorkloadHeader))
+	}
 	if len(probs) > 0 {
 		return errors.New(strings.Join(sortedCopy(probs), "; "))
 	}
@@ -273,4 +283,20 @@ func (c Config) FrpsAddrs(host agentapi.Host) (bind, mux string, err error) {
 		mux = host.FrpsTCPMuxAddr()
 	}
 	return bind, mux, nil
+}
+
+// isHeaderName reports whether s is an HTTP header field name: one or more of
+// the token characters of RFC 9110, section 5.6.2.
+func isHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		token := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+		if !token {
+			return false
+		}
+	}
+	return true
 }

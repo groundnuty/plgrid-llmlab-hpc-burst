@@ -71,7 +71,7 @@ const otelCatchAll = "every other `hpcburst_` series"
 // ways, so a label the table newly maps fails until a check requires it, and a
 // label no longer mapped fails until it leaves these lists.
 var (
-	OTelFrontLabels    = []string{"provider", "model_deployment", "endpoint"}
+	OTelFrontLabels    = []string{"provider", "model_deployment", "endpoint", "workload"}
 	OTelInstanceLabels = []string{"instance_uid"}
 )
 

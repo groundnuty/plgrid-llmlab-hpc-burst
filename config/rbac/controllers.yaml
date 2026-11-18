@@ -204,9 +204,9 @@ kind: ClusterRole
 metadata:
   name: hpcburst-front
 rules:
-  # The four kinds its dynamic informers watch (internal/front/inventory watch.go): the router's inventory.
+  # The five kinds its dynamic informers watch (internal/front/inventory watch.go): the router's inventory.
   - apiGroups: ["hpcburst.groundnuty.github.io"]
-    resources: ["modeldeployments", "instances", "providers", "platformprofiles"]
+    resources: ["modeldeployments", "instances", "workloads", "providers", "platformprofiles"]
     verbs: ["list", "watch"]
   # The record fetch: the identity and verification records of a deployment, listed by label, uncached.
   - apiGroups: ["apps"]

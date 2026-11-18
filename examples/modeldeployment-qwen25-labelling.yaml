@@ -1,0 +1,49 @@
+# The same served ModelDeployment as modeldeployment-qwen25-instruct.yaml, under another name,
+# listing the Workload workload-labelling.yaml in spec.workloads (beta; HBEP-7, HBEP-5
+# Workloads). Apply it INSTEAD of that file, not beside it: both ask for an Instance on the
+# same Provider. Its name is new, and its checkpoint and engine are the same pins, so it is the
+# same deployment ID.
+#
+# A Workload is served only by the ModelDeployments of its own namespace that list it here, or
+# list none. A request that names the Workload, Qwen/Qwen2.5-1.5B-Instruct#labelling, goes to
+# this deployment's Instances alone; a request that names none is routed as before.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: helios-qwen25-labelling
+  namespace: default
+spec:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen2.5-1.5B-Instruct
+        revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "4096"
+  instances: 1
+  workloads:
+    - labelling
+  providers:
+    names:
+      - helios-gh200
+  # Release the Allocation when it has hosted no Instance for this long. The default, Keep,
+  # holds it until its hard end, which on a shared grant is rarely what a first trial wants.
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 128
+      typical: 1024
+      longest: 3072
+    outputTokens:
+      typical: 128
+      longest: 512
+    targetSessions: 4

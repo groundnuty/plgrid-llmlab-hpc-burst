@@ -48,7 +48,7 @@ func TestRunStopCutsAStreamAndWritesItsRecord(t *testing.T) {
 	h.servedMD("md", scModel, 1, "helios-a")
 	h.instance("md", "md-0", "helios-a", e, instanceKey, instanceOpts{leaseEnd: time.Now().Add(48 * time.Hour)})
 	client := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList",
+		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList", inventory.GVRWorkloads: "WorkloadList",
 		inventory.GVRProviders: "ProviderList", inventory.GVRPlatformProfiles: "PlatformProfileList",
 	}, kySeed(t, h)...)
 
@@ -157,7 +157,7 @@ func TestHealthAndEventOnAFailingUsageSink(t *testing.T) {
 	h.servedMD("md", scModel, 1, "helios-a")
 	h.instance("md", "md-0", "helios-a", e, instanceKey, instanceOpts{leaseEnd: time.Now().Add(48 * time.Hour)})
 	client := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList",
+		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList", inventory.GVRWorkloads: "WorkloadList",
 		inventory.GVRProviders: "ProviderList", inventory.GVRPlatformProfiles: "PlatformProfileList",
 	}, kySeed(t, h)...)
 

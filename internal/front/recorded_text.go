@@ -15,7 +15,8 @@ import (
 // the front keeps the whole name and path for the grammar, the routing and the answer, and only the record's copy is cut. The grammar itself
 // has no length limit (a name with no "@" is a valid model-level name whatever its length), so the bound comes from what can be routed to.
 // A longer name names nothing, and its answer, a 400 or a 503, is the same as it was. HBEP-5 (Usage records) words it: requestedModel as sent,
-// cut at 1,291 bytes with a marker at the cut, the longest name the front can serve, and the decoded path at "/v1/models/" and that name, 1,302.
+// cut at 1,355 bytes with a marker at the cut, the longest name the front can serve (1,291 before a name could end in "#" and a Workload's name,
+// amended 2026-11-18), and the decoded path at "/v1/models/" and that name, 1,366 (1,302 before).
 const (
 	// apiModelChars is the most characters spec.model of a ModelDeployment holds (api/v1alpha1, ModelDeploymentSpec.Model, MaxLength). Every
 	// name a request can be routed by has a model part from some ModelDeployment's spec.model, served or managed (internal/front/inventory).
@@ -23,10 +24,12 @@ const (
 	apiModelChars = 256
 	// apiProviderNameBytes is the most bytes of a Provider's name, a Kubernetes object name.
 	apiProviderNameBytes = 253
+	// workloadSuffixBytes is the longest a name's "#<workload>" suffix is: the "#" and a Workload's name, a DNS-1123 label (naming.MaxWorkloadNameLength).
+	workloadSuffixBytes = 1 + naming.MaxWorkloadNameLength
 	// maxRoutableNameBytes is the longest name a request can be routed by, in bytes: the model, "@", the provider, "/" and the 12-character
-	// deployment ID (naming.DisplayIDLength), the model's characters taking up to 4 bytes each in UTF-8. It is the number of bytes of a model name
-	// the record keeps, 1,291.
-	maxRoutableNameBytes = apiModelChars*utf8.UTFMax + 1 + apiProviderNameBytes + 1 + naming.DisplayIDLength
+	// deployment ID (naming.DisplayIDLength), the model's characters taking up to 4 bytes each in UTF-8, and the Workload's suffix. It is the number
+	// of bytes of a model name the record keeps, 1,355.
+	maxRoutableNameBytes = apiModelChars*utf8.UTFMax + 1 + apiProviderNameBytes + 1 + naming.DisplayIDLength + workloadSuffixBytes
 	// modelsPathPrefix and the bound of the path: the longest path the front answers by a name is GET /v1/models/<name>. The front takes the name
 	// from the path decoded once, and the record holds the path decoded too (r.URL.Path), so a client that percent-encodes every byte of a name, 3
 	// bytes each, does not lengthen what is recorded. A longer path can still be forwarded to an engine, and is recorded cut.

@@ -38,7 +38,7 @@ func TestRunTunnelInBothDialHomeModes(t *testing.T) {
 			e, sock := rig.engine(key)
 			a := f.tunInstance("md-a", key)
 			client := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-				inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList",
+				inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList", inventory.GVRWorkloads: "WorkloadList",
 				inventory.GVRProviders: "ProviderList", inventory.GVRPlatformProfiles: "PlatformProfileList",
 			}, kySeed(t, h)...)
 

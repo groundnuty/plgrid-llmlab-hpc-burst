@@ -209,10 +209,16 @@ func (h *harness) managedProvider(name, profile, platform, baseURL, key string, 
 	h.snap.Providers = append(h.snap.Providers, p)
 }
 
-// servedMD adds a served ModelDeployment of model on the named providers.
+// servedMD adds a served ModelDeployment of model on the named providers, in the namespace "ns".
 func (h *harness) servedMD(name, model string, instances int32, providers ...string) *v1alpha1.ModelDeployment {
+	return h.servedMDIn("ns", name, model, instances, providers...)
+}
+
+// servedMDIn is servedMD in a namespace. The tests that use two namespaces give
+// every ModelDeployment its own name, since md finds one by name alone.
+func (h *harness) servedMDIn(ns, name, model string, instances int32, providers ...string) *v1alpha1.ModelDeployment {
 	h.snap.Deployments = append(h.snap.Deployments, v1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: h.newUID()},
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: h.newUID()},
 		Spec: v1alpha1.ModelDeploymentSpec{Model: model, Instances: instances, Providers: v1alpha1.ProviderSelection{Names: providers},
 			Source: v1alpha1.ModelSource{Served: &v1alpha1.ServingSpec{}}},
 	})
@@ -220,14 +226,41 @@ func (h *harness) servedMD(name, model string, instances int32, providers ...str
 }
 
 // managedMD adds a managed-source ModelDeployment of model naming a catalog
-// entry on platform, allowing the named providers.
+// entry on platform, allowing the named providers, in the namespace "ns".
 func (h *harness) managedMD(name, model, platform, catalog string, providers ...string) *v1alpha1.ModelDeployment {
+	return h.managedMDIn("ns", name, model, platform, catalog, providers...)
+}
+
+// managedMDIn is managedMD in a namespace.
+func (h *harness) managedMDIn(ns, name, model, platform, catalog string, providers ...string) *v1alpha1.ModelDeployment {
 	h.snap.Deployments = append(h.snap.Deployments, v1alpha1.ModelDeployment{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: h.newUID()},
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: h.newUID()},
 		Spec: v1alpha1.ModelDeploymentSpec{Model: model, Providers: v1alpha1.ProviderSelection{Names: providers},
 			Source: v1alpha1.ModelSource{Managed: &v1alpha1.ManagedCatalogEntry{Platform: platform, CatalogName: catalog}}},
 	})
 	return &h.snap.Deployments[len(h.snap.Deployments)-1]
+}
+
+// workload adds a Workload of model to the snapshot.
+func (h *harness) workload(ns, name, model string) *v1alpha1.Workload {
+	h.snap.Workloads = append(h.snap.Workloads, v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: h.newUID()},
+		Spec:       v1alpha1.WorkloadSpec{Model: model},
+	})
+	return &h.snap.Workloads[len(h.snap.Workloads)-1]
+}
+
+// dropWorkload removes the Workload of that namespace and name from the
+// snapshot, as a delete does.
+func (h *harness) dropWorkload(ns, name string) {
+	h.t.Helper()
+	for i := range h.snap.Workloads {
+		if w := &h.snap.Workloads[i]; w.Namespace == ns && w.Name == name {
+			h.snap.Workloads = append(h.snap.Workloads[:i:i], h.snap.Workloads[i+1:]...)
+			return
+		}
+	}
+	h.t.Fatalf("no Workload %s/%s", ns, name)
 }
 
 // md returns the ModelDeployment of that name in the snapshot.
@@ -265,7 +298,7 @@ func (h *harness) instance(mdName, name, providerName string, e *enginetest.Engi
 		o.deployID = fmt.Sprintf("%064x", 0x1234500+h.uid)
 	}
 	inst := v1alpha1.Instance{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: uid,
+		ObjectMeta: metav1.ObjectMeta{Namespace: md.Namespace, Name: name, UID: uid,
 			Labels:          map[string]string{v1alpha1.LabelProvider: providerName, v1alpha1.LabelModelDeployment: md.Name},
 			OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "ModelDeployment", Name: md.Name, UID: md.UID, Controller: boolp(true)}}},
 		Spec:   v1alpha1.InstanceSpec{DeploymentID: v1alpha1.FullDeploymentID(o.deployID), Launch: v1alpha1.Launch{MaxNumSeqs: o.maxNumSeqs}},

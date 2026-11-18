@@ -368,7 +368,7 @@ func TestKeysAClientKeyCannotWriteAModelDeployment(t *testing.T) {
 	h.servedMD("md", "example-27b", 1, "helios-a")
 	h.instance("md", "md-0", "helios-a", e, instanceKey, instanceOpts{leaseEnd: time.Now().Add(48 * time.Hour)})
 	client := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList",
+		inventory.GVRModelDeployments: "ModelDeploymentList", inventory.GVRInstances: "InstanceList", inventory.GVRWorkloads: "WorkloadList",
 		inventory.GVRProviders: "ProviderList", inventory.GVRPlatformProfiles: "PlatformProfileList",
 	}, kySeed(t, h)...)
 

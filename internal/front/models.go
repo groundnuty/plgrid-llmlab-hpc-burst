@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/naming"
 )
 
 // modelEntry is one entry of GET /v1/models: OpenAI's model object plus the
@@ -52,9 +54,18 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request, x *exchange)
 		Data   []modelEntry `json:"data"`
 	}{Object: "list", Data: append([]modelEntry{}, models...)}
 	if id, ok := strings.CutPrefix(r.URL.Path, "/v1/models/"); ok {
+		// "<model>#<workload>" (HBEP-5, Workloads, Naming it; written %23 in the URL, which the path above is decoded from): the model's card
+		// when the Workload exists for that model, an unlisted name as any other when it does not, or when the name breaks the grammar. The
+		// card is the model's own, unchanged.
+		name := id
+		known := true
+		if model, wl, hasSuffix := strings.Cut(id, "#"); hasSuffix {
+			name = model
+			known = model != "" && naming.IsWorkloadName(wl) && p.router.HasWorkload(model, wl)
+		}
 		var found *modelEntry
 		for i := range models {
-			if models[i].ID == id {
+			if models[i].ID == name && known {
 				found = &models[i]
 			}
 		}
@@ -73,4 +84,12 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request, x *exchange)
 	x.rec.Status = http.StatusOK
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// HasWorkload reports whether a Workload of that name has that model as its
+// spec.model, in a namespace the front watches.
+func (r *Router) HasWorkload(model, name string) bool {
+	r.lockFresh()
+	defer r.mu.Unlock()
+	return r.view != nil && len(r.view.Workloads[model][name]) > 0
 }
