@@ -56,6 +56,10 @@ var neverStartedBound = map[string]struct {
 	"beta-athena-now-bulk":       {notRunNowStartWait10, true},
 	"beta-helios-now-router":     {notRunPending30, true},
 	"alpha-athena-now-stage":     {notRunStartWait10, true},
+	// The Sano rows (issue #735): no one-job slot and no start wait, so the operator's wait in the queue is the first clock, as the Athena handover's.
+	"alpha-sano-stage":    {notRunPending2h, false},
+	"alpha-sano-serve":    {notRunPending2h, false},
+	"alpha-sano-handover": {notRunPending2h, false},
 }
 
 var cleanupLeftNone = regexp.MustCompile(`cleanup: left behind 0 \(cancelled \d+\)`)
@@ -288,6 +292,9 @@ var cannotTellLine = map[string]string{
 	"beta-athena-now-bulk":       "FAIL (exit status 1)",
 	"beta-helios-now-router":     "FAIL (exit status 1)",
 	"alpha-athena-now-stage":     "FAIL (exit status 1)",
+	"alpha-sano-stage":           "FAIL (exit status 1)",
+	"alpha-sano-serve":           "FAIL (exit status 1)",
+	"alpha-sano-handover":        "FAIL (exit status 1)",
 }
 
 func TestEveryRowThatCannotCallItsJobNeverStartedEndsAFailure(t *testing.T) {

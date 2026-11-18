@@ -632,7 +632,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'handoverlead.go@@SuccessorWaitEnds: -lead - lead/2@@SuccessorWaitEnds: -lead'
   'run.go@@errors.Is(err, ErrSlotTaken) || errors.Is(err, ErrLeadTooShort)@@errors.Is(err, ErrSlotTaken)'
   'live_flows_test.go@@return FitLead(r.tm.MaxRequestDuration, r.maxModelLenOrDefault(), rate)@@return FitLead(r.tm.MaxRequestDuration, 32768, rate)'
-  'hack/live-checks.sh@@  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1@@  true'
+  'hack/live-checks.sh@@  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap|alpha-sano-handover) true ;; *) false ;; esac || return 1@@  true'
   'hack/live-checks.sh@@    elif lead_marker; then@@    elif false; then'
   'hack/live-checks.sh@@at [0-9]+ tokens/s with max-model-len [0-9]+ the lead that fits is@@at .+ tokens/s with max-model-len [0-9]+ the lead that fits is'
   # #451: the tunnel hour's long stream sized to the context (longstream.go): the cap, the floor (dropped, and inclusive), the cap's formula,

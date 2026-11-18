@@ -65,6 +65,10 @@ var alphaShapes = []alphaShape{
 	{"beta-helios-now-router", "TestBetaHeliosNowRouter", "helios", "partition plgrid-gpu-gh200, qos now, 1 GPU, 72 CPU, 120000M, time limit 01:46:00, one job, no requeue", "now", "SEEDACCT-gh", true},
 	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
 	// minute), each with its start wait of 10.
+	// The Sano rows' stack rows (issue #735): one A100 under gpu1 (chosen by the profile; the script's estimate sends it in the extra column),
+	// 11 CPUs and 135904Mi (cpusPerGpu and memPerGpu), the shortest lease of the profile's default clock, no slot and no start wait.
+	{"alpha-sano-handover", "TestAlphaSanoHandover", "sano", "partition gpu, 1 GPU, 11 CPU, 135904Mi, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "", "SEEDACCT-sano", true},
+	{"alpha-sano-serve", "TestAlphaSanoServe", "sano", "partition gpu, 1 GPU, 11 CPU, 135904Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 }
 
@@ -488,6 +492,12 @@ func TestAnAlphaRunBuildsBeforeTheSlotAndGivesTheTestItsEnvironment(t *testing.T
 					t.Errorf("an address reached %s's test, which runs in host-dialed mode:\n%s", s.row, env)
 				}
 			}
+			// The Sano rows' Provider gives its own staging directory (issue #735), from the settings; no other row is given one.
+			if strings.HasPrefix(s.row, "alpha-sano-") {
+				want = append(want, "HPCBURST_ALPHA_STAGING_DIR=/SEEDSTAGE/hb-stage")
+			} else if strings.Contains(env, "HPCBURST_ALPHA_STAGING_DIR") {
+				t.Errorf("a staging directory reached %s's test, whose profile gives its own:\n%s", s.row, env)
+			}
 			for _, x := range want {
 				if !strings.Contains(env, x) {
 					t.Errorf("the test did not get %s:\n%s", x, env)
@@ -695,7 +705,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router", "alpha-sano-serve", "alpha-sano-handover"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -706,8 +716,9 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"the rows' own package", "internal/alpha/alpha.go", "package alpha\n\nvar X = 1\n", alphaRows},
 		{"a stack binary", "cmd/hpcburst-front/main.go", "package main\n\nimport _ \"example.test/fx/internal/stack\"\n\nfunc main() { _ = 1 }\n", stackRows},
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
+		{"the Sano example the Sano rows apply", "examples/provider-sano-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-sano-handover", "alpha-sano-serve", "alpha-sano-stage"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage", "alpha-sano-stage"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

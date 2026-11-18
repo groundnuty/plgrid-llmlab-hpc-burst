@@ -19,7 +19,7 @@ import (
 // every reply they give, so an output rule that holds is one that would catch
 // them; with nothing seeded, "the output is clean" would be an absence check
 // that proves nothing.
-var leakSeeds = []string{"SEEDACCT", "424242", "seedhost01", "seed.example", "SEEDTOKEN", "SEEDKEY"}
+var leakSeeds = []string{"SEEDACCT", "424242", "seedhost01", "seed.example", "SEEDTOKEN", "SEEDKEY", "SEEDSTAGE"}
 
 const fixtureGoMod = "module example.test/fx\n\ngo 1.21\n"
 
@@ -201,11 +201,15 @@ func (w *world) writeSettings(mutate func(m map[string]string)) {
 		"LIVE_LLMLAB_CREDENTIALS":      llmlab,
 		"LIVE_CONF_CREDENTIALS_HELIOS": filepath.Join(w.dir, "helios.ssh"),
 		"LIVE_CONF_CREDENTIALS_ATHENA": filepath.Join(w.dir, "athena.ssh"),
+		"LIVE_CONF_CREDENTIALS_SANO":   filepath.Join(w.dir, "sano.ssh"),
 		"ACCOUNT_HELIOS_CPU":           "SEEDACCT-cpu",
 		"ACCOUNT_HELIOS_GH200":         "SEEDACCT-gh",
 		"ACCOUNT_ATHENA_A100":          "SEEDACCT-a100",
+		"ACCOUNT_SANO_GPU":             "SEEDACCT-sano",
+		// The Sano rows' Provider staging directory (issue #735): account data, which must never reach the screen (a leak seed below).
+		"LIVE_SANO_STAGING_DIR": "/SEEDSTAGE/hb-stage",
 	}
-	for _, p := range []string{llmlab, m["LIVE_CONF_CREDENTIALS_HELIOS"], m["LIVE_CONF_CREDENTIALS_ATHENA"]} {
+	for _, p := range []string{llmlab, m["LIVE_CONF_CREDENTIALS_HELIOS"], m["LIVE_CONF_CREDENTIALS_ATHENA"], m["LIVE_CONF_CREDENTIALS_SANO"]} {
 		write(w.t, p, "key SEEDKEY\n", 0o600)
 	}
 	if mutate != nil {
@@ -541,7 +545,8 @@ func lines(s string) []string {
 }
 
 // hostDialedOnly names the rows that run in host-dialed mode alone (the script refuses them in another): the keeper row, whose relay keeper runs that
-// mode's relays, and the bulk row, which reads the bulk path's buffer on the relays' ssh (issue #521). The harness gives them that mode.
+// mode's relays, and the bulk row, which reads the bulk path's buffer on the relays' ssh (issue #521), and the Sano rows, whose profile lists that
+// mode alone (issue #735). The harness gives them that mode.
 func hostDialedOnly(row string) bool {
-	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk"
+	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover"
 }
