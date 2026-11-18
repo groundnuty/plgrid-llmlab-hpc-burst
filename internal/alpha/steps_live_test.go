@@ -163,6 +163,10 @@ func liveWorld(cfg Config) (world, error) {
 		return world{}, fmt.Errorf("%w: %v", ErrNoDeployment, err)
 	}
 	md.Name, md.Namespace = "alpha", "default"
+	// The rows' Allocation counts are their assertions: over-allocation's extra (k defaults to 1, #616 PR 4) would be one more
+	// GPU job where an end time admits it. Beta's over-allocation live criterion is a row of its own.
+	noExtra := int32(0)
+	md.Spec.OverAllocation = &noExtra
 	// A request near the 5-minute deadline needs room for its tokens.
 	for i, f := range md.Spec.Source.Served.Flags {
 		if f.Name == "max-model-len" {

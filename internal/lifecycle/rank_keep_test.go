@@ -134,56 +134,40 @@ func TestThreeRankedOutEndsSetNoRestartLoop(t *testing.T) {
 	}
 }
 
-// rkScaleStart makes the scale-down rows' deployment: P1 starts at 00:10 and P2 at 00:20:20, hard ends 20:10:20 and
-// 20:20:20 on the rig's clock (12:10 and 12:20 on the HBEP's), and the extra X, seeded at 08:00:40, with the script
-// given. instances is raised to 2 at 08:00:20, after P1's submission, so the two primaries' jobs take their scripts
-// in order. It steps to 09:00:00 (01:00).
+// rkScaleStart makes the scale-down rows' deployment: instances 2, so the pass at 08:00:10 makes P1, P2 and PR 4's
+// extra X together, and the provider submits their jobs at 08:00:20 in the order of their Allocations' names, which
+// is the order they take the scripts (rkRoles): P1's wait is 10 min and P2's the one given, so P1 starts at 00:10 and
+// P2 at 00:20:20, hard ends 20:10:20 and 20:20:20 on the rig's clock (12:10 and 12:20 on the HBEP's), and X's is the
+// script given. The roles are the jobs' order and not the selection's choice, which the UID decides while all three pend
+// from one second and the job starts then fix. It steps to 09:00:00 (01:00) in the caller.
 func rkScaleStart(h *rkRig, xScript pfake.Script, p2 pfake.Script, edit func(*v1alpha1.ModelDeployment)) (p1, p2n, x string) {
-	h.batch.Enqueue(pfake.Script{QueueWait: 10 * time.Minute}, p2, xScript)
-	h.create(rkMD(edit))
-	h.tick(10 * time.Second)
-	h.tick(10 * time.Second) // 08:00:20: P1's job is submitted
-	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 2 })
-	h.tick(10 * time.Second) // 08:00:30: P2 is created
-	h.tick(10 * time.Second) // 08:00:40: P2's job is submitted
-	ins := h.instances(hoMD)
-	if len(ins) != 2 {
-		h.t.Fatalf("%d Instances at 08:00:40, want P1 and P2", len(ins))
-	}
-	p1, p2n = ins[0].Name, ins[1].Name
-	x = h.seedExtra()
-	for _, n := range []string{p1, p2n, x} {
+	h.t.Helper()
+	roles := h.startN(edit, 3, pfake.Script{QueueWait: 10 * time.Minute}, p2, xScript)
+	p1, p2n, x = roles[0], roles[1], roles[2]
+	for _, n := range roles {
 		h.alloc(n) // remembered, for the one a cancellation deletes
 	}
 	return p1, p2n, x
 }
 
-// TestAWarmAllocationDoesNotCancelAPendingSurplus: instances 3, with P1 and P2 ready and P3 pending, k 1. P1 starts at
-// 08:20:20 (a wait of 20 min from its submission at 08:00:20) and P2 at 08:10:40 (10 min from 08:00:40), so P2 has the
-// nearer hard end, 20:10:40 against 20:20:20; P3's job pends behind 3 h. At 09:00 instances is lowered to 1: P1, the
-// later hard end, is chosen, P2 drains (lowered), and P3, the one non-ready surplus Instance, is left alone with k = 1.
-// Once P2 has ended and its Allocation carries idle-since it is the deployment's warm Allocation, and for the next 10
-// minutes, 60 passes, none cancels P3: a warm Allocation counts toward k only in the extra's creation bound (PR 4),
-// never in the trim of surplus that exists (the science agent's ruling on #635, option B; HBEP-7 amendment #636).
+// TestAWarmAllocationDoesNotCancelAPendingSurplus: instances 3, k 1, so the pass at 08:00:10 makes P1, P2, P3 and PR 4's
+// extra X together, and the provider submits their jobs at 08:00:20 in the order of their Allocations' names, which is
+// the order they take the scripts (rkRoles): P1's wait is 20 min, P2's 10 min, and P3's and X's 3 h. P1 starts at
+// 08:20:20 and P2 at 08:10:20, so P2 has the nearer hard end, 20:10:20 against 20:20:20; P3 and X pend. Which of the
+// last two the selection chose as the third primary while both pend is left to their UIDs, so the row calls them S and
+// S' and asserts nothing that depends on it. At 09:00 instances is lowered to 1: P1, the later hard end, is chosen, P2
+// drains (lowered), and of the two non-ready surplus Instances k = 1 leaves ONE alone, in the selection's fixed order,
+// and the other is cancelled with the trim cause. Once P2 has ended and its Allocation carries idle-since it is the
+// deployment's warm Allocation, and for the next 10 minutes, 60 passes, none cancels the one left alone: a warm
+// Allocation counts toward k only in the extra's creation bound (PR 4), never in the trim of surplus that exists (the
+// science agent's ruling on #635, option B; HBEP-7 amendment #636).
 func TestAWarmAllocationDoesNotCancelAPendingSurplus(t *testing.T) {
 	h := newRkRig(t, false)
 	h.defaultDelay = rkNoDelay
-	h.batch.Enqueue(pfake.Script{QueueWait: 20 * time.Minute}, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 3 * time.Hour})
-	h.create(rkMD(nil))
-	h.tick(10 * time.Second)
-	h.tick(10 * time.Second) // 08:00:20: P1's job is submitted
-	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 2 })
-	h.tick(10 * time.Second)
-	h.tick(10 * time.Second) // 08:00:40: P2 is created and its job submitted
-	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 3 })
-	h.tick(10 * time.Second)
-	h.tick(10 * time.Second) // 08:01:00: P3 is created and its job submitted
-	ins := h.instances(hoMD)
-	if len(ins) != 3 {
-		t.Fatalf("%d Instances at 08:01:00, want P1, P2 and P3", len(ins))
-	}
-	p1, p2, p3 := ins[0].Name, ins[1].Name, ins[2].Name
-	for _, n := range []string{p1, p2, p3} {
+	roles := h.startN(func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 3 }, 4,
+		pfake.Script{QueueWait: 20 * time.Minute}, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 3 * time.Hour}, pfake.Script{QueueWait: 3 * time.Hour})
+	p1, p2, s1, s2 := roles[0], roles[1], roles[2], roles[3]
+	for _, n := range roles {
 		h.alloc(n)
 	}
 	h.stepTo(rkAt(1, 0, 0), 10*time.Second, nil)
@@ -195,8 +179,10 @@ func TestAWarmAllocationDoesNotCancelAPendingSurplus(t *testing.T) {
 	if a, b := h.mustInstance(p1).Status.LeaseEnd, h.mustInstance(p2).Status.LeaseEnd; a == nil || b == nil || !b.Before(a) {
 		t.Fatalf("hard ends %v and %v, want P2's the nearer", a, b)
 	}
-	if h.mustInstance(p3).Status.Phase == v1alpha1.InstanceReady || ended(h.mustInstance(p3)) {
-		t.Fatalf("P3 is %s at 01:00, want pending", h.mustInstance(p3).Status.Phase)
+	for _, n := range []string{s1, s2} {
+		if h.mustInstance(n).Status.Phase == v1alpha1.InstanceReady || ended(h.mustInstance(n)) {
+			t.Fatalf("%s is %s at 01:00, want pending", n, h.mustInstance(n).Status.Phase)
+		}
 	}
 	h.mutateMD(hoMD, func(md *v1alpha1.ModelDeployment) { md.Spec.Instances = 1 })
 	pass := h.passOf(hoMD)
@@ -204,8 +190,15 @@ func TestAWarmAllocationDoesNotCancelAPendingSurplus(t *testing.T) {
 	for _, tg := range pass.scaleDownTargets(pass.primaries(), 0) {
 		got = append(got, tg.instance.Name+":"+string(tg.effect)+":"+string(tg.cause))
 	}
-	if want := []string{p2 + ":drain:lowered"}; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("targets %v, want %v", got, want)
+	// P2 drains (lowered), and exactly one of S and S' is cancelled beyond k (the trim cause); written for each choice.
+	want1 := []string{s2 + ":cancelPending:overAllocationTrim", p2 + ":drain:lowered"}
+	want2 := []string{s1 + ":cancelPending:overAllocationTrim", p2 + ":drain:lowered"}
+	if g := strings.Join(got, ","); g != strings.Join(want1, ",") && g != strings.Join(want2, ",") {
+		t.Fatalf("targets %v, want P2 drained (lowered) and one of S, S' cancelled (overAllocationTrim)", got)
+	}
+	left := s1
+	if strings.HasPrefix(got[0], s1+":") {
+		left = s2
 	}
 	h.until(10*time.Minute, 10*time.Second, "P2 ended and its Allocation warm", func() bool {
 		_, anchored := h.idleSince(p2)
@@ -216,12 +209,12 @@ func TestAWarmAllocationDoesNotCancelAPendingSurplus(t *testing.T) {
 	}
 	for i := range 60 {
 		h.tick(10 * time.Second)
-		if in := h.mustInstance(p3); ended(in) || !h.kept(p3) {
-			t.Fatalf("pass %d after P2's Allocation turned warm: P3 is %s (%s), Allocation kept %v, want it still pending", i+1, in.Status.Phase, in.Status.EndReason, h.kept(p3))
+		if in := h.mustInstance(left); ended(in) || !h.kept(left) {
+			t.Fatalf("pass %d after P2's Allocation turned warm: %s is %s (%s), Allocation kept %v, want it still pending", i+1, left, in.Status.Phase, in.Status.EndReason, h.kept(left))
 		}
 	}
-	if got := h.submissions(); got != 3 {
-		t.Fatalf("%d submissions, want the three from before the lowering", got)
+	if got := h.submissions(); got != 4 {
+		t.Fatalf("%d submissions, want the four from before the lowering", got)
 	}
 	if h.mustInstance(p1).Status.Phase != v1alpha1.InstanceReady {
 		t.Fatal("P1 stopped serving")
@@ -293,7 +286,7 @@ func TestScaleDownWithASurplus(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newRkRig(t, false)
-			p1, p2, x := rkScaleStart(h, c.x, pfake.Script{QueueWait: 19*time.Minute + 40*time.Second}, nil)
+			p1, p2, x := rkScaleStart(h, c.x, pfake.Script{QueueWait: 20 * time.Minute}, nil)
 			h.engineOf(p1, rk200, rkNoDelay)
 			h.engineOf(p2, rk200, rkNoDelay)
 			h.engineOf(x, rk200, max(c.xDelay, rkNoDelay))

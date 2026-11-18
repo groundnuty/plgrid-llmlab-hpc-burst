@@ -94,8 +94,16 @@ func (w *execWorld) planOnTolerant(md, name string, spec v1alpha1.OperationSpec)
 
 // An Executing Release's Allocation, whose delete fails in the very pass in which a primary is missing, is not warm capacity:
 // nothing is placed on it. A new Allocation is made for the missing primary instead.
+//
+// Extended for the merge of #664 into #616 PR 4 (the extra): at k = 1 the same pass gives the new primary its extra, so the
+// committed Allocation is not counted as "warm there" by the extra's bound either (extraBound reads warmOf, which skips an
+// Allocation an Executing Operation committed for release, as it skips one pending release). Hand-worked: the world holds two
+// serving Instances; one is lost, so one primary is missing; with the kept Allocation out of warmOf the pass makes two new
+// Instances and two new Allocations, the primary's and the extra's. A bound that counted the kept Allocation as warm would
+// refuse the extra (one new Instance and one new Allocation), and a placement that used it would make none.
 func TestNothingIsPlacedOnAnAllocationAnExecutingReleaseCommittedToRelease(t *testing.T) {
 	w, serving, kept := newKeptThreeWorld(t)
+	w.mutateMD(hoMD, func(m *v1alpha1.ModelDeployment) { m.Spec.OverAllocation = ptrTo(int32(1)) })
 	keptUID := w.allocOrNil(kept).UID
 	failing := true
 	w.failAllocationWrites(kept, &failing)
@@ -106,12 +114,20 @@ func TestNothingIsPlacedOnAnAllocationAnExecutingReleaseCommittedToRelease(t *te
 	lost := w.allocOrNil(w.instance(serving[1]).Spec.AllocationRef.Name)
 	w.batch.CancelExternally(lost.Annotations[v1alpha1.AnnotationJobID])
 	sbatches := w.submissions()
+	before := w.objectNames()
 	w.approve("release", "person", userPerson)
 	w.stepsUntil(5*time.Minute, 10*time.Second, "a replacement primary placed", func() bool { return w.submissions() > sbatches })
 	for _, in := range w.liveInstances(hoMD) {
 		if a := w.allocOrNil(in.Spec.AllocationRef.Name); a != nil && a.UID == keptUID {
 			t.Errorf("Instance %s was placed on Allocation %s, which the Executing Release committed to release", in.Name, kept)
 		}
+	}
+	if op := w.getOp("release"); !isExecuting(op) {
+		t.Fatalf("phase %q: the Release's delete fails, so it is still Executing", op.Status.Phase)
+	}
+	w.passesTolerant(2 * time.Minute)
+	if i, a := w.createdSince(before, "Instance "), w.createdSince(before, "Allocation "); len(i) != 2 || len(a) != 2 {
+		t.Errorf("created Instances %v and Allocations %v, want two of each: the primary and its extra, which the committed Allocation does not bound", i, a)
 	}
 	failing = false
 	w.untilPhase("release", v1alpha1.OperationPhaseDone)
