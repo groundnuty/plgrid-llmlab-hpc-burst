@@ -46,6 +46,36 @@
 #     kill in internal/slurm/sshrun, which the graph reaches by matching an interface call of Close to that
 #     type's, not through any call the tests make). The group's parallel pair keeps its subtests parallel:
 #     a group runs its tests by -run, and -run matches the top-level name only;
+#   - lifecycle-slow4: thirty-four more of internal/lifecycle's fake-clock tests (issue #295, part B4; #725's batch). The
+#     over-allocation work of #708, #721 and #724 added 81 tests to the package (100.3 s of its top-level lines on
+#     train 11's CI run) and slowed rows that were already there (the extra's checks run in every pass, and the
+#     handover, ranking and gate rows now also run with an extra), so the package's run read 332.9 s in the go job
+#     and 453.9 s in the crd and envtest job (the same tests, the second runner 1.36x slower), both above the 323 s
+#     that one reading must not pass (540 s over the 1.67x runner swing; part B3's rule), where it had read 175.2 s
+#     on main before #708. These are the thirty-four slowest, by their own time in train 11's go-job run, of the
+#     rows those three PRs added or slowed (new tests of #708, #721 and #724, and existing rows whose time on that
+#     run exceeds their time before #708 by more than the two runners' ratio explains), 125.2 s in all. Taking them
+#     out, the package's run would have read 332.9 s - 125.2 s = 207.7 s in the go job, and 453.9 s - 125.2 s x 1.36 =
+#     283.6 s in the crd and envtest job, both under 323 s (a projection: CI's runs of this change are the
+#     measurement). The group's -timeout is 3x the sum of each test's worst in the go-job logs read that carry it
+#     (before #708, #708's merge and train 11; a row that #721 or #724 added has train 11's reading alone, from the
+#     fast runner), 163.5 s, which gives 490 s, so the worst of three has to stay under 327 s,
+#     two thirds of it (#295's rule for a group that sets its own timeout). The thirty-four tests sum to 125.2 s in
+#     train 11's go-job run and took 80.7 s run alone on a 4-CPU Sano node, where the package without the lanes reads
+#     243 s against that run's 333 s, so the group is expected to read about 110 s in a lane on CI, 163 s at the most (the
+#     sum of worsts), well under 327 s. The lane adds that to its 477 s in the crd and envtest job (the job read 1,386 s
+#     of its 2,700 s on train 11, so about 1,500 s, 1,549 s at the most) and to go own-timeout's 572 s (of 1,800 s: 682 s,
+#     735 s at the most). Like lifecycle-slow's, the thirty-four run reconcile passes over a fake provider and a fake clock: read
+#     through the package's helpers with a type-checked call graph (golang.org/x/tools/go/packages, go/ssa and RTA over
+#     every Test function), they reach no control plane (internal/testenv), listener (net.Listen*, httptest, an
+#     http.Server's Serve), process (os/exec, os.StartProcess, syscall.Kill) or port constant (28000 to 29999). The
+#     graph follows static calls, interface calls by the types the program instantiates, and closures and functions
+#     taken as values from where they are taken, and it reads only this module's own functions: a call through a
+#     function value is not followed, and a library's insides are not entered, since the real Kubernetes client that
+#     an interface call of client.Client resolves to among the instantiated types would otherwise reach HTTP and
+#     the credential plugin's exec from every test, while the fake client these tests use does neither. The same
+#     graph reports TestManagerOnControlPlane, TestOperationsOnAControlPlaneWithTwoAgents, TestAgentCLIOnAControlPlane
+#     and TestMetricsStandbyOnTwoManagers (testenv, exec, port constants, kill), so it can see what it checks for;
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - envoy-timeouts: internal/agent's two real-Envoy tests that wait out Envoy's own defaults, about 6
@@ -108,6 +138,8 @@ cd "$root" || exit 1
 # 17 Nov 2026): 20.3 s, 14.6 s, 13.8 s and 13.4 s for the four serial tests and 53.9 s for the two parallel
 # ones, which is the part of the package's run that their top-level lines do not carry (432.2 s less the
 # 378.3 s of the top-level lines). That is 115.9 s, which gives 350 s.
+# Part B4's lifecycle-slow4 takes the sum of each test's worst over the go-job logs of main before #708 (f05028df), of
+# main after #708 and #739 (5919a554) and of train 11, 163.5 s, which gives 490 s.
 groups=(
   "lease|./internal/lifecycle|TestLifecycleManagerReleasesItsLeaseOnEveryStop|150s"
   "lifecycle-caches|./internal/lifecycle|TestCachesNeedsEveryWatchedInformer TestCachesRecoverFromAStalledDiscovery TestCachesStopDuringAStalledDiscovery TestCachesListIsWhatTheControllerWatches|180s"
@@ -117,6 +149,7 @@ groups=(
   "lifecycle-slow|./internal/lifecycle|TestScaleDownWithASurplus TestARankedOutAllocationIsKeptUnderItsPolicy TestHandoverLateReplacementDegradesThenTakesOver TestHandoverReplacementCreatedAtItsPlannedTime TestAWaitingCandidateIsNotFailedByStartTimeout TestACandidateWithNoTunnelFailsAtItsDeadline TestNoOverlapOneSlotSuccessorWaitsForTheFlagToClear TestAWarmAllocationDoesNotCancelAPendingSurplus TestGateAWrongEntryReleasesAtMostTwoWhenInstancesGoOnWarmAllocations TestAMarkedPeerThatRestartsNeverOutranks TestAReplacementHedgesByItsWaits|520s"
   "lifecycle-slow2|./internal/lifecycle|TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry TestRetentionNoneOutlivesHardEnd TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart TestMetricsNoProgressNeedsFreshKnownCounters TestNoOverlapModeBoundaries TestRetentionJobEndsAndLeavesListing TestTunnelDownAloneRestartsNothing TestMetricsDrainEndsOnAKnownZeroReadAfterTheDrainBegan|330s"
   "lifecycle-slow3|./internal/lifecycle|TestVerifyRefusedGenerationConfigStopsClass TestReadyInstanceStaysReadyWhenTunnelDrops TestGateAMissTheFullRecordCantHoldSuspendsItsEntry TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases TestTheTwoJobGuardKeepsALongWaitToTwoAllocations TestADeadStepLeavesTheDeploymentAtItsLastEnd|350s"
+  "lifecycle-slow4|./internal/lifecycle|TestACandidateRanksAgainstItsServingPeer TestTheFirstToPassIsChosenAndTheLaterOutranksIt TestAnExtraIsRankedOutWhenItsPeerHasAReplacement TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsAtLeastTheLeadLater TestNoExtraWhereThePassMadeNoNewAllocationForAPrimary TestAKeptLoserIsNeverRankedAgainstAnotherPrimaryWhenItsWinnerLeaves TestGateDoesNotJudgeAWaitingCandidateAgainAfterItRestarts TestAnExtraThatPassesFirstWaitsForTheRanking TestAStartedLoserEndsAtTheWinWhenAnyOfItsConditionsFails TestAKeptLosersMarkIsReadAfterARestart TestHandoverRestartPlansTheSameTime TestAFailedPrimaryWithAReplacementLeavesTheWaitingExtraChosen TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains TestHandoverControllerKilledAtEachStep TestGateRecordOnlyIsFinalForAWaitingCandidate TestAKeptLoserRankingPointCases TestAReReadyOutrankerWaitsTheFullWindowFromItsNewTransition TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned TestAStartedLoserIsRankedAgainstItsWinnerAlone TestHandoverSameClassSameIDAndRollout TestTheExtraAndTheSlotBeyondItsOwnHandovers TestAStartedLoserIsNeverComparedWithAnotherPrimary TestAKeptLoserIsChosenWhenTheDeploymentIsShort TestAFailedPrimaryLeavesTheExtraAsThePrimary TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement TestAStartedLoserIsKept TestHandoverLeaseEndExtensionMovesDrainStart TestAStartedLoserThirtyMinutesAfterItsPredecessorIsNotPlacedOn TestAWarmPlacementCannotSlipBetweenTheCountAndTheHeadroom TestLoweringInstancesLeavesANonReadyPrimaryAsTheExtra TestAWinnerThatFailsLeavesTheLoserChosen TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater TestAKeptLoserThatFailsACheckIsReleased TestNoOverlapWarmAllocationTakesTheReplacement|490s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
   "livechecks-hostdialed|./hack/livechecks|TestEachHostDialedFaultFailsTheRowThroughTheScript TestEveryHostDialedRowPassesThroughTheScriptOverTheFake TestAHostDialedRowWhoseSlotIsHeldIsNotRunThroughTheScript TestADryHostDialedBinaryRefusesLiveSettings|150s"
