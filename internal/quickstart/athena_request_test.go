@@ -210,3 +210,43 @@ func TestCodesNamedInTheQuickstartAreTheCodesOfTheCode(t *testing.T) {
 		}
 	}
 }
+
+// The default over-allocation (spec.overAllocation, absent means 1: #616, PR 4) adds an extra Allocation beside the primary
+// wherever the Provider has room for it, and the guide says where the reader sees it. The Athena objects, by hand:
+//   - host-dialed, the guide's mode: the Provider has at most 2 Allocations (HBEP-6), and the primary, pending, will hold
+//     the second for its replacement once it runs (no end time), so the extra's slot, 1 + 1 + 1 = 3, exceeds 2: one
+//     Allocation, the primary's;
+//   - direct or ssh: no cap of 2, and the partition's QOS plgrid types only a limit of 1000 submitted jobs, so the extra is
+//     made: two Allocations, each of the same size;
+//   - overAllocation 0 in either: one.
+func TestQuickstartTheExtraFollowsTheMode(t *testing.T) {
+	if n := len(planFiles(t, athenaInput, nil).allocs); n != 1 {
+		t.Fatalf("host-dialed: %d Allocations, want the primary's alone", n)
+	}
+	direct := athenaInput
+	direct.hostDialed = false
+	plan := planFiles(t, direct, nil)
+	if len(plan.allocs) != 2 {
+		t.Fatalf("direct or ssh: %d Allocations, want the primary's and the extra's (Degraded: %v)", len(plan.allocs), plan.degraded)
+	}
+	a, b := plan.allocs[0].Spec.ForProvider.Batch, plan.allocs[1].Spec.ForProvider.Batch
+	if a == nil || b == nil || a.GPUs != 1 || b.GPUs != 1 || a.Partition != "plgrid-gpu-a100" || b.Partition != "plgrid-gpu-a100" {
+		t.Fatalf("the two requests are %+v and %+v, want each 1 GPU on plgrid-gpu-a100", a, b)
+	}
+	zero := int32(0)
+	if n := len(planFiles(t, direct, func(_ *v1alpha1.Provider, md *v1alpha1.ModelDeployment) { md.Spec.OverAllocation = &zero }).allocs); n != 1 {
+		t.Fatalf("direct or ssh with overAllocation 0: %d Allocations, want one", n)
+	}
+	// The guide says what the code does: the extra is refused in host-dialed mode, and made in the other two, where
+	// overAllocation: 0 turns it off.
+	page := readRepoFile(t, "docs/quickstart.md")
+	for _, want := range []string{
+		"the extra is refused without a word and `hbk get instances,allocations` shows one Allocation",
+		"so the default over-allocation adds an extra: beside the primary, a second, pending Allocation",
+		"Set `overAllocation: 0` in the ModelDeployment's `spec` to turn it off.",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("docs/quickstart.md does not say %q", want)
+		}
+	}
+}

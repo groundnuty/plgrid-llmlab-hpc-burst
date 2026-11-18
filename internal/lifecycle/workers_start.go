@@ -282,8 +282,8 @@ func (p *pass) workerStartSignal(in *v1alpha1.Instance, av agentView, st setting
 		p.at(deadline)
 		return "", ""
 	}
-	if p.waitingAtRankingPoint(in) {
-		return "", "" // a surplus Instance that passed waits for its ranking (startSignal)
+	if p.waitingAtRankingPoint(in) || p.readyThisPass(in, av) {
+		return "", "" // a surplus Instance that passed waits for its ranking, and a chosen one is ready in this pass (startSignal)
 	}
 	for _, w := range names {
 		if !workerWarmed(in, w) {
