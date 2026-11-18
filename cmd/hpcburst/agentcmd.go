@@ -1,7 +1,7 @@
 package main
 
 // The agent commands of HBEP-10's beta step 2 (issue #659): scale, end, release, confirm, approvals,
-// approve and operation. internal/agentcli does the work and docs/agent-cli.md is its contract; this file
+// approve and operation, and beta step 5's inventory (issue #662). internal/agentcli does the work and docs/agent-cli.md is its contract; this file
 // hands it the process's kubeconfig variable and the terminal, which the package never reads itself.
 
 import (
