@@ -29,7 +29,8 @@ const outlivedWait = 30 * time.Second
 // internal/lifecycle and hack/livechecks in three more groups: lifecycle-apiserver (envtest),
 // lifecycle-slow (fake-clock, no control plane and no port) and livechecks-tree. Part B2 adds
 // lifecycle-slow2, eight more fake-clock tests of internal/lifecycle, and part B3 lifecycle-slow3, six more:
-// four serial ones and the two whose subtests run in parallel.
+// four serial ones and the two whose subtests run in parallel. Part B4 adds lifecycle-slow4, thirty-four more
+// fake-clock tests of internal/lifecycle, the slowest rows that #708, #721 and #724 added or slowed.
 const ownTestName = "TestLifecycleManagerReleasesItsLeaseOnEveryStop"
 
 var (
@@ -54,6 +55,7 @@ var (
 	lifecycleSlow3 = []string{"TestVerifyRefusedGenerationConfigStopsClass", "TestReadyInstanceStaysReadyWhenTunnelDrops",
 		"TestGateAMissTheFullRecordCantHoldSuspendsItsEntry", "TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases",
 		"TestTheTwoJobGuardKeepsALongWaitToTwoAllocations", "TestADeadStepLeavesTheDeploymentAtItsLastEnd"}
+	lifecycleSlow4       = []string{"TestACandidateRanksAgainstItsServingPeer", "TestTheFirstToPassIsChosenAndTheLaterOutranksIt", "TestAnExtraIsRankedOutWhenItsPeerHasAReplacement", "TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsAtLeastTheLeadLater", "TestNoExtraWhereThePassMadeNoNewAllocationForAPrimary", "TestAKeptLoserIsNeverRankedAgainstAnotherPrimaryWhenItsWinnerLeaves", "TestGateDoesNotJudgeAWaitingCandidateAgainAfterItRestarts", "TestAnExtraThatPassesFirstWaitsForTheRanking", "TestAStartedLoserEndsAtTheWinWhenAnyOfItsConditionsFails", "TestAKeptLosersMarkIsReadAfterARestart", "TestHandoverRestartPlansTheSameTime", "TestAFailedPrimaryWithAReplacementLeavesTheWaitingExtraChosen", "TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains", "TestHandoverControllerKilledAtEachStep", "TestGateRecordOnlyIsFinalForAWaitingCandidate", "TestAKeptLoserRankingPointCases", "TestAReReadyOutrankerWaitsTheFullWindowFromItsNewTransition", "TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned", "TestAStartedLoserIsRankedAgainstItsWinnerAlone", "TestHandoverSameClassSameIDAndRollout", "TestTheExtraAndTheSlotBeyondItsOwnHandovers", "TestAStartedLoserIsNeverComparedWithAnotherPrimary", "TestAKeptLoserIsChosenWhenTheDeploymentIsShort", "TestAFailedPrimaryLeavesTheExtraAsThePrimary", "TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement", "TestAStartedLoserIsKept", "TestHandoverLeaseEndExtensionMovesDrainStart", "TestAStartedLoserThirtyMinutesAfterItsPredecessorIsNotPlacedOn", "TestAWarmPlacementCannotSlipBetweenTheCountAndTheHeadroom", "TestLoweringInstancesLeavesANonReadyPrimaryAsTheExtra", "TestAWinnerThatFailsLeavesTheLoserChosen", "TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater", "TestAKeptLoserThatFailsACheckIsReleased", "TestNoOverlapWarmAllocationTakesTheReplacement"}
 	controllerFailover   = []string{"TestControllerProcessesFailOverMidSubmit", "TestControllerProcessesFailOverBeforeSubmit"}
 	controllerIdentities = []string{"TestEachManagerOfTheBinaryRunsUnderItsOwnIdentity", "TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity",
 		"TestTheLifecycleIdentityStampsTheOwnerHashLabel", "TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan"}
@@ -84,6 +86,7 @@ var groups = []group{
 	{"lifecycle-slow", "./internal/lifecycle", "520s", lifecycleSlow},
 	{"lifecycle-slow2", "./internal/lifecycle", "330s", lifecycleSlow2},
 	{"lifecycle-slow3", "./internal/lifecycle", "350s", lifecycleSlow3},
+	{"lifecycle-slow4", "./internal/lifecycle", "490s", lifecycleSlow4},
 	{"controller-failover", "./cmd/hpcburst-controller", "460s", controllerFailover},
 	{"controller-identities", "./cmd/hpcburst-controller", "150s", controllerIdentities},
 	{"envoy-timeouts", "./internal/agent", "1200s", envoyTimeouts},
