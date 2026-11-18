@@ -421,14 +421,16 @@ func TestRenderLaunchCommand(t *testing.T) {
 // still part of its flag; a boolean is --name or --no-name; max-num-seqs is
 // last, once, as the spec gives it.
 func TestRenderLaunchEveryFlagIsOneArgument(t *testing.T) {
-	l := specLaunch(t, specMD(
+	// On the pinned image: a "false" on an image with no dump file is refused
+	// (enginebooleans.go), and the rig's own digest has none.
+	l := specLaunch(t, onThePinnedImage(specMD(
 		specFlag("max_model_len", "32768"),
 		specFlag("seed", "-1"),
 		specFlag("enable_prefix_caching", "false"),
 		specFlag("trust-remote-code", "true"),
 		specFlag("speculative-config", `{"method": "ngram", "num_speculative_tokens": 3}`),
 		specFlag("max_num_seqs", "64"),
-	))
+	)))
 	want := specLaunchArgv(
 		"--max-model-len=32768",
 		"--seed=-1",
@@ -456,7 +458,7 @@ func TestRenderLaunchGPUsAreTPTimesPP(t *testing.T) {
 func TestRenderLaunchBooleanFlags(t *testing.T) {
 	for _, name := range []string{"enable-prefix-caching", "enable_prefix_caching"} {
 		t.Run("false as "+name, func(t *testing.T) {
-			l := specLaunch(t, specMD(specFlag(name, "false")))
+			l := specLaunch(t, onThePinnedImage(specMD(specFlag(name, "false")))) // the pinned image: "false" needs a dump file
 			if want := specLaunchArgv("--no-enable-prefix-caching", "--max-num-seqs=256"); !slices.Equal(l.Command, want) {
 				t.Fatalf("command\n got %q\nwant %q", l.Command, want)
 			}
