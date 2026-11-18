@@ -133,9 +133,10 @@ func TestEveryRowsProviderStagingFollowsItsProfile(t *testing.T) {
 
 // A Sano row refuses ssh mode alone (issue #735; L-1.16): its compute nodes have no home directory, where ssh mode's agent reads its key. Direct mode
 // is accepted, with its address and the front's listen address as the first study sets them, and so is host-dialed with neither; ConfigFromEnv
-// refuses ssh for a Sano row and takes the others.
+// refuses ssh for a Sano row and takes the others. Every Sano row is held to it, the baseline row (Row 1, which the first study's direct mode
+// runs first) included: the rule is the row's cluster, not a list of names.
 func TestASanoRowRefusesSSHAndTakesDirectAndHostDialed(t *testing.T) {
-	for _, row := range []string{SanoServeName, SanoHandoverName} {
+	for _, row := range []string{SanoServeName, SanoHandoverName, BetaBaselineName} {
 		t.Run(row, func(t *testing.T) {
 			m := liveSettings(row)
 			if _, _, err := ConfigFromEnv(env(m), row); err != nil {

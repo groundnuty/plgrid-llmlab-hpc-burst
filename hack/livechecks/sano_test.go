@@ -183,6 +183,7 @@ func TestTheSanoStagingDirectoryAndModeAreRefusedBeforeAnythingRuns(t *testing.T
 		{"a staging directory with a comma", "alpha-sano-stage", func(m map[string]string) { m["LIVE_SANO_STAGING_DIR"] = "/SEEDSTAGE/a,b" }, "LIVE_SANO_STAGING_DIR has a ':', '=' or ',' in it"},
 		{"ssh mode", "alpha-sano-serve", sshMode, "does not run in ssh mode"},
 		{"ssh mode on the handover row", "alpha-sano-handover", sshMode, "does not run in ssh mode"},
+		{"ssh mode on the baseline row", "beta-sano-llmlab-baseline", sshMode, "does not run in ssh mode"},
 		{"the account the shape needs", "alpha-sano-handover", func(m map[string]string) { delete(m, "ACCOUNT_SANO_GPU") }, "setting ACCOUNT_SANO_GPU is missing"},
 		{"the provider's credentials", "alpha-sano-stage", func(m map[string]string) { delete(m, "LIVE_CONF_CREDENTIALS_SANO") }, "setting LIVE_CONF_CREDENTIALS_SANO is missing"},
 	} {
@@ -211,10 +212,11 @@ func TestTheSanoStagingDirectoryAndModeAreRefusedBeforeAnythingRuns(t *testing.T
 
 // A Sano row runs in direct mode (issue #735): the first study dials Sano that way, and only ssh mode is refused (the table above). The script takes
 // the mode with its address and the front's listen address, and gives both to the row's test; a row that refused it, or that dropped the listen
-// address, would stop the live check of direct mode before it began. The row runs in the mode as written, not in the host-dialed mode the harness
-// gives the Sano rows by default.
+// address, would stop the live check of direct mode before it began. It holds for every Sano row, the baseline row (Row 1) included. The row runs in
+// the mode as written, not in the host-dialed mode the harness gives the Sano rows by default.
 func TestASanoRowRunsInDirectModeAndGivesTheTestItsAddressAndListenAddress(t *testing.T) {
-	for _, r := range []struct{ row, test string }{{"alpha-sano-serve", "TestAlphaSanoServe"}, {"alpha-sano-handover", "TestAlphaSanoHandover"}} {
+	for _, r := range []struct{ row, test string }{{"alpha-sano-serve", "TestAlphaSanoServe"}, {"alpha-sano-handover", "TestAlphaSanoHandover"},
+		{"beta-sano-llmlab-baseline", "TestBetaSanoLLMLabBaseline"}} {
 		t.Run(r.row, func(t *testing.T) {
 			w := newAlphaWorld(t)
 			w.exactMode = true
