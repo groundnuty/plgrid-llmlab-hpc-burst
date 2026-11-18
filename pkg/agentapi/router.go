@@ -7,6 +7,13 @@ import "time"
 // DesiredInstance.Router, and every report InstanceReport.Router, as doc.go's Parts section planned.
 // A controller that sends no Router means alpha's shape, and an older agent ignores one.
 
+// RouterReadTimeout bounds each of the two reads of the agent's router poll: the admin socket's
+// /clusters?format=json and the probe through the router's listener. The agent's poll is the probe
+// interval plus up to two of these, so the controller's window for a /clusters read is counted in
+// such polls (internal/lifecycle identityHealthy; `@hpc-burst-science-agent`, 18 Nov 2026, #764,
+// for #784). The agent and the controller share this one number.
+const RouterReadTimeout = 2 * time.Second
+
 // RouterKind is a router an Instance can run, the strings of v1alpha1.InstanceRouter.
 type RouterKind string
 

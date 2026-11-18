@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -18,8 +19,9 @@ import (
 //     only from a report whose router part echoes the desired router generation, so a stale report
 //     cannot undo the router rung's 0;
 //   - a worker counts only on a read of /clusters taken after its current process started and at most two
-//     probe intervals old at the report; past that window nobody counts, healthyWorkers is 0 and the front
-//     skips the Instance until a fresh read (identityHealthy; the science agent's ruling on #764, 18 Nov 2026);
+//     of the agent's router polls old at the report; past that window nobody counts, healthyWorkers is 0
+//     and the front skips the Instance until a fresh read (identityHealthy; the science agent's ruling on
+//     #764, 18 Nov 2026, and #784's window);
 //   - a worker the router holds failing its active check for health.failureThreshold reports in a row,
 //     while its current generation is verified, enters the worker rung (RouterCheckFailing); a
 //     restarted worker is failing by design during its own warm-up, and an ejection alone is no signal;
@@ -70,13 +72,27 @@ const (
 	// readNone: the report says nothing current about the router's workers: no report, a report that does
 	// not echo the desired router generation, a router that is not running, or no /clusters read yet.
 	readNone readState = iota
-	// readFresh: a read at most agentapi.MetricsStaleProbeIntervals probe intervals old at the report's own
-	// time, or a router that has exited or stopped (no worker is healthy behind it, a current fact).
+	// readFresh: a read at most routerPollWindow old at the report's own time, or a router that has exited or stopped (no worker is healthy behind it, a current fact).
 	readFresh
 	// readStale: a read older than that, or one whose age cannot be judged (a probe interval or a report
 	// time that is not known): no worker counts.
 	readStale
 )
+
+// routerPollsStale is how many of the agent's router polls old a /clusters read may be at the report and
+// still count (`@hpc-burst-science-agent`, 18 Nov 2026, #764, for #784, replacing two probe intervals).
+const routerPollsStale = 2
+
+// routerPollWindow is how old a /clusters read may be at the report and still count: routerPollsStale of
+// the agent's router polls, a poll being the probe interval plus its two bounded reads, the admin's
+// /clusters and the probe through the router, each at most agentapi.RouterReadTimeout (internal/agent
+// watchRouterHealth: a timer of one probe interval, then both reads, then the next round). The read is
+// stamped when its round begins, so one failed round whose reads time out leaves the last good read up
+// to two polls old before the next good one posts; two bare probe intervals were shorter than that and
+// wrote a 0 in the gap. The agent and the controller share the timeout's one number.
+func routerPollWindow(probeInterval time.Duration) time.Duration {
+	return routerPollsStale * (probeInterval + 2*agentapi.RouterReadTimeout)
+}
 
 // identityHealthy is the one join of the router's view to the workers' processes, for healthyWorkers
 // (healthyCount) and the KV cache size (kvRouterWorkers) alike (`@hpc-burst-science-agent`, 18 Nov 2026,
@@ -89,13 +105,18 @@ const (
 //     holds a restarted worker out of the router (its readiness answers 503) until its new generation is
 //     verified. The agent cannot stamp a generation on an Envoy host, which has none, so the join is on
 //     time. A worker with no report or no StartTime is a process the controller cannot place: not counted;
-//   - the read is at most agentapi.MetricsStaleProbeIntervals probe intervals old at the report's own time
-//     (exactly that old is still fresh). A failed /clusters read is not flagged in the report: the agent
-//     keeps the last good Workers and ClustersReadAt (internal/agent routerRead) and the age says how old
-//     it is, so one failed read inside the window changes nothing.
+//   - the worker's own report says it is running: the agent keeps an exited worker's StartTime, so a
+//     worker that died after the router's last read would otherwise still count under the router's flag;
+//   - the read is at most routerPollWindow old at the report's own time (exactly that old is still fresh)
+//     and not after it: a read stamped later than the report's own time, which a backward step of the
+//     agent's clock makes of a predecessor's cached read, cannot be placed against any process and is
+//     stale. A failed /clusters read is not flagged in the report: the agent keeps the last good Workers and
+//     ClustersReadAt (internal/agent routerRead) and the age says how old it is, so one failed read inside
+//     the window changes nothing.
 //
-// state is readNone when the report says nothing current (today's ok == false), readStale past the window
-// or when the window cannot be judged (names are nil: none counts), readFresh otherwise.
+// state is readNone when the report says nothing current (today's ok == false), readStale past the window,
+// for a read dated after the report, or when the window cannot be judged (names are nil: none counts),
+// readFresh otherwise.
 func identityHealthy(in *v1alpha1.Instance, av agentView) (names []string, state readState) {
 	rr := currentRouter(in, av)
 	switch {
@@ -106,15 +127,15 @@ func identityHealthy(in *v1alpha1.Instance, av agentView) (names []string, state
 	case rr.Phase != agentapi.PartRunning || rr.ClustersReadAt == nil:
 		return nil, readNone
 	}
-	bound := agentapi.MetricsStaleProbeIntervals * av.probeInterval
-	if av.probeInterval <= 0 || av.reportTime.IsZero() || av.reportTime.Sub(*rr.ClustersReadAt) > bound {
+	if av.probeInterval <= 0 || av.reportTime.IsZero() || av.reportTime.Before(*rr.ClustersReadAt) ||
+		av.reportTime.Sub(*rr.ClustersReadAt) > routerPollWindow(av.probeInterval) {
 		return nil, readStale
 	}
 	for _, w := range rr.Workers {
 		if !w.Healthy || w.Ejected {
 			continue
 		}
-		if wr := reportOf(av.report, w.Name); wr != nil && wr.StartTime != nil && rr.ClustersReadAt.After(*wr.StartTime) {
+		if wr := reportOf(av.report, w.Name); wr != nil && wr.Phase == agentapi.PartRunning && wr.StartTime != nil && rr.ClustersReadAt.After(*wr.StartTime) {
 			names = append(names, w.Name)
 		}
 	}

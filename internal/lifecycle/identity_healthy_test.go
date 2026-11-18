@@ -1,11 +1,12 @@
 package lifecycle
 
 // status.healthyWorkers joins the router's view to each worker's current process and reads it at most two
-// probe intervals old (identityHealthy, routerhealth.go; `@hpc-burst-science-agent`, 18 Nov 2026, #764,
-// the ruling on healthyWorkers, with team-lead's answer for the read past the window). Each test feeds
-// hand-built reports to writeWorkerCounts over kvcache_test.go's fake API and reads healthyWorkers back
-// from it. Every expected count is a literal typed here; none is computed by the join under test. The
-// probe interval is kvProbe, 10 s, so a read is fresh for 20 s.
+// of the agent's router polls old (identityHealthy, routerhealth.go; `@hpc-burst-science-agent`, 18 Nov
+// 2026, #764, the ruling on healthyWorkers, with team-lead's answer for the read past the window, and
+// #784's window). Each test feeds hand-built reports to writeWorkerCounts over kvcache_test.go's fake API
+// and reads healthyWorkers back from it. Every expected count is a literal typed here; none is computed
+// by the join under test. The probe interval is kvProbe, 10 s: the agent's poll is that plus its two
+// bounded reads of 2 s, 14 s, so a read counts for 28 s (kvWindow, typed by hand).
 
 import (
 	"testing"
@@ -60,25 +61,39 @@ func TestAReplacedWorkerDoesNotCountForHealthyWorkersUnderItsPredecessorsFlag(t 
 }
 
 // A count of 2, then the agent's /clusters read fails: the report carries the last good read, now older.
-// Inside the window (up to two probe intervals, 20 s, exactly 20 s still inside) healthyWorkers stays 2 and
-// the pass writes nothing; a second past it, it is 0; a fresh read writes 2 again. (Mutant: a failed read
-// inside the window clears the set, which writes 0 at the first later step.)
+// Inside the window (two router polls, 28 s, exactly 28 s still inside) healthyWorkers stays 2 and the
+// pass writes nothing; a millisecond past it, it is 0; a fresh read writes 2 again.
+//
+// The row that matters is the read that TIMES OUT: the last good read is at t0, the next round starts 14 s
+// later (a 10 s timer, then both reads) and its read fails at about t0+16 s (a 2 s timeout), and the round
+// after it, the next good one, lands at t0+28 s. A report at t0+27 s, between the two, carries the t0 read
+// 27 s old: two bare probe intervals (20 s) would call it stale and write 0 where one failed read must
+// change nothing. Astra's own case, in PR 784's review: a good read at 0 s, a 10 s interval, one 2 s
+// timeout. The agent's loop (watchRouterHealth) waits a full interval AFTER each round's reads end, so
+// round 1 starts at 10 s, its read times out at 12 s, the timer waits 10 s more, and round 2 starts at 22 s
+// at the earliest: a report at 21 s carries the 0 s read 21 s old, which the bare 20 s bound wrote 0 for and
+// the 28 s window keeps. (Mutants: a failed read inside the window clears the set, which writes 0 at the
+// first later step; the bare 2 x probe interval bound put back, which writes 0 at the t0+21 s step, and at
+// t0+27 s.)
 func TestOneFailedReadInsideTheWindowChangesNothing(t *testing.T) {
 	rg := newKVRig(t, 2)
 	good := kvView(0, true, kvw("worker-0", 0, nil, true), kvw("worker-1", 0, nil, true))
 	rg.run([]kvStep{
-		kvstep("a fresh read: 2", good, "unset", "2", 1),
-		kvstep("one probe interval later, the read failed: still 2, no write", afterFailedRead(t, good, kvProbe), "unset", "2", 0),
-		kvstep("exactly two probe intervals after the read: still inside", afterFailedRead(t, good, 2*kvProbe), "unset", "2", 0),
+		kvstep("a fresh read at t0: 2", good, "unset", "2", 1),
+		kvstep("t0+10 s, a read refused at once: still 2, no write", afterFailedRead(t, good, kvProbe), "unset", "2", 0),
+		kvstep("t0+16 s, the next round's read timed out: still 2, no write", afterFailedRead(t, good, 16*time.Second), "unset", "2", 0),
+		kvstep("t0+21 s, Astra's case (below): still 2, no write", afterFailedRead(t, good, 21*time.Second), "unset", "2", 0),
+		kvstep("t0+27 s, before the next good read lands at t0+28 s: still 2, no write", afterFailedRead(t, good, 27*time.Second), "unset", "2", 0),
+		kvstep("t0+28 s exactly, two router polls: still inside", afterFailedRead(t, good, 28*time.Second), "unset", "2", 0),
 	})
 	// A report each side of the window's end, from a fresh count, and then a fresh read.
 	rg = newKVRig(t, 2)
-	later := kvNow.Add(3 * kvProbe)
+	later := kvNow.Add(42 * time.Second)
 	again := kvViewRead(later, 0, true, kvw("worker-0", 0, nil, true), kvw("worker-1", 0, nil, true))
 	again.reportTime, again.reportAt, again.now = later, later, later
 	rg.run([]kvStep{
 		kvstep("a fresh read: 2", good, "unset", "2", 1),
-		kvstep("a second past two probe intervals: the Instance is skipped, 0", afterFailedRead(t, good, 2*kvProbe+time.Second), "unset", "0", 1),
+		kvstep("t0+28 s and a millisecond, past two router polls: the Instance is skipped, 0", afterFailedRead(t, good, 28*time.Second+time.Millisecond), "unset", "0", 1),
 		kvstep("a fresh read, both healthy: 2 again", again, "unset", "2", 1),
 	})
 }
@@ -92,12 +107,12 @@ func TestOneFailedReadInsideTheWindowChangesNothing(t *testing.T) {
 func TestPastTheWindowNobodyCountsAndTheInstanceIsSkipped(t *testing.T) {
 	rg := newKVRig(t, 2)
 	fresh := kvView(0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), true))
-	// The last good read is 21 s old at this report: worker-1 was unhealthy in it, which the controller
-	// never saw (it judges the latest report of each pass).
-	stale := kvViewRead(kvNow.Add(-2*kvProbe-time.Second), 0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), false))
+	// The last good read is 29 s old at this report, past the 28 s window: worker-1 was unhealthy in it,
+	// which the controller never saw (it judges the latest report of each pass).
+	stale := kvViewRead(kvNow.Add(-29*time.Second), 0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), false))
 	rg.run([]kvStep{
 		kvstep("a fresh read, both healthy", fresh, "380000", "2", 1),
-		kvstep("the read is past two probe intervals, its flags say one healthy: 0 and no size, in ONE update", stale, "unset", "0", 1),
+		kvstep("the read is past two router polls, its flags say one healthy: 0 and no size, in ONE update", stale, "unset", "0", 1),
 		kvstep("the same stale report writes nothing more", stale, "unset", "0", 0),
 		kvstep("a later fresh read with both healthy: 2 again", fresh, "380000", "2", 1),
 	})
@@ -129,5 +144,43 @@ func TestNoRouterReadYetLeavesHealthyWorkersAbsent(t *testing.T) {
 		kvstep("a router still starting", starting, "unset", "-", 0),
 		kvstep("the first read", kvView(0, true, kvw("worker-0", 0, nil, true), kvw("worker-1", 0, nil, true)), "unset", "2", 1),
 		kvstep("the router has exited: nobody is healthy, 0", exited, "unset", "0", 1),
+	})
+}
+
+// An exited worker is not counted although the router's last read flags it healthy and the agent keeps
+// its StartTime after the exit (PR 784's review): two workers healthy on a read, worker-1 dies just after
+// it, and the next report, before the router reads again, shows it exited. healthyWorkers is 1, not 2,
+// and the KV minimum (worker-1's 380000 is the smaller) is worker-0's 400000. (Mutant: the phase check
+// removed, which gives 2 and 380000.)
+func TestAWorkerThatHasExitedSinceTheRoutersReadIsNotCounted(t *testing.T) {
+	rg := newKVRig(t, 2)
+	read := kvNow.Add(-5 * time.Second)
+	two := func(w1 agentapi.PartPhase) agentView {
+		av := kvViewRead(read, 0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), true))
+		av.report.Workers[1].Phase = w1
+		return av
+	}
+	rg.run([]kvStep{
+		kvstep("both running on the router's read", two(agentapi.PartRunning), "380000", "2", 1),
+		kvstep("worker-1's report now says exited, its StartTime kept, the router's flag still healthy", two(agentapi.PartExited), "400000", "1", 1),
+		kvstep("worker-1 starting again, the router's read not yet after its start", two(agentapi.PartStarting), "400000", "1", 0),
+		kvstep("worker-1 running again on that read", two(agentapi.PartRunning), "380000", "2", 1),
+	})
+}
+
+// A read dated after the report cannot be placed against any process: after a backward step of the agent's
+// clock a predecessor's cached read can look newer than both a replacement's start and the report. It is
+// past the window, so nobody counts (0), and a read exactly at the report's time still counts (PR 784's
+// review). (Mutant: the check removed, which counts 2 for the read a second after the report.)
+func TestAReadDatedAfterTheReportCountsForNobody(t *testing.T) {
+	rg := newKVRig(t, 2)
+	both := func(read time.Time) agentView {
+		return kvViewRead(read, 0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), true))
+	}
+	rg.run([]kvStep{
+		kvstep("a read exactly at the report's time counts", both(kvNow), "380000", "2", 1),
+		kvstep("a read a second after the report: nobody counts", both(kvNow.Add(time.Second)), "unset", "0", 1),
+		kvstep("a read a millisecond after the report: the same", both(kvNow.Add(time.Millisecond)), "unset", "0", 0),
+		kvstep("a read at the report's time again", both(kvNow), "380000", "2", 1),
 	})
 }

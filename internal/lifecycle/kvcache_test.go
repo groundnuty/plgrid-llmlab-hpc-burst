@@ -45,8 +45,13 @@ func tok(n int64) *int64 { return &n }
 
 var kvNow = time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 
-// kvProbe is the probe interval of these reports: a router read is fresh for twice it, 20 s.
-const kvProbe = 10 * time.Second
+// kvProbe is the probe interval of these reports, and kvWindow how old a router read may be at the report
+// and still count, typed by hand: two of the agent's router polls, a poll being the probe interval plus
+// its two bounded reads of 2 s each, 14 s here, so 28 s (#764, the ruling for #784).
+const (
+	kvProbe  = 10 * time.Second
+	kvWindow = 28 * time.Second
+)
 
 // kvView is the agentView of one report at kvNow, instance generation instGen, whose router read was at kvNow.
 func kvView(instGen int64, router bool, ws ...kvWorker) agentView {
@@ -397,7 +402,7 @@ func TestAReplacementCountsForTheKVCacheSizeOnlyOnceTheRouterHasReadItsProcess(t
 
 // Row (4b): a failed or stale /clusters read is unknown, so no worker counts for the size and it is UNSET.
 // The agent keeps the last read when a read fails and its time says how old it is (routerRead): a read
-// older than two probe intervals (20 s here) at the report's time is unknown, exactly two is still
+// older than two router polls (28 s here) at the report's time is unknown, exactly that old is still
 // fresh. healthyWorkers follows the same read (identityHealthy): past the window it is 0, the Instance is
 // skipped, and a fresh read writes the count again.
 func TestAStaleRouterReadMakesEveryWorkerUnknownForTheKVCacheSize(t *testing.T) {
@@ -407,8 +412,8 @@ func TestAStaleRouterReadMakesEveryWorkerUnknownForTheKVCacheSize(t *testing.T) 
 	}
 	rg.run([]kvStep{
 		kvstep("a fresh read", both(kvNow), "380000", "2", 1),
-		kvstep("a read exactly two probe intervals old is still fresh", both(kvNow.Add(-2*kvProbe)), "380000", "2", 0),
-		kvstep("a read a second older than that is unknown: no size, healthyWorkers 0", both(kvNow.Add(-2*kvProbe-time.Second)), "unset", "0", 1),
+		kvstep("a read exactly two router polls (28 s) old is still fresh", both(kvNow.Add(-kvWindow)), "380000", "2", 0),
+		kvstep("a read a millisecond older than that is unknown: no size, healthyWorkers 0", both(kvNow.Add(-kvWindow-time.Millisecond)), "unset", "0", 1),
 		kvstep("a read a minute old, the same", both(kvNow.Add(-time.Minute)), "unset", "0", 0),
 		kvstep("a read again, fresh", both(kvNow), "380000", "2", 1),
 	})
