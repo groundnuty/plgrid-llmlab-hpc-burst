@@ -343,12 +343,21 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	}
 	// An extra's unit set (extraUnits): the slot of each unit not reserved yet is left free, and each unit's size is counted
 	// by the caps check as if already expected, but for a replacement's own Allocation that an expectation already sizes.
-	var future []v1alpha1.BatchParameters
+	var future, futureQ []v1alpha1.BatchParameters
 	if q.deployment != "" {
+		units := extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, unitSizing: us})
+		sized := func(key string) bool { _, ok := t.params[q.provider][key]; return ok }
 		var leave int
-		leave, future = unitTerms(extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, unitSizing: us}),
-			func(key string) bool { _, ok := t.params[q.provider][key]; return ok }, nil)
+		leave, future = unitTerms(units, sized, nil)
 		q.alsoLeave += leave
+		if q.scope != nil {
+			// Where the partition sets qosByGpus each unit is charged to the QOS its GPU count submits under: the extra's own
+			// QOS counts the SAME units, filtered (qosScope.under counts an unknown count, never missing it). Without a
+			// scope there are no per-QOS terms.
+			var leaveQ int
+			leaveQ, futureQ = unitTerms(units, sized, func(u extraUnit) bool { return q.scope.under(u.gpus) })
+			q.qosAlsoLeave += leaveQ
+		}
 	}
 	if q.params != nil {
 		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], future, *q.params, nil); !ok {
@@ -356,7 +365,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 		}
 		// The per-user caps of the asking Allocation's own QOS count that QOS's Allocations alone.
 		if q.scope != nil && q.scope.hasLimits() {
-			if ok, why := capsFit(q.provider, q.scope.limits, rd, t.params[q.provider], future, *q.params, q.scope); !ok {
+			if ok, why := capsFit(q.provider, q.scope.limits, rd, t.params[q.provider], futureQ, *q.params, q.scope); !ok {
 				return slotAnswer{count: c.total(), holds: holds, capsWhy: why}, nil
 			}
 		}
