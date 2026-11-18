@@ -361,7 +361,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		if serr != nil {
 			return nil, serr
 		}
-		refused = nowServeNotRun(o)
+		refused = nowServeNotRun(cfg.Row.Name, o)
 		tags, obs = o.Tags, o
 		judge = func(j []provider.Job) []string { return VerifyNowServe(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return nowServePost(cfg.Row, o, f) }

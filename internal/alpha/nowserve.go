@@ -139,6 +139,16 @@ func EndingSoonAt(ready, drainStart, end time.Time) EndingSoonVerdict {
 	return EndingSoonOptional
 }
 
+// EndingSoonOf is what a row asks of the ending-soon event at the window's end at. Athena's row asks for it unconditionally, as it did before #735: its
+// 48-minute lease always puts the drain start under an hour away, and the rule must not read the Instance's lease end, which a wrong one would turn
+// into a forbidden event (the review of PR 770). Sano's serve row, whose 106-minute lease does not, follows the rule (EndingSoonAt).
+func EndingSoonOf(rowName string, ready, drainStart, at time.Time) EndingSoonVerdict {
+	if !IsSanoServe(rowName) {
+		return EndingSoonExpected
+	}
+	return EndingSoonAt(ready, drainStart, at)
+}
+
 // HBEP3Tag is an Allocation's job tag computed from HBEP-3 (Allocation and job identity), here and not with the
 // contracts' helper, as the rehearsal's part 3 does (internal/rehearsal/scenario, part3_requeue_test.go): hb-<n>-<h>,
 // <n> the name cut to its first 40 characters, <h> the first 12 hex characters of the SHA-256 of
@@ -328,7 +338,8 @@ func VerifyNowServe(row Row, o NowServeObs, jobs []provider.Job) []string {
 func nowServePost(row Row, o NowServeObs, failures []string) string {
 	var b strings.Builder
 	head := verdictLine(row, failures)
-	warm := warmStartShownByTheAgentsOwnLog(o.Warm)
+	allowed := LeadingForeignAllowed(row.Name)
+	warm := warmStartShownAllowing(o.Warm, allowed)
 	if len(failures) == 0 {
 		var why []string
 		if warm != nil {
@@ -350,7 +361,7 @@ func nowServePost(row Row, o NowServeObs, failures []string) string {
 	} else {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: NOT shown (%s): NOT RUN, never a pass\n", warm.counts())
 	}
-	if n := LeadingForeign(o.Warm.Log); n > 0 {
+	if n := LeadingForeign(o.Warm.Log); n > 0 && allowed > 0 {
 		fmt.Fprintf(&b, "- the job's standard error opened with %d line(s) that are not the agent's (the scheduler's or the shell's), before the agent's first line; the agent's own log is judged from its first line on\n", n)
 	}
 	b.WriteString(rehashLine("the job", o.Warm))
@@ -397,6 +408,16 @@ const (
 // (AgentLogLine.Foreign): the science agent's bound on #735, 18 Nov 2026, on the relaxation that lets Sano's two scheduler lines come first. A fourth is no
 // longer a few lines of a scheduler or a shell: the log is not accounted for, and the warm start is not shown.
 const MaxLeadingForeign = 3
+
+// LeadingForeignAllowed is how many leading lines that are not the agent's a row's warm-start check skips: MaxLeadingForeign on Sano's serve row, whose
+// jobs write them, and none on any other row, so that Athena's verdict is exactly what it was before #735 (the review of PR 770: an Athena log with one
+// scheduler line stays NOT RUN).
+func LeadingForeignAllowed(rowName string) int {
+	if IsSanoServe(rowName) {
+		return MaxLeadingForeign
+	}
+	return 0
+}
 
 // LeadingForeign is how many lines at the very head of the agent's log are not the agent's (AgentLogLine.Foreign): the lines the check skips before the
 // agent's first line, counted for the text to post, which says how many and never what. A foreign line after the agent's first line is not leading.
@@ -670,10 +691,12 @@ func ExpectedWarmFiles(files []agentapi.FileDigest, loadFormat string, skip Skip
 	return expected, skipped
 }
 
-// warmStartShownByTheAgentsOwnLog is the warm-start check's one seam (the ruling 1(b) on #376 and its conditions), nil
-// when the warm start is shown:
+// warmStartShownByTheAgentsOwnLog is the warm-start check's one seam (the ruling 1(b) on #376 and its conditions) as every row but Sano's serve row
+// takes it, nil when the warm start is shown; warmStartShownAllowing is the same seam with a row's allowance of leading lines that are not the agent's
+// (LeadingForeignAllowed). The conditions:
 //   - the log is whole: it opens with the agent's start line, restartCount 0, after the agent's pre-start lines only
-//     (AgentPreStartMsgs), and the read reaches the end of the first staging;
+//     (AgentPreStartMsgs), and, on a row with an allowance, after at most that many lines that are not the agent's, and the read reaches the end of
+//     the first staging;
 //   - the window is that first execution's first staging: from the start line to the first of a worker's start
 //     (AgentWorkerMsg, which comes only once staging is done) and a second start line (a second execution);
 //   - in it, the first attempt alone: no image build, no failed attempt, no failed image check (StagedFailedCheck), and
@@ -681,16 +704,21 @@ func ExpectedWarmFiles(files []agentapi.FileDigest, loadFormat string, skip Skip
 //   - that one image line names the Instance's image digest, and for each expected file (ExpectedWarmFiles) a file
 //     line names it; a line naming another digest or file shows nothing.
 func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
+	return warmStartShownAllowing(w, 0)
+}
+
+// warmStartShownAllowing is warmStartShownByTheAgentsOwnLog for a row that skips up to leading lines at the head of the log that are not the agent's.
+func warmStartShownAllowing(w WarmObs, leading int) *WarmUnshownError {
 	e := &WarmUnshownError{LogRead: w.LogRead, FilesOf: len(w.Files)}
 	if !w.LogRead {
 		return e
 	}
-	// The log opens with at most MaxLeadingForeign lines that are not the agent's (the scheduler's or the shell's: the read is the file's head from its
-	// first byte, agentLogLine, so what comes first is the job's own first output), then the agent's pre-start lines. A foreign line after the agent's
-	// first line, or a fourth before it, is not accounted for. The first line of the agent's that is not a pre-start line must be its start, restartCount 0:
+	// The log opens with at most leading lines that are not the agent's (the scheduler's or the shell's: the read is the file's head from its
+	// first byte, agentLogLine, so what comes first is the job's own first output; none on a row with no allowance), then the agent's pre-start lines.
+	// A foreign line after the agent's first line, or one more than the allowance before it, is not accounted for. The first line of the agent's that is not a pre-start line must be its start, restartCount 0:
 	// a staging line, an unlisted agent line or a restarted agent's start there is no first execution, and that start is what proves the log whole.
 	i := LeadingForeign(w.Log)
-	if i > MaxLeadingForeign {
+	if i > leading {
 		e.NotWhole = true
 		return e
 	}
@@ -752,8 +780,8 @@ func slicesContains(list []string, s string) bool {
 }
 
 // nowServeNotRun is what ends a run of row A NOT RUN when nothing failed: the warm start the agent's own log did not show.
-func nowServeNotRun(o NowServeObs) error {
-	if w := warmStartShownByTheAgentsOwnLog(o.Warm); w != nil {
+func nowServeNotRun(rowName string, o NowServeObs) error {
+	if w := warmStartShownAllowing(o.Warm, LeadingForeignAllowed(rowName)); w != nil {
 		return w
 	}
 	return nil

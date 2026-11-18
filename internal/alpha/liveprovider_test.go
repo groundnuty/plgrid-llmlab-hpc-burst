@@ -165,6 +165,24 @@ func TestTheStagingDirSettingIsRequiredCheckedAndNeverNamed(t *testing.T) {
 			t.Errorf("staging dir %.20q: err %v, want a refusal that does not quote the value", bad, err)
 		}
 	}
+	// The CRD takes ':', '=' and ',', but the warm-start reader refuses a log path with one (safePath): the row refuses it at its first line, with the
+	// reason, and not at the end of a run (the review of PR 770). The same value without them is taken.
+	for _, bad := range []string{"/people/example-user/a:b", "/people/example-user/a=b", "/people/example-user/a,b", "$STAGE/a:b"} {
+		m[envStagingDir] = bad
+		if _, _, err := ConfigFromEnv(env(m), SanoServeName); err == nil || !strings.Contains(err.Error(), "the rows read the agent's log by this path") || strings.Contains(err.Error(), bad) {
+			t.Errorf("staging dir %.30q: err %v, want the refusal that says why and does not quote the value", bad, err)
+		}
+	}
+	m[envStagingDir] = "$STAGE/a.b_c-d"
+	if _, _, err := ConfigFromEnv(env(m), SanoServeName); err != nil {
+		t.Errorf("a staging directory of a variable and letters, digits and ._-: %v", err)
+	}
+	// What the rows' reader can read is exactly what the check takes: the log path the flow builds from any accepted root passes safePath.
+	for _, ok := range []string{"/people/example-user/hb-stage", "/a/b.c_d-e/f"} {
+		if err := CheckStagingDir(ok); err != nil || !safePath.MatchString(ok+"/alloc/hb-x/job.err") {
+			t.Errorf("staging dir %q: check %v, safePath %t; want both to take it", ok, err, safePath.MatchString(ok+"/alloc/hb-x/job.err"))
+		}
+	}
 	m[envStagingDir] = secret
 	cfg, _, err := ConfigFromEnv(env(m), SanoServeName)
 	if err != nil || cfg.StagingDir != secret {

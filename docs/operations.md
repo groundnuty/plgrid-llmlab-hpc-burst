@@ -489,7 +489,7 @@ In `host-dialed` mode no job dials your host. The host dials each job, and the j
 
 ### Bursting onto Sano
 
-Sano's `gpu` partition has two nodes, one with 4 and one with 8 NVIDIA A100 80GB PCIe GPUs. Its compute nodes have no home directory, which is where `ssh` mode's agent reads its dial-home key, so a Sano Provider runs in `host-dialed` mode only. It also needs a staging directory of its own.
+Sano's `gpu` partition has two nodes, one with 4 and one with 8 NVIDIA A100 80GB PCIe GPUs. Its compute nodes have no home directory, which is where `ssh` mode's agent reads its dial-home key, so the profile lists `host-dialed` as its only dial-home mode, and the Sano rows and the examples run in it. A launcher in `direct` mode is not checked against the profile's list ([HBEP-4](../hbep/0004-provider-interface/README.md), the profile schema), and `direct` is plausible on Sano but untested, so use `host-dialed`, the mode that has run. A Sano Provider also needs a staging directory of its own.
 
 **Before the first deployment:**
 

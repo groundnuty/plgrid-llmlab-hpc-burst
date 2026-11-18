@@ -163,7 +163,7 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 | `modeldeployment-qwen3-reasoning.yaml` | a reasoning model, on the same Provider |
 | `provider-helios-gh200.yaml` | a batch Provider on Helios `plgrid-gpu-gh200` (beta) |
 | `modeldeployment-qwen25-instruct.yaml` | the same small instruct model, on the Helios Provider (beta) |
-| `provider-sano-a100.yaml` | a batch Provider on Sano `gpu` (beta), host-dialed only, with its own `stagingDir` |
+| `provider-sano-a100.yaml` | a batch Provider on Sano `gpu` (beta), run host-dialed (its profile's only dial-home mode), with its own `stagingDir` |
 | `modeldeployment-sano-qwen25-7b-instruct.yaml` | a 7B instruct model, served on that Provider (beta) |
 | `modeldeployment-sano-reference-qwen25-7b-instruct.yaml` | the same model under a name no client sends, with one Allocation, for the reference run behind Sano's expected-performance entry (beta) |
 | `provider-llmlab.yaml` | a managed Provider: LLMLab itself, read-only ([optional](#optional-attach-llmlab)) |

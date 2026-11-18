@@ -680,16 +680,16 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # end's catch-ups, and its NOT RUN is the warm start alone.
   'budget.go@@(r.Lease - dw) + stack.WaitDeadline + dw@@(r.Lease - dw) + dw'
   'budget.go@@stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase@@stack.WaitDeadline + dw + EndMargin + stack.CatchUpWorstCase'
-  'run.go@@		refused = nowServeNotRun(o)@@		refused = nil'
+  'run.go@@		refused = nowServeNotRun(cfg.Row.Name, o)@@		refused = nil'
   # #503: the restart ladder's climb is named by its rung in row A's verdict (LadderOf reads it, ladderChecks names it).
   'nowserve.go@@	case l.RestartLoop:@@	case false && l.RestartLoop:'
   'nowserve.go@@	case l.InstanceRestarts > 0:@@	case false && l.InstanceRestarts > 0:'
   'nowserve.go@@	f := ladderChecks(o.Ladder)@@	f := []string(nil)'
   # #735, 18 Nov 2026: the warm start's reader skips at most MaxLeadingForeign lines that are not the agent's, only before the agent's first line, and the
   # text of the first four goes to the private record (WarmObs.LeadingText), cut at 300 bytes, and never to the text to post.
-  'nowserve.go@@	if i > MaxLeadingForeign {@@	if false {'
+  'nowserve.go@@	if i > leading {@@	if false {'
   'nowserve.go@@	for i < len(w.Log) && w.Log[i].Kind == LinePreStart {@@	for i < len(w.Log) && (w.Log[i].Kind == LinePreStart || w.Log[i].Foreign) {'
-  'nowserve.go@@	if n := LeadingForeign(o.Warm.Log); n > 0 {@@	if n := LeadingForeign(o.Warm.Log); n > 0 {
+  'nowserve.go@@	if n := LeadingForeign(o.Warm.Log); n > 0 && allowed > 0 {@@	if n := LeadingForeign(o.Warm.Log); n > 0 && allowed > 0 {
 		fmt.Fprint(&b, o.Warm.LeadingText)'
   'nowserve.go@@		if len(out) > MaxLeadingForeign || !parseAgentLine(l).Foreign {@@		if !parseAgentLine(l).Foreign {'
   'nowserve.go@@const leadingTextMax = 300@@const leadingTextMax = 3000'
@@ -697,6 +697,19 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'liveobs.go@@			case r.Part == v1alpha1.PartInstance:@@			case false:'
   'liveobs.go@@		if in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonRestartLoop {@@		if in.Status.EndReason == v1alpha1.ReasonRestartLoop {'
   'now_flows_test.go@@	o.Ladder = LadderOf(r.watch.Last())@@	o.Ladder = LadderOf(nil)'
+  # #770 review: the stage row's post says what the job did (stageKind) and not "cold" for a rerun over staged artifacts.
+  'internal/providerctl/conformance/nowstage_test.go@@	case !res.imageBuilt && res.rehash.Files > 0:@@	case false:'
+  'internal/providerctl/conformance/nowstage_test.go@@	case res.imageBuilt && res.rehash.Files == 0:@@	case res.imageBuilt:'
+  # #770 review, Athena's invariant: the ending-soon sets are drawn at each read (2), Athena's expectation is unconditional (3), and the leading-line
+  # allowance is Sano's serve row's alone, in the verdict and in the post (5). Also (4) the stand-in helper's image format and (7) the staging root's characters.
+  'now_flows_test.go@@		at = clock()@@		_ = clock()'
+  'nowserve.go@@	if !IsSanoServe(rowName) {@@	if false {'
+  'nowserve.go@@	if IsSanoServe(rowName) {@@	if true {'
+  'nowserve.go@@	if w := warmStartShownAllowing(o.Warm, LeadingForeignAllowed(rowName)); w != nil {@@	if w := warmStartShownAllowing(o.Warm, MaxLeadingForeign); w != nil {'
+  'nowserve.go@@	allowed := LeadingForeignAllowed(row.Name)@@	allowed := MaxLeadingForeign'
+  'standin_test.go@@ -X main.loadFormat=auto -X main.imageFormat=" + string(agentapi.ImageFormatSandbox)@@ -X main.loadFormat=auto"'
+  'config.go@@var stagingDirReadable = regexp.MustCompile(`^[^:=,]*$`)@@var stagingDirReadable = regexp.MustCompile(`^.*$`)'
+  'hack/live-checks.sh@@  if [[ $d == *[:=,]* ]]; then@@  if [[ $d == *[Z]* ]]; then'
   # #503, the delta review of PR 509: the wait for the worker restart fails on an ended or gone Instance and names a climb of the ladder.
   'live_flows_test.go@@			t.Fatalf("%s", workerRestartFailure(last, true))@@			_ = last; t.Fatalf("worker fault: Instance %s is gone", in.Name)'
   'live_flows_test.go@@		if msg := workerRestartFailure(now, false); msg != "" {@@		if msg := ""; msg != "" {'

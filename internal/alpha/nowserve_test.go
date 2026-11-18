@@ -700,7 +700,7 @@ func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T
 		other(5), worker, other(6), other(7)}
 	judge := func(lines ...string) (*WarmUnshownError, []AgentLogLine) {
 		log := ParseAgentLog([]byte(strings.Join(lines, "\n") + "\n"))
-		return warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: log}), log
+		return warmStartShownAllowing(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: log}, LeadingForeignAllowed(SanoServeName)), log
 	}
 	// The shape of the run: shown, and two leading lines are counted for the post.
 	e, log := judge(append(slices.Clone(foreign), body...)...)
@@ -749,33 +749,75 @@ func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T
 	if !strings.Contains(post, "opened with 2 line(s) that are not the agent's") || strings.Contains(post, "invented notice") {
 		t.Errorf("the text to post does not say how many lines came first, or names them:\n%s", post)
 	}
+	// The allowance is Sano's serve row's alone (the review of PR 770: Athena's verdict stays exactly what it was before #735). On every other row one
+	// line that is not the agent's first is NotWhole, through the seam as the rows take it and through the text to post, which says NOT RUN and has no
+	// line about leading lines.
+	for name, want := range map[string]int{SanoServeName: MaxLeadingForeign, SanoHandoverName: 0, "alpha-athena-now-serve": 0, "alpha-athena-now-nooverlap": 0, "alpha-athena-handover": 0} {
+		if got := LeadingForeignAllowed(name); got != want {
+			t.Errorf("LeadingForeignAllowed(%s) = %d, want %d", name, got, want)
+		}
+	}
+	oneFirst := ParseAgentLog([]byte(strings.Join(append([]string{foreign[0]}, body...), "\n") + "\n"))
+	athenaObs := NowServeObs{Warm: WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: oneFirst}}
+	if e := warmStartShownByTheAgentsOwnLog(athenaObs.Warm); e == nil || !e.NotWhole {
+		t.Errorf("Athena's reader, one line that is not the agent's first: %+v, want NotWhole", e)
+	}
+	if err := nowServeNotRun("alpha-athena-now-serve", athenaObs); !errors.Is(err, ErrWarmUnshown) {
+		t.Errorf("Athena's row, one line that is not the agent's first: %v, want the NOT RUN of a warm start not shown", err)
+	}
+	if err := nowServeNotRun(SanoServeName, athenaObs); err != nil {
+		t.Errorf("Sano's serve row, the same log: %v, want it shown", err)
+	}
+	apost := nowServePost(rowOf("alpha-athena-now-serve"), athenaObs, nil)
+	if !strings.Contains(apost, "alpha-athena-now-serve: NOT RUN") || strings.Contains(apost, "opened with") || strings.Contains(apost, "invented notice") {
+		t.Errorf("Athena's text to post, one line that is not the agent's first, is not the NOT RUN it was:\n%s", apost)
+	}
+	// With no such line, Athena's log is shown, as before.
+	if e := warmStartShownByTheAgentsOwnLog(WarmObs{LogRead: true, ImageDigest: digest, Files: files, Log: ParseAgentLog([]byte(strings.Join(body, "\n") + "\n"))}); e != nil {
+		t.Errorf("Athena's reader, a log that opens with the agent's own line: %+v, want shown", e)
+	}
 }
 
-// Through Run, the dry log whose first two lines are the scheduler's (the shape of the Sano serve run) still shows the warm start: no failure, no NOT RUN,
-// a PASS whose text says how many lines came first and not what they were. The control is the unlisted agent line before the start, which is NOT RUN
-// (TestAWarmStartTheAgentsLogDidNotShowIsNotRun, warm-unknown-first). Three lines are the most the check takes, and the text of the lines is in the
-// private record and in no text to post (the science agent's bound on #735, 18 Nov 2026).
+// Through Run, the dry log whose first two lines are the scheduler's (the shape of the Sano serve run) still shows the warm start on Sano's serve row: no
+// failure, no NOT RUN, a PASS whose text says how many lines came first and not what they were. The control is the unlisted agent line before the start,
+// which is NOT RUN (TestAWarmStartTheAgentsLogDidNotShowIsNotRun, warm-unknown-first). Three lines are the most the check takes, and the text of the lines
+// is in the private record and in no text to post (the science agent's bound on #735, 18 Nov 2026). On Athena's row the same logs are NOT RUN, as they were
+// before #735: the allowance is Sano's alone (the review of PR 770).
 func TestARowALogThatOpensWithTheSchedulersLinesStillShowsTheWarmStart(t *testing.T) {
-	for _, name := range []string{"alpha-athena-now-serve", SanoServeName} {
-		for fault, n := range map[string]int{"warm-foreign-first": 2, "warm-foreign-three": 3} {
-			t.Run(name+"/"+fault, func(t *testing.T) {
-				row := rowOf(name)
-				cfg := Config{Row: row, Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
-				rec, err := NewRecorder(cfg.Out)
-				if err != nil {
-					t.Fatal(err)
-				}
-				failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
-				if err != nil || len(failures) != 0 {
-					t.Fatalf("failures %v, err %v; want a pass", failures, err)
-				}
-				posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
-				if !strings.Contains(string(posts), name+": PASS") || !strings.Contains(string(posts), fmt.Sprintf("opened with %d line(s) that are not the agent's", n)) {
-					t.Errorf("the text to post does not say PASS with the count of the lines that came first:\n%s", posts)
-				}
-				leadingTextIsPrivate(t, cfg.Out, n)
-			})
-		}
+	for fault, n := range map[string]int{"warm-foreign-first": 2, "warm-foreign-three": 3} {
+		t.Run(SanoServeName+"/"+fault, func(t *testing.T) {
+			cfg := Config{Row: rowOf(SanoServeName), Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+			if err != nil || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v; want a pass", failures, err)
+			}
+			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+			if !strings.Contains(string(posts), SanoServeName+": PASS") || !strings.Contains(string(posts), fmt.Sprintf("opened with %d line(s) that are not the agent's", n)) {
+				t.Errorf("the text to post does not say PASS with the count of the lines that came first:\n%s", posts)
+			}
+			leadingTextIsPrivate(t, cfg.Out, n)
+		})
+		t.Run("alpha-athena-now-serve/"+fault, func(t *testing.T) {
+			row := rowOf("alpha-athena-now-serve")
+			cfg := Config{Row: row, Dry: true, DryFault: fault, Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+			var w *WarmUnshownError
+			if !errors.Is(err, ErrWarmUnshown) || !errors.As(err, &w) || !w.NotWhole || !NotRun(row, err) || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v; want the NOT RUN of a log that is not the whole of the first start, as before #735", failures, err)
+			}
+			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+			if !strings.Contains(string(posts), "alpha-athena-now-serve: NOT RUN") || strings.Contains(string(posts), "opened with") {
+				t.Errorf("Athena's text to post is not the NOT RUN it was before #735:\n%s", posts)
+			}
+		})
 	}
 }
 

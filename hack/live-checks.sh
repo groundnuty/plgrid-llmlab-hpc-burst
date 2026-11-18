@@ -830,13 +830,16 @@ reach_is_host_dialed() { [ "${S[LIVE_DIALHOME_MODE]:-}" = host-dialed ]; }
 # only that it is a directory). Every problem is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
 # checkout that has these rows.
 # check_sano_settings: the Sano rows' Provider staging directory (issue #735), held to the form the Provider's CRD gives it: an absolute
-# path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment (internal/alpha, CheckStagingDir; the
-# package's own check runs it again). The refusal names the setting, never its value: a cluster path carries a user name.
+# path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment, and with no ':', '=' or ',' (the rows' warm-start reader
+# refuses them in the agent's log path; internal/alpha, CheckStagingDir; the package's own check runs it again). The refusal names the setting, never its value: a cluster path carries a user name.
 check_sano_settings() {
   local d=${S[LIVE_SANO_STAGING_DIR]:-}
   if [ -z "$d" ]; then say "live-checks: setting LIVE_SANO_STAGING_DIR is missing"; return 1; fi
   if ! [[ $d =~ ^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$ ]] || [[ /$d/ == */../* ]] || [ "${#d}" -gt 1024 ]; then
     say "live-checks: setting LIVE_SANO_STAGING_DIR is not an absolute path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment"; return 1
+  fi
+  if [[ $d == *[:=,]* ]]; then
+    say "live-checks: setting LIVE_SANO_STAGING_DIR has a ':', '=' or ',' in it: the Provider's CRD takes them, but the rows read the agent's log by this path, which a command line carries unquoted, and refuse them"; return 1
   fi
 }
 
@@ -860,8 +863,8 @@ check_alpha_settings() {
   if [ "$name" = beta-athena-now-bulk ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the bulk path's buffer is read on the relays' ssh through the login node"; bad=1
   fi
-  # The Sano rows (issue #735): host-dialed alone, since Sano's compute nodes cannot reach this host and have no home for ssh mode's key
-  # (profiles/sano.yaml lists no other mode), and the Provider's own staging directory.
+  # The Sano rows (issue #735): host-dialed alone, since Sano's compute nodes have no home for ssh mode's key (profiles/sano.yaml lists no other mode;
+  # direct is untested there, and these rows run none), and the Provider's own staging directory.
   case $name in
     alpha-sano-*)
       if [ "$host_dialed" != 1 ]; then

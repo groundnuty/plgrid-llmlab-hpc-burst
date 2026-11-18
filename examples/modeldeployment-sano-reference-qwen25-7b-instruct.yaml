@@ -9,12 +9,16 @@
 #     qualified beside it;
 #   - leaseLimit is 4h, a little over the lead an Instance needs on Sano (3h40m: the profile's
 #     2h10m drain window, 30m handover margin and 1h start timeout; shorter would be refused as
-#     PartitionTooShort), so a run left behind ends in 4 hours, not after Sano's 3-day wall;
-#   - retentionPolicy releases an Allocation that hosts no Instance after 30 minutes.
+#     PartitionTooShort). It caps each Allocation's time limit, not the deployment: while the
+#     deployment exists, a handover starts a successor before an Allocation ends, so it is no stop;
+#   - retentionPolicy releases an Allocation that hosts no Instance after 30 minutes. It is a
+#     backstop for a run whose Instance never started or has ended, not for a running one.
 #
-# A reference run reads status.throughput of the Instance once it is ready, then deletes the
-# deployment: deleting it releases its Allocation at once (docs/operations.md, Stopping a
-# deployment). Each repeat applies a copy with its own metadata.name, such as
+# The operator ends the run: it reads status.throughput of the Instance once it is ready, then
+# deletes the deployment, which releases its Allocation at once (docs/operations.md, Stopping a
+# deployment). For a hard stop that does not depend on that, add spec.endTime to the copy, an
+# hour or so ahead: the deployment then shuts down at that time (HBEP-7, Release), and it is no
+# deployment-ID input. Each repeat applies a copy with its own metadata.name, such as
 # sano-reference-qwen25-7b-2, on a fresh Allocation. The Provider is a private copy of
 # examples/provider-sano-a100.yaml, named sano-a100 here.
 apiVersion: hpcburst.groundnuty.github.io/v1alpha1
