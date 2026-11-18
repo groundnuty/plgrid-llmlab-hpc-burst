@@ -688,9 +688,17 @@ func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []s
 // partition sets qosByGpus the view is resolved for that count first (providerView.forGPUs): the Provider-wide limit
 // is the partition QOS's and the host-dialed ceiling, and the QOS the Allocation runs under counts its own.
 func (p *pass) reserveSlotAs(pv *providerView, gpus int32, name, holder string, takers []string, size, params *v1alpha1.BatchParameters, quiet bool, x extraAsk) (ok, holds bool, err error) {
+	ok, holds, _, err = p.reserveSlotWhy(pv, gpus, name, holder, takers, size, params, quiet, x)
+	return ok, holds, err
+}
+
+// reserveSlotWhy is reserveSlotAs that also returns why the per-user caps refused, in the words of the refusal (capsWhy), or ""
+// when the reservation was admitted or was refused for the submit limit: the caller that must tell the two apart reads it
+// (ensureAllocation, a hedge member's retry; endsOnRefusal).
+func (p *pass) reserveSlotWhy(pv *providerView, gpus int32, name, holder string, takers []string, size, params *v1alpha1.BatchParameters, quiet bool, x extraAsk) (ok, holds bool, capsWhy string, err error) {
 	rv, err := pv.forGPUs(gpus)
 	if err != nil {
-		return false, false, fmt.Errorf("reserve a slot on Provider %s: %w", pv.name, err)
+		return false, false, "", fmt.Errorf("reserve a slot on Provider %s: %w", pv.name, err)
 	}
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: rv.limits.MaxSubmitPerUser,
 		params: params, size: size, caps: rv.limits, headroom: x.headroom, deployment: x.deployment, unitExclude: x.exclude, unitSizing: x.sizing,
@@ -700,22 +708,22 @@ func (p *pass) reserveSlotAs(pv *providerView, gpus int32, name, holder string, 
 	}
 	a, err := p.r.slots().reserveAsk(p.ctx, p.r.Reader, q, p.reserveTime)
 	if err != nil || a.ok || quiet {
-		return a.ok, a.holds, err
+		return a.ok, a.holds, a.capsWhy, err
 	}
 	if a.capsWhy != "" {
 		// Refused for the per-user caps, not the submit limit: no SubmitLimitReached words, and a Provider with
 		// no submit limit has none to name.
-		return false, a.holds, nil
+		return false, a.holds, a.capsWhy, nil
 	}
 	if p.noSlot == nil {
 		p.noSlot = map[string]string{}
 	}
 	if a.scoped {
 		p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations under QOS %s still holding a slot, at its %s%s", pv.name, a.count-a.reserved, rv.scope.qos, scopedLimitText(rv.scope), reservedText(a.reserved, a.reservedBy))
-		return false, a.holds, nil
+		return false, a.holds, "", nil
 	}
 	p.noSlot[pv.name] = fmt.Sprintf("Provider %s has %d Allocations still holding a slot, at its %s%s", pv.name, a.count-a.reserved, submitLimitText(rv), reservedText(a.reserved, a.reservedBy))
-	return false, a.holds, nil
+	return false, a.holds, "", nil
 }
 
 // scopedLimitText names the submit limit of the QOS a scope counts, as submitLimitText names a Provider's.

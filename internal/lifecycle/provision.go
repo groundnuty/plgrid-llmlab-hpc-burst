@@ -587,16 +587,17 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		}
 		capsOf, quiet = &params, true
 	case member:
-		// A hedge member's retry reserves as its first creation did: the caps check beside our Allocations there, and no
-		// condition for a refusal (a member is extra capacity), since another job may have filled its QOS since (review of #756,
-		// Astra 4; in alpha too).
-		capsOf, quiet = &params, true
+		// A hedge member's retry reserves as its first creation did: the caps check beside our Allocations there, since another
+		// job may have filled its QOS since (review of #756, Astra 4; in alpha too). Not quiet: a refusal for the caps records
+		// no condition (reserveSlotWhy), and a refusal for the submit limit records its words, which the member waits with
+		// (Degraded SubmitLimitReached), as a member's retry always did (endsOnRefusal).
+		capsOf = &params
 	}
-	ok, holds, err := p.reserveSlotAs(pv, params.GPUs, name, holder, takers, &params, capsOf, quiet, x)
+	ok, holds, capsWhy, err := p.reserveSlotWhy(pv, params.GPUs, name, holder, takers, &params, capsOf, quiet, x)
 	if err != nil {
 		return err
 	}
-	if !ok && quiet && member {
+	if !ok && member && endsOnRefusal(capsWhy) {
 		return p.endCutShortMember(in)
 	}
 	if !ok && quiet {
@@ -612,8 +613,16 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	return nil
 }
 
-// endCutShortMember ends a pending hedge member whose Allocation was never made and whose slot or caps check now refuses
-// it: a member is extra capacity, so it is dropped in silence, as a member that finds no room at its creation is passed over.
+// endsOnRefusal is the ONE predicate for what becomes of a pending hedge member whose Allocation was never made and whose
+// retry's reservation is refused (ensureAllocation): it ends only when the PER-USER CAPS refuse it (capsWhy is the refusal's
+// words, "" for the submit limit), since another job may have filled its QOS since its first creation passed them (#756, aec8945e,
+// review Astra 4); refused for the SLOT LIMIT it waits for the older racing member's slot, as HBEP-7 rules (Hedging, Slots
+// reserved atomically, Interactions: the newer of two racing members on one Provider waits; #604's last criterion; the A5 row).
+// #756 ended it for both; a ruling that it should flips this one line.
+func endsOnRefusal(capsWhy string) bool { return capsWhy != "" }
+
+// endCutShortMember ends a pending hedge member whose Allocation was never made and whose per-user caps now refuse it
+// (endsOnRefusal): a member is extra capacity, so it is dropped in silence, as a member that finds no room at its creation is passed over.
 func (p *pass) endCutShortMember(in *v1alpha1.Instance) error {
 	return p.end(in, nil, v1alpha1.ReasonDrained, "scaled down: its Provider refuses the hedge member (the slot or the caps)", true)
 }
