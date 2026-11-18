@@ -369,16 +369,16 @@ func TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan(t *testing.T) {
 	// What the lifecycle's Operation execution calls (#664: opexec.go), asked of the API server's own authorizer under the
 	// lifecycle identity (a SelfSubjectAccessReview made with its token): update and delete of a ModelDeployment (an End, a
 	// Scale's spec write, the kept-warm finalizer), patch of one (#715's owner-hash label), the get of an Operation through the
-	// API reader that recovers a commit whose status write returned an error (afterCommitError), and the update of an Operation
-	// (the operation-unfinished finalizer). The Operation's delete and what no controller does stay refused: the 7-day removal's
-	// delete is the audit PR's, and is not granted here.
+	// API reader that recovers a commit whose status write returned an error (afterCommitError), the update of an Operation
+	// (the operation-unfinished finalizer) and the delete of an Operation that the 7-day removal makes (opttl.go:58; #660, PR B). What no
+	// controller does stays refused: the create and the patch of an Operation, the create of a ModelDeployment, a collection delete.
 	for _, c := range []struct {
 		verb, resource string
 		want           bool
 	}{
 		{"update", "modeldeployments", true}, {"delete", "modeldeployments", true}, {"patch", "modeldeployments", true},
 		{"get", "operations", true}, {"update", "operations", true}, {"update", "modeldeployments/status", true},
-		{"create", "modeldeployments", false}, {"delete", "operations", false}, {"create", "operations", false},
+		{"delete", "operations", true}, {"create", "modeldeployments", false}, {"create", "operations", false},
 		{"patch", "operations", false}, {"deletecollection", "modeldeployments", false},
 	} {
 		resource, sub, _ := strings.Cut(c.resource, "/")

@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,15 +44,14 @@ func TestLifecycleManagerReleasesItsLeaseOnEveryStop(t *testing.T) {
 	defer cancel()
 	cfg, cl := leaseControlPlane(t, ctx)
 	creds, builds := t.TempDir(), t.TempDir()
-	// The removal of finished Operations (opttl.go) is built and NOT wired into the manager until the audit log keeps what a
-	// removal would lose (#660; HBEP-10, The report, as amended by #665, #666 and #668). Round 0 shows that a running manager
-	// removes no Operation, with one that finished eight days ago and one that finished an hour ago: both stay, after the
-	// manager has been told of both and of an Operation made while it runs (removalIsNotWired).
+	// The removal of finished Operations (opttl.go) is wired into the manager with the audit policy (#660, PR B). Round 0 shows
+	// that a running manager removes the Operation that finished eight days ago, and keeps the one that finished an hour ago
+	// and one made while it runs (removalIsWired).
 	old, young := seedFinishedOperations(t, ctx, cl)
 	for round := 0; round < stopRounds && !t.Failed(); round++ {
 		var during func()
 		if round == 0 {
-			during = func() { removalIsNotWired(t, ctx, cl, old, young) }
+			during = func() { removalIsWired(t, ctx, cl, old, young) }
 		}
 		stopRound(t, ctx, cl, round, round%2 == 1, Options{
 			CredentialsDir: creds, AgentBuildsDir: builds, LeaderElection: true,
@@ -80,36 +80,32 @@ func seedFinishedOperations(t *testing.T, ctx context.Context, cl client.Client)
 	return mk("finished-8d-ago", 8*24*time.Hour), mk("finished-1h-ago", time.Hour)
 }
 
-// removalIsNotWired shows that a running manager removes no Operation. A check that something does NOT happen needs a
-// state that shows the manager has had the chance to do it: the lifecycle controller's queue (client-go's workqueue
-// metrics, by the controller's name) counts a key for each of the two seeded Operations, which names a deployment of its own,
-// and then one more for an Operation made now, which does too. The manager's one informer of Operations told the
-// lifecycle controller of each, and tells every controller that watches Operations, a removal controller included, so a
-// removal controller would have been told of the Operation that finished eight days ago before the third key is counted.
-// Then both seeded Operations are read, and both are still there, and the metrics hold no queue of a removal controller.
-func removalIsNotWired(t *testing.T, ctx context.Context, cl client.Client, old, young client.ObjectKey) {
+// removalIsWired shows that a running manager removes a finished Operation 7 days after it finished, and no sooner. The Operation
+// that finished eight days ago goes. That the others stay needs a state that shows the removal controller has had the chance
+// to remove them: its work queue (client-go's workqueue metrics, by the controller's name) has had a key added for each of the
+// two seeded Operations, and then one more for an Operation made now, so each was handed to it. Then the Operation that
+// finished an hour ago and the one made now are read, and both are still there.
+func removalIsWired(t *testing.T, ctx context.Context, cl client.Client, old, young client.ObjectKey) {
 	t.Helper()
-	eventually(t, time.Minute, "the lifecycle controller has been told of the two seeded Operations", func() (bool, string) {
-		n, _ := queueAdds(t, "lifecycle")
-		return n >= 2, fmt.Sprintf("%v keys added", n)
+	eventually(t, time.Minute, "the removal takes the Operation that finished eight days ago", func() (bool, string) {
+		var op v1alpha1.Operation
+		err := cl.Get(ctx, old, &op)
+		return apierrors.IsNotFound(err), fmt.Sprintf("get: %v", err)
 	})
 	sentinel := &v1alpha1.Operation{ObjectMeta: metav1.ObjectMeta{Name: "sentinel", Namespace: v1alpha1.ControllerNamespace}, Spec: v1alpha1.OperationSpec{
 		Action: v1alpha1.OperationActionEnd, ModelDeploymentRef: v1alpha1.ObjectReference{Name: "sentinel-md"}, Owner: "example-owner"}}
 	if err := cl.Create(ctx, sentinel); err != nil {
 		t.Fatalf("create the sentinel Operation: %v", err)
 	}
-	eventually(t, time.Minute, "the lifecycle controller has been told of the sentinel Operation", func() (bool, string) {
-		n, _ := queueAdds(t, "lifecycle")
-		return n >= 3, fmt.Sprintf("%v keys added", n)
+	eventually(t, time.Minute, "the removal controller has been handed the two seeded Operations and the sentinel", func() (bool, string) {
+		n, found := queueAdds(t, operationTTLController)
+		return found && n >= 3, fmt.Sprintf("%v keys added (a queue: %v)", n, found)
 	})
-	for _, k := range []client.ObjectKey{old, young} {
+	for _, k := range []client.ObjectKey{young, client.ObjectKeyFromObject(sentinel)} {
 		var op v1alpha1.Operation
 		if err := cl.Get(ctx, k, &op); err != nil {
-			t.Errorf("the Operation %s: %v, want it kept: no controller of the manager removes a finished Operation (#660 wires the removal)", k.Name, err)
+			t.Errorf("the Operation %s: %v, want it kept: it had not finished 7 days ago", k.Name, err)
 		}
-	}
-	if n, found := queueAdds(t, operationTTLController); found {
-		t.Errorf("the manager runs a controller named %s (%v keys added): the removal of finished Operations is not wired until #660", operationTTLController, n)
 	}
 }
 
