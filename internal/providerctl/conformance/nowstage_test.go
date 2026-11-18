@@ -325,19 +325,7 @@ func stageBody(t testing.TB, w *world, rowName string) {
 			qos = q
 		}
 	}
-	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the cold staging on partition %s, qos %s, in the Provider's staging directory where the agent stages: the job ran %s of its %s lease\n",
-		row.Name, verdict, row.PostsTo, row.Partition, qos, ran.Round(time.Second), limit)
-	if res.ok {
-		kind := "sandbox"
-		if w.s.part.ImageFormat == v1alpha1.ImageFormatSIF {
-			kind = "SIF"
-		}
-		posts += fmt.Sprintf("- the %s image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", kind, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
-		posts += stageRehashLine(res.rehash)
-	}
-	if !pass {
-		posts += "- " + why + "\n"
-	}
+	posts := stagePostText(row, verdict, qos, ran, limit, res, w.s.part.ImageFormat == v1alpha1.ImageFormatSIF, pass, why)
 	w.p.save(alpha.PostsFile, []byte(posts))
 	w.p.save(alpha.RecordFile, []byte(fmt.Sprintf("{\"row\": %q, \"verdict\": %q, \"ranSeconds\": %d, \"result\": {\"present\": %t, \"ok\": %t, \"signalled\": %t, \"step\": %q, \"imageBuilt\": %t, \"imageSeconds\": %d, \"files\": %d, \"checkpointSeconds\": %d, \"mismatched\": %d, \"rehash\": {\"files\": %d, \"listed\": %d, \"bytes\": %d, \"ms\": %d}}}\n",
 		row.Name, verdict, int(ran.Seconds()), res.present, res.ok, res.signalled, res.step, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched,
@@ -346,6 +334,44 @@ func stageBody(t testing.TB, w *world, rowName string) {
 		t.Fatalf("%s: %s", row.Name, why)
 	}
 	t.Logf("%s passed; the text to post is in %s", row.Name, alpha.PostsFile)
+}
+
+// stageKind says what the helper's line shows the job did, from the image it built and the checkpoint files the stager found present and rehashed (the
+// agent's rehash line, issue #575): the cold staging the row measures (the image built and no checkpoint file present), a reuse of artifacts already in
+// the directory (no image built and files rehashed), or part of each. A rerun over a staged directory is no cold start, and the post must not say it is
+// (the review of PR 770). A line the helper did not give the rehash of says only that a cold start is not shown. A failed run is the row's usual cold staging
+// that did not finish, as before.
+func stageKind(res stageResult) string {
+	switch {
+	case !res.ok:
+		return "cold staging"
+	case !res.rehash.Read:
+		return "staging, whose checkpoint rehash the helper's line did not give, so that a cold start is not shown"
+	case res.imageBuilt && res.rehash.Files == 0:
+		return "cold staging"
+	case !res.imageBuilt && res.rehash.Files > 0:
+		return "reuse of artifacts already in the directory, not a cold start"
+	}
+	return fmt.Sprintf("partly cached staging, not a cold start (image built %t, %d of %d listed checkpoint files found present)", res.imageBuilt, res.rehash.Files, res.rehash.Listed)
+}
+
+// stagePostText is the stage row's text to post: the verdict, the job, what it staged and how, the rehash, and the reason for a FAIL. The row's cold-staging
+// words stand where the run was one, and where it was not they say what it was (stageKind).
+func stagePostText(row alpha.Row, verdict, qos string, ran, limit time.Duration, res stageResult, sif, pass bool, why string) string {
+	posts := fmt.Sprintf("%s: %s (posts to %s)\n- the %s on partition %s, qos %s, in the Provider's staging directory where the agent stages: the job ran %s of its %s lease\n",
+		row.Name, verdict, row.PostsTo, stageKind(res), row.Partition, qos, ran.Round(time.Second), limit)
+	if res.ok {
+		kind := "sandbox"
+		if sif {
+			kind = "SIF"
+		}
+		posts += fmt.Sprintf("- the %s image: built %t, in %d s; the checkpoint: %d files in %d s, %d mismatched\n", kind, res.imageBuilt, res.imageSeconds, res.files, res.checkpointSeconds, res.mismatched)
+		posts += stageRehashLine(res.rehash)
+	}
+	if !pass {
+		posts += "- " + why + "\n"
+	}
+	return posts
 }
 
 // dryStageHelper is the helper built for this machine with the Hub double's checkpoint and an image of the right shape
@@ -651,5 +677,39 @@ func TestTheSanoStageRowDryRunStagesASIFInTheProvidersOwnDirectory(t *testing.T)
 	}
 	if regexp.MustCompile(`/|sha256|hb-sano-stage`).Match(posts) {
 		t.Errorf("the text to post names a path or a digest:\n%s", posts)
+	}
+}
+
+// The stage row's post says what the job did (stageKind): the cold staging the row measures, and not that for a rerun over artifacts already in the
+// directory, or for a run that found some of them (the review of PR 770). The expected words are written out here from the row's rule, one case for
+// each pair of (the image built, the checkpoint files found present), and the cold case keeps the sentence the row has always posted.
+//
+//livecheck:none a unit test of the stage row's post text over the helper's results, no cluster
+func TestTheStageRowsPostNamesWhatTheJobDid(t *testing.T) {
+	row, ok := alpha.RowByName(alpha.SanoStageName)
+	if !ok {
+		t.Fatal("no Sano stage row")
+	}
+	limit := 30 * time.Minute
+	res := func(ok, built bool, readRehash bool, files, listed int) stageResult {
+		return stageResult{present: true, ok: ok, imageBuilt: built, imageSeconds: 432, files: 14, checkpointSeconds: 144,
+			rehash: alpha.RehashObs{Read: readRehash, Files: files, Listed: listed, Bytes: int64(files) * 1000, MS: 5}}
+	}
+	for _, c := range []struct {
+		name         string
+		r            stageResult
+		want, reject string
+	}{
+		{"cold: the image built, no file present", res(true, true, true, 0, 14), "- the cold staging on partition gpu, qos gpu1, in the Provider's staging directory", "not a cold start"},
+		{"a rerun over everything staged: the image not built, files present", res(true, false, true, 14, 14), "- the reuse of artifacts already in the directory, not a cold start on partition gpu", "the cold staging"},
+		{"the image built over a cached checkpoint", res(true, true, true, 14, 14), "- the partly cached staging, not a cold start (image built true, 14 of 14 listed checkpoint files found present) on partition gpu", "the cold staging"},
+		{"the image cached over a fresh checkpoint", res(true, false, true, 0, 14), "- the partly cached staging, not a cold start (image built false, 0 of 14 listed checkpoint files found present) on partition gpu", "the cold staging"},
+		{"no rehash read", res(true, true, false, 0, 0), "- the staging, whose checkpoint rehash the helper's line did not give, so that a cold start is not shown on partition gpu", "the cold staging"},
+		{"a failed run is the cold staging that did not finish", res(false, false, false, 0, 0), "- the cold staging on partition gpu", "not a cold start"},
+	} {
+		got := stagePostText(row, "PASS", "gpu1", 9*time.Minute, limit, c.r, true, true, "")
+		if !strings.Contains(got, c.want) || strings.Contains(got, c.reject) {
+			t.Errorf("%s: the text to post is\n%s\nwant it to hold %q and not %q", c.name, got, c.want, c.reject)
+		}
 	}
 }

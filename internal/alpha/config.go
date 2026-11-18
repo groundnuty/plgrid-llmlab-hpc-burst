@@ -245,8 +245,8 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	default:
 		bad = append(bad, envMode+" must be direct, ssh or host-dialed")
 	}
-	// Sano's compute nodes have no home directory and cannot reach this host, so its profile lists host-dialed alone (profiles/sano.yaml,
-	// dialHomeModes; HBEP-4): ReadProfile refuses another mode there.
+	// Sano's compute nodes have no home directory, where ssh mode's agent reads its key, so its profile lists host-dialed alone (profiles/sano.yaml,
+	// dialHomeModes; HBEP-4), and these rows run in no other mode: ReadProfile refuses ssh there. (direct is untested on Sano, not refused by the profile.)
 	if row.Cluster == "sano" && cfg.DialHomeMode != "host-dialed" {
 		bad = append(bad, envMode+" must be host-dialed for "+row.Name+": Sano's profile lists no other dial-home mode")
 	}
@@ -306,11 +306,20 @@ func joinBad(bad []string) error {
 // starts with an environment variable, of letters, digits and ._:=,/-.
 var stagingDirForm = regexp.MustCompile(`^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$`)
 
-// CheckStagingDir holds a Provider's stagingDir to the form the CRD gives it, before anything is built: a value the API would refuse
-// fails the run at its first line instead of at the first Provider. The error names no part of the value.
+// stagingDirReadable is what the rows add to that form: no ':', '=' or ','. The CRD takes them, but the warm-start reader puts the path of the job's standard
+// error on a command line unquoted and refuses any character outside letters, digits and "._/-" (safePath, in the live flow), after the run has spent
+// its GPU time and with its evidence unread (the review of PR 770). So the row refuses them at its first line.
+var stagingDirReadable = regexp.MustCompile(`^[^:=,]*$`)
+
+// CheckStagingDir holds a Provider's stagingDir to the form the CRD gives it, and to the rows' own rule on top of it, before anything is built: a value the
+// API would refuse, or the harness could not read the agent's log by, fails the run at its first line instead of at the first Provider, or at the end of a
+// run. The errors name no part of the value.
 func CheckStagingDir(dir string) error {
 	if !stagingDirForm.MatchString(dir) || slices.Contains(strings.Split(dir, "/"), "..") || len(dir) > 1024 {
 		return fmt.Errorf("is not an absolute path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment")
+	}
+	if !stagingDirReadable.MatchString(dir) {
+		return fmt.Errorf("has a ':', '=' or ',' in it: the Provider's CRD takes them, but the rows read the agent's log by this path, which a command line carries unquoted, and refuse them")
 	}
 	return nil
 }

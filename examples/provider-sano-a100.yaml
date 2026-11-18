@@ -1,7 +1,8 @@
 # A batch Provider on Sano's A100 partition (HBEP-3, HBEP-4 Provider settings; issue #735, beta).
 # Replace every <placeholder> and the stagingDir below. Apply profiles/sano.yaml first. Sano's
 # compute nodes have no home directory, where ssh mode's agent reads its dial-home key, so the
-# Provider runs in host-dialed mode alone: the control plane reaches each job through the login node.
+# profile lists host-dialed alone and the Provider runs in it: the control plane reaches each job
+# through the login node.
 #
 # spec.stagingDir is required here: Sano's profile names none, because the shared file system lies
 # at a cluster path that carries a user name. Give an absolute path on the shared file system that

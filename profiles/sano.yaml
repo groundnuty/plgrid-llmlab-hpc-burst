@@ -79,6 +79,37 @@ spec:
       # It is also 8 x memPerGpu above, and sacctmgr's mem=1087232M (facts.slurm.qos). 1120 GiB was refused.
       maxMemPerJob: 1087232Mi
 
+  # The throughput gate's references (beta; HBEP-4, Expected performance), one per serving spec, from reference runs apart from serving (#735's record, the
+  # issue comment each source names). Each value is the slowest of three warm runs, each on a fresh reference ModelDeployment on one A100 under gpu1, read from
+  # the Instance's status.throughput at Ready. All the runs landed on 8-GPU nodes and none on a 4-GPU one, and the entries apply to the 4-GPU nodes too (the same
+  # A100 80 GB class) within tolerancePercent, which stays at its default. Each deploymentID is the deployment ID of the client example named beside it, and
+  # internal/slurm's test derives it from that example, the checkpoint's file list and this partition's class, never from the entry.
+  expectedPerformance:
+    # examples/modeldeployment-sano-qwen25-7b-instruct.yaml: Qwen/Qwen2.5-7B-Instruct at a09a35458c70, max-model-len 32768, the default max-num-seqs of 256.
+    - deploymentID: 367d47b43853
+      capacityFlags:
+        max-num-seqs: "256"
+      sessions: 8 # the example's targetSessions on one worker
+      contextTokens: 1024 # the example's contextTokens.typical
+      outputTokens: 128 # the example's outputTokens.typical
+      timePerOutputToken: 12.326323ms
+      timeToFirstToken: 399.394255ms
+      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+      source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
+      date: "2026-11-18"
+    # examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml: Qwen/Qwen3-VL-8B-Instruct at 0c351dd01ed8, max-model-len 32768, the default max-num-seqs of 256.
+    - deploymentID: 965fa2409193
+      capacityFlags:
+        max-num-seqs: "256"
+      sessions: 8
+      contextTokens: 1024
+      outputTokens: 128
+      timePerOutputToken: 13.679505ms
+      timeToFirstToken: 429.065029ms
+      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+      source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
+      date: "2026-11-18"
+
   holdRelease: true # facts.slurm.hold_release (the holdRelease probe of 18 Nov 2026): sbatch --hold stays pending (JobHeldUser) until the job's user runs scontrol release, then starts at once
   lostGrace: 2m # framework default (HBEP-4, Platform profile schema, lostGrace): above the gap of about 2 s between queue and accounting that S7 measured on Helios; not measured on Sano
   inflightWindow: 5m # framework default (HBEP-4, Platform profile schema, inflightWindow): 5 min until the sbatch latency over ssh is measured on Sano (HBEP-4, Graduation criteria)

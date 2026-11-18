@@ -745,6 +745,38 @@ func TestStandInNowServe(t *testing.T) {
 	}
 }
 
+// standInHelperFlags are the link flags that compile the stand-in deployment's values into the stage helper: its image and digest, its checkpoint, its load
+// format and the image format of the stand-in's profile, which is a sandbox (standInWorldShaped sets it on every Athena row). The helper refuses to
+// run with any of the six empty, so a stand-in that leaves one out fails in its pre-staging, before it exercises anything (the review of PR 770, point 4).
+func standInHelperFlags() string {
+	return "-X main.image=docker.io/vllm/vllm-openai -X main.imageDigest=" + stack.EngineDigest + " -X main.checkpointRepo=" + stack.CheckpointRepo +
+		" -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto -X main.imageFormat=" + string(agentapi.ImageFormatSandbox)
+}
+
+// The stand-ins that pre-stage (Athena's warm serve, its no-overlap rows and the lead row) build the stage helper with its six compiled-in values, and the
+// helper refuses to run when one is empty: a flag left out fails them in the pre-staging, which only a stand-in run sees, and that takes the launcher lock.
+// The six are the helper's own list (stagehelper's inputs, pinned by its drift test), written out here, and the image format is the stand-in profile's:
+// a sandbox, as standInWorldShaped makes it on every Athena row.
+//
+//livecheck:none a unit test over the stand-ins' stage helper build flags on this host, no cluster
+func TestTheStandInsStageHelperGetsEveryCompiledInValue(t *testing.T) {
+	flags := standInHelperFlags()
+	for _, name := range []string{"image", "imageDigest", "checkpointRepo", "checkpointRev", "loadFormat", "imageFormat"} {
+		prefix := " -X main." + name + "="
+		i := strings.Index(" "+flags, prefix)
+		if i < 0 {
+			t.Errorf("the flags do not set main.%s: %s", name, flags)
+			continue
+		}
+		if v, _, _ := strings.Cut((" " + flags)[i+len(prefix):], " "); v == "" {
+			t.Errorf("main.%s is set to nothing", name)
+		}
+	}
+	if !strings.HasSuffix(flags, " -X main.imageFormat="+string(v1alpha1.ImageFormatSandbox)) {
+		t.Errorf("the image format is not the stand-in profile's sandbox: %s", flags)
+	}
+}
+
 // preStage is the pre-staging row's staging on the stand-in cluster, before row A: the real stage helper
 // (internal/providerctl/conformance/stagehelper), built here with the stand-in deployment's image and checkpoint
 // compiled in, run as a job of the stand-in's fake Slurm with the environment every job of that cluster has (the engine
@@ -766,9 +798,7 @@ func preStage(t *testing.T, cl *stack.Cluster, w world) {
 	}
 	bin := stack.ShortDir(t)
 	helper := filepath.Join(bin, "stagehelper")
-	flags := "-X main.image=docker.io/vllm/vllm-openai -X main.imageDigest=" + stack.EngineDigest + " -X main.checkpointRepo=" + stack.CheckpointRepo +
-		" -X main.checkpointRev=" + stack.CheckpointRev + " -X main.loadFormat=auto"
-	build := exec.Command("go", "build", "-ldflags", flags, "-o", helper, "./internal/providerctl/conformance/stagehelper")
+	build := exec.Command("go", "build", "-ldflags", standInHelperFlags(), "-o", helper, "./internal/providerctl/conformance/stagehelper")
 	build.Dir = filepath.Join("..", "..")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
