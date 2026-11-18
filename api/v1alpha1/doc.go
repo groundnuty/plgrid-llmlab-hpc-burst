@@ -1,7 +1,8 @@
 // Package v1alpha1 holds the custom resources of the plgrid-llmlab-hpc-burst
 // control plane (HBEP-3, HBEP-11): Provider, PlatformProfile, ModelDeployment,
 // Allocation and Instance, and in beta Operation, Approval and ApprovalPolicy
-// (HBEP-10), in the API group hpcburst.groundnuty.github.io.
+// (HBEP-10) and Workload (HBEP-764), in the API group
+// hpcburst.groundnuty.github.io.
 //
 // The CRD manifests under config/crd are generated from these types with
 // hack/generate.sh. Admission rules are CEL rules in the markers; none needs a

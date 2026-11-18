@@ -72,8 +72,8 @@ func installCRDs(ctx context.Context, cl client.Client) error {
 	if err != nil {
 		return err
 	}
-	if len(crds) != 8 {
-		return fmt.Errorf("want 8 CRD manifests in config/crd, found %d", len(crds))
+	if len(crds) != 9 {
+		return fmt.Errorf("want 9 CRD manifests in config/crd, found %d", len(crds))
 	}
 	return crdinstall.InstallAndWait(ctx, cl, crds)
 }

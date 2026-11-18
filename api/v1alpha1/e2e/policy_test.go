@@ -92,7 +92,7 @@ func TestCRDDeletionGuard(t *testing.T) {
 	}
 	for _, name := range []string{
 		"providers", "platformprofiles", "modeldeployments", "allocations", "instances",
-		"operations", "approvals", "approvalpolicies"} {
+		"operations", "approvals", "approvalpolicies", "workloads"} {
 		err := dryRunDelete(name + ".hpcburst.groundnuty.github.io")
 		if !apierrors.IsForbidden(err) {
 			t.Errorf("deleting the %s CRD: want Forbidden, got %v", name, err)

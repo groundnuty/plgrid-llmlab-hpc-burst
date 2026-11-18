@@ -2,8 +2,8 @@
 # capacity by editing or deleting a ModelDeployment, nor by writing anything the controllers would act
 # on: an agent's update is accepted only if every change in it is on the allowlist (a higher
 # spec.instances, a later or removed spec.endTime, an edit of spec.source.served, a change of
-# spec.hedgeWidth either way, the purpose annotation, and kubectl's last-applied-configuration
-# annotation), and the rest must be unchanged.
+# spec.hedgeWidth either way, an edit of spec.workloads, the purpose annotation, and kubectl's
+# last-applied-configuration annotation), and the rest must be unchanged.
 # The person and the controllers are outside the guard: its match condition is the agents' group.
 #
 # hpcburst up installs the policy and its binding on every start and resets them to this file, then
@@ -75,9 +75,11 @@ spec:
     # Spec fields the allowlist handles by their own rules; every other field must be unchanged. hedgeWidth is
     # allowlisted in both directions (HBEP-10, The capacity guard, as amended for #606): lowering it cancels
     # nothing, and raising it reserves capacity, which the owner allowed. It needs its entry because the rule
-    # below refuses every field that is not named, a field added after this file included.
+    # below refuses every field that is not named, a field added after this file included. workloads (HBEP-764,
+    # #769) is a routing input only: warm-up and qualification keep spec.workload, so an edit of the list
+    # releases nothing, and an agent may change it.
     - name: ownRules
-      expression: "['instances', 'endTime', 'source', 'hedgeWidth']"
+      expression: "['instances', 'endTime', 'source', 'hedgeWidth', 'workloads']"
   validations:
     - expression: "variables.op != 'DELETE' || variables.res != 'modeldeployments'"
       reason: Forbidden
@@ -112,7 +114,7 @@ spec:
         (object.spec.filter(k, !(k in variables.ownRules)).all(k, k in oldObject.spec && object.spec[k] == oldObject.spec[k]) &&
         oldObject.spec.filter(k, !(k in variables.ownRules)).all(k, k in object.spec))
       reason: Forbidden
-      message: "an agent may change only spec.instances (higher), spec.endTime (later), spec.source.served and spec.hedgeWidth: every other field of the spec must stay as it is (HBEP-10, The capacity guard)"
+      message: "an agent may change only spec.instances (higher), spec.endTime (later), spec.source.served, spec.hedgeWidth and spec.workloads: every other field of the spec must stay as it is (HBEP-10, The capacity guard)"
     - expression: >-
         variables.op != 'UPDATE' || !variables.mainMD ||
         (has(object.metadata.labels) ? object.metadata.labels : {}) == (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})
