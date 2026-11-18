@@ -158,8 +158,12 @@ func TestTwoWorkloadsOnTwoRoutes(t *testing.T) {
 			if fmt.Sprint(s.roles) != fmt.Sprint(wantRoles[k]) {
 				t.Errorf("engine side: %s: roles %v, want %v", where, s.roles, wantRoles[k])
 			}
-			if s.maxTokens != w.output || s.minTokens == nil || *s.minTokens != w.output {
-				t.Errorf("engine side: %s: max_tokens %d min_tokens %v, want both %d", where, s.maxTokens, s.minTokens, w.output)
+			minTok := -1 // -1: the field was absent
+			if s.minTokens != nil {
+				minTok = *s.minTokens
+			}
+			if s.maxTokens != w.output || minTok != w.output {
+				t.Errorf("engine side: %s: max_tokens %d min_tokens %d (-1: absent), want both %d", where, s.maxTokens, minTok, w.output)
 			}
 			if !s.stream || !s.includeUsage {
 				t.Errorf("engine side: %s: stream %v include_usage %v, want both true", where, s.stream, s.includeUsage)
