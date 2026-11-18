@@ -82,6 +82,9 @@ func (s rigSetup) hostOptions() []stack.HostOption {
 	if s.instanceRouter {
 		o = append(o, stack.InstanceRouter)
 	}
+	if s.eventLog {
+		o = append(o, stack.EventLog)
+	}
 	return o
 }
 
