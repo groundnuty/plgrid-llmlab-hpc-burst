@@ -16,6 +16,7 @@ Design decisions for this framework are made as HBEPs, modelled on Kubernetes En
 | [10](0010-agent-primitives/README.md) | Agent primitives | implementable | none |
 | [11](0011-kubernetes-control-plane/README.md) | Kubernetes as the control plane | implementable | none |
 | [15](0015-dependencies-and-provenance/README.md) | Dependencies and provenance | implementable | none |
+| [764](0764-single-study-workloads/README.md) | A single study with several workloads | provisional | none |
 
 ## Starting an HBEP
 
