@@ -97,9 +97,9 @@ type Result struct {
 	// Cites are the modules, versions and files the entries cite, for CheckCitations.
 	Cites []Cite
 	// Dead lists the call sites whose client comes only from parameters of functions that no call in the module reaches:
-	// code that is written and not wired (the Operation removal controller, until #660 wires it), and helpers that only
-	// tests call. Their calls are not counted. When something calls such a function, its sites are live and the check
-	// reads them; when a live function loses its last caller, the rights it needed are unused rules.
+	// code that is written and not wired, and helpers that only tests call. Their calls are not counted. When something
+	// calls such a function, its sites are live and the check reads them; when a live function loses its last caller, the
+	// rights it needed are unused rules.
 	Dead []string
 }
 
