@@ -23,7 +23,12 @@ var baselineCases = []dryCase{
 	{"detach-not-seen", "the managed ModelDeployment was not seen detached at the front before the phase"},
 	{"instance-ineligible", "the served Instance became ineligible, so the generator was stopped"},
 	{"engine-over-the-cap", "the engine ran more than the cap of 11 requests"},
-	{"engine-waiting", "the engine had requests waiting"},
+	// Waiting requests fail only when sustained for 3 consecutive samples (EngineWaitingSustain); a blip, two in a row, and two runs of two are readings.
+	{"engine-waiting", "the engine had requests waiting in 5 consecutive samples"},
+	{"engine-waiting-thrice", "the engine had requests waiting in 3 consecutive samples"},
+	{"engine-waiting-twice", ""},
+	{"engine-waiting-blip", ""},
+	{"engine-waiting-split", ""},
 	{"engine-preempts", "the engine preempted"},
 	{"engine-unread", "fewer than 2 engine samples were read"},
 	// In the long phase the engine's waiting requests and preemptions are readings (ruling H0), posted and never failed on.
@@ -43,6 +48,9 @@ var baselineCases = []dryCase{
 	{"p0-not-sent", "P0 was not sent"},
 	{"p0-answered-by-an-instance", "P0 was not answered by LLMLab"},
 	{"p0-front-fails", "P0's request failed and the front answered it"},
+	{"ratio-probe-fails", "the ratio probe was not answered by the served Instance (status 500"},
+	// A word that comes to 1.3 tokens: the contexts are fewer words, the run passes (TestTheRatioSetsTheLongContextsWords).
+	{"ratio-wide", ""},
 	{"kv-unread", "the engine's logged KV was not read"},
 	{"no-routing-block", "does not hold routing.instanceCap at the row's cap of 11"},
 	{"two-instances", "does not ask for exactly 1 Instance"},
@@ -69,6 +77,8 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"min-tokens-ignored", "LLMLab did not give exactly that: it does not honour min_tokens"},
 	{"long-contexts-short", "outside the long phase's 24000 to 28672"},
 	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
+	{"ratio-impossible", "no word count reaches 24000 to 28672 tokens"},
+	{"ratio-unread", "the ratio probe's usage record holds no prompt tokens"},
 }
 
 func init() {
@@ -139,6 +149,7 @@ type dryBaseline struct {
 	calls            []string
 	configs          map[string][]byte
 	preBumped        bool
+	phaseSamples     int
 	released         bool
 	readAfterRelease bool
 }
@@ -321,8 +332,12 @@ func (w *dryBaseline) EngineSample(context.Context) (EngineSample, bool) {
 	switch {
 	case w.d.fault("engine-over-the-cap") && w.phase.Name == PhaseP2:
 		s.Running = float64(w.cap + 1)
-	case w.d.fault("engine-waiting") && w.phase.Name == PhaseP2:
-		s.Waiting = 1
+	case w.waitingFault() && w.inPhase(PhaseP2):
+		// P2 is looked at five times (dryBaseline.lookedAt), and the samples numbered in waitingPatterns have a request waiting.
+		w.phaseSamples++
+		if waitingPatterns[w.faultName()][w.phaseSamples] {
+			s.Waiting = 1
+		}
 	case w.d.fault("engine-preempts") && w.phase.Name == PhaseP2:
 		w.pre += 3
 		s.Preemptions = w.pre
@@ -336,6 +351,33 @@ func (w *dryBaseline) EngineSample(context.Context) (EngineSample, bool) {
 	}
 	w.samples++
 	return s, true
+}
+
+// waitingPatterns are the in-phase samples of P2 that show a request waiting, by fault: the whole phase, exactly the sustained run of 3, and the blips and runs
+// short of it that are readings (EngineWaitingSustain).
+var waitingPatterns = map[string]map[int]bool{
+	"engine-waiting":        {1: true, 2: true, 3: true, 4: true, 5: true},
+	"engine-waiting-thrice": {2: true, 3: true, 4: true},
+	"engine-waiting-twice":  {2: true, 3: true},
+	"engine-waiting-blip":   {2: true},
+	"engine-waiting-split":  {1: true, 2: true, 4: true, 5: true},
+}
+
+// ratio is the tokens a word comes to on the dry engine: 1.05, wider and absurd in the faults that test the long shape.
+func (w *dryBaseline) ratio() float64 {
+	switch {
+	case w.d.fault("ratio-wide"):
+		return 1.3
+	case w.d.fault("ratio-impossible"):
+		return 10000
+	}
+	return 1.05
+}
+
+func (w *dryBaseline) faultName() string { return w.d.cfg.DryFault }
+func (w *dryBaseline) waitingFault() bool {
+	_, ok := waitingPatterns[w.d.cfg.DryFault]
+	return ok
 }
 
 // dryGenerator ends when the world says its phase has been looked at enough, or when it is stopped.
@@ -361,7 +403,7 @@ func (g *dryGenerator) looked(n int) {
 // StartGenerator builds the phase the front's rule would give: the first cap sessions on the Instance, the rest on LLMLab (or waiting, when LLMLab is
 // detached), each of the phase's turns in turn. The generator's config is made too, as the live world makes it, and its record kept.
 func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, error) {
-	cfgJSON, err := StudyConfig(ph, StudyRun{BaseURL: "http://127.0.0.1:1/v1", RunID: PhaseRunID("0123456789", ph.Name), RequestTimeout: 5 * time.Minute})
+	cfgJSON, err := StudyConfig(ph, StudyRun{BaseURL: "http://127.0.0.1:1/v1", RunID: PhaseRunID("0123456789", ph.Name), ServedProvider: dryServedProvider, RequestTimeout: 5 * time.Minute})
 	if err != nil {
 		return nil, err
 	}
@@ -385,6 +427,10 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 		w.kv = 0.74
 	}
 	g := &dryGenerator{done: make(chan struct{}), gen: gen, needed: 2}
+	w.phaseSamples = 0
+	if w.waitingFault() && ph.Name == PhaseP2 {
+		g.needed = 6 // five looks of the engine in the phase, to show a run of consecutive samples
+	}
 	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 || w.d.fault("instance-ineligible") && ph.Name == PhaseP1Long {
 		g.never = true // the phase ends only by the sequencer's stop
 	}
@@ -444,14 +490,12 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 			length = end
 		}
 	}
+	// The prompt of a turn, in tokens: the words of the first turn and of each later one at the engine's ratio of tokens to a word, and the template's 7.
 	promptOf := func(turn int) int64 {
-		if ph.Kind == KindLong {
-			if w.d.fault("long-contexts-short") {
-				return 5000
-			}
-			return int64(ph.Context+7) + int64(turn-1)*int64(ph.Turn+ph.Output)
+		if ph.Kind == KindLong && w.d.fault("long-contexts-short") {
+			return 5000
 		}
-		return int64(ph.Context+7) + int64(turn-1)*int64(ph.Turn+ph.Output)
+		return int64(float64(ph.Context)*w.ratio()) + 7 + int64(float64(turn-1)*float64(ph.Turn+ph.Output)*w.ratio())
 	}
 	for i := 0; i < instanceSessions+llmSessions; i++ {
 		session := fmt.Sprintf("s%03d", i)
@@ -529,6 +573,14 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		rows = append(rows, w.row("unlisted", LLMLabProviderName, "provider", 200, t0.Add(time.Second), 2*time.Second, 9, 8, 300))
 	}
 	instance = instanceSessions
+	if ph.Kind == KindProbe && len(rows) == 1 {
+		switch {
+		case w.d.fault("ratio-probe-fails"):
+			rows[0].Status = 500
+		case w.d.fault("ratio-unread"):
+			rows[0].PromptTokens = nil
+		}
+	}
 	return gen, rows, llm, instance, length + time.Second
 }
 

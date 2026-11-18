@@ -98,8 +98,8 @@ func (s BaselineSettings) logf(f string, a ...any) {
 // run (DidNotFit); a logged KV under the cap's need ends it with no phase run. An error is a run that broke: a scenario that could not go on.
 func RunBaseline(ctx context.Context, w BaselineWorld, s BaselineSettings) (BaselineObs, error) {
 	o, err := runBaselineSteps(ctx, w, s)
-	if err != nil {
-		return o, err
+	if err != nil || !o.ServedCreated {
+		return o, err // no served deployment, so no job and nothing to end
 	}
 	// Every read of the Allocation's directory is above: the engine's logged KV, while the Instance was up, after it was ready and before any phase.
 	if err := w.EndServed(ctx); err != nil {
@@ -131,10 +131,18 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 		return o, err
 	}
 	s.logf("P0 is sent: the managed leg answers before any Instance exists")
+	// The served ModelDeployment, and with it the first sbatch, is created only once P0 has completed: a managed leg that does not answer, a Provider that never
+	// becomes Ready or an LLMLab that fails ends the run here, before any GPU job and so on no A100 time. P0 FAILS the run when the front answered it (the managed
+	// path is ours to get right) and makes it INVALID when LLMLab did (a failed LLMLab says nothing of the framework); it is no NOT RUN, since that is a job that
+	// never started and here none was submitted.
+	if f, i := p0Problems(o); len(f)+len(i) > 0 {
+		return o, nil
+	}
 	ready, err := w.StartServed(ctx)
 	if err != nil {
 		return o, err
 	}
+	o.ServedCreated = true
 	o.ReadyAt, o.DrainStart, o.Deployment, o.Served = ready.ReadyAt, ready.DrainStart, ready.Deployment, ready.Served
 	// A check and never an input: the cap was fixed before the run. It is read here, while the Instance is up, and nowhere later: the Allocation's directory,
 	// with the engine's log, is removed once its job is released (internal/providerctl/delete.go:110, internal/slurm/files.go:109-113).
@@ -144,7 +152,11 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 	if o.Gate, err = w.Gate(ctx); err != nil {
 		return o, err
 	}
-	for _, ph := range s.Phases {
+	phases, err := resolveLongShape(ctx, w, s, &o)
+	if err != nil {
+		return o, err
+	}
+	for _, ph := range phases {
 		if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {
 			o.DidNotFit = ph.Name
 			break
@@ -254,4 +266,50 @@ loop:
 	}
 	s.logf("%s: %d generator records, %d front records, stopped %q", ph.Name, len(po.Gen), len(po.Rows), po.Stopped)
 	return po, nil
+}
+
+// BaselineProbeBound bounds the ratio probe's one request.
+const BaselineProbeBound = 3 * time.Minute
+
+// resolveLongShape sets the words of every phase that derives its context from a token target (Phase.TargetTokens): after the gate, ONE probe at the served
+// Instance alone, by the generator's binary with one session of one turn, RatioProbeWords words and one output token, whose prompt tokens the front's usage
+// record gives. LongContextWords turns the ratio into words. A phase whose words cannot be set is left out of the run and the reading is INVALID, never a
+// guess. It sets the shape of a phase and no cap. A run with no such phase sends no probe.
+func resolveLongShape(ctx context.Context, w BaselineWorld, s BaselineSettings, o *BaselineObs) ([]Phase, error) {
+	phases := append([]Phase(nil), s.Phases...)
+	need := false
+	for _, ph := range phases {
+		need = need || (ph.TargetTokens > 0 && ph.Context < 1)
+	}
+	if !need {
+		return phases, nil
+	}
+	o.Ratio = RatioObs{Needed: true, Words: RatioProbeWords}
+	probe := Phase{Name: PhaseRatio, Kind: KindProbe, OnServed: true, Sessions: 1, Turns: 1, Context: RatioProbeWords, Output: 1, Bound: BaselineProbeBound}
+	po, err := runPhase(ctx, w, s, probe)
+	if err != nil {
+		return nil, err
+	}
+	if joined, _, _, _ := joinPhase(po); len(joined) == 1 {
+		row := joined[0].Front
+		o.Ratio.Sent, o.Ratio.Row = true, row
+		if row.Status == 200 && row.CutBy == "" && row.PromptTokens != nil {
+			o.Ratio.PromptTokens = *row.PromptTokens
+			o.Ratio.TokensPerWord = float64(*row.PromptTokens) / RatioProbeWords
+		}
+	}
+	out := phases[:0]
+	for _, ph := range phases {
+		if ph.TargetTokens > 0 && ph.Context < 1 {
+			words, ok := LongContextWords(RatioProbeWords, o.Ratio.PromptTokens, ph.TargetTokens)
+			if !ok {
+				o.Ratio.Invalid = true
+				continue
+			}
+			ph.Context, o.Ratio.LongWords = words, words
+			s.logf("%s: the ratio probe read %d prompt tokens for %d words (%.4f a word), so the contexts are %d words", ph.Name, o.Ratio.PromptTokens, RatioProbeWords, o.Ratio.TokensPerWord, words)
+		}
+		out = append(out, ph)
+	}
+	return out, nil
 }

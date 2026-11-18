@@ -20,9 +20,12 @@ package alpha
 //   - the gate: the served Instance routable, by one request at model@<provider>, answered by the Instance;
 //   - P1, the control: N = cap, the declared shape (1024 words of context, 128 of turn, 128 of output, 24 turns, 100 ms of think time, no stagger),
 //     LLMLab gets none;
-//   - P1-long: N = cap, contexts of 24k to 28k tokens (26,000 words by default: the generator sends one word per intended token, and the front's own
-//     count of the prompt, which the row reads, says what the tokenizer made of them: 24,000 to 28,672 holds for 0.92 to 1.10 tokens a word), LLMLab gets
-//     none; the engine's KV use, its requests waiting and its preemptions are READ at the cap and posted (ruling H0: R4's calibration), never failed on;
+//   - P1-long: N = cap, contexts of 24k to 28k tokens, LLMLab gets none; the engine's KV use, its requests waiting and its preemptions are READ at the cap and
+//     posted (ruling H0: R4's calibration), never failed on. The generator sends one word per intended token, so the words that reach 26,000 tokens are set
+//     from a MEASURED ratio: after the gate, ONE probe at the served Instance alone (model@<provider>, which cannot spill) sends RatioProbeWords words with
+//     one output token, the front's usage record gives the prompt tokens, and LongContextWords sets the words. If no whole number of words gives 24,000 to
+//     28,672 tokens at that ratio, P1-long is INVALID before it starts. This sets the SHAPE of a phase, never a cap: the caps stay constants fixed before the
+//     run (a cap set from what the run itself measures proves nothing);
 //   - P2, full load: N = cap + k; LLMLab gets EXACTLY k first-turn requests, with at most k in flight, and at each of its arrivals the Instance held
 //     its cap;
 //   - P3, detach: the managed ModelDeployment is deleted, then N = cap + 2; two requests wait in the front's FIFO under queueTimeout. A 503 makes it
@@ -95,6 +98,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -166,6 +170,18 @@ const (
 	// declared longest context, 28,672 (the served example's workload block). The generator sizes in words, so the size is read, never assumed.
 	LongPromptMin = 24_000
 	LongPromptMax = 28_672
+	// EngineWaitingSustain is how many consecutive engine samples with requests waiting fail a phase: 3, which is 6 s at BaselinePoll's 2 s. N sessions that
+	// start together can have their first prefills briefly above the engine's batched-token budget, so a sample or two of waiting requests is no sign that the
+	// engine is the bottleneck: such a blip is a reading, posted with its count and its longest run (the science agent's ruling of 18 Nov 2026 on #764's row).
+	// Running above the cap, or preemptions rising, fail at any sample.
+	EngineWaitingSustain = 3
+	// RatioProbeWords is the context, in words, of the one probe that measures the tokens a word comes to on the engine's own tokenizer, PhaseRatio, and
+	// LongTargetTokens the length P1-long's contexts are set to reach, 26,000 tokens, the middle of LongPromptMin to LongPromptMax. The probe sets the SHAPE of
+	// P1-long, never a cap, so a cap set from what the run measures, which proves nothing, is not what this is: the caps stay constants fixed before the run.
+	RatioProbeWords  = 2000
+	LongTargetTokens = 26_000
+	// maxStudyWords is the most words the generator takes in one context (hack/studyload/config.go, maxTokens).
+	maxStudyWords = 1 << 20
 	// ArrivalTolerance is the tolerance on a count read from the usage records' intervals, one request within 100 ms: the records carry milliseconds, and
 	// the reservation's release follows the relay (internal/front/proxy.go:238-239).
 	ArrivalTolerance = 100 * time.Millisecond
@@ -194,6 +210,8 @@ const (
 	KindFull PhaseKind = "full"
 	// KindDetach deletes the managed ModelDeployment, then runs N = cap + 2.
 	KindDetach PhaseKind = "detach"
+	// KindProbe is the ratio probe: one session of one turn and one output token at the served Instance alone (model@<provider>, so it cannot spill).
+	KindProbe PhaseKind = "probe"
 )
 
 // Phase is one phase of the row, a config: its name, what it asks, the session count and the shape of every session, and how long it may run.
@@ -210,6 +228,11 @@ type Phase struct {
 	Stagger  time.Duration `json:"startStagger"`
 	// Bound is how long the generator may run; past it the phase is stopped and FAILS.
 	Bound time.Duration `json:"bound"`
+	// TargetTokens, when set, says the context is not given in words but derived from the tokens a word came to in the ratio probe, so that the first turns'
+	// prompts reach this many tokens: the words are then resolved by the sequencer (LongContextWords) and Context is 0 until they are.
+	TargetTokens int `json:"targetTokens,omitempty"`
+	// OnServed says the generator addresses the served Instance alone, as model@<provider>, which cannot spill to LLMLab: the ratio probe's.
+	OnServed bool `json:"onServed,omitempty"`
 }
 
 // The phases' names.
@@ -218,6 +241,8 @@ const (
 	PhaseP1Long = "P1-long"
 	PhaseP2     = "P2"
 	PhaseP3     = "P3"
+	// PhaseRatio names the ratio probe, which is no phase of the run's reading (resolveLongShape).
+	PhaseRatio = "ratio"
 )
 
 // DefaultPhases are the phases with their defaults, for a Sano cap: the declared shape in P1, P2 and P3, long contexts in P1-long.
@@ -229,7 +254,8 @@ func DefaultPhases(cap int) []Phase {
 		return p
 	}
 	long := mk(PhaseP1Long, KindLong, cap)
-	long.Turns, long.Context, long.Turn, long.Output, long.Think, long.Bound = 2, 26_000, 128, 128, time.Second, 15*time.Minute
+	long.Turns, long.Context, long.Turn, long.Output, long.Think, long.Bound = 2, 0, 128, 128, time.Second, 15*time.Minute
+	long.TargetTokens = LongTargetTokens // the words come from the ratio probe
 	return []Phase{mk(PhaseP1, KindControl, cap), long, mk(PhaseP2, KindFull, cap+LLMLabK), mk(PhaseP3, KindDetach, cap+2)}
 }
 
@@ -243,6 +269,8 @@ type phaseEnv struct {
 	Think    *string `json:"thinkTime"`
 	Stagger  *string `json:"startStagger"`
 	Bound    *string `json:"bound"`
+	// TargetTokens replaces the tokens the long phase's contexts are set to reach. An explicit contextTokens replaces the target: the words are then given.
+	TargetTokens *int `json:"targetTokens"`
 }
 
 // PhasesFromEnv applies HPCBURST_ALPHA_BASELINE_PHASES to the defaults: a JSON object from a phase's name to the fields it replaces, durations as
@@ -272,10 +300,13 @@ func PhasesFromEnv(base []Phase, v string) ([]Phase, error) {
 		for _, f := range []struct {
 			set *int
 			to  *int
-		}{{o.Sessions, &p.Sessions}, {o.Turns, &p.Turns}, {o.Context, &p.Context}, {o.Turn, &p.Turn}, {o.Output, &p.Output}} {
+		}{{o.Sessions, &p.Sessions}, {o.Turns, &p.Turns}, {o.Context, &p.Context}, {o.Turn, &p.Turn}, {o.Output, &p.Output}, {o.TargetTokens, &p.TargetTokens}} {
 			if f.set != nil {
 				*f.to = *f.set
 			}
+		}
+		if o.Context != nil && o.TargetTokens == nil {
+			p.TargetTokens = 0 // the words are given: no probe sets them
 		}
 		for _, f := range []struct {
 			set *string
@@ -306,8 +337,10 @@ func (p Phase) Check() error {
 		return errors.New("sessions must be at least 1")
 	case p.Turns < 1 || p.Turns > 1000:
 		return errors.New("turns must be 1 to 1000")
-	case p.Context < 1 || p.Output < 1:
-		return errors.New("contextTokens and outputTokens must be at least 1")
+	case p.Context < 1 && p.TargetTokens < 1:
+		return errors.New("contextTokens, or targetTokens to derive them, must be at least 1")
+	case p.Output < 1:
+		return errors.New("outputTokens must be at least 1")
 	case p.Turns > 1 && p.Turn < 1:
 		return errors.New("turnTokens must be at least 1 when there is more than one turn")
 	case p.Turns == 1 && p.Turn != 0:
@@ -349,7 +382,9 @@ type studyConfig struct {
 // is left out (the min_tokens probe's verdict; internal/front, TestLLMLabMinTokens).
 type StudyRun struct {
 	BaseURL, APIKeyFile, RunID string
-	OmitMinTokens              bool
+	// ServedProvider is the served Provider's name, which a phase that is OnServed addresses as model@<provider>.
+	ServedProvider string
+	OmitMinTokens  bool
 	// RequestTimeout is the deployment's own deadline, the generator's bound on each request.
 	RequestTimeout time.Duration
 }
@@ -373,6 +408,9 @@ func StudyConfig(ph Phase, run StudyRun) ([]byte, error) {
 	if err := ph.Check(); err != nil {
 		return nil, fmt.Errorf("phase %q: %w", ph.Name, err)
 	}
+	if ph.Context < 1 {
+		return nil, fmt.Errorf("phase %q has no context in words yet: the ratio probe sets it from its target of %d tokens", ph.Name, ph.TargetTokens)
+	}
 	if !runIDForm.MatchString(run.RunID) {
 		return nil, fmt.Errorf("phase %q: the generator's run ID is not 1 to 32 characters of letters, digits, dot, underscore and hyphen", ph.Name)
 	}
@@ -383,7 +421,14 @@ func StudyConfig(ph Phase, run StudyRun) ([]byte, error) {
 	if ph.Stagger > 0 {
 		w.StartStagger = ph.Stagger.String()
 	}
-	c := studyConfig{BaseURL: run.BaseURL, Model: BaselineModel, APIKeyFile: run.APIKeyFile, SessionHeader: "x-session-id", RunID: run.RunID,
+	model := BaselineModel
+	if ph.OnServed {
+		if run.ServedProvider == "" {
+			return nil, fmt.Errorf("phase %q addresses the served Instance alone and has no served Provider's name", ph.Name)
+		}
+		model += "@" + run.ServedProvider
+	}
+	c := studyConfig{BaseURL: run.BaseURL, Model: model, APIKeyFile: run.APIKeyFile, SessionHeader: "x-session-id", RunID: run.RunID,
 		OmitMinTokens: run.OmitMinTokens, RequestTimeout: run.RequestTimeout.String(), Workloads: []studyWorkload{w}}
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
@@ -465,4 +510,27 @@ func ParseGenRecords(r io.Reader) ([]GenRow, error) {
 		out = append(out, GenRow{Session: g.Session, Turn: g.Turn, RequestID: g.RequestID, Emitter: g.Emitter, Provider: g.Provider, Instance: g.Instance})
 	}
 	return out, sc.Err()
+}
+
+// LongContextWords maps the ratio probe's reading to the words of the long contexts: the probe sent probeWords words and the front's record says the prompt
+// was promptTokens tokens, so a word comes to promptTokens/probeWords tokens, and the contexts are the number of words whose tokens come nearest target. False
+// when the probe read nothing (no prompt tokens), or no whole number of words gives a prompt of LongPromptMin to LongPromptMax tokens at that ratio (a word
+// that comes to more than the window is wide), or the words would pass what the generator takes: the long shape cannot be set, and P1-long is INVALID.
+func LongContextWords(probeWords int, promptTokens int64, target int) (words int, ok bool) {
+	if probeWords < 1 || promptTokens < 1 {
+		return 0, false
+	}
+	ratio := float64(promptTokens) / float64(probeWords)
+	exact := float64(target) / ratio
+	best, bestGap := 0, math.MaxFloat64
+	for _, w := range []int{int(math.Floor(exact)), int(math.Ceil(exact))} {
+		tokens := ratio * float64(w)
+		if w < 1 || w > maxStudyWords || tokens < LongPromptMin || tokens > LongPromptMax {
+			continue
+		}
+		if gap := math.Abs(tokens - float64(target)); gap < bestGap {
+			best, bestGap = w, gap
+		}
+	}
+	return best, best > 0
 }

@@ -11,10 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/yaml"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
 // runBaselineDry is one dry run of the baseline row through Run: its record directory, its failed checks, its error and the steps (for the world's calls).
@@ -203,7 +208,7 @@ func TestTheLLMLabGuardStopsTheGeneratorAndFails(t *testing.T) {
 		t.Errorf("the phases run were %v, want %v: nothing runs after a guard trips", names, want)
 	}
 	// The generator's own end: it was stopped by the sequencer, not by its work running out, which the dry world ends after two looks at the count.
-	g := st.baseline.gens[2]
+	g := st.baseline.gens[3] // the ratio probe, P1, P1-long, then P2
 	if !g.never {
 		t.Fatal("the fault's generator ends by itself, so the test would not tell a stop from an end")
 	}
@@ -250,7 +255,7 @@ func TestTheBaselinesStepsRunInTheirOrder(t *testing.T) {
 	if err != nil || len(failures) != 0 {
 		t.Fatalf("%v %v", failures, err)
 	}
-	want := []string{"AttachManaged", "Probe", "StartServed", "LoggedKV", "Gate", "StartGenerator P1", "StartGenerator P1-long", "StartGenerator P2", "DetachManaged", "StartGenerator P3", "EndServed"}
+	want := []string{"AttachManaged", "Probe", "StartServed", "LoggedKV", "Gate", "StartGenerator ratio", "StartGenerator P1", "StartGenerator P1-long", "StartGenerator P2", "DetachManaged", "StartGenerator P3", "EndServed"}
 	if !slices.Equal(st.baseline.calls, want) {
 		t.Errorf("the calls were\n%v\nwant\n%v", st.baseline.calls, want)
 	}
@@ -271,7 +276,7 @@ func TestTheBaselinePostCarriesWhatTheIssueAsks(t *testing.T) {
 	}
 	for _, w := range []string{
 		"- P1 (control): N = 11, 24 turns, context 1024, turn 128, output 128 words, think 100ms, stagger 0s",
-		"- P1-long (long): N = 11, 2 turns, context 26000",
+		"- P1-long (long): N = 11, 2 turns, context 24680",
 		"- P2 (full): N = 13, 24 turns",
 		"- P3 (detach): N = 13, 24 turns",
 		// P2, by hand: 11 sessions on the Instance, 2 on LLMLab, 24 turns each: 264 and 48 requests.
@@ -478,10 +483,169 @@ func TestTheLongPhasesEngineReadingsArePostedAndNeverFailed(t *testing.T) {
 		t.Fatalf("failures %v, err %v: the long phase's readings are no failure", failures, err)
 	}
 	post, _ := os.ReadFile(filepath.Join(out, PostsFile))
-	if !strings.Contains(string(post), "requests waiting in 1 samples, at most 2; preemptions 3; KV use at most 74.0% of the cache (vllm:kv_cache_usage_perc) (a READING, ruling H0") {
+	if !strings.Contains(string(post), "requests waiting in 1 samples, the longest run 1, at most 2; preemptions 3; KV use at most 74.0% of the cache (vllm:kv_cache_usage_perc) (a READING, ruling H0") {
 		t.Errorf("the text to post lacks the long phase's readings:\n%s", post)
 	}
 	if n := strings.Count(string(post), "(a READING, ruling H0"); n != 1 {
 		t.Errorf("%d engine lines are marked a reading, want the long phase's alone:\n%s", n, post)
+	}
+}
+
+// P0 completes before the served ModelDeployment is created, so before any sbatch (internal/alpha/baselineflow.go: Probe, then p0Problems, then StartServed;
+// live, StartServed is the first call that creates the served ModelDeployment, in baseline_live_test.go, and AttachManaged before it makes only the stack, the
+// Providers and the managed ModelDeployment). A P0 that fails ends the run there: the fake Slurm counts no submission, the calls stop after P0, and nothing is
+// created or run. The verdict is FAIL when the front answered P0 (the managed Provider never became usable, or nothing was sent: the managed path is ours to
+// get right) and INVALID when LLMLab answered it and failed, or gave fewer tokens than min_tokens asked (a failed LLMLab says nothing of the framework). It is
+// no NOT RUN: that is a job that never started, and none was submitted. The control, a healthy run, submits exactly one job, after P0.
+func TestAFailedP0EndsTheRunBeforeAnyJob(t *testing.T) {
+	for _, c := range []struct {
+		fault   string
+		invalid bool
+	}{{"p0-front-fails", false}, {"p0-not-sent", false}, {"p0-answered-by-an-instance", false}, {"p0-llmlab-fails", true}, {"min-tokens-ignored", true}} {
+		t.Run(c.fault, func(t *testing.T) {
+			out, failures, err, st := runBaselineDry(t, c.fault)
+			if n := st.plat.CountSubmits(); n != 0 {
+				t.Errorf("the fake Slurm counts %d submission(s), want 0: the served ModelDeployment was created although P0 had failed", n)
+			}
+			if want := []string{"AttachManaged", "Probe"}; !slices.Equal(st.baseline.calls, want) {
+				t.Errorf("the calls were %v, want %v: nothing follows a failed P0", st.baseline.calls, want)
+			}
+			switch {
+			case c.invalid && (len(failures) != 0 || !errors.Is(err, ErrBaselineInvalid) || NotRun(BaselineRow(), err)):
+				t.Errorf("failures %v, err %v: want INVALID alone, and no NOT RUN", failures, err)
+			case !c.invalid && (len(failures) == 0 || err != nil):
+				t.Errorf("failures %v, err %v: want a FAIL", failures, err)
+			}
+			o := obsOfRecord(t, out)
+			if o.ServedCreated || len(o.Tags) != 0 || len(o.Phases) != 0 {
+				t.Errorf("the observation says the served deployment was created %t, %d tag(s), %d phase(s)", o.ServedCreated, len(o.Tags), len(o.Phases))
+			}
+		})
+	}
+	_, failures, err, st := runBaselineDry(t, "")
+	probe, served := slices.Index(st.baseline.calls, "Probe"), slices.Index(st.baseline.calls, "StartServed")
+	if err != nil || len(failures) != 0 || st.plat.CountSubmits() != 1 || probe < 0 || served < probe {
+		t.Errorf("the control: failures %v, err %v, %d submissions, Probe at %d and StartServed at %d: want a pass with one submission, after P0", failures, err, st.plat.CountSubmits(), probe, served)
+	}
+}
+
+// The row's own settings (the cap, the deadline, one Instance, no hedge, the lease and the Providers) are none of them an input of the deployment ID
+// (HBEP-3): pkg/deploymentid.Compute reads the serving spec alone (deploymentid.go:114), and hedgeWidth is "capacity, not a deployment-ID input"
+// (api/v1alpha1/modeldeployment_types.go:341-342). So the served deployment the row creates has the example's serving spec exactly, and the ID the live
+// check expects, 965fa2409193, is the example's.
+func TestTheRowsSettingsAreNoInputOfTheDeploymentID(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "examples", SanoQwen3VLDeployment))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base v1alpha1.ModelDeployment
+	if err := yaml.UnmarshalStrict(b, &base); err != nil {
+		t.Fatal(err)
+	}
+	applied := applyPlan(&base, BaselineRow(), "alpha-0123456789")
+	if !reflect.DeepEqual(applied.Spec.Source, base.Spec.Source) || applied.Spec.Model != base.Spec.Model {
+		t.Errorf("the row changed the example's source or model: its deployment ID is no longer the example's")
+	}
+}
+
+// Requests waiting in the engine fail a phase only when SUSTAINED, 3 consecutive samples, which is 6 s at the 2 s cadence (the science agent's ruling of 18 Nov
+// 2026): N sessions that start together can have first prefills above the batched-token budget for a sample or two. Hand-typed runs: a blip of 1 and 2 in a
+// row pass, 3 in a row fail, and two runs of 2 split by a clear sample pass. Preemptions and running above the cap fail at any sample, as before.
+func TestEngineWaitingFailsOnlyWhenSustainedForThreeSamples(t *testing.T) {
+	if EngineWaitingSustain != 3 || BaselinePoll != 2*time.Second {
+		t.Fatalf("sustain %d at %s, want 3 at 2s: 6 s", EngineWaitingSustain, BaselinePoll)
+	}
+	samples := func(waiting ...float64) []EngineSample {
+		out := make([]EngineSample, len(waiting))
+		for i, w := range waiting {
+			out[i] = EngineSample{Running: 11, Waiting: w}
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name    string
+		seq     []float64
+		run     int
+		failing bool
+	}{
+		{"none", []float64{0, 0, 0, 0, 0}, 0, false},
+		{"a blip of 1", []float64{0, 1, 0, 0, 0}, 1, false},
+		{"2 in a row", []float64{0, 1, 3, 0, 0}, 2, false},
+		{"2 and 2", []float64{1, 1, 0, 1, 1}, 2, false},
+		{"3 in a row", []float64{0, 1, 1, 1, 0}, 3, true},
+		{"the whole phase", []float64{2, 2, 2, 2, 2}, 5, true},
+	} {
+		if got := longestWaitingRun(samples(c.seq...)); got != c.run {
+			t.Errorf("%s: the longest run is %d, want %d", c.name, got, c.run)
+		}
+		po := PhaseObs{Phase: DefaultPhases(CapSano)[1+1], Engine: samples(c.seq...)} // P2
+		fail, _ := judgePhase(BaselineObs{Cap: CapSano, LLMLabProvider: LLMLabProviderName}, po)
+		got := false
+		for _, f := range fail {
+			got = got || strings.Contains(f, "the engine had requests waiting")
+		}
+		if got != c.failing {
+			t.Errorf("%s: failed on waiting %t, want %t (%q)", c.name, got, c.failing, fail)
+		}
+	}
+	// The long phase reads, and never fails on waiting, however long.
+	fail, _ := judgePhase(BaselineObs{Cap: CapSano, LLMLabProvider: LLMLabProviderName}, PhaseObs{Phase: DefaultPhases(CapSano)[1], Engine: samples(2, 2, 2, 2, 2)})
+	for _, f := range fail {
+		if strings.Contains(f, "waiting") {
+			t.Errorf("the long phase failed on waiting requests: %q", f)
+		}
+	}
+}
+
+// The long shape is set from a MEASURED ratio, after the gate: one probe at the served Instance alone (model@<provider>, so it cannot spill), one session of one
+// turn of 2,000 words and one output token. The dry engine's prompt of 2,000 words is 2,107 tokens (1.05 a word and the template's 7), a ratio of 1.0535, so 26,000
+// tokens are 24,680 words (24,679 come to 25,999.3 and 24,680 to 26,000.4, the nearer); at 1.3 a word the probe reads 2,607 tokens, a ratio of 1.3035, and 19,946
+// words (25,999.6). An absurd ratio, or a reading with no tokens, is INVALID and P1-long is not run; a probe the Instance did not answer is a failed check.
+func TestTheRatioSetsTheLongContextsWords(t *testing.T) {
+	for _, c := range []struct {
+		fault, words, tpw string
+	}{{"", "24680", "1.0535"}, {"ratio-wide", "19946", "1.3035"}} {
+		out, failures, err, st := runBaselineDry(t, c.fault)
+		if err != nil || len(failures) != 0 {
+			t.Fatalf("%q: failures %v, err %v", c.fault, failures, err)
+		}
+		cfg := string(st.baseline.configs[PhaseP1Long])
+		if !strings.Contains(cfg, `"contextTokens": `+c.words) {
+			t.Errorf("%q: P1-long's generator config lacks %s words:\n%s", c.fault, c.words, cfg)
+		}
+		probe := string(st.baseline.configs[PhaseRatio])
+		for _, w := range []string{`"model": "Qwen/Qwen3-VL-8B-Instruct@alpha-dry"`, `"sessions": 1`, `"turns": 1`, `"contextTokens": 2000`, `"outputTokens": 1`} {
+			if !strings.Contains(probe, w) {
+				t.Errorf("%q: the probe's generator config lacks %s:\n%s", c.fault, w, probe)
+			}
+		}
+		post, _ := os.ReadFile(filepath.Join(out, PostsFile))
+		if want := c.tpw + " tokens a word, so P1-long's contexts are " + c.words + " words for 26000 tokens (a shape, never a cap)"; !strings.Contains(string(post), want) {
+			t.Errorf("%q: the text to post lacks %q:\n%s", c.fault, want, post)
+		}
+		if o := obsOfRecord(t, out); o.Ratio.LongWords == 0 || strings.Contains(strings.Join(st.baseline.calls, ","), "StartGenerator ratio,StartGenerator ratio") {
+			t.Errorf("%q: the observation's long words %d, and the probe must be sent once", c.fault, o.Ratio.LongWords)
+		}
+	}
+	// An absurd ratio: INVALID, P1-long not run, nothing else failed, and the other phases ran.
+	out, failures, err, _ := runBaselineDry(t, "ratio-impossible")
+	if len(failures) != 0 || !errors.Is(err, ErrBaselineInvalid) {
+		t.Fatalf("failures %v, err %v: want INVALID", failures, err)
+	}
+	var ran []string
+	for _, po := range obsOfRecord(t, out).Phases {
+		ran = append(ran, po.Phase.Name)
+	}
+	if want := []string{PhaseP1, PhaseP2, PhaseP3}; !slices.Equal(ran, want) {
+		t.Errorf("the phases run were %v, want %v: P1-long is INVALID before it starts and the others go on", ran, want)
+	}
+	// A probe the Instance fails to answer is a failed check, and sets nothing.
+	if _, failures, err, _ = runBaselineDry(t, "ratio-probe-fails"); err != nil || !strings.Contains(Summary(failures), "the ratio probe was not answered by the served Instance") {
+		t.Errorf("failures %v, err %v", failures, err)
+	}
+	// With the words given, no probe is sent.
+	phases, _ := PhasesFromEnv(DefaultPhases(CapSano), `{"P1-long":{"contextTokens":25000}}`)
+	if _, failures, err, st := runBaselineDryWith(t, "", phases); err != nil || len(failures) != 0 || slices.Contains(st.baseline.calls, "StartGenerator ratio") {
+		t.Errorf("failures %v, err %v, calls %v: with the words given no probe is sent", failures, err, st.baseline.calls)
 	}
 }

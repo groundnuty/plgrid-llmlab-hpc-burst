@@ -148,12 +148,31 @@ type BaselineObs struct {
 	LoggedKV int64    `json:"loggedKV"`
 	KVRead   bool     `json:"kvRead"`
 	P0       ProbeObs `json:"p0"`
-	Gate     GateObs  `json:"gate"`
+	// ServedCreated says the served ModelDeployment was created, which is the first thing that can submit a job: it is, only after P0 completed. A run whose P0
+	// failed ends with it false and no job.
+	ServedCreated bool    `json:"servedCreated"`
+	Gate          GateObs `json:"gate"`
 	// Plan is the phases the run was asked to make, in order; Phases the ones it made.
 	Plan   []Phase    `json:"plan"`
 	Phases []PhaseObs `json:"phases"`
+	// Ratio is the ratio probe: what P1-long's contexts were set from.
+	Ratio RatioObs `json:"ratio"`
 	// DidNotFit names the phase the time left before the drain start could not hold, which ended the run INVALID.
 	DidNotFit string `json:"didNotFit,omitempty"`
 	// Detached says the managed ModelDeployment was deleted and the front dropped its target before the detach phase ran.
 	Detached bool `json:"detached"`
+}
+
+// RatioObs is the ratio probe's reading (baseline.go, LongContextWords): the words it sent, the prompt tokens the front's record gave, the tokens a word came to,
+// and the words P1-long's contexts were set to, or why they could not be. Needed is false when no phase derives its context.
+type RatioObs struct {
+	Needed        bool     `json:"needed"`
+	Words         int      `json:"words"`
+	Row           FrontRow `json:"row"`
+	Sent          bool     `json:"sent"`
+	PromptTokens  int64    `json:"promptTokens"`
+	TokensPerWord float64  `json:"tokensPerWord"`
+	LongWords     int      `json:"longWords"`
+	// Invalid says the long shape could not be set from the reading, so P1-long was not run.
+	Invalid bool `json:"invalid"`
 }

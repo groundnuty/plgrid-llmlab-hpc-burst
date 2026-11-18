@@ -176,13 +176,13 @@ var betaKeeperFaults = []string{"not-ready", "relays-unread-before", "relays-unr
 // baselineFaults are the baseline row's failing faults (issue #764; internal/alpha, dry_baseline_test.go's baselineCases). Its INVALID faults are
 // baselineInvalidFaults, which end exit 3.
 var baselineFaults = []string{"llmlab-in-the-control", "llmlab-one-too-many-first-turns", "llmlab-spill-below-the-cap", "llmlab-over-its-guard", "llmlab-after-the-detach",
-	"detach-not-seen", "detach-skipped", "wrong-deployment-id", "instance-ineligible", "engine-over-the-cap", "engine-waiting", "engine-preempts", "engine-unread", "front-503-in-the-control", "instance-fails",
+	"detach-not-seen", "detach-skipped", "wrong-deployment-id", "ratio-probe-fails", "engine-waiting-thrice", "instance-ineligible", "engine-over-the-cap", "engine-waiting", "engine-preempts", "engine-unread", "front-503-in-the-control", "instance-fails",
 	"session-moves", "generator-names-another-route", "metric-unread", "metric-disagrees", "unlisted-llmlab-request", "no-answer", "no-record", "over-the-cap-in-flight", "no-gate",
 	"p0-not-sent", "p0-answered-by-an-instance", "p0-front-fails", "kv-unread", "no-routing-block", "two-instances", "hedged", "over-allocated", "managed-not-attached", "untagged",
 	"wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
 
 // baselineInvalidFaults are the baseline row's faults that make its reading measure nothing: INVALID, exit 3.
-var baselineInvalidFaults = []string{"cap-never-binds", "detach-503", "detach-no-wait", "kv-below-the-cap", "llmlab-fails", "p0-llmlab-fails", "min-tokens-ignored", "long-contexts-short", "phases-do-not-fit"}
+var baselineInvalidFaults = []string{"cap-never-binds", "detach-503", "detach-no-wait", "kv-below-the-cap", "llmlab-fails", "p0-llmlab-fails", "min-tokens-ignored", "long-contexts-short", "phases-do-not-fit", "ratio-impossible", "ratio-unread"}
 
 // betaBulkFaults are the bulk row's failing faults (issue #521; internal/alpha, dry_betabulk_test.go's betaBulkCases). A bulk path more than 30 ms
 // below the control passes, above or below S17's 85 ms prediction; 30 ms or less is a FINDING, exit 5 (dryFindings; #584); its INVALIDs are
@@ -225,7 +225,7 @@ var dryRows = []dryRow{
 	{"alpha-sano-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults, nil, nil},
 	{"alpha-sano-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, []string{"rehash-cold", "rehash-unread", "warm-foreign-first", "warm-foreign-three"}, nil},
 	// The baseline row (issue #764): its failing faults; its INVALID faults end the run with exit 3 (baseline_test.go).
-	{"beta-sano-llmlab-baseline", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", baselineFaults, []string{"long-engine-readings"}, nil},
+	{"beta-sano-llmlab-baseline", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", baselineFaults, []string{"long-engine-readings", "engine-waiting-twice", "engine-waiting-blip", "engine-waiting-split", "ratio-wide"}, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 }

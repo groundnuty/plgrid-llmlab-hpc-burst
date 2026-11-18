@@ -369,7 +369,7 @@ func (b *liveBaseline) StartGenerator(ctx context.Context, ph Phase) (Generator,
 		}
 		b.keyFile = filepath.Join(r.cfg.Out, "studyload.key")
 	}
-	cfgJSON, err := StudyConfig(ph, StudyRun{BaseURL: "http://" + r.h.Ports.ClientAddr + "/v1", APIKeyFile: b.keyFile, RunID: PhaseRunID(r.cfg.RunID, ph.Name),
+	cfgJSON, err := StudyConfig(ph, StudyRun{BaseURL: "http://" + r.h.Ports.ClientAddr + "/v1", APIKeyFile: b.keyFile, RunID: PhaseRunID(r.cfg.RunID, ph.Name), ServedProvider: r.w.provider,
 		OmitMinTokens: r.cfg.OmitMinTokens, RequestTimeout: r.tm.MaxRequestDuration})
 	if err != nil {
 		return nil, err

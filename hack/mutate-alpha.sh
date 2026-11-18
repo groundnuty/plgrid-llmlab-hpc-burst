@@ -1229,6 +1229,14 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'baselineflow.go@@		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard {@@		if n, ok := w.LLMLabCount(ctx); ok && beforeOK && n-before > LLMLabGuard && false {'
   'baselineflow.go@@			if err := w.DetachManaged(ctx); err != nil {@@			if err := error(nil); err != nil {'
   'steps_live_test.go@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration), InstanceCap: instanceCapOf(row)}@@	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration)}'
+  # The baseline row's P0 before any job, the engine's waiting rule and the ratio's mapping (#764): the sustain count removed, the served deployment created before P0, a failed P0 that goes on, and the ratio ignored.
+  'baseline.go@@	EngineWaitingSustain = 3@@	EngineWaitingSustain = 1'
+  'baselineflow.go@@	if o.P0, err = w.Probe(ctx); err != nil {@@	if _, err = w.StartServed(ctx); err != nil {
+		return o, err
+	}
+	if o.P0, err = w.Probe(ctx); err != nil {'
+  'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
+  'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
 )
 # The mutants of a test of this script: a file with one mutant per line, in place of the list above.
 [ -z "${MUTATE_ALPHA_MUTANTS:-}" ] || mapfile -t mutants < "$MUTATE_ALPHA_MUTANTS"

@@ -3,6 +3,11 @@ package alpha
 // The baseline row's judge (baseline.go): the verdicts, from the front's usage records and the engine's gauges. It is pure: an observation in, the failed
 // checks and the reasons the reading is INVALID out.
 //
+// Where every number comes from. The front's usage records carry no session and no turn (internal/front/usage/usage.go:35-60), so the generator's own records
+// are used for ONE thing, the join of a request ID to the session and turn it was, and for nothing else: the route of a request, its status, its times and
+// its tokens are always the front's record's, and what the generator's headers said of the route is only compared with it (a disagreement is a failed check).
+// The engine's figures are the controller's gauges for the served Instance, and LLMLab's count is the front's own per-provider request metric.
+//
 // FAIL means the property the row tests was absent: LLMLab over its guard, a failed request the front or an Instance answered, a session that moved in
 // the control, the engine over its cap. INVALID means the run measured nothing it can be judged by: a failed request LLMLab answered, a cap that never
 // bound (a run where the cap never binds proves nothing, HBEP-5's Test plan), a 503 in the detach phase, an engine whose KV is below the cap's need. A failure wins over
@@ -286,6 +291,22 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	f := func(s string, a ...any) { fail = append(fail, fmt.Sprintf(s, a...)) }
 	inv := func(s string, a ...any) { invalid = append(invalid, fmt.Sprintf(s, a...)) }
 
+	// P0, before any job: the managed ModelDeployment attached by name, the plain Hub ID on it, and one request at the plain model answered by LLMLab.
+	if o.Managed.Model != BaselineModel {
+		f("a ModelDeployment's spec.model is not the plain Hub ID, so one name does not reach every route")
+	}
+	if o.LLMLabProvider == "" || !slices.Equal(o.Managed.Providers, []string{o.LLMLabProvider}) {
+		f("the managed ModelDeployment is not attached to the managed Provider by name")
+	}
+	pf, pi := p0Problems(o)
+	fail, invalid = append(fail, pf...), append(invalid, pi...)
+	if !o.ServedCreated {
+		if len(pf)+len(pi) == 0 {
+			f("the run ended before the served ModelDeployment was created, with P0 answered")
+		}
+		return dedupe(fail), dedupe(invalid)
+	}
+
 	// The live world: the served ModelDeployment's routing block kept with its cap, one Instance, no extra Allocation, no hedge; the managed one attached
 	// by name; the plain Hub ID on both.
 	if o.Served.InstanceCap == nil || int(*o.Served.InstanceCap) != o.Cap {
@@ -300,33 +321,14 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	if o.Served.HedgeWidth == nil || *o.Served.HedgeWidth != 1 {
 		f("the served ModelDeployment's hedgeWidth is not 1")
 	}
-	if o.Served.Model != BaselineModel || o.Managed.Model != BaselineModel {
+	if o.Served.Model != BaselineModel {
 		f("a ModelDeployment's spec.model is not the plain Hub ID, so one name does not reach every route")
-	}
-	if o.LLMLabProvider == "" || !slices.Equal(o.Managed.Providers, []string{o.LLMLabProvider}) {
-		f("the managed ModelDeployment is not attached to the managed Provider by name")
 	}
 	if o.K != LLMLabK {
 		f("the row's k is not %d", LLMLabK)
 	}
 	if o.Served.DeploymentID != BaselineDeploymentID {
 		f("the served Instance's deployment ID is not the one the shipped example derives (%s), or was not read", BaselineDeploymentID)
-	}
-
-	// P0: before the GPU job, one request at the plain model, answered by LLMLab.
-	switch {
-	case !o.P0.Sent:
-		f("P0 was not sent: the managed leg was never shown to answer on its own")
-	case o.P0.Row.Status != 200 || o.P0.Row.CutBy != "":
-		if o.P0.Row.Emitter == "provider" {
-			inv("P0's request failed and LLMLab answered it (status %d): LLMLab was not shown to serve", o.P0.Row.Status)
-		} else {
-			f("P0's request failed and the %s answered it, not LLMLab", o.P0.Row.Emitter)
-		}
-	case routeOfRow(o.P0.Row, o.LLMLabProvider) != RouteLLMLab:
-		f("P0 was not answered by LLMLab: with no Instance ready everything is (HBEP-5, Test plan), and the emitter was %q", o.P0.Row.Emitter)
-	case !o.OmitMinTokens && (o.P0.Row.CompletionTokens == nil || *o.P0.Row.CompletionTokens != P0Tokens):
-		inv("P0 asked for %d tokens with min_tokens and LLMLab did not give exactly that: it does not honour min_tokens, so the shapes' output lengths are not the config's (set HPCBURST_ALPHA_OMIT_MIN_TOKENS=1, the probe's verdict)", P0Tokens)
 	}
 
 	// The logged KV is a CHECK, never an input of the cap. Below the cap's need, nothing after it was run.
@@ -348,6 +350,22 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	if o.DidNotFit != "" {
 		inv("%s did not fit before the Instance's drain start, so the phases that follow were not run", o.DidNotFit)
 	}
+	// The ratio probe: one request at the served Instance alone, which only it can answer. A probe the Instance did not answer is a failed check; one that
+	// gave no prompt tokens, or a ratio at which no word count reaches the long range, leaves the long shape unset: INVALID, and P1-long was not run.
+	if o.Ratio.Needed {
+		switch {
+		case !o.Ratio.Sent:
+			f("the ratio probe's request has no usage record at the front, so the long shape was not measured")
+		case o.Ratio.Row.Status != 200 || o.Ratio.Row.CutBy != "" || o.Ratio.Row.Emitter != "instance":
+			f("the ratio probe was not answered by the served Instance (status %d, emitter %q)", o.Ratio.Row.Status, o.Ratio.Row.Emitter)
+		case o.Ratio.Invalid:
+			inv("the ratio probe read %d prompt tokens for %d words (%.4f a word), at which no word count reaches %d to %d tokens: P1-long's shape could not be set and it was not run",
+				o.Ratio.PromptTokens, o.Ratio.Words, o.Ratio.TokensPerWord, LongPromptMin, LongPromptMax)
+		}
+		if o.Ratio.Sent && o.Ratio.Row.Status == 200 && o.Ratio.Row.PromptTokens == nil {
+			inv("the ratio probe's usage record holds no prompt tokens, so P1-long's shape could not be set and it was not run")
+		}
+	}
 
 	done := map[string]PhaseObs{}
 	for _, po := range o.Phases {
@@ -356,7 +374,7 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 		fail, invalid = append(fail, pf...), append(invalid, pi...)
 	}
 	for _, ph := range o.Plan {
-		if _, ok := done[ph.Name]; !ok && o.DidNotFit == "" {
+		if _, ok := done[ph.Name]; !ok && o.DidNotFit == "" && !(o.Ratio.Invalid && ph.TargetTokens > 0 && ph.Context < 1) {
 			// A phase after one that was stopped is no more than the stop's mark: the stop is named by that phase.
 			stopped := false
 			for _, po := range o.Phases {
@@ -368,6 +386,27 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 		}
 	}
 	return dedupe(fail), dedupe(invalid)
+}
+
+// p0Problems judges P0: one request of P0Tokens tokens at the plain model, sent before any served ModelDeployment exists, which LLMLab alone can answer. A
+// request the front answered (the managed Provider or its ModelDeployment never became usable) is a failed check; one LLMLab answered and failed, or answered
+// short of the tokens min_tokens asked, makes the reading INVALID. The sequencer ends the run at either, before it creates the served ModelDeployment.
+func p0Problems(o BaselineObs) (fail, invalid []string) {
+	switch {
+	case !o.P0.Sent:
+		fail = append(fail, "P0 was not sent: the managed leg was never shown to answer on its own")
+	case o.P0.Row.Status != 200 || o.P0.Row.CutBy != "":
+		if o.P0.Row.Emitter == "provider" {
+			invalid = append(invalid, fmt.Sprintf("P0's request failed and LLMLab answered it (status %d): LLMLab was not shown to serve", o.P0.Row.Status))
+		} else {
+			fail = append(fail, fmt.Sprintf("P0's request failed and the %s answered it, not LLMLab", o.P0.Row.Emitter))
+		}
+	case routeOfRow(o.P0.Row, o.LLMLabProvider) != RouteLLMLab:
+		fail = append(fail, fmt.Sprintf("P0 was not answered by LLMLab: with no Instance ready everything is (HBEP-5, Test plan), and the emitter was %q", o.P0.Row.Emitter))
+	case !o.OmitMinTokens && (o.P0.Row.CompletionTokens == nil || *o.P0.Row.CompletionTokens != P0Tokens):
+		invalid = append(invalid, fmt.Sprintf("P0 asked for %d tokens with min_tokens and LLMLab did not give exactly that: it does not honour min_tokens, so the shapes' output lengths are not the config's (set HPCBURST_ALPHA_OMIT_MIN_TOKENS=1, the probe's verdict)", P0Tokens))
+	}
+	return fail, invalid
 }
 
 // judgePhase judges one phase. The checks prove that a spill is the cap's and not forced by loading LLMLab, from the front's records and the engine alone: LLMLab gets none in the control; exactly k first-turn requests in P2, at most k in flight, with the Instance at its cap at each arrival; the engine at or under the cap with nothing waiting and nothing preempted; and what LLMLab got is posted.
@@ -541,21 +580,18 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 	if len(po.Engine) < 2 {
 		f("fewer than 2 engine samples were read, so the engine's running, waiting and preemptions were not checked")
 	} else {
-		over, waiting := 0, 0
+		over := 0
 		for _, s := range po.Engine {
 			if s.Running > float64(cap) {
 				over++
-			}
-			if s.Waiting != 0 {
-				waiting++
 			}
 		}
 		if over > 0 {
 			f("the engine ran more than the cap of %d requests in %d sample(s)", cap, over)
 		}
 		if ph.Kind != KindLong {
-			if waiting > 0 {
-				f("the engine had requests waiting in %d sample(s)", waiting)
+			if run := longestWaitingRun(po.Engine); run >= EngineWaitingSustain {
+				f("the engine had requests waiting in %d consecutive samples, past the %d that a burst of first prefills explains (%s at the %s cadence)", run, EngineWaitingSustain-1, time.Duration(run)*BaselinePoll, BaselinePoll)
 			}
 			if d := po.Engine[len(po.Engine)-1].Preemptions - po.Engine[0].Preemptions; d != 0 {
 				f("the engine preempted %.0f request(s) during the phase", d)
@@ -563,6 +599,20 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		}
 	}
 	return dedupe(fail), dedupe(invalid)
+}
+
+// longestWaitingRun is the longest stretch of consecutive engine samples with requests waiting.
+func longestWaitingRun(samples []EngineSample) int {
+	best, run := 0, 0
+	for _, s := range samples {
+		if s.Waiting > 0 {
+			run++
+			best = max(best, run)
+		} else {
+			run = 0
+		}
+	}
+	return best
 }
 
 // rowsFrom are the front's records of a phase answered by a Provider, whoever sent them.
@@ -584,10 +634,16 @@ func BaselineInvalid(o BaselineObs) []string {
 
 // VerifyBaseline judges the run of Row 1: the checks of every other one-job row (the deployment, the job's record), and the baseline's own.
 func VerifyBaseline(row Row, o BaselineObs, jobs []provider.Job) []string {
-	f := deploymentChecks(row, o.Deployment)
-	lf, _ := ledgerChecks(row, o.Tags, jobs)
-	f = append(f, lf...)
-	f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
+	var f []string
+	if o.ServedCreated {
+		f = deploymentChecks(row, o.Deployment)
+		lf, _ := ledgerChecks(row, o.Tags, jobs)
+		f = append(f, lf...)
+		f = append(f, tagCountChecks(row, o.Tags, "the row makes exactly one Allocation")...)
+	} else if len(o.Tags) > 0 || len(jobs) > 0 {
+		// The served ModelDeployment is created only after P0 completed, so a run that never created it submitted nothing.
+		f = append(f, "a job was submitted although the served ModelDeployment was never created: nothing is submitted before P0 completes")
+	}
 	bf, _ := judgeBaseline(o)
 	return dedupe(append(f, bf...))
 }
@@ -626,6 +682,15 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 	fmt.Fprintf(&b, "- the cap is %d, a constant fixed before the run: floor(0.95 x %d / %d) from the engine's KV as shipped; the engine's logged KV after ready was %d tokens (a check, never an input)\n", o.Cap, KVSano, MaxModelLen, o.LoggedKV)
 	fmt.Fprintf(&b, "- R4's declared charge for comparison: the typical shape's 1,152 tokens against KV %d is %d sessions, capped at max-num-seqs 256, where the baseline's cap is %d\n", KVSano, KVSano/1152, o.Cap)
 	fmt.Fprintf(&b, "- min_tokens: %s\n", map[bool]string{true: "left out of every request (the probe's verdict)", false: "sent on every request"}[o.OmitMinTokens])
+	if o.Ratio.Needed {
+		if o.Ratio.LongWords > 0 {
+			fmt.Fprintf(&b, "- the long shape, MEASURED: one probe of %d words and 1 output token at the served Instance alone read %d prompt tokens, %.4f tokens a word, so P1-long's contexts are %d words for %d tokens (a shape, never a cap)\n",
+				o.Ratio.Words, o.Ratio.PromptTokens, o.Ratio.TokensPerWord, o.Ratio.LongWords, LongTargetTokens)
+		} else {
+			fmt.Fprintf(&b, "- the long shape could NOT be set: the probe of %d words read %d prompt tokens (%.4f a word), at which no word count reaches %d to %d tokens\n",
+				o.Ratio.Words, o.Ratio.PromptTokens, o.Ratio.TokensPerWord, LongPromptMin, LongPromptMax)
+		}
+	}
 	if o.P0.Sent {
 		fmt.Fprintf(&b, "- P0 (no Instance ready): answered by %s, status %d\n", routeOfRow(o.P0.Row, o.LLMLabProvider), o.P0.Row.Status)
 	}
@@ -656,12 +721,13 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 					waitPeak = max(waitPeak, s.Waiting)
 				}
 			}
+			run := longestWaitingRun(po.Engine)
 			reading := ""
 			if po.Phase.Kind == KindLong {
 				reading = " (a READING, ruling H0: the declared charge of 1,152 tokens a session against the cache's real use at the cap)"
 			}
-			fmt.Fprintf(&b, "  - the engine, over %d samples: running at most %.0f (the cap %d); requests waiting in %d samples, at most %.0f; preemptions %.0f; KV use at most %.1f%% of the cache (vllm:kv_cache_usage_perc)%s\n",
-				len(po.Engine), peak, o.Cap, waiting, waitPeak, pre, kv*100, reading)
+			fmt.Fprintf(&b, "  - the engine, over %d samples: running at most %.0f (the cap %d); requests waiting in %d samples, the longest run %d, at most %.0f; preemptions %.0f; KV use at most %.1f%% of the cache (vllm:kv_cache_usage_perc)%s\n",
+				len(po.Engine), peak, o.Cap, waiting, run, waitPeak, pre, kv*100, reading)
 		}
 	}
 	b.WriteString("- the mapping to #769 (hbep-764-amend at 9cc8368d), measurement then the rule it will be compared against:\n")

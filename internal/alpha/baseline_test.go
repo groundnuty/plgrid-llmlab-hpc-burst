@@ -71,7 +71,7 @@ func TestTheDefaultPhasesAreTheBriefs(t *testing.T) {
 	ph := DefaultPhases(11)
 	want := []Phase{
 		{Name: "P1", Kind: KindControl, Sessions: 11, Turns: 24, Context: 1024, Turn: 128, Output: 128, Think: 100 * time.Millisecond, Bound: 10 * time.Minute},
-		{Name: "P1-long", Kind: KindLong, Sessions: 11, Turns: 2, Context: 26000, Turn: 128, Output: 128, Think: time.Second, Bound: 15 * time.Minute},
+		{Name: "P1-long", Kind: KindLong, Sessions: 11, Turns: 2, Context: 0, TargetTokens: 26000, Turn: 128, Output: 128, Think: time.Second, Bound: 15 * time.Minute},
 		{Name: "P2", Kind: KindFull, Sessions: 13, Turns: 24, Context: 1024, Turn: 128, Output: 128, Think: 100 * time.Millisecond, Bound: 10 * time.Minute},
 		{Name: "P3", Kind: KindDetach, Sessions: 13, Turns: 24, Context: 1024, Turn: 128, Output: 128, Think: 100 * time.Millisecond, Bound: 10 * time.Minute},
 	}
@@ -143,6 +143,9 @@ func TestAChangedPhaseReachesTheGenerator(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := func(p Phase) string {
+		if p.Context == 0 {
+			p.Context = 1000 // a phase whose words the ratio probe sets, compared with one whose words are given
+		}
 		b, err := StudyConfig(p, StudyRun{BaseURL: "http://127.0.0.1:1/v1", RunID: "r-0123456789", RequestTimeout: time.Minute})
 		if err != nil {
 			t.Fatal(err)
@@ -163,7 +166,7 @@ func TestAChangedPhaseReachesTheGenerator(t *testing.T) {
 	if !strings.Contains(cfg(got[2]), `"sessions": 14`) {
 		t.Error("P2's generator config lacks 14 sessions")
 	}
-	if base[1].Context != 26000 {
+	if base[1].Context != 0 || base[1].TargetTokens != 26000 {
 		t.Error("the defaults were changed in place")
 	}
 	for _, c := range []struct{ name, env, why string }{
@@ -473,5 +476,54 @@ exit ${STUDYLOAD_EXIT:-0}
 	r.cfg.StudyloadBin = filepath.Join(t.TempDir(), "no-such-binary")
 	if _, err := b.StartGenerator(t.Context(), DefaultPhases(11)[0]); err == nil || strings.Contains(err.Error(), "no-such-binary") {
 		t.Errorf("a missing binary: %v", err)
+	}
+}
+
+// The ratio maps to the words of the long contexts, worked out by hand (the generator sends one word per intended token; the probe measures what the engine's
+// tokenizer makes of a word): 2,000 words that came to 2,000 tokens are a ratio of 1, so 26,000 tokens are 26,000 words; 2,500 tokens, 1.25, so 20,800 words;
+// 1,000 tokens, 0.5, so 52,000 words. No reading, or a ratio at which no whole number of words lands in 24,000 to 28,672 tokens (a word of 10,000 tokens: 2 words
+// are 20,000 and 3 are 30,000), or words past what the generator takes, sets nothing.
+func TestTheRatioMapsToTheWordsOfTheLongContexts(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		words  int
+		tokens int64
+		target int
+		want   int
+		ok     bool
+	}{
+		{"1 token a word", 2000, 2000, 26000, 26000, true},
+		{"1.25 tokens a word", 2000, 2500, 26000, 20800, true},
+		{"half a token a word", 2000, 1000, 26000, 52000, true},
+		{"a word of 4,000 tokens: 6 words are 24,000 and 7 are 28,000, a tie", 1000, 4_000_000, 26000, 6, true},
+		{"a word of 10,000 tokens: nothing lands in the range", 1000, 10_000_000, 26000, 0, false},
+		{"no prompt tokens", 2000, 0, 26000, 0, false},
+		{"a negative reading", 2000, -5, 26000, 0, false},
+		{"no probe words", 0, 2000, 26000, 0, false},
+		{"words past the generator's limit", 2000, 1, 26000, 0, false},
+	} {
+		got, ok := LongContextWords(c.words, c.tokens, c.target)
+		if got != c.want || ok != c.ok {
+			t.Errorf("%s: %d words, %t; want %d, %t", c.name, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// An explicit contextTokens in the settings replaces the derived words: no probe sets them then, and the phase's own words reach the generator.
+func TestAGivenContextReplacesTheDerivedWords(t *testing.T) {
+	got, err := PhasesFromEnv(DefaultPhases(11), `{"P1-long":{"contextTokens":27000}}`)
+	if err != nil || got[1].Context != 27000 || got[1].TargetTokens != 0 {
+		t.Fatalf("%+v, %v: want 27000 words and no target", got[1], err)
+	}
+	got, err = PhasesFromEnv(DefaultPhases(11), `{"P1-long":{"targetTokens":25000}}`)
+	if err != nil || got[1].Context != 0 || got[1].TargetTokens != 25000 {
+		t.Fatalf("%+v, %v: want the derived words, to reach 25000 tokens", got[1], err)
+	}
+	if _, err := StudyConfig(DefaultPhases(11)[1], StudyRun{BaseURL: "http://127.0.0.1:1/v1", RunID: "r-0123456789", RequestTimeout: time.Minute}); err == nil || !strings.Contains(err.Error(), "ratio probe") {
+		t.Errorf("a phase with no words yet was written for the generator: %v", err)
+	}
+	probe := Phase{Name: PhaseRatio, Kind: KindProbe, OnServed: true, Sessions: 1, Turns: 1, Context: RatioProbeWords, Output: 1, Bound: time.Minute}
+	if _, err := StudyConfig(probe, StudyRun{BaseURL: "http://127.0.0.1:1/v1", RunID: "r-0123456789", RequestTimeout: time.Minute}); err == nil {
+		t.Error("a probe for the served Instance alone was written with no served Provider's name")
 	}
 }
