@@ -274,6 +274,17 @@ func rowsOn(joined []joinedRow, managed string, route Route) []FrontRow {
 	return out
 }
 
+// distinctSessionsOn are the distinct sessions that had a request answered on a route, by the joined requests.
+func distinctSessionsOn(joined []joinedRow, managed string, route Route) map[string]bool {
+	out := map[string]bool{}
+	for _, j := range joined {
+		if j.route(managed) == route {
+			out[j.Gen.Session] = true
+		}
+	}
+	return out
+}
+
 // firstTurnSessions are the distinct sessions whose first turn was answered on a route, by the joined requests' session and turn: two first-turn requests of
 // one session are one session.
 func firstTurnSessions(joined []joinedRow, managed string, route Route) map[string]bool {
@@ -549,6 +560,18 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		if len(llm) != 0 {
 			f("LLMLab was asked for %d request(s), and the control gives it none", len(llm))
 		}
+		// The control ran at the cap: ALL N sessions had a request answered by the Instance, and the FRONT's records show N requests in flight at once on it,
+		// by the overlap of their StartTime and EndTime (#776's review, point 3). Sessions that ran one after another show a pass that tests nothing about the
+		// cap; the phase then measured nothing.
+		if ph.Sessions == cap {
+			served := rowsOn(joined, managed, RouteServed)
+			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < cap {
+				inv("only %d of the %d sessions had a request answered by the Instance, so the control was not run at the cap", n, cap)
+			}
+			if peak, _, _ := inFlightStats(served, -1); peak < cap {
+				inv("the front's records show at most %d requests in flight at once on the Instance, want the cap's %d: the sessions did not run together, so the control did not reach the cap", peak, cap)
+			}
+		}
 		// Pinning, shown in the usage records: each session's requests answered by one route (the front's ring only classifies spills).
 		moved := 0
 		route := map[string]Route{}
@@ -640,6 +663,19 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 			inv("a first turn's prompt tokens are not in the front's records, so the long contexts were not confirmed")
 		case shortest < LongPromptMin || longest > LongPromptMax:
 			inv("the first turns' prompts held %d to %d tokens, outside the long phase's %d to %d", shortest, longest, LongPromptMin, LongPromptMax)
+		}
+		// And the N requests in flight at once must EACH be in the long range, not one first turn: the front's records of the requests whose prompt is in range
+		// are the ones counted, so a short request overlapping the others does not make a long one.
+		if ph.Sessions == cap {
+			var long []FrontRow
+			for _, r := range rowsOn(joined, managed, RouteServed) {
+				if r.PromptTokens != nil && *r.PromptTokens >= LongPromptMin && *r.PromptTokens <= LongPromptMax {
+					long = append(long, r)
+				}
+			}
+			if peak, _, _ := inFlightStats(long, -1); peak < cap {
+				inv("the front's records show at most %d requests in flight at once whose prompt is in the long range of %d to %d tokens, want the cap's %d: the long contexts did not run together at the cap", peak, LongPromptMin, LongPromptMax, cap)
+			}
 		}
 	}
 

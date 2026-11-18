@@ -98,6 +98,10 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"p0-cut-200", "P0's request failed and LLMLab answered it (status 200)"},
 	{"min-tokens-ignored", "LLMLab did not give exactly that: it does not honour min_tokens"},
 	{"long-contexts-short", "outside the long phase's 24000 to 28672"},
+	// The control and the long phase prove nothing when their sessions did not run together at the cap (#776's review, point 3).
+	{"p1-serialized", "P1: the front's records show at most 1 requests in flight at once on the Instance, want the cap's 11"},
+	{"p1-sessions-missing", "P1: only 10 of the 11 sessions had a request answered by the Instance"},
+	{"long-serialized", "P1-long: the front's records show at most 1 requests in flight at once on the Instance, want the cap's 11"},
 	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
 	{"ratio-impossible", "no word count reaches 24000 to 28672 tokens"},
 	{"ratio-unread", "the ratio probe's usage record holds no prompt tokens"},
@@ -567,6 +571,11 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 	if w.d.fault("llmlab-spill-below-the-cap") && ph.Kind == KindFull {
 		delay = 2 * time.Second // the Instance's sessions arrive after LLMLab's: at LLMLab's arrival the Instance held none
 	}
+	// serialized runs the phase's sessions one after another, each of two turns, so that at most one request is ever in flight: the control that proves nothing.
+	serialized := (w.d.fault("p1-serialized") && ph.Name == PhaseP1) || (w.d.fault("long-serialized") && ph.Name == PhaseP1Long)
+	if w.d.fault("p1-sessions-missing") && ph.Name == PhaseP1 {
+		instanceSessions-- // one session never ran
+	}
 	idSuffix := ""
 	add := func(session string, turn int, provider, emitter string, status int, start time.Time, dur time.Duration, prompt, first int64) {
 		id := fmt.Sprintf("%s-%s-t%02d%s", ph.Name, session, turn, idSuffix)
@@ -592,9 +601,15 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		if onLLMLab && (w.d.fault("llmlab-over-its-guard") || w.d.fault("llmlab-over-final-count")) {
 			turns = 1
 		}
+		if serialized {
+			turns = 2
+		}
 		// A turn takes two seconds, on the Instance and on LLMLab, and the next starts after the think time.
 		for t := 1; t <= turns; t++ {
 			start := t0.Add(time.Duration(t-1) * step)
+			if serialized {
+				start = start.Add(time.Duration(i) * 2 * step) // each session starts after the one before it has ended
+			}
 			if neverReached && i >= cap {
 				start = start.Add(late)
 			}

@@ -1237,6 +1237,10 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 	if o.P0, err = w.Probe(ctx); err != nil {'
   'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
   'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # #776's review, point 3: the control and the long phase need all N sessions, N requests in flight at once on the Instance, and N of them in the long range.
+  'baselinejudge.go@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < cap {@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < 0 {'
+  'baselinejudge.go@@			if peak, _, _ := inFlightStats(served, -1); peak < cap {@@			if peak, _, _ := inFlightStats(served, -1); peak < 0 {'
+  'baselinejudge.go@@			if peak, _, _ := inFlightStats(long, -1); peak < cap {@@			if peak, _, _ := inFlightStats(long, -1); peak < 0 {'
   # #776's review, point 4: P2's expectation is the constants' (N = cap + k, exactly k distinct first-turn sessions), never the override's.
   'baselinejudge.go@@		k := LLMLabK@@		k := ph.Sessions - cap'
   'baselinejudge.go@@		case len(first) != k:@@		case len(first) != k && false:'
