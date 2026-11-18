@@ -65,6 +65,9 @@ type Reconciler struct {
 	// (HBEP-7, Hedging (beta), Operations). Nil reads the pass's own Operations (frozenByOperation, ophedge.go): this field
 	// is the seam tests set to pin growth on or off.
 	hedgeFrozen func(hedgeGroup) bool
+	// waitsBeforeOwnSubmit, when set, answers placement's open question instead of the default (false): see
+	// pass.waitsBeforeOwnSubmit. Tests set it; the ruling that fixes the default sets it in the method instead.
+	waitsBeforeOwnSubmit func() bool
 }
 
 func (r *Reconciler) memory() *memory {
