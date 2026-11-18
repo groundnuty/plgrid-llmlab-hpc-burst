@@ -311,11 +311,11 @@ func (w *world) agent(t *testing.T, identitiesDir, name string) who {
 	return id
 }
 
-// deployment is a served ModelDeployment of one Instance on the example Provider. Its overAllocation is set to 0 explicitly,
-// since an absent one is 1 (HBEP-7, What the controller reads) and the controller would make one extra Allocation and Instance:
-// the run means one Instance and one Allocation for each deployment, which every wait that counts them reads.
+// deployment is a served ModelDeployment of one Instance on the example Provider. Its over-allocation is off, set explicitly:
+// absent is 1, the API server's default, which gives the Provider one more Instance and Allocation than the run's waits
+// count (an Instance and its Allocation, each one), and the extra capacity is no part of what the run shows.
 func deployment(name string) *v1alpha1.ModelDeployment {
-	noExtras := int32(0)
+	noOverAllocation := int32(0)
 	return &v1alpha1.ModelDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exampleNS},
 		Spec: v1alpha1.ModelDeploymentSpec{
@@ -326,7 +326,7 @@ func deployment(name string) *v1alpha1.ModelDeployment {
 				Flags:      []v1alpha1.EngineFlag{{Name: "max-model-len", Value: "32768"}},
 			}},
 			Instances:      1,
-			OverAllocation: &noExtras,
+			OverAllocation: &noOverAllocation,
 			Providers:      v1alpha1.ProviderSelection{Names: []string{exampleProvider}},
 			Workload: &v1alpha1.Workload{
 				ContextTokens:  v1alpha1.ContextTokens{Typical: 4096},
