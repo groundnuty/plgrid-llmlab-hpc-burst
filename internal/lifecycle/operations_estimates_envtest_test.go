@@ -20,6 +20,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,44 @@ func (e *opsEnv) applyEstimate(t *testing.T, op *v1alpha1.Operation, provider st
 		client.FieldOwner(v1alpha1.FieldManagerProviderEstimate(provider)), client.ForceOwnership); err != nil {
 		t.Fatalf("apply %s's estimate: %v", provider, err)
 	}
+}
+
+// estimatesFixture is opsFixture with the over-allocation set to 0 EXPLICITLY. These rows stand on the plan of a Scale to 1 of a deployment
+// with a pending Instance on each of two Providers, which cancels both: that plan has a target on each Provider, which the estimates
+// are applied to. With k=1, the CRD's default and what the code reads from an unset value (OverAllocationCount, #708's extras), an
+// extra absorbs the scale-down and the plan has no target on sano, so the rows would fail for a reason that has nothing to do with
+// estimates. The fixture's own k is 0 today; this pins it here, so a change of that shared default cannot reach these rows.
+func estimatesFixture(t *testing.T) *opFixture {
+	f := opsFixture(t)
+	f.overAllocation(0)
+	return f
+}
+
+// logWhatTheRowSees says what the rows stand on, from the API server and from the pass's own state: the ModelDeployments, Allocations
+// and Instances the control plane STORES in the rig's namespace (the fixture's are hand-made structs the pass reads and the control
+// plane never holds, so none is expected, and none gets the CRD's default of overAllocation), the overAllocation the pass's
+// deployment has and how the code counts it, and the plan's targets with their Providers. A row that relied on an exact target count
+// would read these lines against a change of the default (#708's extras).
+func (e *opsEnv) logWhatTheRowSees(t *testing.T, f *opFixture, op *v1alpha1.Operation) {
+	t.Helper()
+	var mds v1alpha1.ModelDeploymentList
+	var allocs v1alpha1.AllocationList
+	var insts v1alpha1.InstanceList
+	for _, l := range []client.ObjectList{&mds, &allocs, &insts} {
+		if err := e.admin.c.List(e.ctx, l, client.InNamespace(rigNS)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var targets []string
+	for _, tg := range op.Status.Plan.Targets {
+		targets = append(targets, string(tg.Kind)+" "+tg.Name+" on "+tg.Provider)
+	}
+	oa := "unset"
+	if f.md.Spec.OverAllocation != nil {
+		oa = strconv.Itoa(int(*f.md.Spec.OverAllocation))
+	}
+	t.Logf("stored in the API server: %d ModelDeployments, %d Allocations, %d Instances; the pass's own ModelDeployment (a struct) has spec.overAllocation %s, counted as %d; the plan has %d targets: %s",
+		len(mds.Items), len(allocs.Items), len(insts.Items), oa, f.md.Spec.OverAllocationCount(), len(targets), strings.Join(targets, "; "))
 }
 
 // estimatesOf is the Operation's status.estimates as JSON, to compare byte for byte.
@@ -122,13 +161,14 @@ func (s *raceStatus) Update(ctx context.Context, obj client.Object, opts ...clie
 func (e *opsEnv) plannedWithEstimates(t *testing.T, name string) (f *opFixture, id, list string) {
 	t.Helper()
 	e.setPolicies(t, globalFor(e.person))
-	f = opsFixture(t)
+	f = estimatesFixture(t)
 	e.request(t, e.a, name, scaleOp(1))
 	e.step(t, f, opAt)
 	planned := e.get(t, name)
 	e.applyEstimate(t, planned, "sano", estimateTime)
 	e.applyEstimate(t, planned, "helios", estimateTime.Add(2*time.Hour))
 	withEstimates := e.get(t, name)
+	e.logWhatTheRowSees(t, f, withEstimates)
 	list = estimatesOf(t, withEstimates)
 	if len(withEstimates.Status.Estimates) != 2 || !strings.Contains(list, `"2026-11-30T05:48:10Z"`) {
 		t.Fatalf("the applied estimates are %s, want one per Provider with the probe's time", list)
@@ -195,7 +235,7 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 
 	t.Run("S4-5 (Refused): the backstop's write keeps the list", func(t *testing.T) {
 		e.setPolicies(t, globalFor(e.person))
-		f := opsFixture(t)
+		f := estimatesFixture(t)
 		e.request(t, e.a, "est-5", scaleOp(1))
 		e.step(t, f, opAt)
 		planned := e.get(t, "est-5")
@@ -230,7 +270,7 @@ func TestOperationEstimatesSurviveTheLifecycleControllersWrites(t *testing.T) {
 	// The next pass reads again and succeeds, with the estimate still there.
 	t.Run("S4-3: a status write that races the Provider's apply is a conflict, retried on the next pass", func(t *testing.T) {
 		e.setPolicies(t, globalFor(e.person))
-		f := opsFixture(t)
+		f := estimatesFixture(t)
 		e.request(t, e.a, "est-6", scaleOp(1))
 		e.step(t, f, opAt)
 		planned := e.get(t, "est-6")

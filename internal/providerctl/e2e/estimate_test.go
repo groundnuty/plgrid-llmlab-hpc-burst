@@ -162,6 +162,21 @@ func TestTheProviderEstimatesOnePerPlanAndShapeAndWritesThemByApply(t *testing.T
 	if n := r.sl.CountTestOnly(); n != 1 {
 		t.Errorf("%d sbatch --test-only calls for two targets of one shape, want exactly 1", n)
 	}
+	// What the rows stand on, from the API server: no ModelDeployment is stored (the CRD's overAllocation default applies to a stored
+	// one only), and the Allocations are the two the row made, so the one call is for two targets, whatever an extra would add.
+	var mds v1alpha1.ModelDeploymentList
+	var allocs v1alpha1.AllocationList
+	var insts v1alpha1.InstanceList
+	for _, l := range []client.ObjectList{&mds, &allocs, &insts} {
+		if err := c.List(r.ctx, l, client.InNamespace(r.ns)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Logf("stored in the API server, namespace %s: %d ModelDeployments, %d Allocations, %d Instances; the Operation's plan has 2 targets; %d Estimate call(s)",
+		r.ns, len(mds.Items), len(allocs.Items), len(insts.Items), r.sl.CountTestOnly())
+	if len(mds.Items) != 0 || len(allocs.Items) != 2 || len(insts.Items) != 0 {
+		t.Errorf("the namespace holds %d ModelDeployments, %d Allocations and %d Instances, want 0, 2 and 0: the row's one-call count would then count more than two targets", len(mds.Items), len(allocs.Items), len(insts.Items))
+	}
 	// Who wrote it: this Provider's estimate manager, on the status subresource, and not the shared Provider manager.
 	if want := v1alpha1.FieldManagerProviderEstimate(r.prov) + "/status"; !slices.Equal(ownsEstimates(got), []string{want}) {
 		t.Errorf("the managers that own status.estimates are %v, want only %s", ownsEstimates(got), want)
