@@ -280,7 +280,7 @@ func TestCommandsWithoutAKubeconfigInAChildProcess(t *testing.T) {
 	env := Env{Kubeconfig: os.Getenv("KUBECONFIG"), Home: os.Getenv("HOME"), XDGStateHome: os.Getenv("XDG_STATE_HOME")}
 	for _, args := range [][]string{
 		{"scale", "m", "--instances", "1"}, {"end", "m"}, {"release", "alloc-a"},
-		{"confirm", "op", "--plan", "p"}, {"approvals"}, {"approve", "op", "--plan", "p"}, {"operation", "op"},
+		{"confirm", "op", "--plan", "p"}, {"approvals"}, {"approve", "op", "--plan", "p"}, {"operation", "op"}, {"inventory"},
 	} {
 		var out, errs bytes.Buffer
 		if code := Run(context.Background(), args, env, strings.NewReader(""), &out, &errs); code != exitUsage {

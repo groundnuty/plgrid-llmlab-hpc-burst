@@ -13,7 +13,7 @@ func TestAgentCommandsAreWired(t *testing.T) {
 	t.Setenv("KUBECONFIG", "")
 	for _, args := range [][]string{
 		{"scale", "m", "--instances", "1"}, {"end", "m"}, {"release", "a"}, {"confirm", "op", "--plan", "p"},
-		{"approvals"}, {"approve", "op", "--plan", "p"}, {"operation", "op"},
+		{"approvals"}, {"approve", "op", "--plan", "p"}, {"operation", "op"}, {"inventory"},
 	} {
 		code, out, errs := runInProcess(t, args...)
 		if code != exitUsage || !strings.Contains(errs, "KUBECONFIG") || !strings.Contains(errs, "--kubeconfig") || strings.Contains(errs, "unknown command") {

@@ -349,6 +349,12 @@ func TestAgentCLIOnAControlPlane(t *testing.T) {
 		}
 	})
 
+	// Row 11 reads the world as rows 1 to 3 left it: row1 waiting for its approval, and the pending Allocation still there. Row 4
+	// executes that plan and changes the world, so it runs last.
+	t.Run("row 11: inventory shows the world, selects by owner, shows an object with no owner as unknown, and only reads", func(t *testing.T) {
+		w.inventoryRow(t, asA, asB)
+	})
+
 	t.Run("row 4: A's approval, through the CLI, runs the plan to Done: the pending Allocation goes, the started one stays", func(t *testing.T) {
 		r := w.cli(t, asA, false, "", "approve", "row1", "--plan", rowID)
 		if r.code != 0 {
@@ -424,7 +430,7 @@ func cancelPendingTarget(p *v1alpha1.OperationPlan, name string) *v1alpha1.PlanT
 func allCommands() [][]string {
 	return [][]string{
 		{"scale", opMD, "--instances", "1"}, {"end", opMD}, {"release", "alloc-r"}, {"confirm", "row1", "--plan", "p"},
-		{"approvals"}, {"approve", "row1", "--plan", "p"}, {"operation", "row1"},
+		{"approvals"}, {"approve", "row1", "--plan", "p"}, {"operation", "row1"}, {"inventory"},
 	}
 }
 

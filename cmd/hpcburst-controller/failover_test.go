@@ -21,6 +21,11 @@ package main
 // never exercise the stale-leader path, so it is not used. After a SIGKILL
 // nothing is released: the second copy waits for each Lease to expire.
 //
+// A first copy on a loaded runner could miss its own Lease renewal, lose
+// leadership and exit before the test's SIGKILL. Its exit is a failover trigger
+// just as the kill is, so the test accepts it, narrowly: see endMidSubmit
+// (failover_exit_test.go).
+//
 // What is counted and where from:
 //   - sbatch calls with the tag come from the fake's call log
 //     (fakeslurm.Platform.Calls), never from a return value;
@@ -40,6 +45,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -131,11 +137,24 @@ type failoverRig struct {
 	tag       string
 	// arrived receives the job ID that the first copy's first sbatch got from
 	// the fake, once it has; "" when the sbatch was held before it ran.
-	arrived chan string
+	// midSubmit is when it did, and whether the first copy was alive then, written
+	// before the send (arrive). aProc is the first copy for arrive, which runs on
+	// the fake's server before the rig's test goroutine looks at r.a.
+	arrived   chan string
+	midSubmit midSubmitPoint
+	aProc     atomic.Pointer[child]
 	// lifecycleA and provA are the first copy's Lease holders; killedAt is
 	// when it was killed.
 	lifecycleA, provA string
 	killedAt          time.Time
+}
+
+// arrive records that the first copy's first sbatch has reached the fake, the
+// mid-submit point, and tells awaitMidSubmit.
+func (r *failoverRig) arrive(jobID string) {
+	a := r.aProc.Load()
+	r.midSubmit = midSubmitPoint{at: time.Now(), aliveA: a != nil && a.alive()}
+	r.arrived <- jobID
 }
 
 // newFailoverRig starts the control plane, the fake Slurm, the first copy
@@ -151,7 +170,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	profile := failoverProfile("failover-slurm")
 	prov := batchProvider("failover-batch", profile.Name, partX86, sshCredentials(t))
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "failover-allocs"}}
-	for _, o := range []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}, profile, prov, ns} {
+	for _, o := range []client.Object{profile, prov, ns} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}
@@ -173,7 +192,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	if beforeRun {
 		hooks.before = func(cmd slurm.Command) bool {
 			if first(cmd) {
-				r.arrived <- ""
+				r.arrive("")
 				return true
 			}
 			return false
@@ -181,7 +200,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	} else {
 		hooks.after = func(cmd slurm.Command, res slurm.Result, _ error) bool {
 			if first(cmd) {
-				r.arrived <- sbatchJobID(res)
+				r.arrive(sbatchJobID(res))
 				return true
 			}
 			return false
@@ -193,6 +212,7 @@ func newFailoverRig(t *testing.T, beforeRun bool) *failoverRig {
 	var digest string
 	r.fa, _, digest = prepareState(t, api, "direct", exampleFront)
 	r.a = startChild(t, "A", &r.fa, srvA.Addr())
+	r.aProc.Store(r.a)
 	waitFor(t, "the first copy leads lifecycle and holds "+r.provLease, failoverWait, func() bool {
 		return held(ctx, c, v1alpha1.LeaseLifecycle) && held(ctx, c, r.provLease)
 	}, r.a)
@@ -279,17 +299,21 @@ func (r *failoverRig) checkMidSubmit(aJob string, beforeRun bool) {
 }
 
 // killFirst kills the first copy with SIGKILL and checks that it is dead:
-// reaped, ended by that signal, its PID free.
+// reaped, ended by that signal, its PID free. A copy that already left on its
+// own, through lost leadership, after its sbatch reached the fake is accepted
+// instead (endMidSubmit says exactly when); any other end fails the test.
 func (r *failoverRig) killFirst() {
 	t := r.t
 	t.Helper()
-	if err := r.a.cmd.Process.Signal(syscall.SIGKILL); err != nil {
-		t.Fatalf("SIGKILL to the first copy: %v", err)
-	}
 	r.killedAt = time.Now()
-	ws := r.a.kill(t)
-	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
-		t.Errorf("the first copy's wait status is %v, want ended by SIGKILL", ws)
+	early, ws, err := r.a.endMidSubmit(r.midSubmit)
+	if err != nil {
+		t.Fatalf("the first copy's end: %v", err)
+	}
+	if early {
+		// Its exit is the failover's trigger, so the takeover is timed from it.
+		r.killedAt = r.a.exitedAt
+		t.Logf("the first copy left on its own (%s), through lost leadership, %s after its sbatch reached the fake and before the test's SIGKILL took effect", waitStatusText(ws), r.a.exitedAt.Sub(r.midSubmit.at).Round(time.Millisecond))
 	}
 	if !r.a.gone() {
 		t.Error("the first copy's PID is still there after it was reaped")

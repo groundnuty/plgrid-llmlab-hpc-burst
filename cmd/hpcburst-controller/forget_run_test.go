@@ -28,7 +28,6 @@ import (
 
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -115,7 +114,7 @@ func TestControllerBinaryStopsExportingADroppedManagedProvidersSeries(t *testing
 	// Neither name is a prefix of the other, so a label match cannot be a prefix match.
 	gone, kept := newManaged("drop-gone"), newManaged("drop-kept")
 	goneCtl, keptCtl := eventcount.ControllerProvider(gone.Name), eventcount.ControllerProvider(kept.Name)
-	for _, o := range []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}, profile, gone, kept} {
+	for _, o := range []client.Object{profile, gone, kept} {
 		if err := c.Create(ctx, o); err != nil {
 			t.Fatal(err)
 		}

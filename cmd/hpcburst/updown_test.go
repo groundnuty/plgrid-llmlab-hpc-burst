@@ -14,6 +14,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
 
 // TestUpStatusDown starts the default pinned k3s, checks what it is and how it is isolated,
@@ -301,9 +303,11 @@ func TestUpStatusDown(t *testing.T) {
 				t.Errorf("the audit log contains the Secret's content (%d chars of it, as %q...)", len(form), form[:4])
 			}
 		}
+		// A body is logged only for the framework's own kinds (HBEP-10, Audit: config/audit's rules 2 and 3), and for
+		// no other object, a Secret's least of all.
 		for i, e := range evs {
-			if e.hasBody {
-				t.Errorf("audit event %d (%s %s) carries a request or response body", i, e.Verb, e.ObjectRef.Resource)
+			if e.hasBody && e.ObjectRef.APIGroup != v1alpha1.Group {
+				t.Errorf("audit event %d (%s %s of group %q) carries a request or response body", i, e.Verb, e.ObjectRef.Resource, e.ObjectRef.APIGroup)
 				break
 			}
 		}

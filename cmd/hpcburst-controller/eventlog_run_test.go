@@ -3,7 +3,12 @@ package main
 // The controller binary's own wiring with the durable log (HBEP-8, The durable log, Who writes; #625, PR E2, the
 // fix round after the reviews of #697). run is the real code path, against a real API server with the committed
 // CRDs (startAPIServer: etcd and kube-apiserver on kernel ports, so no block of internal/testenv is used) and a
-// real log, a child process (internal/eventlog/node/nodetest) on the launcher's base + 16 and base + 17.
+// real log, a child process (internal/eventlog/node/nodetest) on 28504 and 28505, this package's pair of #625's
+// block (IMPL-COMMON): the launcher's base + 16 and base + 17 for the port base logBase. They are fixed: the log's
+// start reads both, and a pair that the kernel gave and the test bound later was taken in between by another
+// test's kernel port (#737). The controller's own block is still the kernel's, held until the start (freePortBase),
+// so the publisher reaches the log through the deps hook, with the port base the launcher would have given the
+// log: newEventPublisher is the production code, and only the base its address derives from differs.
 //
 // The recorders are built with the log's option, which does nothing in a process with no log, so a plumbing line
 // that drops the publisher (opts.EventLog, the wiring's eventLog, the publisher handed to the tunnel-state reader)
@@ -18,7 +23,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -40,27 +44,12 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
-// freeBlockWithLogPorts returns a port base whose block, and its base + 16 and base + 17, are free.
-func freeBlockWithLogPorts(t *testing.T) int {
-	t.Helper()
-	for range 50 {
-		base := freePortBase(t)
-		ok := true
-		for _, off := range []int{agentapi.EventLogPortOffset, agentapi.EventLogMonitorPortOffset} {
-			l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(base+off)))
-			if err != nil {
-				ok = false
-				break
-			}
-			l.Close()
-		}
-		if ok {
-			return base
-		}
-	}
-	t.Fatal("no free port block with its two log ports")
-	return 0
-}
+// The log's client and monitoring ports, and the port base whose launcher addresses (base + 16 and + 17) they are.
+const (
+	logClientPort  = 28504
+	logMonitorPort = 28505
+	logBase        = logClientPort - agentapi.EventLogPortOffset
+)
 
 // unloggedSeries reads hpcburst_events_unlogged_total from the controller's /metrics: the value of each
 // controller's series, for those that exist.
@@ -95,17 +84,13 @@ func TestControllerBinaryPublishesToTheDurableLog(t *testing.T) {
 	api := startAPIServer(t)
 	ctx := context.Background()
 	c := api.client
-	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: v1alpha1.ControllerNamespace}}); err != nil {
-		t.Fatal(err)
+	logHost := agentapi.Host{PortBase: logBase}
+	d := nodetest.NewDir(t, nodetest.Ports{Client: logClientPort, Monitor: logMonitorPort}, eventlog.Caps{Events: 16 << 20, Usage: 1 << 20})
+	if logHost.EventLogAddr() != d.Ports.Addr() || logHost.EventLogMonitorPort() != d.Ports.Monitor {
+		t.Fatalf("the launcher's address for the log is %s and its monitoring port %d, the rig's %s and %d", logHost.EventLogAddr(), logHost.EventLogMonitorPort(), d.Ports.Addr(), d.Ports.Monitor)
 	}
-	base := freeBlockWithLogPorts(t)
-	d := nodetest.NewDir(t, nodetest.Ports{Client: base + agentapi.EventLogPortOffset, Monitor: base + agentapi.EventLogMonitorPortOffset},
-		eventlog.Caps{Events: 16 << 20, Usage: 1 << 20})
 	d.Start(t).Ready()
-	f, _, digest := prepareStateAt(t, api, base, "direct", exampleFront, "--event-log-token-file", d.TokenFile())
-	if f.host.EventLogAddr() != d.Ports.Addr() {
-		t.Fatalf("the launcher's address for the log is %s, the rig's %s", f.host.EventLogAddr(), d.Ports.Addr())
-	}
+	f, _, digest := prepareStateAt(t, api, freePortBase(t), "direct", exampleFront, "--event-log-token-file", d.TokenFile())
 
 	// A batch Provider and a managed one, as the wiring test of the whole binary makes them.
 	sshCreds := sshCredentials(t)
@@ -148,6 +133,7 @@ func TestControllerBinaryPublishesToTheDurableLog(t *testing.T) {
 			return slurm.NewBatch(session, v.Profile, v.Settings, slurm.Options{PollInterval: time.Second, BusyInterval: 500 * time.Millisecond}), io.NopCloser(nil), nil
 		},
 		eventPublisher: func(f flags) (*eventcount.Publisher, error) {
+			f.host.PortBase = logBase // the log's address is derived from the base: the log is on the fixed pair
 			p, err := newEventPublisher(f)
 			mu.Lock()
 			pub = p
