@@ -85,13 +85,18 @@ func startAPIServer(t *testing.T) *apiServer {
 			t.Fatal(err)
 		}
 	}
+	// envtest passes no --advertise-address, and kube-apiserver then looks for one on the default route: where the
+	// network namespace has only a loopback (the Apptainer jobs of CI on Sano) it exits with "no default routes
+	// found". internal/testenv's control plane sets it the same way.
+	kubeAPIServer := &envtest.APIServer{CertDir: certDir}
+	kubeAPIServer.Configure().Append("advertise-address", "127.0.0.1")
 	env := &envtest.Environment{
 		BinaryAssetsDirectory: filepath.Dir(bins.KubeAPIServer),
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd")},
 		ErrorIfCRDPathMissing: true,
 		ControlPlane: envtest.ControlPlane{
 			Etcd:      &envtest.Etcd{DataDir: etcdDir},
-			APIServer: &envtest.APIServer{CertDir: certDir},
+			APIServer: kubeAPIServer,
 		},
 	}
 	// The stop is registered before the start: a start that fails after
