@@ -82,6 +82,7 @@ func cloneWorkerReport(w agentapi.WorkerReport) agentapi.WorkerReport {
 		h.WaitingRequests = clonePtr(h.WaitingRequests, same[int64])
 		h.GeneratedTokens = clonePtr(h.GeneratedTokens, same[int64])
 		h.KVCacheUsage = clonePtr(h.KVCacheUsage, same[float64])
+		h.KVCacheTokens = clonePtr(h.KVCacheTokens, same[int64])
 		h.Preemptions = clonePtr(h.Preemptions, same[int64])
 		h.PrefixCacheQueriedTokens = clonePtr(h.PrefixCacheQueriedTokens, same[int64])
 		h.PrefixCacheHitTokens = clonePtr(h.PrefixCacheHitTokens, same[int64])

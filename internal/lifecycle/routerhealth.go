@@ -59,38 +59,64 @@ func verifiedGeneration(in *v1alpha1.Instance) *int64 {
 	return &g
 }
 
+// routerHealthy is the workers the router holds healthy and not ejected, from a report that echoes the
+// desired router generation: none once the router has exited. ok is false when the report says nothing
+// current. It is the set healthyCount counts; the KV cache size is taken over a subset of it (kvRouterWorkers).
+func routerHealthy(in *v1alpha1.Instance, av agentView) (names []string, ok bool) {
+	rr := currentRouter(in, av)
+	switch {
+	case rr == nil:
+		return nil, false
+	case rr.Phase == agentapi.PartExited || rr.Phase == agentapi.PartStopped:
+		return nil, true
+	case rr.Phase != agentapi.PartRunning || rr.ClustersReadAt == nil:
+		return nil, false
+	}
+	for _, w := range rr.Workers {
+		if w.Healthy && !w.Ejected {
+			names = append(names, w.Name)
+		}
+	}
+	return names, true
+}
+
 // healthyCount is the router's healthy workers from a report that echoes the desired router generation:
 // the workers it holds healthy and not ejected while it runs, and 0 once it has exited. ok is false when
 // the report says nothing current.
 func healthyCount(in *v1alpha1.Instance, av agentView) (int32, bool) {
-	rr := currentRouter(in, av)
-	switch {
-	case rr == nil:
-		return 0, false
-	case rr.Phase == agentapi.PartExited || rr.Phase == agentapi.PartStopped:
-		return 0, true
-	case rr.Phase != agentapi.PartRunning || rr.ClustersReadAt == nil:
-		return 0, false
-	}
-	var n int32
-	for _, w := range rr.Workers {
-		if w.Healthy && !w.Ejected {
-			n++
-		}
-	}
-	return n, true
+	names, ok := routerHealthy(in, av)
+	return int32(len(names)), ok
 }
 
-// writeHealthyWorkers writes status.healthyWorkers when a current report changes it.
-func (p *pass) writeHealthyWorkers(in *v1alpha1.Instance, av agentView) error {
-	if !routed(in) {
+// writeWorkerCounts writes status.healthyWorkers and status.kvCacheTokens from a report, in ONE status
+// update when either changes, and none when neither does. The front's cap is healthyWorkers times
+// launch.maxNumSeqs and its token budget is kvCacheTokens times healthyWorkers, so two updates would
+// let it read a mixed pair between them: 2 workers at 400000 before 2 workers at 100000 lands, when a
+// 100000 worker rejoins a 400000 one (PR 780's review). healthyWorkers follows #429's rule only
+// (healthyCount, behind a router); the KV cache size follows kvcache.go's.
+func (p *pass) writeWorkerCounts(in *v1alpha1.Instance, av agentView) error {
+	var changes []func(*v1alpha1.InstanceStatus)
+	if routed(in) {
+		if n, ok := healthyCount(in, av); ok && (in.Status.HealthyWorkers == nil || *in.Status.HealthyWorkers != n) {
+			changes = append(changes, func(s *v1alpha1.InstanceStatus) { s.HealthyWorkers = &n })
+		}
+	}
+	if kv := kvTokens(in, av); !equalInt64Ptr(in.Status.KVCacheTokens, kv) {
+		changes = append(changes, func(s *v1alpha1.InstanceStatus) { s.KVCacheTokens = kv })
+	}
+	if len(changes) == 0 {
 		return nil
 	}
-	n, ok := healthyCount(in, av)
-	if !ok || (in.Status.HealthyWorkers != nil && *in.Status.HealthyWorkers == n) {
-		return nil
-	}
-	return p.setStatus(in, func(s *v1alpha1.InstanceStatus) { s.HealthyWorkers = &n })
+	return p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
+		for _, f := range changes {
+			f(s)
+		}
+	})
+}
+
+// equalInt64Ptr reports whether two optional numbers are both absent or equal.
+func equalInt64Ptr(a, b *int64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 // routerCheckSignal is the worker's own signal behind a router: the router holds it failing its active

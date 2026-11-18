@@ -93,6 +93,11 @@ type worker struct {
 	health        *agentapi.Health
 	failures      int32
 	metricsReadAt *time.Time // the last successful metrics read
+	// kvCacheTokens is the engine's KV cache size, the first one a metrics read gave this process: it is
+	// fixed for the process's life, so recordHealth keeps it and reports it in every sample, past a failed
+	// read. nil until a read gives one. A restart replaces the whole worker (convergeWorkers), so a new
+	// process starts without it.
+	kvCacheTokens *int64
 	stopProbe     context.CancelFunc
 	// cleaning: the leader exited without being told to, and the rest of its
 	// process group is being stopped.

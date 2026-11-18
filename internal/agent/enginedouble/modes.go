@@ -45,6 +45,12 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		}
 		c.KVCacheTokens = 1000
 		return nil
+	case "kv-tokens":
+		// The KV capacity the engine reports, kv_cache_size_tokens, as it is: a test that needs a size of its
+		// own, such as the two workers of a router test, names it (kv-low is kv-tokens=1000).
+		n, err := intValue(val, hasVal, 1)
+		c.KVCacheTokens = int64(n)
+		return err
 	case "greedy-repeat":
 		return flag(&c.GreedyRepeat)
 	case "tool-malformed":
@@ -79,6 +85,8 @@ func applyMode(c *Config, name, val string, hasVal bool) error {
 		return flag(&c.Stall)
 	case "no-prefix-cache-metrics":
 		return flag(&c.OmitPrefixCacheMetrics)
+	case "no-cache-config-info":
+		return flag(&c.OmitCacheConfigInfo)
 	case "no-tpot":
 		return flag(&c.OmitTPOT)
 	case "no-tpot-sum":

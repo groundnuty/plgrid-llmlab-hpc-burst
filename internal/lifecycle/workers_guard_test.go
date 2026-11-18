@@ -28,6 +28,7 @@ var workerZeroSites = map[string]string{
 	"health.go:healthSignal":             "one worker's ready-phase signals; several workers' are workerSignal, behind several in ready",
 	"health.go:restart":                  "the ladder from worker-0's rung; several workers name theirs through restartWorker",
 	"spec.go:renderLaunch":               "by design: the launch names worker-0's socket, which the agent replaces for each worker",
+	"kvcache.go:kvCounted":               "one worker's KV cache size is its running worker-0's; several workers' is the router's healthy set (routerHealthy), behind several",
 }
 
 func TestEveryWorkerZeroSiteIsReviewed(t *testing.T) {

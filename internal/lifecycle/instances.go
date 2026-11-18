@@ -470,8 +470,9 @@ func (p *pass) running(in *v1alpha1.Instance, alloc *v1alpha1.Allocation) error 
 		return err
 	}
 	p.correlateExits(in, av)
-	// Behind a router: the router's healthy count, from a current report (routerhealth.go).
-	if err := p.writeHealthyWorkers(in, av); err != nil {
+	// Behind a router: the router's healthy count, from a current report (routerhealth.go); and, in the same
+	// update, the KV cache size the agent reports (kvcache.go).
+	if err := p.writeWorkerCounts(in, av); err != nil {
 		return err
 	}
 	if in.Status.Phase == v1alpha1.InstanceDraining {

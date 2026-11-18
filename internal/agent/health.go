@@ -14,13 +14,24 @@ import (
 // controller can tell stale metrics from fresh ones (agentapi.Health,
 // MetricsFresh; `@hpc-burst-science-agent`, 31 Oct 2026; PR #87 review, Opus
 // nit).
+//
+// The KV cache size is the one value that is not dropped with the gauges: the
+// engine fixes it for its process's life, so the worker keeps the first one a
+// read gave and puts it back in every sample, a failed read's included
+// (agentapi.Health.KVCacheTokens; `@hpc-burst-science-agent`, 18 Nov 2026,
+// #764, Q4). It stays nil until a read gives one, and a new process, which is a
+// new worker, starts without it.
 func (w *worker) recordHealth(now time.Time, perr error, h agentapi.Health, serr error) {
 	if serr == nil {
 		read := now
 		w.metricsReadAt = &read
+		if w.kvCacheTokens == nil {
+			w.kvCacheTokens = clonePtr(h.KVCacheTokens)
+		}
 	} else {
 		h = agentapi.Health{}
 	}
+	h.KVCacheTokens = clonePtr(w.kvCacheTokens)
 	if perr == nil {
 		w.failures = 0
 	} else {
@@ -44,6 +55,7 @@ func cloneHealth(h agentapi.Health) agentapi.Health {
 	h.WaitingRequests = clonePtr(h.WaitingRequests)
 	h.GeneratedTokens = clonePtr(h.GeneratedTokens)
 	h.KVCacheUsage = clonePtr(h.KVCacheUsage)
+	h.KVCacheTokens = clonePtr(h.KVCacheTokens)
 	h.Preemptions = clonePtr(h.Preemptions)
 	h.PrefixCacheQueriedTokens = clonePtr(h.PrefixCacheQueriedTokens)
 	h.PrefixCacheHitTokens = clonePtr(h.PrefixCacheHitTokens)

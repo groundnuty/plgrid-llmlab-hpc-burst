@@ -54,8 +54,11 @@ func f64p(v float64) *float64 { return &v }
 
 // withZeroCounters returns h with the five counters HBEP-8 adds (preemptions,
 // the two prefix-cache counters, and the sum and count of the time per output
-// token) set to the explicit zeros every Health double starts from.
+// token) set to the explicit zeros every Health double starts from, and the
+// KV cache size the common sample reports, 1,048,576 tokens (2^20), typed here
+// and not taken from fake.DefaultKVCacheTokens.
 func withZeroCounters(h agentapi.Health) agentapi.Health {
+	h.KVCacheTokens = i64p(1048576)
 	h.Preemptions = i64p(0)
 	h.PrefixCacheQueriedTokens, h.PrefixCacheHitTokens = i64p(0), i64p(0)
 	h.TimePerOutputTokenSecondsSum, h.TimePerOutputTokenCount = f64p(0), i64p(0)
@@ -324,6 +327,7 @@ func TestHealthEngineCountersRiseWithEverySample(t *testing.T) {
 		n := int64(k + 1)
 		eq(t, fmt.Sprintf("sample %d", k), withoutTime(h), agentapi.Health{
 			ProbeOK: true, RunningRequests: i64p(4), WaitingRequests: i64p(0), GeneratedTokens: i64p(1000 * n), KVCacheUsage: f64p(0.5),
+			KVCacheTokens:            i64p(1048576),
 			Preemptions:              i64p(n),
 			PrefixCacheQueriedTokens: i64p(1000 * n), PrefixCacheHitTokens: i64p(800 * n),
 			TimePerOutputTokenSecondsSum: f64p(0.5 * float64(n)), TimePerOutputTokenCount: i64p(10 * n),
@@ -349,7 +353,7 @@ func TestHealthWithoutPrefixCacheOmitsOnlyThePrefixCacheCounters(t *testing.T) {
 // HealthGauges gives each worker the gauges its function names for it, fresh at each sample, with a
 // counter kept per process that rises, or stays flat for a worker that isn't draining.
 func TestHealthGaugesGivesEachWorkerItsOwn(t *testing.T) {
-	g1 := fake.Gauges{Running: 8, Waiting: 3, KVCache: 0.97, Flat: true}
+	g1 := fake.Gauges{Running: 8, Waiting: 3, KVCache: 0.97, Flat: true, KVCacheTokens: 380000}
 	f := fake.HealthGauges(func(w string) fake.Gauges {
 		if w == "worker-1" {
 			return g1
@@ -365,11 +369,30 @@ func TestHealthGaugesGivesEachWorkerItsOwn(t *testing.T) {
 	if h1.MetricsReadAt == nil || !h1.MetricsReadAt.Equal(now) {
 		t.Errorf("worker-1's metrics read at %v, want the sample's time", h1.MetricsReadAt)
 	}
+	// Each worker its own KV cache size: worker-1's is its own, and a Gauges that sets none (worker-0's)
+	// reads as the common sample's 2^20, never as 0 tokens.
+	if h1.KVCacheTokens == nil || *h1.KVCacheTokens != 380000 || h0.KVCacheTokens == nil || *h0.KVCacheTokens != 1048576 {
+		t.Errorf("KV cache sizes: worker-1 %v, worker-0 %v; want 380000 and 1048576", h1.KVCacheTokens, h0.KVCacheTokens)
+	}
+	if h := f(now, fake.Process{Worker: "worker-2", PID: 12}); h.KVCacheTokens == nil {
+		// worker-2 gets the else-branch Gauges{KVCache: 0.1}: the default again.
+		t.Errorf("a worker with no size set reports none")
+	}
 	if h := f(now.Add(time.Second), fake.Process{Worker: "worker-1", PID: 11}); *h.GeneratedTokens != *h1.GeneratedTokens {
 		t.Errorf("a flat worker's counter went from %d to %d", *h1.GeneratedTokens, *h.GeneratedTokens)
 	}
 	g1.Flat, g1.Waiting = false, 0
 	if h := f(now.Add(2*time.Second), fake.Process{Worker: "worker-1", PID: 11}); *h.WaitingRequests != 0 || *h.GeneratedTokens <= *h1.GeneratedTokens {
 		t.Errorf("worker-1 draining: waiting %d, tokens %d after %d; want 0, and the counter risen", *h.WaitingRequests, *h.GeneratedTokens, *h1.GeneratedTokens)
+	}
+}
+
+// KVCacheUnknown leaves the KV cache size nil, an engine that exports no such label, and the rest of the
+// sample is the common one.
+func TestHealthGaugesCanLeaveTheKVCacheSizeUnknown(t *testing.T) {
+	f := fake.HealthGauges(func(string) fake.Gauges { return fake.Gauges{KVCache: 0.2, KVCacheUnknown: true} })
+	h := f(t0, fake.Process{Worker: "worker-0", PID: 10})
+	if h.KVCacheTokens != nil || h.KVCacheUsage == nil || h.RunningRequests == nil {
+		t.Errorf("KVCacheUnknown: size %v, usage %v, running %v; want the size nil and the rest known", h.KVCacheTokens, h.KVCacheUsage, h.RunningRequests)
 	}
 }
