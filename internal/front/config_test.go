@@ -3,6 +3,7 @@ package front
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,6 +39,30 @@ func TestConfigDefaultsAreHBEP5s(t *testing.T) {
 	}
 	if c.ClientListen != "127.0.0.1:8000" || c.PauseAfterFailures != 3 || len(c.SessionHeaders) != 1 || c.SessionHeaders[0] != "x-session-id" {
 		t.Errorf("clientListen %q, pauseAfterFailures %d, sessionHeaders %v", c.ClientListen, c.PauseAfterFailures, c.SessionHeaders)
+	}
+	// HBEP-5, Parameters: workloadHeader (beta, proposed), default x-hpcburst-workload.
+	if c.WorkloadHeader != "x-hpcburst-workload" {
+		t.Errorf("workloadHeader = %q, want x-hpcburst-workload", c.WorkloadHeader)
+	}
+}
+
+// workloadHeader is a setting: a name set in the file is kept, and a value no
+// header can have is refused at load, named, rather than never matching.
+func TestConfigWorkloadHeader(t *testing.T) {
+	dir := t.TempDir()
+	load := func(name, header string) (Config, error) {
+		path := filepath.Join(dir, name)
+		writeMode600(t, path, `{"dialHomeListen":"127.0.0.1:9000","clientKeysFile":"/k","usageDir":"/u","workloadHeader":`+header+`}`)
+		return LoadConfig(path)
+	}
+	c, err := load("ok.json", `"X-Study-Workload"`)
+	if err != nil || c.WorkloadHeader != "X-Study-Workload" {
+		t.Errorf("a set workloadHeader: %q, %v; want it kept", c.WorkloadHeader, err)
+	}
+	for i, bad := range []string{`"two words"`, `"a:b"`, `"bad/name"`, `" "`} {
+		if _, err := load(fmt.Sprintf("bad%d.json", i), bad); err == nil || !strings.Contains(err.Error(), "workloadHeader") {
+			t.Errorf("workloadHeader %s: error %v, want one that names workloadHeader", bad, err)
+		}
 	}
 }
 

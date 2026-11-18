@@ -163,12 +163,32 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 	x.rec.Stream = rb.stream
 	n, err := naming.Parse(rb.model)
 	if err != nil {
-		p.fail(w, x, http.StatusBadRequest, codeInvalidModelName, "grammar", "model", "the model name breaks the naming grammar: model, model@provider or model@provider/<12 hex>")
+		p.fail(w, x, http.StatusBadRequest, codeInvalidModelName, "grammar", "model", "the model name breaks the naming grammar: model, model@provider or model@provider/<12 hex>, each with at most one #workload after it, a DNS label")
 		return
 	}
+	n.HeaderWorkload = workloadHeaderValue(r.Header, p.cfg.WorkloadHeader)
 	x.rec.Level = string(n.Level)
 	key, _ := convkey.Key(r.Header, p.cfg.SessionHeaders, rb.messages)
 	p.forward(w, r, x, n, key, body, rb)
+}
+
+// workloadHeaderValue is the Workload the request's header names, or "" when
+// the header is absent, empty or blank: an empty header names nothing, as an
+// empty session header does (HBEP-5, Conversation key). A header sent more than
+// once reads as its combined list (RFC 9110, section 5.3), which is one name
+// when every line says the same and otherwise names no Workload, so the
+// front's lookup refuses it with unknown_workload.
+func workloadHeaderValue(h http.Header, name string) string {
+	if name == "" {
+		return ""
+	}
+	var vals []string
+	for _, v := range h.Values(name) {
+		if v = strings.TrimSpace(v); v != "" && !slices.Contains(vals, v) {
+			vals = append(vals, v)
+		}
+	}
+	return strings.Join(vals, ",")
 }
 
 // authenticate checks the bearer key against the client keys file.
@@ -437,6 +457,11 @@ func (p *Proxy) sendWith(x *exchange, r *http.Request, t *target, body []byte, r
 	stripHop(h)
 	h.Del("Authorization")
 	h.Del("Content-Length")
+	// The Workload the client named is the front's routing input, never the engine's or LLMLab's: the header is dropped toward both kinds of
+	// target, as the "#<workload>" suffix is by the model rewrite below (HBEP-5, Workloads, Naming it).
+	if p.cfg.WorkloadHeader != "" {
+		h.Del(p.cfg.WorkloadHeader)
+	}
 	// The front redacts what it relays, so it takes bodies uncompressed
 	// (@hpc-burst-science-agent, 31 Oct 2026).
 	h.Set("Accept-Encoding", "identity")
