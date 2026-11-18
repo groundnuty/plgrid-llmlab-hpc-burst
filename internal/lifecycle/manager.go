@@ -729,6 +729,8 @@ func (r *readiness) startInformer(ctx context.Context, k client.Object) (cache.I
 	for {
 		got := make(chan answer, 1)
 		go func() {
+			// The informers of the kinds the manager watches (the builder's For and Watches start the same ones).
+			//rbac:resources hpcburst.groundnuty.github.io/modeldeployments hpcburst.groundnuty.github.io/allocations hpcburst.groundnuty.github.io/instances hpcburst.groundnuty.github.io/providers hpcburst.groundnuty.github.io/platformprofiles hpcburst.groundnuty.github.io/operations hpcburst.groundnuty.github.io/approvals hpcburst.groundnuty.github.io/approvalpolicies apps/controllerrevisions
 			inf, err := r.cache.GetInformer(ctx, k, cache.BlockUntilSynced(false))
 			got <- answer{inf, err}
 		}()
