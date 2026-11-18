@@ -29,9 +29,41 @@ func mustConfig(t *testing.T, url, workload string) Config {
 	return c
 }
 
-// Session j starts j*100ms after the run, so the k-th earliest arrival at the engine is at least k*100ms after the time taken before Run:
-// a lower bound that a slow machine only makes safer. A generator that ignored the stagger would send all four at once.
-func TestStartStaggerSpacesTheSessionStarts(t *testing.T) {
+// Session j of a workload starts at j * startStagger from the run's start. The schedule is checked through the seam every session's wait for
+// its start goes through: the test records the offset each session is scheduled at and lets it start at once, so there is no clock and no
+// window. A workload with no stagger starts all its sessions at 0. (A run that waited the largest offset and then started every session
+// together would pass a check of arrival times alone; it fails here.)
+func TestStartStaggerSchedulesSessionJAtJTimesTheStagger(t *testing.T) {
+	srv := httptest.NewServer(enginedouble.Handler(enginedouble.DefaultConfig()))
+	defer srv.Close()
+	cfg := mustConfig(t, srv.URL, `
+	  {"name": "s", "sessions": 4, "turns": 1, "contextTokens": 5, "outputTokens": 3, "startStagger": "100ms"},
+	  {"name": "t", "sessions": 2, "turns": 1, "contextTokens": 5, "outputTokens": 3, "startStagger": "1s"},
+	  {"name": "u", "sessions": 2, "turns": 1, "contextTokens": 5, "outputTokens": 3}`)
+	var mu sync.Mutex
+	offsets := map[string]time.Duration{}
+	recs, err := runWith(context.Background(), cfg, "", nil, hooks{startWait: func(_ context.Context, session string, offset time.Duration) bool {
+		mu.Lock()
+		offsets[session] = offset
+		mu.Unlock()
+		return true
+	}})
+	if err != nil || len(recs) != 8 {
+		t.Fatalf("%d records, %v, want 8", len(recs), err)
+	}
+	want := map[string]time.Duration{ // session IDs are <runId>-<workload>-<NNN>
+		"r-s-000": 0, "r-s-001": 100 * time.Millisecond, "r-s-002": 200 * time.Millisecond, "r-s-003": 300 * time.Millisecond,
+		"r-t-000": 0, "r-t-001": time.Second,
+		"r-u-000": 0, "r-u-001": 0,
+	}
+	if fmt.Sprint(offsets) != fmt.Sprint(want) {
+		t.Errorf("scheduled start offsets %v, want %v", offsets, want)
+	}
+}
+
+// The same schedule on the real wait, as a lower bound: the k-th earliest arrival at the engine is at least k*100ms after the time taken
+// before Run. A slow machine only makes that safer. (It cannot tell a ramp from a delayed burst; the test above does.)
+func TestStartStaggerHoldsBackTheLaterSessionsInRealTime(t *testing.T) {
 	var mu sync.Mutex
 	arrivals := map[string]time.Time{}
 	inner := enginedouble.Handler(enginedouble.DefaultConfig())

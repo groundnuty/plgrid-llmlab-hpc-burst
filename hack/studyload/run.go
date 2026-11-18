@@ -15,6 +15,21 @@ import (
 // from); the others go on. sink, when set, is called with each record as it arrives, from one goroutine; if it fails the run is cancelled
 // and its error returned with the records so far. apiKey may be empty.
 func Run(ctx context.Context, cfg Config, apiKey string, sink func(Record) error) ([]Record, error) {
+	return runWith(ctx, cfg, apiKey, sink, hooks{})
+}
+
+// hooks are the seams a test replaces; a nil field is the real thing.
+type hooks struct {
+	// startWait is how a session waits for its scheduled start: offset is j * StartStagger for the session's index j in its workload.
+	// A test records the offsets, and returns at once, so the schedule is checked without a clock.
+	startWait func(ctx context.Context, session string, offset time.Duration) bool
+}
+
+func runWith(ctx context.Context, cfg Config, apiKey string, sink func(Record) error, h hooks) ([]Record, error) {
+	startWait := h.startWait
+	if startWait == nil {
+		startWait = func(ctx context.Context, _ string, offset time.Duration) bool { return sleep(ctx, offset) }
+	}
 	runID := cfg.RunID
 	if runID == "" {
 		var b [3]byte
@@ -36,7 +51,7 @@ func Run(ctx context.Context, cfg Config, apiKey string, sink func(Record) error
 			go func() {
 				defer wg.Done()
 				id := fmt.Sprintf("%s-%s-%03d", runID, w.Name, j)
-				if !sleep(ctx, time.Duration(j)*time.Duration(w.StartStagger)) {
+				if !startWait(ctx, id, time.Duration(j)*time.Duration(w.StartStagger)) {
 					return
 				}
 				runSession(ctx, cl, w, id, out)

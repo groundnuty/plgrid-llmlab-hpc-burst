@@ -203,24 +203,44 @@ func TestTwoWorkloadsOnTwoRoutes(t *testing.T) {
 	if len(recs) != 19 { // 3*3 + 5*2
 		t.Fatalf("records file: %d lines, want 19 (3 sessions x 3 turns + 5 x 2)", len(recs))
 	}
+	// Each engine request has an identity of its own: the Hpcburst-Request-Id its wrapper sent (a counter, so no two are equal), and a
+	// place, its session and its turn (its arrival order in the session). A record must name exactly ONE engine request by that ID, say the
+	// session and turn that request really was, and every engine request must be named by exactly one record: a generator that wrote
+	// turn 1's record twice and none for turn 2 keeps every total, and fails here.
+	byID, turnOf := map[string]*seenReq{}, map[*seenReq]int{}
+	for _, reqs := range g.bySess {
+		for k, s := range reqs {
+			byID[s.requestID], turnOf[s] = s, k+1
+		}
+	}
+	if len(byID) != 19 {
+		t.Fatalf("engine side: %d distinct request IDs, want 19 (one per request)", len(byID))
+	}
+	matched := map[*seenReq]int{}
 	perWorkload := map[string]int{}
 	for _, r := range recs {
 		perWorkload[r.Workload]++
-		w := wants[r.Workload]
 		where := fmt.Sprintf("record %s session %s turn %d", r.Workload, r.Session, r.Turn)
-		if r.Turn < 1 || r.Turn > w.turns || len(g.bySess[r.Session]) != w.turns {
-			t.Errorf("%s: no such turn on the engine side", where)
+		s := byID[r.RequestID]
+		if s == nil {
+			t.Errorf("%s: request id %q is no engine request's", where, r.RequestID)
 			continue
 		}
-		s := g.bySess[r.Session][r.Turn-1]
+		matched[s]++
+		if s.session != r.Session || turnOf[s] != r.Turn || s.workload != r.Workload {
+			t.Errorf("%s: that request id is the engine side's %s session %s turn %d", where, s.workload, s.session, turnOf[s])
+			continue
+		}
+		w := wants[s.workload]
+		if r.Turn < 1 || r.Turn > w.turns {
+			t.Errorf("%s: a %s session has %d turns", where, s.workload, w.turns)
+			continue
+		}
 		if r.Status != 200 || r.Error != "" {
 			t.Errorf("%s: status %d error %q", where, r.Status, r.Error)
 		}
 		if r.Provider != w.provider || r.DeploymentID != w.dep || r.Instance != w.instance || r.Emitter != "front" {
 			t.Errorf("%s: route %q/%q/%q emitter %q, want %q/%q/%q front", where, r.Provider, r.DeploymentID, r.Instance, r.Emitter, w.provider, w.dep, w.instance)
-		}
-		if r.RequestID != s.requestID || r.RequestID == "" {
-			t.Errorf("%s: request id %q, the engine side sent %q", where, r.RequestID, s.requestID)
 		}
 		if r.PromptTokens == nil || *r.PromptTokens != w.prompt[r.Turn-1] || *r.PromptTokens != s.prompt ||
 			r.CompletionTokens == nil || *r.CompletionTokens != w.output || *r.CompletionTokens != s.completion {
@@ -228,6 +248,11 @@ func TestTwoWorkloadsOnTwoRoutes(t *testing.T) {
 		}
 		if r.TTFTMs == nil || *r.TTFTMs <= 0 || r.DecodeTokensPerSec == nil || *r.DecodeTokensPerSec <= 0 || r.End.Before(r.Start) {
 			t.Errorf("%s: ttft %v speed %v start %v end %v", where, r.TTFTMs, r.DecodeTokensPerSec, r.Start, r.End)
+		}
+	}
+	for id, s := range byID {
+		if matched[s] != 1 {
+			t.Errorf("engine request %s (%s session %s turn %d) is named by %d records, want exactly 1", id, s.workload, s.session, turnOf[s], matched[s])
 		}
 	}
 	if perWorkload["long"] != 9 || perWorkload["short"] != 10 {

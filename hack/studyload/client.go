@@ -45,7 +45,9 @@ func newChatClient(cfg Config, key string) *chatClient {
 	tr.MaxIdleConns, tr.MaxIdleConnsPerHost = 0, 1024
 	tr.DisableCompression = true // a compressed stream would be delivered in blocks, which would blur the time to the first token
 	return &chatClient{
-		http:          &http.Client{Transport: tr},
+		// A redirect is never followed: Go keeps Authorization on a redirect to another port of the same host, which would send the key
+		// to, and replay the study request against, another service. The 3xx is the request's status and its class "status 3xx".
+		http:          &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		url:           strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions",
 		model:         cfg.Model,
 		key:           key,
@@ -88,9 +90,32 @@ func (e event) text() (content string, any bool) {
 	return content, any
 }
 
+// redacted replaces the API key wherever a record would show it.
+const redacted = "(redacted)"
+
+// redact returns rec with every occurrence of the API key in any of its text fields replaced by redacted. An endpoint can echo the key it
+// was sent (in an attribution header, say, on any status), and a record is printed and written to a file. With no key it changes nothing
+// (replacing the empty string would insert the marker between every character).
+func (c *chatClient) redact(rec Record) Record {
+	if c.key == "" {
+		return rec
+	}
+	for _, p := range []*string{&rec.Workload, &rec.Session, &rec.RequestID, &rec.Emitter, &rec.Provider, &rec.DeploymentID, &rec.Instance, &rec.Error} {
+		*p = strings.ReplaceAll(*p, c.key, redacted)
+	}
+	return rec
+}
+
 // chat sends one request of a session's conversation and returns the assistant's reply text (the content deltas joined) and the record.
-// A failed request has a non-empty Error in the record, and the reply is not to be used.
+// A failed request has a non-empty Error in the record, and the reply is not to be used. Every record leaves through here, so the key is
+// redacted in this one place.
 func (c *chatClient) chat(ctx context.Context, w Workload, session string, turn int, msgs []chatMessage) (string, Record) {
+	reply, rec := c.exchange(ctx, w, session, turn, msgs)
+	return reply, c.redact(rec)
+}
+
+// exchange is the request and its answer, before the record is redacted.
+func (c *chatClient) exchange(ctx context.Context, w Workload, session string, turn int, msgs []chatMessage) (string, Record) {
 	rec := Record{Workload: w.Name, Session: session, Turn: turn}
 	body := chatBody{Model: c.model, Messages: msgs, Stream: true, MaxTokens: w.OutputTokens}
 	body.StreamOptions.IncludeUsage = true

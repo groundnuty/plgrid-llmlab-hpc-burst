@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -194,5 +195,55 @@ func TestNoUsageMeansNoCountsAndNoSpeed(t *testing.T) {
 	_, rec := testClient(t, srv, "").chat(context.Background(), oneWorkload, "s", 1, nil)
 	if rec.Error != "" || rec.PromptTokens != nil || rec.CompletionTokens != nil || rec.DecodeTokensPerSec != nil || rec.TTFTMs == nil {
 		t.Errorf("record %+v: want a ttft and no counts or speed", rec)
+	}
+}
+
+func TestRedactReplacesEveryOccurrenceInEveryTextField(t *testing.T) {
+	c := &chatClient{key: "K-SECRET"}
+	got := c.redact(Record{
+		Workload: "w-K-SECRET", Session: "s",
+		Attribution: Attribution{RequestID: "K-SECRET", Emitter: "a-K-SECRET-b-K-SECRET", Provider: "p", DeploymentID: "K-SECRETK-SECRET", Instance: "i"},
+		Error:       "status 500 K-SECRET",
+	})
+	want := Record{
+		Workload: "w-(redacted)", Session: "s",
+		Attribution: Attribution{RequestID: "(redacted)", Emitter: "a-(redacted)-b-(redacted)", Provider: "p", DeploymentID: "(redacted)(redacted)", Instance: "i"},
+		Error:       "status 500 (redacted)",
+	}
+	if got != want {
+		t.Errorf("redacted record %+v, want %+v", got, want)
+	}
+	// With no key the record is untouched (replacing the empty string would put the marker between every character).
+	plain := Record{Session: "abc", Attribution: Attribution{Provider: "p"}}
+	if (&chatClient{}).redact(plain) != plain {
+		t.Error("a client with no key changed a record")
+	}
+}
+
+// A redirect is the request's answer, not something to follow: Go would keep Authorization on a redirect to another port of the same
+// host, and replay the request there. The second server must see nothing, and the 3xx is the record's status, which stops the session.
+func TestARedirectIsRecordedNotFollowed(t *testing.T) {
+	var hits atomic.Int32
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		fmt.Fprint(w, sse(content("a"), "[DONE]"))
+	}))
+	defer second.Close()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, second.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer first.Close()
+	cfg := mustConfig(t, first.URL, `{"name": "w", "sessions": 1, "turns": 2, "contextTokens": 3, "turnTokens": 2, "outputTokens": 4}`)
+	recs, err := Run(context.Background(), cfg, "SENTINEL-redirect-key", nil)
+	first.Close()
+	second.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("the redirect target received %d requests, want none", n)
+	}
+	if len(recs) != 1 || recs[0].Status != 307 || recs[0].Error != "status 307" {
+		t.Errorf("records %+v, want one, with status 307 and error \"status 307\" (the session stops at its failed first turn)", recs)
 	}
 }

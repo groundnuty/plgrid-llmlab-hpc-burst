@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/agent/enginedouble"
@@ -17,9 +18,14 @@ import (
 // cli runs the command with a config for one tiny workload against url, and returns its exit code, streams and records file.
 func cli(t *testing.T, url, keyFile string) (code int, stdout, stderr, records string) {
 	t.Helper()
+	return cliConfig(t, fmt.Sprintf(`{"baseURL": %q, "model": "model", "apiKeyFile": %q, "workloads": [
+	  {"name": "w", "sessions": 2, "turns": 2, "contextTokens": 5, "turnTokens": 3, "outputTokens": 4}]}`, url+"/v1", keyFile))
+}
+
+// cliConfig runs the command on a config given as text.
+func cliConfig(t *testing.T, cfg string) (code int, stdout, stderr, records string) {
+	t.Helper()
 	dir := t.TempDir()
-	cfg := fmt.Sprintf(`{"baseURL": %q, "model": "model", "apiKeyFile": %q, "workloads": [
-	  {"name": "w", "sessions": 2, "turns": 2, "contextTokens": 5, "turnTokens": 3, "outputTokens": 4}]}`, url+"/v1", keyFile)
 	cfgPath, outPath := filepath.Join(dir, "c.json"), filepath.Join(dir, "out.jsonl")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -119,5 +125,47 @@ func TestKeyFileMustHoldOneLine(t *testing.T) {
 	}
 	if k, err := readKey(writeKey(t, "  abc123 \n")); err != nil || k != "abc123" {
 		t.Errorf("key %q, %v: want abc123", k, err)
+	}
+}
+
+// An endpoint that echoes the key it was sent in every attribution header, on a 200 and on an error status, must not get it into the
+// records file, the summary or stderr. The marker is looked for too, so the test cannot pass by the key never having been sent.
+func TestAKeyTheEndpointEchoesReachesNoOutput(t *testing.T) {
+	const key = "SENTINEL-echo-key-0123456789"
+	var sent atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if got == key {
+			sent.Add(1)
+		}
+		for _, h := range []string{"Hpcburst-Request-Id", "Hpcburst-Emitter", "Hpcburst-Provider", "Hpcburst-Deployment-Id", "Hpcburst-Instance"} {
+			w.Header().Set(h, "x-"+got+"-y")
+		}
+		if r.Header.Get("X-Mode") == "fail" {
+			http.Error(w, "an error status", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, sse(content("a"), content(" b"), `{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}`, "[DONE]"))
+	}))
+	defer srv.Close()
+	code, stdout, stderr, records := cliConfig(t, fmt.Sprintf(`{"baseURL": %q, "model": "model", "apiKeyFile": %q, "workloads": [
+	  {"name": "ok",   "sessions": 1, "turns": 1, "contextTokens": 3, "outputTokens": 2, "headers": {"x-mode": "ok"}},
+	  {"name": "fail", "sessions": 1, "turns": 1, "contextTokens": 3, "outputTokens": 2, "headers": {"x-mode": "fail"}}]}`,
+		srv.URL+"/v1", writeKey(t, key+"\n")))
+	srv.Close()
+	if code != 1 || sent.Load() != 2 {
+		t.Fatalf("exit %d (want 1: the fail workload errors), the endpoint received the key on %d requests (want 2)", code, sent.Load())
+	}
+	for name, text := range map[string]string{"stdout": stdout, "stderr": stderr, "records file": records} {
+		if strings.Contains(text, "SENTINEL") {
+			t.Errorf("the key reached the %s:\n%s", name, text)
+		}
+	}
+	// Both requests, the 200 and the 500, have all five values recorded, redacted.
+	if n := strings.Count(records, `"provider":"x-(redacted)-y"`); n != 2 {
+		t.Errorf("%d records have the redacted provider, want 2:\n%s", n, records)
+	}
+	if !strings.Contains(stdout, "route provider=x-(redacted)-y deployment=x-(redacted)-y instance=x-(redacted)-y: sessions 2 (1 with errors), requests 2, errors 1,") {
+		t.Errorf("summary lacks the redacted route line:\n%s", stdout)
 	}
 }
