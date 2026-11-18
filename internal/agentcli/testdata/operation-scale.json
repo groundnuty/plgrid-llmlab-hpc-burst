@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "operation": {
+    "name": "scale-m",
+    "namespace": "team",
+    "action": "Scale",
+    "modelDeployment": "m",
+    "scale": {
+      "instances": 0
+    },
+    "owner": "system:serviceaccount:hpcburst-agents:agent-b",
+    "purpose": "free the slot for the nightly run",
+    "confirmedPlan": "0123456789abcdef",
+    "phase": "AwaitingApproval",
+    "conditions": [
+      {
+        "type": "Executable",
+        "status": "False",
+        "reason": "AwaitingApproval",
+        "message": "Allocation alloc-p: needs an approval under provider.sano, global",
+        "lastTransitionTime": "2026-11-20T10:05:00Z"
+      }
+    ],
+    "plan": {
+      "id": "0123456789abcdef",
+      "observedAt": "2026-11-20T10:00:00Z",
+      "modelDeployment": {
+        "name": "m",
+        "uid": "uid-m",
+        "generation": 4
+      },
+      "targets": [
+        {
+          "kind": "Allocation",
+          "name": "alloc-p",
+          "uid": "uid-alloc-p",
+          "provider": "sano",
+          "effect": "CancelPending",
+          "needsApproval": true,
+          "approvalRule": "cancel a pending Allocation",
+          "policies": [
+            {
+              "name": "provider.sano",
+              "approvers": [
+                {"serviceAccount": {"namespace": "hpcburst-agents", "name": "agent-a"}}
+              ]
+            },
+            {
+              "name": "global",
+              "approvers": [
+                {"user": "admin"},
+                {"group": "operators"}
+              ]
+            }
+          ],
+          "cost": {
+            "queueAge": {"duration": "48h0m0s", "observedAt": "2026-11-20T10:00:00Z"},
+            "startEstimate": {"unknown": "the platform gives no start estimate for the job", "observedAt": "2026-11-20T10:00:00Z", "advisory": true},
+            "queueWaits": {"median": "3h0m0s", "p90": "70h0m0s", "max": "72h0m0s", "count": 5, "observedAt": "2026-11-20T09:59:30Z"},
+            "startToReady": {"unknown": "not measured yet; the controller plans with 30 min", "observedAt": "2026-11-20T10:00:00Z"}
+          },
+          "estimate": {"state": "unknown", "unknown": "no estimate within 60 s", "advisory": true}
+        },
+        {
+          "kind": "Instance",
+          "name": "inst-r",
+          "uid": "uid-inst-r",
+          "provider": "sano",
+          "effect": "DrainLastReady",
+          "needsApproval": true,
+          "approvalRule": "drain the last ready Instance",
+          "policies": [
+            {
+              "name": "provider.sano",
+              "approvers": [
+                {"serviceAccount": {"namespace": "hpcburst-agents", "name": "agent-a"}}
+              ]
+            },
+            {
+              "name": "global",
+              "approvers": [
+                {"user": "admin"},
+                {"group": "operators"}
+              ]
+            }
+          ],
+          "cost": {
+            "leaseLeft": {"duration": "9h30m0s", "observedAt": "2026-11-20T10:00:00Z"},
+            "gpuHoursLeft": {"gpuHours": "38.0", "observedAt": "2026-11-20T10:00:00Z"},
+            "lastReady": true,
+            "queueWaits": {"median": "3h0m0s", "p90": "70h0m0s", "max": "72h0m0s", "count": 5, "observedAt": "2026-11-20T09:59:30Z"}
+          },
+          "estimate": {"state": "unknown", "unknown": "no estimate within 60 s", "advisory": true}
+        },
+        {
+          "kind": "Allocation",
+          "name": "alloc-r",
+          "uid": "uid-alloc-r",
+          "provider": "sano",
+          "effect": "Keep",
+          "needsApproval": false
+        }
+      ]
+    }
+  }
+}
