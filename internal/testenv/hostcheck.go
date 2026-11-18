@@ -25,6 +25,13 @@ const (
 	PortRangeFirst = 29200
 	PortRangeLast  = 29219
 
+	// SecondPortRangeFirst and SecondPortRangeLast bound a second range for Start's block, since 29200-29219
+	// holds five packages' blocks and no more (IMPL-COMMON, 17 Nov 2026): 28560-28579. 28560-28569 is #660 B's
+	// audit end-to-end package (internal/audit/e2e), 28570-28579 is #697's. Below 29220, so nothing here reaches
+	// the launcher's block; ExternalConfig still accepts 29200-29239 only.
+	SecondPortRangeFirst = 28560
+	SecondPortRangeLast  = 28579
+
 	// ExternalPortLast is the last port an external control plane (the
 	// launcher's user-level k3s) may listen on: its block ends at 29239.
 	ExternalPortLast = 29239
@@ -41,7 +48,8 @@ var systemPorts = []int{6443, 6444, 10250}
 
 // portBase parses the first port of Start's block from the value of
 // HPCBURST_TESTENV_PORT_BASE (empty means DefaultPortBase). The whole block,
-// base to base+3, must lie inside 29200-29219, so the base is 29200 to 29216.
+// base to base+3, must lie inside 29200-29219 (the base is 29200 to 29216) or
+// inside 28560-28579 (28560 to 28576).
 func portBase(value string) (int, error) {
 	if value == "" {
 		return DefaultPortBase, nil
@@ -50,9 +58,13 @@ func portBase(value string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%s=%q is not a port number: %w", envPortBase, value, err)
 	}
-	if last := PortRangeLast - portBlockSize + 1; base < PortRangeFirst || base > last {
-		return 0, fmt.Errorf("%s=%d: the block of %d ports from %d must lie inside %d-%d, so the base is %d to %d",
-			envPortBase, base, portBlockSize, base, PortRangeFirst, PortRangeLast, PortRangeFirst, last)
+	last, secondLast := PortRangeLast-portBlockSize+1, SecondPortRangeLast-portBlockSize+1
+	inFirst := base >= PortRangeFirst && base <= last
+	inSecond := base >= SecondPortRangeFirst && base <= secondLast
+	if !inFirst && !inSecond {
+		return 0, fmt.Errorf("%s=%d: the block of %d ports from %d must lie inside %d-%d, so the base is %d to %d, or inside %d-%d, so the base is %d to %d",
+			envPortBase, base, portBlockSize, base, PortRangeFirst, PortRangeLast, PortRangeFirst, last,
+			SecondPortRangeFirst, SecondPortRangeLast, SecondPortRangeFirst, secondLast)
 	}
 	return base, nil
 }

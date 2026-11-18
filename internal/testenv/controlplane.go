@@ -20,6 +20,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/audit"
 )
 
 // DefaultPortBase is the first port of the block the control plane listens on.
@@ -54,6 +56,49 @@ type Options struct {
 	// collection must fail on it, which shows that the test checks the
 	// collector and not just the API server.
 	WithoutControllerManager bool
+
+	// Audit, when set, makes the API server write an audit log, with the flags the launcher gives k3s
+	// (config/audit.Flags). It is off by default: a test that does not ask has the API server's own default, no
+	// audit log, so shared infrastructure costs nothing to the other packages.
+	Audit *AuditOptions
+}
+
+// AuditOptions is the opt-in audit log of a test's API server (HBEP-10, Audit; issue #660).
+type AuditOptions struct {
+	// PolicyFile is the audit policy's path: the test writes config/audit.Policy there, so the policy it reads the
+	// log under is the one hpcburst up installs.
+	PolicyFile string
+	// LogPath is the log's file. Its directory is made, mode 700, when it is missing, and the API server creates
+	// the file itself, so the file and the rotated files that follow it keep the API server's own mode.
+	LogPath string
+	// MaxSizeMB is the size at which the log is rotated; 0 means config/audit.DefaultMaxSizeMB. A test sets it
+	// small (1) to make the rotation happen.
+	MaxSizeMB int
+}
+
+// args are the kube-apiserver arguments of the audit log, after the checks that make a bad option fail here,
+// and not as an API server that starts without a log.
+func (a *AuditOptions) args() ([]string, error) {
+	if a.PolicyFile == "" || a.LogPath == "" {
+		return nil, errors.New("testenv: the audit option needs a policy file and a log path")
+	}
+	if !filepath.IsAbs(a.PolicyFile) || !filepath.IsAbs(a.LogPath) {
+		return nil, fmt.Errorf("testenv: the audit option's paths must be absolute (policy %q, log %q)", a.PolicyFile, a.LogPath)
+	}
+	if fi, err := os.Stat(a.PolicyFile); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("testenv: the audit policy file %s must exist before Start: %v", a.PolicyFile, err)
+	}
+	if a.MaxSizeMB < 0 {
+		return nil, fmt.Errorf("testenv: the audit log's size at rotation, %d MB, is negative", a.MaxSizeMB)
+	}
+	if err := os.MkdirAll(filepath.Dir(a.LogPath), 0o700); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, f := range audit.Flags(a.PolicyFile, a.LogPath, a.MaxSizeMB) {
+		out = append(out, "--"+f)
+	}
+	return out, nil
 }
 
 // Start launches the control plane in dir, waits until the API server is ready
@@ -92,6 +137,14 @@ func (cp *ControlPlane) start(ctx context.Context, bins Binaries, opts Options, 
 			return err
 		}
 	}
+	// A bad audit option fails before anything starts, not as an API server that runs without its log.
+	var auditArgs []string
+	if opts.Audit != nil {
+		var err error
+		if auditArgs, err = opts.Audit.args(); err != nil {
+			return err
+		}
+	}
 	token, saKey, err := writeSecrets(cp.Dir)
 	if err != nil {
 		return err
@@ -113,14 +166,17 @@ func (cp *ControlPlane) start(ctx context.Context, bins Binaries, opts Options, 
 		return err
 	}
 
-	apiserver, err := startProc("kube-apiserver", filepath.Join(logs, "kube-apiserver.log"), bins.KubeAPIServer,
+	apiserverArgs := []string{
 		"--etcd-servers", clientURL, "--secure-port", strconv.Itoa(api), "--bind-address", "127.0.0.1",
 		"--advertise-address", "127.0.0.1", "--cert-dir", filepath.Join(cp.Dir, "certs"),
 		"--service-account-issuer", apiURL,
 		"--service-account-key-file", saKey, "--service-account-signing-key-file", saKey,
 		"--service-cluster-ip-range", "10.0.0.0/24", "--authorization-mode", "RBAC",
 		"--token-auth-file", filepath.Join(cp.Dir, "tokens.csv"), "--disable-admission-plugins", "ServiceAccount",
-		"--allow-privileged=true", "--storage-media-type", "application/json")
+		"--allow-privileged=true", "--storage-media-type", "application/json",
+	}
+	apiserver, err := startProc("kube-apiserver", filepath.Join(logs, "kube-apiserver.log"),
+		append(append([]string{bins.KubeAPIServer}, apiserverArgs...), auditArgs...)...)
 	if err != nil {
 		return err
 	}
