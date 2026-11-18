@@ -211,13 +211,13 @@ func unwrap(err error) error {
 	return nil
 }
 
-// TestTwoMembersOfAHedgeOnOneProviderFromTwoLeaders (#725's row 2; HBEP-7, Hedging (beta), Slots reserved atomically: "Two
-// members on one Provider, which only a leader hand-over race can make, are one too many. The older, by creation time and then
-// UID, is that Provider's member, and the newer waits ... It is never cancelled for the race"). P of D serves on A. X, the first
-// member of P's replacement hedge, is made on B at 08:00:40 by one leader, and Y, the hedge's second, at 08:00:50 by the
-// other, each Instance with its Allocation cut short (no Allocation yet) while B's limit is 2. The limit is then lowered to
-// 1, the slot table of each leader holds nothing of the other's, and the second leader reads through a cache that shows no
-// Allocation made after the first leader's pass began. Each leader passes once, in both orders:
+// TestTwoHedgeMembersWhoseInstancesBothExistRetryOlderFirst (#725's row 2, retitled to what it proves, A5 of #751; HBEP-7,
+// Hedging (beta), Slots reserved atomically: once both members' Instances exist, the older, by creation time and then UID,
+// is that Provider's member, and the newer waits, never cancelled for the race). P of D serves on A. X, the first member of
+// P's replacement hedge, is made on B at 08:01:10 and Y, the hedge's second, at 08:01:20, each Instance with its Allocation
+// cut short (no Allocation yet) while B's limit is 2. The limit is then lowered to 1, the second leader has a slot table of
+// its own and reads through a cache that shows no Allocation made after the first leader's pass began. Each leader passes
+// once, in both orders (the retry of an Allocation that two Instances wait for):
 //   - X, the older, takes B's one slot: its Allocation is made;
 //   - Y, the newer, finds it taken, counting X's own slot where X's Allocation is not shown: it waits, with D
 //     SubmitLimitReached naming B;
@@ -225,10 +225,10 @@ func unwrap(err error) error {
 //
 // With the limit raised to 2 again, Y's Allocation is made on the next pass: Y waited, it was never cancelled.
 //
-// This holds for a REPLACEMENT hedge, whose members name a predecessor and so hold their slots. A missing primary's hedge
-// is a stated limit, bounded by the two rows below (HBEP-7, Hedging, Slots reserved atomically; the science agent's
-// ruling on #725, 18 Nov 2026).
-func TestTwoMembersOfAHedgeOnOneProviderFromTwoLeaders(t *testing.T) {
+// It does NOT prove the window before both Instances exist: two leaders can each reserve B's last slot for a member whose
+// Instance does not exist yet, and the younger may reach Slurm first. That race is HBEP-7's stated limit, for any hedge
+// (the one extra creation of Per-user limits), bounded by the two rows below for a missing primary's hedge.
+func TestTwoHedgeMembersWhoseInstancesBothExistRetryOlderFirst(t *testing.T) {
 	for _, order := range []struct {
 		name     string
 		firstOne bool // the rig's own leader passes first

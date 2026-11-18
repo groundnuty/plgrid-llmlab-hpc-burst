@@ -274,15 +274,18 @@ func TestAReplacementInFlightIsCountedAtItsOwnSizeOnceAndNotTwiceOnceListed(t *t
 //     counted none for the asker's own: admitted.
 func TestAnUnresolvedHedgesMembersCountByTheRule(t *testing.T) {
 	end := hoT(9, 30, 0)
-	for _, each := range []bool{true, false} {
-		name := "countEachMember true"
-		if !each {
-			name = "countEachMember false"
-		}
-		t.Run(name, func(t *testing.T) {
-			old := countEachMember
-			countEachMember = each
-			t.Cleanup(func() { countEachMember = old })
+	for _, c := range []struct {
+		name string
+		set  *bool // nil: the rule as shipped, which the science agent ruled true
+		each bool
+	}{{"the rule as shipped (ruled true)", nil, true}, {"countEachMember true", ptrTo(true), true}, {"countEachMember false", ptrTo(false), false}} {
+		each := c.each
+		t.Run(c.name, func(t *testing.T) {
+			if c.set != nil {
+				old := countEachMember
+				countEachMember = *c.set
+				t.Cleanup(func() { countEachMember = old })
+			}
 			f := &unitFx{}
 			f.md("md-e", &end)
 			f.md("md-h", nil)
