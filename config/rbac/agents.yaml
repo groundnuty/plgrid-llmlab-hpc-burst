@@ -17,8 +17,8 @@
 # role grant a write before the policy that bounds it is enforced:
 #   - the NARROW form, config/rbac/agents-narrow.yaml: read-only. up applies it with the policies and
 #     keeps it until each policy has refused a dry-run probe, or for good where a probe cannot be made;
-#   - the WIDE form, in this file: the narrow rules plus the writes the policies bound. up applies it
-#     last, after the wait.
+#   - the WIDE form, in this file: the narrow rules plus the writes the policies bound (and the Workload
+#     writes, which no policy bounds). up applies it last, after the wait.
 # The two are hand-written, never derived from each other in code; a test states the difference
 # (the writes) by hand and compares it with both.
 #
