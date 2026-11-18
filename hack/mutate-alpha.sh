@@ -1080,6 +1080,7 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # #735 (the amendment of 18 Nov 2026): the relay line carries --chdir=<its own --dir>, and the check holds both rules.
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath@@return ok && chdir != "" && w[6] == o.AgentPath'
   'internal/providerctl/conformance/hostdialed_verdict_test.go@@return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath@@return ok && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath'
+  'internal/providerctl/conformance/hostdialed_verdict_test.go@@return ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath && w[7] == agentapi.RelaySubcommand@@return (w[5] == o.AgentPath && w[6] == agentapi.RelaySubcommand) || (ok && chdir != "" && chdir == lineArg(w, "--dir") && w[6] == o.AgentPath && w[7] == agentapi.RelaySubcommand)'
   # #735: the relay line drops --chdir, or takes another directory for it; pkg/agentapi's literal tests judge these, and internal/hostdial's
   # no-home row (TestHostDialedRelaysStartWhereComputeNodesHaveNoHome) judges the first end to end, by hand on Sano.
   'pkg/agentapi/relay.go@@"--ntasks=1", "--chdir=" + a.Dir, agentPath,@@"--ntasks=1", agentPath,'
