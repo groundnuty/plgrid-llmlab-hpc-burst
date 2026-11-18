@@ -200,8 +200,10 @@ func (u criticalAnnotationUpdater) UpdateCriticalAnnotations(ctx context.Context
 		}
 	}
 	err := retry.OnError(retry.DefaultRetry, func(err error) bool { return !errors.Is(err, context.Canceled) }, func() error {
+		//rbac:resources hpcburst.groundnuty.github.io/allocations
 		err := u.kube.Update(ctx, o)
 		if kerrors.IsConflict(err) {
+			//rbac:resources hpcburst.groundnuty.github.io/allocations
 			if getErr := u.reader.Get(ctx, client.ObjectKeyFromObject(o), o); getErr != nil {
 				return getErr
 			}
@@ -231,5 +233,6 @@ func (t tagInitializer) Initialize(ctx context.Context, mg resource.Managed) err
 		return nil
 	}
 	meta.SetExternalName(mg, v1alpha1.JobTag(mg.GetNamespace(), mg.GetName(), mg.GetUID()))
+	//rbac:resources hpcburst.groundnuty.github.io/allocations
 	return t.kube.Update(ctx, mg)
 }

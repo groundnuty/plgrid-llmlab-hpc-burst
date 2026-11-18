@@ -31,6 +31,11 @@
 #   - CI's launcher-k3s starts a FAKE controller and the real front: it proves the identities are issued and usable
 #     (a SelfSubjectReview through each file, the audit log's user names) and that the real front's startup
 #     paths run under its role, and nothing of the real controller.
+#   - internal/rbacscan (#684) reads the code, not a run: it follows every call of a controller-runtime client, a
+#     clientset or an informer to the manager that makes it, and fails the `go` job on a call its identity's role does
+#     not grant (naming the call site) and on a rule that no call needs. It takes what a library calls on the
+#     controllers' behalf from a short list of entries that each cite the pinned library source, and the object of a
+#     generic call from an annotation, //rbac:resources group/resource, on the call.
 # A controller change that adds an API call extends its role in the same change. The rules of one resource
 # carry the reason in the comment above them. Three things that follow from how the clients are built:
 #   - A read through a manager's cached client (mgr.GetClient()) is a LIST and a WATCH of the kind: the

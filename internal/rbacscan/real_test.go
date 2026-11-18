@@ -1,0 +1,297 @@
+package rbacscan
+
+import (
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/config/rbac"
+)
+
+const (
+	lifecycle = "hpcburst-lifecycle"
+	provider  = "hpcburst-provider"
+	front     = "hpcburst-front"
+)
+
+func repoRoot() string {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		panic(err)
+	}
+	return root
+}
+
+func realOptions() Options {
+	root := repoRoot()
+	return Options{
+		Root:     root,
+		Patterns: []string{"./cmd/hpcburst-controller", "./cmd/hpcburst-front"},
+		CRDDir:   filepath.Join(root, "config", "crd"),
+		Managers: []Source{
+			{Where: "internal/lifecycle.NewManager", Ident: lifecycle, Why: "the lifecycle controller's manager, made with --kubeconfig"},
+			{Where: "internal/providerctl.NewProviderManager", Ident: provider, Why: "every Provider's manager, made with --provider-kubeconfig"},
+		},
+		Library: realLibrary(),
+		SkipStores: []Skip{
+			{Pos: "internal/managed/controller.go:167", Why: "the fallback of a nil Reader to the cached client, which only a test leaves nil: the controller is built with mgr.GetAPIReader() (controller.go:213), and its identity-record reads are the API reader's"},
+		},
+		Clients: []Source{
+			{Where: "cmd/hpcburst-front", Ident: front, Why: "the front's clientset and dynamic client, made with its --kubeconfig"},
+			{Where: "internal/launcher", Ident: Exempt, Why: "the launcher acts as the administrator"},
+			{Where: "internal/leaderlock", Ident: Exempt, Why: "the Lease lock's clients: the library entry for the lock stands for its calls"},
+		},
+	}
+}
+
+// The real tree is scanned once for all the tests below.
+var realScan = sync.OnceValues(func() (*Result, error) { return Scan(realOptions()) })
+
+func realResult(t *testing.T) (*Result, Roles) {
+	t.Helper()
+	res, err := realScan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles, err := ParseRoles(rbac.Controllers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res, roles
+}
+
+// TestEveryControllerCallIsGrantedAndEveryGrantIsCalled is the check itself: the controllers' roles in
+// config/rbac/controllers.yaml against the calls the code makes, in both directions. It fails naming the call site of a
+// call a role does not grant (a refused call shows only as a recurring pass error, so no other test would), and the rule of
+// a role that nothing calls (S2: each role grants exactly what its component calls).
+func TestEveryControllerCallIsGrantedAndEveryGrantIsCalled(t *testing.T) {
+	res, roles := realResult(t)
+	if fs := Check(res, roles); len(fs) > 0 {
+		t.Fatalf("%d disagreements between the code and config/rbac/controllers.yaml:\n%s\nA call a role lacks: add the rule to the role of the identity named, in the same change as the call. A rule nothing "+
+			"calls: delete it. A call the scan cannot read: see the message, and doc.go.", len(fs), Format(fs))
+	}
+}
+
+// A scan that read nothing would pass the check above, with every role "unused" aside. These floors say the scan saw each
+// identity at work, and name the call sites it must find: the three the lifecycle controller's roles missed on 17 Nov.
+func TestTheScanSeesEachIdentityAtWork(t *testing.T) {
+	res, roles := realResult(t)
+	count := map[string]int{}
+	for _, st := range res.Sites {
+		count[st.Ident]++
+	}
+	for id, floor := range map[string]int{lifecycle: 60, provider: 25, front: 3} {
+		if count[id] < floor {
+			t.Errorf("the scan found %d sites for %s, want at least %d", count[id], id, floor)
+		}
+	}
+	for _, id := range []string{lifecycle, provider, front} {
+		if len(roles[id]) == 0 {
+			t.Errorf("the manifest has no rules for %s", id)
+		}
+	}
+	for _, want := range []struct{ ident, file, fn string }{
+		{lifecycle, "internal/lifecycle/owner.go", "syncOwnerLabel"},
+		{lifecycle, "internal/lifecycle/opexec.go", "afterCommitError"},
+		{lifecycle, "internal/lifecycle/opexec.go", "keepOperationUntilFinished"},
+		{provider, "internal/providerctl/keeper.go", ""},
+		{front, "internal/front/records.go", "listRecords"},
+	} {
+		found := false
+		for _, st := range res.Sites {
+			if st.Ident == want.ident && strings.HasPrefix(st.Pos, want.file+":") && strings.Contains(st.Func, want.fn) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the scan found no site of %s in %s %s", want.ident, want.file, want.fn)
+		}
+	}
+	t.Logf("%d sites (%d for %s, %d for %s, %d for %s), %d library entries, %d call sites in code nothing calls", len(res.Sites),
+		count[lifecycle], lifecycle, count[provider], provider, count[front], front, len(res.Entries), len(res.Dead))
+}
+
+// Every rule of every role is a mutant: with one verb removed, the check fails and names a call site that needs it (for a
+// verb a library makes, the call that triggers the library). The same loop is the proof that no rule is there for nothing.
+func TestAVerbRemovedFromAnyRoleFailsNamingACallSite(t *testing.T) {
+	res, roles := realResult(t)
+	n := 0
+	for _, id := range roles.Idents() {
+		for tr := range roles[id] {
+			n++
+			var named []string
+			for _, f := range Check(res, roles.Without(id, tr)) {
+				if f.Kind == "not granted" && f.Ident == id && f.Need == tr {
+					named = append(named, f.Msg)
+				}
+			}
+			if len(named) == 0 {
+				t.Errorf("%s's role without %q passes: nothing names a call site that needs it", id, tr)
+				continue
+			}
+			if !strings.Contains(named[0], ".go:") {
+				t.Errorf("the finding for %s without %q does not name a call site: %s", id, tr, named[0])
+			}
+		}
+	}
+	t.Logf("%d rules, each one's removal named a call site", n)
+}
+
+// The three seams of 17 Nov 2026, found by hand, each removed in turn: each fails, naming the call it would have refused.
+func TestTheThreeSilentSeamsWouldHaveFailed(t *testing.T) {
+	res, roles := realResult(t)
+	for _, tc := range []struct {
+		name  string
+		tr    Triple
+		names []string // what the findings must name, all of it
+	}{
+		{"#715's label patch (owner.go)", Triple{hpcburst, "modeldeployments", "patch"}, []string{"internal/lifecycle/owner.go:", "syncOwnerLabel"}},
+		{"#707's Operation finalizer (opexec.go)", Triple{hpcburst, "operations", "update"}, []string{"internal/lifecycle/opexec.go:", "keepOperationUntilFinished", "releaseOperationFinalizer"}},
+		{"#664's read of the Operation after a lost commit (afterCommitError)", Triple{hpcburst, "operations", "get"}, []string{"internal/lifecycle/opexec.go:", "afterCommitError"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var msgs []string
+			for _, f := range Check(res, roles.Without(lifecycle, tc.tr)) {
+				if f.Kind != "not granted" {
+					t.Errorf("a finding that is not about the missing rule: %s", f)
+				}
+				msgs = append(msgs, f.Msg)
+			}
+			all := strings.Join(msgs, "\n")
+			if len(msgs) == 0 {
+				t.Fatalf("the role without %q passes", tc.tr)
+			}
+			for _, n := range tc.names {
+				if !strings.Contains(all, n) {
+					t.Errorf("no finding names %q:\n%s", n, all)
+				}
+			}
+		})
+	}
+}
+
+// A rule added to a role that nothing calls fails the check, naming the rule.
+func TestARuleWithNoCallFails(t *testing.T) {
+	res, roles := realResult(t)
+	for _, tc := range []struct {
+		ident string
+		tr    Triple
+	}{
+		{lifecycle, Triple{hpcburst, "approvals", "delete"}},
+		{provider, Triple{"", "secrets", "get"}},
+		{front, Triple{hpcburst, "allocations", "watch"}},
+	} {
+		fs := Check(res, roles.With(tc.ident, tc.tr))
+		if len(fs) != 1 || fs[0].Kind != "unused rule" || fs[0].Ident != tc.ident || fs[0].Need != tc.tr || !strings.Contains(fs[0].Msg, tc.tr.String()) {
+			t.Errorf("%s with the extra rule %q: findings %v, want exactly the unused rule", tc.ident, tc.tr, fs)
+		}
+	}
+}
+
+// An identity the manifest does not hold, whose code makes calls, is a finding for each call.
+func TestACallOfAnIdentityWithNoRoleFails(t *testing.T) {
+	res, roles := realResult(t)
+	delete(roles, front)
+	var named bool
+	for _, f := range Check(res, roles) {
+		if f.Kind == "not granted" && f.Ident == front && strings.Contains(f.Msg, "internal/front/") {
+			named = true
+		}
+	}
+	if !named {
+		t.Error("the front without a role passes")
+	}
+}
+
+const (
+	hpcburst = "hpcburst.groundnuty.github.io"
+	crVer    = "v0.23.1"
+	cgVer    = "v0.35.3"
+	xpVer    = "v2.4.3"
+	crModule = "sigs.k8s.io/controller-runtime"
+	cgModule = "k8s.io/client-go"
+	xpModule = "github.com/crossplane/crossplane-runtime/v2"
+)
+
+// realLibrary are the calls the libraries make for the controllers, which no walk of the module's code can see. Each entry
+// is triggered by a call (or a reference) in the code, so that the rights go when the call does, and cites the pinned
+// source of the library that makes the requests. Not an entry, on purpose: the Secrets crossplane-runtime's managed
+// reconciler would write for an Allocation that names spec.writeConnectionSecretToRef (nothing sets it; were it set, the
+// Forbidden would surface as a reconcile error, not silently, and S2 grants only what each controller does today).
+func realLibrary() []LibraryEntry {
+	events := func(group string) []Triple {
+		return []Triple{{group, "events", "create"}, {group, "events", "patch"}}
+	}
+	return []LibraryEntry{
+		{
+			ID:      "lease lock",
+			Trigger: "{mod}/internal/leaderlock.New",
+			For: []Source{
+				{Where: "internal/lifecycle", Ident: lifecycle, Why: "the lifecycle controller's Lease, in its manager's lock"},
+				{Where: "internal/providerctl", Ident: provider, Why: "each Provider manager's Lease, provider-<name>"},
+			},
+			Rights: []Triple{{"coordination.k8s.io", "leases", "get"}, {"coordination.k8s.io", "leases", "create"}, {"coordination.k8s.io", "leases", "update"}},
+			Cites: []Cite{
+				{cgModule, cgVer, "tools/leaderelection/resourcelock/leaselock.go", "ll.Client.Leases(ll.LeaseMeta.Namespace).Get("},
+				{cgModule, cgVer, "tools/leaderelection/resourcelock/leaselock.go", "ll.Client.Leases(ll.LeaseMeta.Namespace).Create("},
+				{cgModule, cgVer, "tools/leaderelection/resourcelock/leaselock.go", "ll.Client.Leases(ll.LeaseMeta.Namespace).Update("},
+			},
+		},
+		{
+			ID:           "events.k8s.io recorder of a manager",
+			Trigger:      "(sigs.k8s.io/controller-runtime/pkg/recorder.Provider).GetEventRecorder",
+			FromReceiver: true,
+			Rights:       events("events.k8s.io"),
+			Cites: []Cite{
+				{crModule, crVer, "pkg/internal/recorder/recorder.go", "StartRecordingToSinkWithContext"},
+				{cgModule, cgVer, "tools/events/event_broadcaster.go", "newEvent, err = sink.Patch(ctx, event, patch)"},
+				{cgModule, cgVer, "tools/events/event_broadcaster.go", "newEvent, err = sink.Create(ctx, event)"},
+			},
+		},
+		{
+			ID:           "core recorder of a manager",
+			Trigger:      "(sigs.k8s.io/controller-runtime/pkg/recorder.Provider).GetEventRecorderFor",
+			FromReceiver: true,
+			Rights:       events(""),
+			Cites: []Cite{
+				{crModule, crVer, "pkg/internal/recorder/recorder.go", "corev1client.EventSinkImpl"},
+				{cgModule, cgVer, "tools/record/event.go", "newEvent, err = sink.Patch(event, patch)"},
+				{cgModule, cgVer, "tools/record/event.go", "newEvent, err = sink.Create(event)"},
+			},
+		},
+		{
+			ID:      "events.k8s.io broadcaster of the front",
+			Trigger: "k8s.io/client-go/tools/events.NewBroadcaster",
+			For:     []Source{{Where: "internal/front", Ident: front, Why: "the front's recorder, over its clientset"}},
+			Rights:  events("events.k8s.io"),
+			Cites: []Cite{
+				{cgModule, cgVer, "tools/events/event_broadcaster.go", "newEvent, err = sink.Patch(ctx, event, patch)"},
+				{cgModule, cgVer, "tools/events/event_broadcaster.go", "newEvent, err = sink.Create(ctx, event)"},
+			},
+		},
+		{
+			ID:      "managed reconciler",
+			Trigger: "github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed.NewReconciler",
+			For:     []Source{{Where: "internal/providerctl", Ident: provider, Why: "each Provider's reconciler over Allocations"}},
+			Rights: []Triple{
+				{hpcburst, "allocations", "list"}, {hpcburst, "allocations", "watch"}, // r.client.Get, through the cached client
+				{hpcburst, "allocations", "update"}, {hpcburst, "allocations/status", "update"},
+			},
+			Cites: []Cite{
+				{xpModule, xpVer, "pkg/reconciler/managed/reconciler.go", "if err := r.client.Get(ctx, req.NamespacedName, managed); err != nil {"},
+				{xpModule, xpVer, "pkg/reconciler/managed/reconciler.go", "r.client.Status().Update(ctx, managed)"},
+				{xpModule, xpVer, "pkg/reconciler/managed/reconciler.go", "if err := r.client.Update(ctx, managed); err != nil {"},
+			},
+		},
+		{
+			ID:      "managed finalizer",
+			Trigger: "github.com/crossplane/crossplane-runtime/v2/pkg/resource.NewAPIFinalizer",
+			For:     []Source{{Where: "internal/providerctl", Ident: provider, Why: "the Allocation's finalizer"}},
+			Rights:  []Triple{{hpcburst, "allocations", "update"}},
+			Cites: []Cite{
+				{xpModule, xpVer, "pkg/resource/api.go", "errors.Wrap(a.client.Update(ctx, obj), errUpdateObject)"},
+			},
+		},
+	}
+}
