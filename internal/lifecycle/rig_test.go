@@ -155,6 +155,10 @@ type rig struct {
 	extra []*rigExtra
 	// hostDialed is the controller's Config.HostDialed, kept across a restart.
 	hostDialed bool
+	// syncHook, when set, sees the result of every Provider controller pass (the Provider's name and the error its Sync
+	// returned, nil for none). It returns true when it handled the error, which then does not fail the test: it plays
+	// crossplane's managed reconciler, which turns a failed delete into Synced=False and retries it with backoff.
+	syncHook func(provider string, err error) bool
 	// noTunnels: syncAgents does not play the path-state writer
 	// (syncTunnels), so a test sets TunnelConnected itself, or leaves it
 	// absent.
@@ -439,11 +443,11 @@ func (rg *rig) condition(md, typ string) metav1.Condition {
 // ModelDeployment.
 func (rg *rig) Step() {
 	rg.t.Helper()
-	if err := rg.prov.Sync(rg.ctx); err != nil {
+	if err := rg.prov.Sync(rg.ctx); !rg.syncHandled(rigProvider, err) {
 		rg.t.Fatalf("provider sync: %v", err)
 	}
 	for _, x := range rg.extra {
-		if err := x.prov.Sync(rg.ctx); err != nil {
+		if err := x.prov.Sync(rg.ctx); !rg.syncHandled(x.name, err) {
 			rg.t.Fatalf("provider %s sync: %v", x.name, err)
 		}
 	}
@@ -454,6 +458,14 @@ func (rg *rig) Step() {
 	if err := rg.r.checkHeartbeats(rg.ctx); err != nil {
 		rg.t.Fatalf("checkHeartbeats: %v", err)
 	}
+}
+
+// syncHandled is whether a Provider pass's result is acceptable: no error, or one the test's syncHook handled.
+func (rg *rig) syncHandled(provider string, err error) bool {
+	if rg.syncHook != nil {
+		return rg.syncHook(provider, err) || err == nil
+	}
+	return err == nil
 }
 
 // syncTunnels plays #90's path-state writer, which sets TunnelConnected from

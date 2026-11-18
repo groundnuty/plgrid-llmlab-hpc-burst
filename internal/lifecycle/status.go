@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -117,7 +119,10 @@ func (p *pass) writeStatus() error {
 		cond(&s.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, v1alpha1.ReasonAsDesired, "no degradation", gen, now)
 	}
 	stable := ready == desired && live == desired
-	if stable {
+	if held := p.keptWarmHoldingTheDelete(); held != "" {
+		// The delete waits on marked, started Allocations: the controller does nothing until one is released, and says which and how.
+		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse, v1alpha1.ReasonHeldByKeptWarm, held, gen, now)
+	} else if stable {
 		cond(&s.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse, v1alpha1.ReasonStable, "the desired Instances serve", gen, now)
 	} else {
 		msg := fmt.Sprintf("%d Instances live, %d ready, %d desired", live, ready, desired)
@@ -128,6 +133,37 @@ func (p *pass) writeStatus() error {
 	}
 	s.ObservedGeneration, s.LastReconcileTime = gen, &now
 	return p.updateMDStatus(next)
+}
+
+// keptWarmHoldingTheDelete says what holds a deployment's delete, or "" when nothing does: while the deployment is being deleted under
+// held-by-kept-warm, each marked, started Allocation remaining, with its hard end and the profile's maxIdle if it sets one, and that an
+// approved Release frees it (HBEP-10, The report, Kept warm: "status says why").
+func (p *pass) keptWarmHoldingTheDelete() string {
+	md := p.md
+	if md == nil || md.DeletionTimestamp.IsZero() || !controllerutil.ContainsFinalizer(md, v1alpha1.FinalizerKeptWarm) {
+		return ""
+	}
+	var parts []string
+	for _, name := range orderedKeys(p.allocs) {
+		a := p.allocs[name]
+		if !a.DeletionTimestamp.IsZero() || !keptWarmStarted(a) {
+			continue
+		}
+		part := a.Name
+		if h := a.Status.AtProvider.HardEnd; h != nil {
+			part += " (hard end " + h.UTC().Format(time.RFC3339)
+		} else {
+			part += " (hard end not known"
+		}
+		if pv := p.pvOf(a.Labels); pv != nil && pv.profile != nil && pv.settings.maxIdle != nil {
+			part += ", maxIdle " + pv.settings.maxIdle.String()
+		}
+		parts = append(parts, part+")")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "the delete waits for kept-warm Allocations: " + strings.Join(parts, "; ") + "; an approved Release frees it"
 }
 
 func (p *pass) updateMDStatus(next *v1alpha1.ModelDeployment) error {

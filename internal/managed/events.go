@@ -71,6 +71,8 @@ func RaisedEvents() []eventcount.Series {
 	}
 	// ObservationGap, which the manager raises at its start through providerctl.AddGapEmitter.
 	add(provider.EventActionDegraded, providerctl.ReasonObservationGap)
+	// EventsNotLogged, which the durable log's publisher raises through the manager's recorder.
+	add(provider.EventActionDegraded, eventcount.ReasonEventsNotLogged)
 	add(provider.EventActionDegraded, provider.EventCatalogEntrySkipped)
 	add(provider.EventActionDegraded, provider.EventCatalogTruncated)
 	for _, reason := range readyReasons {

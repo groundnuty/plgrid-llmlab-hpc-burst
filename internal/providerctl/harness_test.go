@@ -193,8 +193,9 @@ type typedEvent struct {
 // for client-go's recorder in the unit tests of the decisions; the API-level
 // rows are in e2e, which lists the Events the API server holds.
 type typedRecorder struct {
-	mu     sync.Mutex
-	events []typedEvent
+	mu      sync.Mutex
+	events  []typedEvent
+	refused []string // the reasons of the events counted as not logged (NotLogged)
 }
 
 func (r *typedRecorder) add(id string, regarding, related runtime.Object, eventtype, reason, action, note string, args []interface{}) {
@@ -210,6 +211,14 @@ func (r *typedRecorder) Eventf(regarding, related runtime.Object, eventtype, rea
 
 func (r *typedRecorder) EventfID(id string, regarding, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
 	r.add(id, regarding, related, eventtype, reason, action, note, args)
+}
+
+// NotLogged records an event the controller refused to raise: it is counted as not logged by the
+// real recorder, and by this double in refused, which a test reads (#625, PR E2).
+func (r *typedRecorder) NotLogged(regarding runtime.Object, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refused = append(r.refused, reason)
 }
 
 // of returns the events of the reason, in order.

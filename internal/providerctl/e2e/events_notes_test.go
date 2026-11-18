@@ -36,4 +36,17 @@ func TestNoLoggedNoteNamesAPathUserAccountOrGrant(t *testing.T) {
 		!strings.Contains(notes[0], "provider.spec.credentialsRef.file") || !strings.Contains(notes[0], "provider.spec.account") {
 		t.Errorf("AllocationRefused notes %q, want the reason code's fixed description naming the invalid fields", notes)
 	}
+	// The same rule for the note the log keeps, read through a fresh client: it holds no path, user name, account or
+	// grant, and its id is <uid>/AllocationRefused/<attempt>, 0 here since the Allocation was refused before any
+	// submission attempt was recorded (HBEP-8, The event's id; the erratum for #625).
+	r.idle()
+	msgs := r.wantLog(a, eid(a, "AllocationRefused", "0"))
+	r.checkLogNotes(msgs, firstJobID)
+	for _, m := range msgs {
+		for _, bad := range []string{rowCredsPath, rowUser, rowHome} {
+			if strings.Contains(m.Data.Note, bad) {
+				t.Errorf("the log's %s note %q holds %q", m.Data.Reason, m.Data.Note, bad)
+			}
+		}
+	}
 }

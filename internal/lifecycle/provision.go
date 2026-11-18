@@ -244,18 +244,19 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 }
 
 // warmOf returns the deployment's warm Allocations on the Provider: Running, not deleting, hosting no live
-// Instance, not pending release (releasePending) and whose relay has not ended for good (relayEnded), the latest
-// hard end first, then by name (HBEP-7, Over-allocation and qualification (beta), When the extra is submitted:
-// "Warm Allocations count toward k only here, in the extra's creation bound"). It checks no fit, no lease and no
-// registration: warmFor, which places on one, keeps those, and the extra's bound only asks whether one
-// exists. One predicate, so the placement and the bound never disagree about what is warm. An Allocation with no
-// hard end yet sorts last.
+// Instance, not pending release (releasePending), whose relay has not ended for good (relayEnded) and not committed for
+// release by an Executing Operation (committedForRelease: the Operation ends it, so nothing is placed on it and the
+// extra's bound does not count it), the latest hard end first, then by name (HBEP-7, Over-allocation and qualification
+// (beta), When the extra is submitted: "Warm Allocations count toward k only here, in the extra's creation bound"). It
+// checks no fit, no lease and no registration: warmFor, which places on one, keeps those, and the extra's bound only
+// asks whether one exists. One predicate, so the placement and the bound never disagree about what is warm. An
+// Allocation with no hard end yet sorts last.
 func (p *pass) warmOf(pv *providerView) []*v1alpha1.Allocation {
 	var out []*v1alpha1.Allocation
 	for _, a := range p.allocs {
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
 			a.Status.AtProvider.Phase != v1alpha1.AllocationRunning || len(p.liveOn(a.Name)) > 0 ||
-			p.releasePending(a) || relayEnded(a) {
+			p.releasePending(a) || relayEnded(a) || p.committedForRelease(a) {
 			continue
 		}
 		out = append(out, a)
@@ -343,6 +344,9 @@ func (p *pass) drainsAfter(pv *providerView, warm *v1alpha1.Allocation, pred *v1
 // Allocation is to be released (a release that failed or was interrupted is
 // made on a later pass): it is never warm capacity.
 func (p *pass) releasePending(a *v1alpha1.Allocation) bool {
+	if allocationFailed(a) {
+		return true // a job that failed or was lost, or a relay ended for good: retention releases it by its own reason
+	}
 	for _, in := range p.insts {
 		if in.Spec.AllocationRef.Name == a.Name && releaseRequired(in) {
 			return true
