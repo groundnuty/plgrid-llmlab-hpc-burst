@@ -79,7 +79,7 @@ These are for the amendments. Each names the HBEP expected to own it, and each i
 
 | | Requirement | Owner HBEP |
 |---|---|---|
-| R1 | **Workload definitions:** named per study, with the shape, the model, the expected sessions and their window, and the route order. Built from the ModelDeployment's `workload` block, not a second place to declare the same thing. | HBEP-3, HBEP-7 |
+| R1 | **Workload definitions:** named per study, with the shape, the model, the expected sessions and their window, and the route order. Its shape uses the token fields of the ModelDeployment's `workload` block. The deployment's own block still drives warm-up and qualification, so a Workload stays a routing input that can't release capacity. | HBEP-3, HBEP-7 |
 | R2 | **Naming a workload in a request:** a header, and a form of the model name for clients that can't set one. A request naming none gets the default workload. | HBEP-3, HBEP-5 |
 | R3 | **Pinning within a workload:** the conversation key (HBEP-5) placed on a ring of that workload's routes only. | HBEP-5 |
 | R4 | **Capacity per Instance follows the workload,** within the engine's own limit, with a set `instanceCap` still able to cap it. The proposal: a budget in context tokens, taken from the engine's own report at start, with each session charged its workload's expected tokens. | HBEP-5, HBEP-7 |
