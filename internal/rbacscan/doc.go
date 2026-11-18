@@ -47,6 +47,15 @@
 // A Lease's resourceNames are the launcher's drift guard's. A call made by reflection, or by a client the scan does not read
 // (a hand-built REST request outside the exempt packages is a problem), is not seen.
 //
+// Stated limits, each one a place the scan is blind, not a rule it breaks:
+//   - the whole of internal/leaderlock is exempt as a client (its Lease lock is the library entry's), so a new call made
+//     through the clients it builds would be taken for the lock's;
+//   - a method of a typed clientset that is not in the verb table (Deployments' GetScale) is not a site;
+//   - an annotation names the resources a call serves and is trusted: a kind added to the call's loop stays unseen until the
+//     annotation names it (the front's dynamic informer loop, the lifecycle cache's readiness loop);
+//   - the managed Reader fallback is suppressed by its line (Options.SkipStores), not by the callers that make it reachable;
+//   - Cache.DisableFor is not modelled: any use of it is a problem, until the scan is taught which manager carries it.
+//
 // The roles stay hand-written. A role generated from the list this package reads would prove nothing: the package
 // checks the roles against the code, in both directions, and a mutant of the role (a verb removed, a rule added) fails.
 package rbacscan

@@ -41,6 +41,7 @@ func fixOptions() (Options, error) {
 		},
 		Clients: []Source{
 			{Where: fixPkg + ".newTyped", Ident: "c", Why: "fixture"},
+			{Where: fixPkg + ".newDynamic", Ident: "c", Why: "fixture"},
 			{Where: fixPkg + ".newAdmin", Ident: Exempt, Why: "fixture: the administrator's"},
 		},
 		SkipStores: []Skip{
@@ -127,6 +128,21 @@ func TestTheFixtureYieldsTheRightsOfEachWayACallIsMade(t *testing.T) {
 		// a clientset's calls are its own requests; the administrator's are no one's
 		"c: typed: list apps/controllerrevisions",
 		"c: typed: update coordination.k8s.io/leases",
+		// every write to a subresource is the subresource's: through a typed Patch's variadic argument, and through a dynamic
+		// client's UpdateStatus and its variadic subresources (never the parent's)
+		"c: typedPatch: patch coordination.k8s.io/leases",
+		"c: typedPatch: patch coordination.k8s.io/leases/status",
+		"c: dyn: update " + h + "/operations",
+		"c: dyn: update " + h + "/operations/status",
+		"c: dyn: get " + h + "/operations/scale",
+		// the elements of a slice literal are followed, and a read of a subresource is a get, not an informer's list and watch
+		"a: (*reconciler).rangeLiteral: delete " + h + "/instances",
+		"a: (*reconciler).rangeLiteral: delete " + h + "/approvals",
+		"a: (*reconciler).subresourceGet: get " + h + "/providers/scale",
+		// a call through an interface the module declares for what a library already has is the library's call
+		"a: viaLocalInterfaces: list " + h + "/providers",
+		"a: viaLocalInterfaces: watch " + h + "/providers",
+		"a: viaLocalInterfaces: get " + h + "/platformprofiles",
 		// the library entry's rights, for the identity of the function that triggers it
 		"a: wire: get coordination.k8s.io/leases",
 		// an entry whose citation is bad still yields its rights, so that the one finding is the citation and not a grant
@@ -168,6 +184,7 @@ func TestTheFixtureReportsWhatTheScanCannotReadOrAccept(t *testing.T) {
 		`library entry "old cite" cites`,                                        // a citation of a version go.mod does not pin
 		`library entry "cite that says other"`,                                  // a citation the file does not bear out
 		`library entry "trigger with no identity"`,                              // a trigger in a place the entry has no identity for
+		"Cache.DisableFor makes a cached client read",                           // an option that changes what a cached read is
 		"an //rbac:resources annotation that no call needs",                     // an annotation on a call whose type is static
 		"a REST request (Do) whose path is a string",                            // a request the scan cannot read
 		"the client method Get is taken as a value",                             // a call the scan cannot attribute
@@ -177,8 +194,8 @@ func TestTheFixtureReportsWhatTheScanCannotReadOrAccept(t *testing.T) {
 		}
 	}
 	// and nothing else: each of those is the fixture's own, and the clean cases raise none
-	if len(res.Problems) != 10 && !t.Failed() {
-		t.Errorf("the fixture raised %d problems, want the 10 above:\n%s", len(res.Problems), joined)
+	if len(res.Problems) != 11 && !t.Failed() {
+		t.Errorf("the fixture raised %d problems, want the 11 above:\n%s", len(res.Problems), joined)
 	}
 	// the generic call that is not annotated is named by its position
 	var generic bool
@@ -192,5 +209,44 @@ func TestTheFixtureReportsWhatTheScanCannotReadOrAccept(t *testing.T) {
 	}
 	if !slices.ContainsFunc(res.Dead, func(d string) bool { return strings.Contains(d, "Delete Instance") }) {
 		t.Errorf("the call in the function no call reaches is not listed as dead: %q", res.Dead)
+	}
+}
+
+// A write to a subresource is not satisfied by a grant of its parent: with the status's rule taken from a role that keeps
+// the parent's, the check fails and names the call (the class of the 17 Nov seams).
+func TestAStatusWriteIsNotSatisfiedByItsParentsGrant(t *testing.T) {
+	res, err := fixture()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const h = "hpcburst.groundnuty.github.io"
+	roles := Roles{}
+	for _, st := range res.Sites {
+		if roles[st.Ident] == nil {
+			roles[st.Ident] = map[Triple]bool{}
+		}
+		for _, n := range st.Need {
+			roles[st.Ident][n] = true
+		}
+	}
+	for _, tc := range []struct {
+		parent, status Triple
+		callName       string
+	}{
+		{Triple{h, "operations", "update"}, Triple{h, "operations/status", "update"}, "dyn"},
+		{Triple{"coordination.k8s.io", "leases", "patch"}, Triple{"coordination.k8s.io", "leases/status", "patch"}, "typedPatch"},
+	} {
+		if !roles["c"][tc.parent] || !roles["c"][tc.status] {
+			t.Fatalf("the fixture's sites do not need both %q and %q", tc.parent, tc.status)
+		}
+		var named bool
+		for _, f := range Check(res, roles.Without("c", tc.status)) {
+			if f.Kind == "not granted" && f.Need == tc.status && strings.Contains(f.Msg, tc.callName) {
+				named = true
+			}
+		}
+		if !named {
+			t.Errorf("a role that keeps %q but lacks %q passes: the status write is satisfied by its parent", tc.parent, tc.status)
+		}
 	}
 }

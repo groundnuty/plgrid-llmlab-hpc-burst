@@ -25,7 +25,8 @@ func ParseRoles(manifest []byte) (Roles, error) {
 		subjects           []rbacv1.Subject
 	}
 	var bindings []binding
-	accounts := map[string]bool{}
+	names := map[string]bool{}
+	accounts := map[string]bool{} // "namespace/name": a binding's subject is the account of its name AND its namespace
 	for _, part := range bytes.Split(manifest, []byte("\n---")) {
 		if len(bytes.TrimSpace(part)) == 0 {
 			continue
@@ -36,11 +37,20 @@ func ParseRoles(manifest []byte) (Roles, error) {
 		}
 		switch d.Kind {
 		case "ServiceAccount":
-			var sa struct{ Metadata struct{ Name string } }
+			var sa struct {
+				Metadata struct{ Name, Namespace string }
+			}
 			if err := yaml.Unmarshal(part, &sa); err != nil {
 				return nil, err
 			}
-			accounts[sa.Metadata.Name] = true
+			if sa.Metadata.Namespace == "" {
+				return nil, fmt.Errorf("the ServiceAccount %s names no namespace, so no binding's subject can be matched to it", sa.Metadata.Name)
+			}
+			if names[sa.Metadata.Name] {
+				return nil, fmt.Errorf("two ServiceAccounts are named %s: the roles are read by account name", sa.Metadata.Name)
+			}
+			names[sa.Metadata.Name] = true
+			accounts[sa.Metadata.Namespace+"/"+sa.Metadata.Name] = true
 		case "Role":
 			var r rbacv1.Role
 			if err := yaml.UnmarshalStrict(part, &r); err != nil {
@@ -76,8 +86,8 @@ func ParseRoles(manifest []byte) (Roles, error) {
 			return nil, fmt.Errorf("a binding names the %s %s, which the manifest does not hold", b.roleKind, b.roleName)
 		}
 		for _, sub := range b.subjects {
-			if sub.Kind != "ServiceAccount" || !accounts[sub.Name] {
-				return nil, fmt.Errorf("a binding of %s has the subject %s %s, which is no ServiceAccount of the manifest", b.roleName, sub.Kind, sub.Name)
+			if sub.Kind != "ServiceAccount" || !accounts[sub.Namespace+"/"+sub.Name] {
+				return nil, fmt.Errorf("a binding of %s has the subject %s %s in namespace %q, which is no ServiceAccount of the manifest (name and namespace)", b.roleName, sub.Kind, sub.Name, sub.Namespace)
 			}
 			if out[sub.Name] == nil {
 				out[sub.Name] = map[Triple]bool{}

@@ -151,6 +151,7 @@ func Scan(o Options) (*Result, error) {
 		}
 	}
 	s.collect()
+	s.cacheBypass()
 	s.collectLibrary()
 	s.staleNotes()
 	sort.Strings(s.res.Dead)

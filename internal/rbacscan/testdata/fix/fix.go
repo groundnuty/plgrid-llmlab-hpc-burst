@@ -9,9 +9,14 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -25,6 +30,9 @@ func newB(cfg *rest.Config) (manager.Manager, error) { return ctrl.NewManager(cf
 // newTyped makes the clientset of the identity "c", and newAdmin one that is no identity's.
 func newTyped(cfg *rest.Config) kubernetes.Interface { return kubernetes.NewForConfigOrDie(cfg) }
 func newAdmin(cfg *rest.Config) kubernetes.Interface { return kubernetes.NewForConfigOrDie(cfg) }
+
+// newDynamic makes the dynamic client of the identity "c" too.
+func newDynamic(cfg *rest.Config) dynamic.Interface { return dynamic.NewForConfigOrDie(cfg) }
 
 // reconciler holds the cached client and the API reader of one manager, as the controllers' structs do.
 type reconciler struct {
@@ -71,7 +79,12 @@ var (
 	listOptions   = metav1.ListOptions{}
 	updateOptions = metav1.UpdateOptions{}
 	createOptions = metav1.CreateOptions{}
+	getOptions    = metav1.GetOptions{}
+	patchOptions  = metav1.PatchOptions{}
 )
+
+// cacheBypass uses Cache.DisableFor, which the scan does not model: a problem.
+var cacheBypass = client.CacheOptions{DisableFor: []client.Object{&v1alpha1.Provider{}}}
 
 // cachedGet: a read through the cached client is a list and a watch of the kind (a: list watch providers).
 func (r *reconciler) cachedGet(ctx context.Context) {
@@ -118,6 +131,35 @@ func (r *reconciler) statusUpdate(ctx context.Context) {
 // (the call below is not).
 func (r *reconciler) generic(ctx context.Context, o client.Object) {
 	_ = r.Client.Update(ctx, o)
+}
+
+// rangeLiteral deletes each object of a slice literal: the scan follows the elements (a: delete instances and approvals).
+func (r *reconciler) rangeLiteral(ctx context.Context) {
+	for _, o := range []client.Object{&v1alpha1.Instance{}, &v1alpha1.Approval{}} {
+		_ = r.Client.Delete(ctx, o)
+	}
+}
+
+// subresourceGet reads a subresource through the cached client: it has no informer, so it is a get (a: get providers/scale).
+func (r *reconciler) subresourceGet(ctx context.Context) {
+	_ = r.Client.SubResource("scale").Get(ctx, &v1alpha1.Provider{}, &v1alpha1.Provider{})
+}
+
+// localCache and localReader are interfaces the module declares for what a library's cache and reader already have: a call
+// through one is the library's (a: list watch providers, get platformprofiles).
+type localCache interface {
+	GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error)
+}
+
+type localReader interface {
+	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
+}
+
+func viaLocalInterfaces(ctx context.Context, mgr manager.Manager) {
+	var c localCache = mgr.GetCache()
+	_, _ = c.GetInformer(ctx, &v1alpha1.Provider{})
+	var r localReader = mgr.GetAPIReader()
+	_ = r.Get(ctx, key, &v1alpha1.PlatformProfile{})
 }
 
 // followed takes any object too, but every caller passes a value of a type the scan can follow to (a: update instances).
@@ -183,6 +225,24 @@ func typed(ctx context.Context, cs kubernetes.Interface) {
 	_, _ = cs.CoordinationV1().Leases("example").Update(ctx, &coordinationv1.Lease{}, updateOptions)
 }
 
+// typedPatch patches a lease and its status through a clientset (c: patch coordination.k8s.io/leases and leases/status).
+func typedPatch(ctx context.Context, cs kubernetes.Interface) {
+	_, _ = cs.CoordinationV1().Leases("example").Patch(ctx, "example", types.MergePatchType, nil, patchOptions)
+	_, _ = cs.CoordinationV1().Leases("example").Patch(ctx, "example", types.MergePatchType, nil, patchOptions, "status")
+}
+
+// dyn writes and reads through a dynamic client: the status write is the parent's status (c: update operations, update
+// operations/status, get operations/scale).
+func dyn(ctx context.Context, d dynamic.Interface) {
+	gvr := schema.GroupVersionResource{Group: "hpcburst.groundnuty.github.io", Version: "v1alpha1", Resource: "operations"}
+	//rbac:resources hpcburst.groundnuty.github.io/operations
+	_, _ = d.Resource(gvr).Namespace("example").Update(ctx, &unstructured.Unstructured{}, updateOptions)
+	//rbac:resources hpcburst.groundnuty.github.io/operations
+	_, _ = d.Resource(gvr).Namespace("example").UpdateStatus(ctx, &unstructured.Unstructured{}, updateOptions)
+	//rbac:resources hpcburst.groundnuty.github.io/operations
+	_, _ = d.Resource(gvr).Namespace("example").Get(ctx, "example", getOptions, "scale")
+}
+
 // admin calls through the exempt clientset: no site.
 func admin(ctx context.Context, cs kubernetes.Interface) {
 	_, _ = cs.CoreV1().Namespaces().Create(ctx, nil, createOptions)
@@ -218,14 +278,17 @@ func wire(ctx context.Context, cfg *rest.Config) error {
 	ra.cachedList(ctx)
 	ra.writes(ctx)
 	ra.statusUpdate(ctx)
-	objs := []client.Object{&v1alpha1.Allocation{}}
-	ra.generic(ctx, objs[0])
+	objs := map[string]client.Object{"a": &v1alpha1.Allocation{}}
+	ra.generic(ctx, objs["a"])
 	ra.followed(ctx, &v1alpha1.Instance{})
 	ra.annotated(ctx, &v1alpha1.Approval{})
 	ra.converted(ctx)
 	ra.fallback()
 	ra.staleNote(ctx)
 	viaEmbedded(ctx, ra.Client)
+	ra.rangeLiteral(ctx)
+	ra.subresourceGet(ctx)
+	viaLocalInterfaces(ctx, ma)
 	ra.methodValue(ctx)
 	rawRequest(ctx, nil)
 	libTrigger()
@@ -236,6 +299,8 @@ func wire(ctx context.Context, cfg *rest.Config) error {
 		return err
 	}
 	typed(ctx, newTyped(cfg))
+	typedPatch(ctx, newTyped(cfg))
+	dyn(ctx, newDynamic(cfg))
 	admin(ctx, newAdmin(cfg))
 	return nil
 }

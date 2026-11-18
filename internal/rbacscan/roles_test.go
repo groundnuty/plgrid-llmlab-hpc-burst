@@ -60,7 +60,7 @@ subjects: [{kind: ServiceAccount, name: sa, namespace: ns}]
 }
 
 func TestParseRolesRefusesWhatItCannotCheck(t *testing.T) {
-	const sa = "apiVersion: v1\nkind: ServiceAccount\nmetadata: {name: sa}\n---\n"
+	const sa = "apiVersion: v1\nkind: ServiceAccount\nmetadata: {name: sa, namespace: ns}\n---\n"
 	for name, tc := range map[string]struct{ doc, want string }{
 		"a wildcard verb": {sa + `
 kind: ClusterRole
@@ -70,13 +70,13 @@ rules: [{apiGroups: [x], resources: [y], verbs: ["*"]}]
 kind: ClusterRoleBinding
 metadata: {name: r}
 roleRef: {kind: ClusterRole, name: r}
-subjects: [{kind: ServiceAccount, name: sa}]
+subjects: [{kind: ServiceAccount, name: sa, namespace: ns}]
 `, "wildcard"},
 		"a binding to a role the manifest lacks": {sa + `
 kind: ClusterRoleBinding
 metadata: {name: r}
 roleRef: {kind: ClusterRole, name: gone}
-subjects: [{kind: ServiceAccount, name: sa}]
+subjects: [{kind: ServiceAccount, name: sa, namespace: ns}]
 `, "does not hold"},
 		"a subject that is no account of the manifest": {sa + `
 kind: ClusterRole
@@ -86,9 +86,20 @@ rules: []
 kind: ClusterRoleBinding
 metadata: {name: r}
 roleRef: {kind: ClusterRole, name: r}
-subjects: [{kind: ServiceAccount, name: other}]
+subjects: [{kind: ServiceAccount, name: other, namespace: ns}]
 `, "no ServiceAccount of the manifest"},
-		"a kind it does not read": {sa + "kind: Secret\nmetadata: {name: s}\n", "no ServiceAccount, role or binding"},
+		"a subject of the right name in another namespace": {sa + `
+kind: ClusterRole
+metadata: {name: r}
+rules: []
+---
+kind: ClusterRoleBinding
+metadata: {name: r}
+roleRef: {kind: ClusterRole, name: r}
+subjects: [{kind: ServiceAccount, name: sa, namespace: elsewhere}]
+`, "name and namespace"},
+		"a ServiceAccount with no namespace": {"kind: ServiceAccount\nmetadata: {name: sa}\n", "names no namespace"},
+		"a kind it does not read":            {sa + "kind: Secret\nmetadata: {name: s}\n", "no ServiceAccount, role or binding"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := ParseRoles([]byte(tc.doc))

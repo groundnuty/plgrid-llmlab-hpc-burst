@@ -95,6 +95,7 @@ func TestTheScanSeesEachIdentityAtWork(t *testing.T) {
 		{lifecycle, "internal/lifecycle/owner.go", "syncOwnerLabel"},
 		{lifecycle, "internal/lifecycle/opexec.go", "afterCommitError"},
 		{lifecycle, "internal/lifecycle/opexec.go", "keepOperationUntilFinished"},
+		{lifecycle, "cmd/hpcburst-controller/tunnel.go", "pluginFeed"}, // GetInformer, through the interface tunnel.go declares
 		{provider, "internal/providerctl/keeper.go", ""},
 		{front, "internal/front/records.go", "listRecords"},
 	} {
@@ -182,6 +183,44 @@ func TestTheThreeSilentSeamsWouldHaveFailed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A ClusterRoleBinding whose subject is the right name in another namespace binds nothing to the controller's account, and
+// every role mutant would still see the permissions it read before. The parse refuses it.
+func TestABindingSubjectInAnotherNamespaceFailsTheParse(t *testing.T) {
+	m := string(rbac.Controllers)
+	i := strings.Index(m, "kind: ClusterRoleBinding\nmetadata:\n  name: hpcburst-lifecycle")
+	if i < 0 {
+		t.Fatal("the manifest has no ClusterRoleBinding of the lifecycle identity")
+	}
+	const subjectNS = "    namespace: hpcburst-system"
+	j := strings.Index(m[i:], subjectNS)
+	if j < 0 {
+		t.Fatal("the lifecycle binding's subject names no namespace")
+	}
+	mutated := m[:i+j] + "    namespace: elsewhere" + m[i+j+len(subjectNS):]
+	if _, err := ParseRoles([]byte(mutated)); err == nil || !strings.Contains(err.Error(), "name and namespace") {
+		t.Fatalf("ParseRoles of a binding whose subject is in another namespace: %v, want a refusal naming the namespace", err)
+	}
+}
+
+// A status write is checked against the status rule, not its parent's: with operations/status's update taken from the
+// lifecycle role, which keeps operations' update, the check fails and names the Operation status write.
+func TestAStatusWriteIsNotSatisfiedByItsParentInTheRealRole(t *testing.T) {
+	res, roles := realResult(t)
+	parent, status := Triple{hpcburst, "operations", "update"}, Triple{hpcburst, "operations/status", "update"}
+	if !roles[lifecycle][parent] || !roles[lifecycle][status] {
+		t.Fatalf("the lifecycle role lacks %q or %q", parent, status)
+	}
+	var named bool
+	for _, f := range Check(res, roles.Without(lifecycle, status)) {
+		if f.Kind == "not granted" && f.Need == status && strings.Contains(f.Msg, "internal/lifecycle/operations.go:") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the lifecycle role without %q, with %q kept, passes", status, parent)
 	}
 }
 

@@ -91,6 +91,15 @@ func (x *index) walkLoad(addr ssa.Value, r *result, seen seenSet, ctx *frame) {
 		x.walkStores(x.fieldStores[keyOf(a.X.Type(), a.Field)], r, seen, nil)
 	case *ssa.Global:
 		x.walkStores(x.globalStores[a], r, seen, nil)
+	case *ssa.IndexAddr:
+		// an element of a slice made of a local array: a range over a slice literal, or an indexed element of one
+		if sl, ok := a.X.(*ssa.Slice); ok {
+			if vals, ok := sliceElements(sl); ok {
+				x.walkStores(vals, r, seen, ctx)
+				return
+			}
+		}
+		r.why("a load of an element of %s", a.X.Type())
 	case *ssa.Alloc:
 		vals, why := localStores(a)
 		if why != "" {
@@ -311,4 +320,69 @@ func (x *index) objectTypes(v ssa.Value) ([]types.Type, bool) {
 		return nil, false
 	}
 	return ts, true
+}
+
+// arrayStores returns the values stored into the elements of a local array (a slice literal's backing array), when the array's
+// address is used only to index it and to make a slice of it: false when it is passed on or stored away, so that a store
+// through another pointer would be missed.
+func arrayStores(alloc *ssa.Alloc) ([]ssa.Value, bool) {
+	refs := alloc.Referrers()
+	if refs == nil {
+		return nil, false
+	}
+	var vals []ssa.Value
+	for _, r := range *refs {
+		switch r := r.(type) {
+		case *ssa.IndexAddr:
+			irefs := r.Referrers()
+			if irefs == nil {
+				return nil, false
+			}
+			for _, ir := range *irefs {
+				switch ir := ir.(type) {
+				case *ssa.Store:
+					if ir.Addr != ssa.Value(r) {
+						return nil, false
+					}
+					vals = append(vals, ir.Val)
+				case *ssa.UnOp, *ssa.DebugRef:
+				default:
+					return nil, false
+				}
+			}
+		case *ssa.Slice:
+			// the slice made of it is followed by whoever loads from the slice; the slice itself must not be passed on
+			// to anything that could store into it, which only a caller of arrayStores through the Slice can say
+		case *ssa.DebugRef:
+		default:
+			return nil, false
+		}
+	}
+	return vals, true
+}
+
+// sliceElements follows a load from an element of a slice made of a local array (a slice literal in a range loop, or an
+// indexed element of one) to the values stored into the array's elements. The slice must not leave the function to a call
+// or a store, which could change an element where the scan cannot see it.
+func sliceElements(sl *ssa.Slice) ([]ssa.Value, bool) {
+	alloc, ok := sl.X.(*ssa.Alloc)
+	if !ok {
+		return nil, false
+	}
+	refs := sl.Referrers()
+	if refs == nil {
+		return nil, false
+	}
+	for _, r := range *refs {
+		switch r := r.(type) {
+		case *ssa.IndexAddr, *ssa.DebugRef, *ssa.UnOp:
+		case *ssa.Call:
+			if b, ok := r.Common().Value.(*ssa.Builtin); !ok || b.Name() != "len" {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	return arrayStores(alloc)
 }
