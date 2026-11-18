@@ -350,7 +350,21 @@ func (r *faultRig) orphanEngine() int {
 	return engine
 }
 
+// slurmJobCgroupSegment is the classifier of workerfault.go's cgroup form j: a path segment job_<digits> in a
+// /proc/<pid>/cgroup listing, the segment last or followed by a slash.
+var slurmJobCgroupSegment = regexp.MustCompile(`(?m)/job_[0-9]+(/|$)`)
+
+// inASlurmJobCgroup reports whether the cgroup listing of this very process has a Slurm job's segment.
+func inASlurmJobCgroup(cgroups string) bool { return slurmJobCgroupSegment.MatchString(cgroups) }
+
+// The fake job's processes are this test's own children, so they share its cgroup. The shapes below name that cgroup
+// "other", which holds on a developer machine and on a hosted runner; inside a Slurm job (CI on Sano) the cgroup is the
+// job's, every process classifies as cgroup:job_<n>, and the test cannot hold. It is skipped there, visibly, on that
+// condition alone, and hosted CI keeps running it. It is not made to expect what it finds: that would be circular.
 func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
+	if b, err := os.ReadFile("/proc/self/cgroup"); err == nil && inASlurmJobCgroup(string(b)) {
+		t.Skip("SKIPPED, NOT TESTED: this process runs inside a Slurm job cgroup, so every process of the fake job classifies as cgroup:job_<n>, not the cgroup:other these shapes expect; hosted CI runs this test")
+	}
 	me, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
@@ -411,6 +425,29 @@ func TestTheWorkerFaultFindsTheEngineInEachShape(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The skip above fires on a job's segment and on nothing else: a hosted runner's cgroup listing must run the test.
+func TestASlurmJobCgroupIsRecognisedAndNothingLooserIs(t *testing.T) {
+	for _, c := range []struct {
+		name, cgroups string
+		want          bool
+	}{
+		{"a Slurm task under cgroup v2", "0::/system.slice/slurmstepd.scope/job_29490/step_0/task_0\n", true},
+		{"a Slurm step under cgroup v1", "12:cpuacct:/slurm/uid_1000/job_7654321/step_batch\n11:memory:/slurm/uid_1000/job_7654321\n", true},
+		{"the job segment last, with no newline", "0::/a/job_12", true},
+		{"a job line among others", "1:name=systemd:/user.slice\n0::/x/job_5/y\n", true},
+		{"a hosted runner's service", "0::/system.slice/hosted-runner.service\n", false},
+		{"a login session", "0::/user.slice/user-1000.slice/session-3.scope\n", false},
+		{"a segment that only starts with job_", "0::/job_12abc/step_0\n", false},
+		{"a segment with no digits", "0::/x/job_/y\n", false},
+		{"job_<digits> inside a longer segment", "0::/x/myjob_12/y\n", false},
+		{"an empty listing", "", false},
+	} {
+		if got := inASlurmJobCgroup(c.cgroups); got != c.want {
+			t.Errorf("%s: inASlurmJobCgroup(%q) = %v, want %v", c.name, c.cgroups, got, c.want)
+		}
 	}
 }
 
