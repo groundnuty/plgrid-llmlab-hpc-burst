@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -179,5 +180,21 @@ func TestTheStagingDirSettingIsRequiredCheckedAndNeverNamed(t *testing.T) {
 	d := map[string]string{envRow: SanoServeName, envDry: "1", envOut: "/example/out", envStagingDir: secret, EnvFrontLabel: testFrontLabel}
 	if _, _, err := ConfigFromEnv(env(d), SanoServeName); err == nil || strings.Contains(err.Error(), secret) {
 		t.Errorf("a dry run with a staging directory: %v, want a refusal", err)
+	}
+}
+
+// The time limit a live run expects of its jobs (liveRun.timeLimit) reads the limits of the QOS the partition chooses for the row's GPUs, not the
+// Provider's own, which is none on Sano: gpu1's 72 h wall and the partition's 168 h are above the 106 minute lease, so the limit is the lease, as
+// the controller's own AllocationTimeLimit gives it. The control is the Athena handover row, whose partition has no qosByGpus and whose limit is
+// its lease too. The expected value is a literal of the rows' own clock (1 h 46 min), not read back from the function.
+func TestTheLiveRunsTimeLimitIsTheLeaseOnSanoAndOnAthena(t *testing.T) {
+	for _, name := range []string{SanoServeName, SanoHandoverName, "alpha-athena-handover"} {
+		t.Run(name, func(t *testing.T) {
+			r, _ := RowByName(name)
+			run := &liveRun{t: t, cfg: Config{Row: r}, w: world{profile: shippedProfile(t, r.ProfileName()), qos: r.QOS}}
+			if got, want := run.timeLimit(), 106*time.Minute; got != want {
+				t.Errorf("the time limit is %s, want %s", got, want)
+			}
+		})
 	}
 }
