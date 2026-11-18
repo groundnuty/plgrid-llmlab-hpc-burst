@@ -154,7 +154,7 @@ func (fx *fixture) result(t *testing.T) string {
 
 // goodInputs are inputs for the Hub double of package stack.
 func goodInputs() inputs {
-	return inputs{image: testImage, imageDigest: testDigest, checkpointRepo: stack.CheckpointRepo, checkpointRev: stack.CheckpointRev, loadFormat: "auto"}
+	return inputs{image: testImage, imageDigest: testDigest, checkpointRepo: stack.CheckpointRepo, checkpointRev: stack.CheckpointRev, loadFormat: "auto", imageFormat: "sandbox"}
 }
 
 // apptainerCalls is the first argument of every invocation the fake Apptainer

@@ -29,7 +29,7 @@ func alphaFixtureFiles() map[string]string {
 }
 
 // The pre-staging row's build script (prepare_stage): it records that it ran, with its arguments, and makes the helper.
-const stageBuildStub = `echo "build-stage-helper $*" >> "$STUB_STATE/events"
+const stageBuildStub = `echo "build-stage-helper $* example=${STAGE_EXAMPLE:-} format=${STAGE_IMAGE_FORMAT:-}" >> "$STUB_STATE/events"
 echo helper > "$1"`
 
 // The two scripts prepare_alpha runs: they record that they ran, with their arguments, and make what the run later looks for.

@@ -6,14 +6,23 @@
 #   hack/build-stage-helper.sh --print                 prints the -ldflags it would build with, and builds nothing
 #
 # The values are those of examples/modeldeployment-qwen25-instruct.yaml, the deployment row A serves (internal/alpha,
-# liveWorld): its engine's image and imageDigest, its checkpoint's repository and revision, and its served flags'
+# liveWorld), or of the file of examples/ that STAGE_EXAMPLE names: Sano's pre-staging row (issue #735) names the 7B's,
+# modeldeployment-sano-qwen25-7b-instruct.yaml, the deployment its serve and handover rows serve (alpha.Row.Deployment).
+# The image format the helper stages is STAGE_IMAGE_FORMAT: sandbox by default (Athena's partition cannot run a SIF) and sif for Sano's
+# pre-staging row, which the PartitionProfile's imageFormat says (the helper stages the format the agent of that partition reads).
+# The values are: its engine's image and imageDigest, its checkpoint's repository and revision, and its served flags'
 # load-format, auto when it names none (the stager reads an empty one as auto). Each is held to its shape before the build,
 # and internal/providerctl/conformance (TestTheStageHelpersBuildIsTheExampleDeployments) checks them against the file read as
 # a ModelDeployment. hack/live-checks.sh runs it before the row takes its slot.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-example="$root/examples/modeldeployment-qwen25-instruct.yaml"
+example_name=${STAGE_EXAMPLE:-modeldeployment-qwen25-instruct.yaml}
+[[ $example_name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.yaml$ ]] || { echo "build-stage-helper: STAGE_EXAMPLE is not the name of a file of examples/" >&2; exit 2; }
+example="$root/examples/$example_name"
+image_format=${STAGE_IMAGE_FORMAT:-sandbox}
+[[ $image_format =~ ^(sandbox|sif)$ ]] || { echo "build-stage-helper: STAGE_IMAGE_FORMAT is neither sandbox nor sif" >&2; exit 2; }
+[ -f "$example" ] || { echo "build-stage-helper: examples/$example_name does not exist" >&2; exit 2; }
 
 # value <key>: the first "<key>: <value>" line's value, without quotes.
 value() { sed -n -E "s/^ +$1: *\"?([^\" ]+)\"?[[:space:]]*\$/\\1/p" "$example" | head -1; }
@@ -33,7 +42,7 @@ bad=0
 [[ $load =~ ^[a-z_]+$ ]] || { echo "build-stage-helper: the example's load-format is not a word" >&2; bad=1; }
 [ "$bad" = 0 ] || exit 2
 
-flags="-X main.image=$image -X main.imageDigest=$digest -X main.checkpointRepo=$repo -X main.checkpointRev=$rev -X main.loadFormat=$load"
+flags="-X main.image=$image -X main.imageDigest=$digest -X main.checkpointRepo=$repo -X main.checkpointRev=$rev -X main.loadFormat=$load -X main.imageFormat=$image_format"
 if [ "${1:-}" = --print ]; then printf '%s\n' "$flags"; exit 0; fi
 [ $# -ge 1 ] || { echo "usage: hack/build-stage-helper.sh <output> [<goarch>] | --print" >&2; exit 2; }
 out=$1 arch=${2:-amd64}

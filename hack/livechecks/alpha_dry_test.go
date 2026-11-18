@@ -54,7 +54,7 @@ if [ -n "${HPCBURST_CONFORMANCE:-}" ]; then
   unset $(env | sed -n 's/^\(HPCBURST_CONF[A-Z_]*\)=.*/\1/p')
 else
   unset HPCBURST_ALPHA_ACCOUNT HPCBURST_ALPHA_CREDENTIALS HPCBURST_ALPHA_HOST_LOCK HPCBURST_ALPHA_CONTROL_DIR HPCBURST_ALPHA_BIN_DIR \
-    HPCBURST_ALPHA_BUILD_DIR HPCBURST_ALPHA_DIALHOME_MODE HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY
+    HPCBURST_ALPHA_BUILD_DIR HPCBURST_ALPHA_DIALHOME_MODE HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_STAGING_DIR
 fi
 export HPCBURST_ALPHA_DRY=1 HPCBURST_ALPHA_DRY_FAULT="$fault"
 cd "@REALDIR@" || exit 3
@@ -209,6 +209,9 @@ var dryRows = []dryRow{
 	{"beta-athena-now-keeper", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaKeeperFaults, []string{"window-at-the-floor"}, nil},
 	{"beta-athena-now-bulk", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaBulkFaults,
 		[]string{"bulk-at-the-prediction", "bulk-past-the-margin"}, nil},
+	// The Sano rows (issue #735): the Athena handover's faults and row A's, on Sano's gpu partition, with no slot.
+	{"alpha-sano-handover", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", handoverFaults, nil, nil},
+	{"alpha-sano-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, []string{"rehash-cold", "rehash-unread", "warm-foreign-first", "warm-foreign-three"}, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 }

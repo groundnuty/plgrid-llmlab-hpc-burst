@@ -1,0 +1,54 @@
+# A served ModelDeployment: Qwen3-VL-8B-Instruct on one A100 80 GB of Sano's gpu partition (HBEP-3,
+# HBEP-7; issue #735, beta). Clients ask the front for it by its plain name, spec.model. Its
+# expected-performance entry in profiles/sano.yaml was measured on exactly this spec, and the
+# gate's reference for it is that entry.
+#
+# The checkpoint is pinned by a full commit ID and the engine by an image digest, because they
+# make up the deployment ID (HBEP-3, Deployment ID). The engine is the vLLM v0.32.0
+# multi-architecture index that examples/modeldeployment-sano-qwen25-7b-instruct.yaml uses, with
+# the engine's own defaults, including vLLM v0.32.0's --gpu-memory-utilization of 0.92, and
+# max-model-len 32768 as shipped. An engine flag that is an ID input, or a changed workload shape,
+# is a new key, which no entry matches: the gate then records only until a reference run measures
+# it (HBEP-4, Expected performance).
+#
+# overAllocation is 0: one Allocation serves it, and no extra one is qualified beside it. The
+# reference runs sent text only.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: sano-qwen3-vl-8b-instruct
+  namespace: default
+spec:
+  model: Qwen/Qwen3-VL-8B-Instruct
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen3-VL-8B-Instruct
+        revision: 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "32768"
+  instances: 1
+  overAllocation: 0
+  providers:
+    names:
+      - sano-a100
+  # Release the Allocation when it has hosted no Instance for this long. The default, Keep,
+  # holds it until its hard end, which on a shared grant is rarely what a first trial wants.
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 256
+      typical: 1024
+      longest: 28672
+    outputTokens:
+      typical: 128
+      longest: 1024
+    targetSessions: 8

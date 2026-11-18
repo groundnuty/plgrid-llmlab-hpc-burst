@@ -265,7 +265,7 @@ func TestEveryRowsTimeoutIsAboveTheWorstCaseItsSourceAddsUpTo(t *testing.T) {
 			body, wantStartWaits = "TestConformance", 2
 		case strings.HasPrefix(row.name, "gpu-accounting-"):
 			body, wantStartWaits = "gpuAccountingBody", 1
-		case row.name == alpha.NowStageRow().Name:
+		case alpha.IsStageRow(row.name):
 			body, wantStartWaits = "stageBody", 1
 		case strings.HasPrefix(row.name, "reach-host-dialed-"):
 			body, wantStartWaits = "hostDialedBody", 1

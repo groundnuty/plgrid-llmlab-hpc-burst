@@ -67,6 +67,7 @@ var dryCases = map[string][]dryCase{
 	"tunnel-hour-helios":         tunnelCases,
 	"tunnel-hour-athena":         tunnelCases,
 	"alpha-athena-now-serve":     nowServeCases,
+	SanoServeName:                nowServeCases, // issue #735: row A's flow and verdict on Sano's partition
 	"beta-athena-now-router":     betaRouterCases,
 	"beta-athena-now-keeper":     betaKeeperCases,
 	"beta-athena-now-bulk":       betaBulkCases,
@@ -176,9 +177,12 @@ var tunnelCases = []dryCase{
 	{"no-back-to-back", "no run of requests back to back"},
 }
 
+// The Sano handover row has the Athena handover's flow, verdict and faults (issue #735).
+func init() { dryCases[SanoHandoverName] = dryCases["alpha-athena-handover"] }
+
 func familyOf(row string) string {
 	switch {
-	case strings.HasPrefix(row, "alpha-athena-now-serve"):
+	case strings.HasPrefix(row, "alpha-athena-now-serve"), IsSanoServe(row):
 		return "nowserve"
 	case IsRouterRow(row):
 		return "betarouter"
@@ -188,7 +192,7 @@ func familyOf(row string) string {
 		return "betabulk"
 	case strings.HasPrefix(row, "alpha-athena-now-nooverlap"):
 		return "nownooverlap"
-	case strings.HasPrefix(row, "alpha-athena"):
+	case strings.HasPrefix(row, "alpha-athena"), IsSanoHandover(row):
 		return "handover"
 	case strings.HasPrefix(row, "alpha-helios"):
 		return "nooverlap"
@@ -526,8 +530,8 @@ func neverStartedErrors() map[string]error {
 func stackRows(t *testing.T) []Row {
 	t.Helper()
 	out := Rows()
-	if len(out) != 10 {
-		t.Fatalf("the package runs %d stack rows, the table below was written for 10 (rows A and B on plgrid-now added, #376, the router, keeper and bulk rows, #521, and the Helios router row, #566): add the new row's cases", len(out))
+	if len(out) != 12 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 12 (rows A and B on plgrid-now added, #376, the router, keeper and bulk rows, #521, the Helios router row, #566, and the Sano serve and handover rows, #735): add the new row's cases", len(out))
 	}
 	return out
 }
@@ -536,8 +540,8 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 15 {
-		t.Fatalf("there are %d rows, the table below was written for 15 (rows A and B on plgrid-now added, #376, the accounting row on plgrid-now, #145, the router, keeper and bulk rows, #521, and the Helios router row, #566): add the new row's cases", len(out))
+	if len(out) != 17 {
+		t.Fatalf("there are %d rows, the table below was written for 17 (rows A and B on plgrid-now added, #376, the accounting row on plgrid-now, #145, the router, keeper and bulk rows, #521, the Helios router row, #566, and the Sano serve and handover rows, #735): add the new row's cases", len(out))
 	}
 	return out
 }

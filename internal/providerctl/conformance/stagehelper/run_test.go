@@ -77,6 +77,37 @@ func TestSecondRunDoesNotBuildAgain(t *testing.T) {
 	}
 }
 
+// A compiled-in image format of sif stages the SIF, with its record, and no sandbox, and pulls it as the agent of a SIF partition does (Sano's;
+// issue #735): the serve row's agent reads images/<hex>.sif, so a sandbox staged there would leave it cold. The control is the default
+// build's sandbox, which the first test above stages.
+func TestAnImageFormatOfSIFStagesTheSIFAndNotTheSandbox(t *testing.T) {
+	hub := stack.StartHub(t)
+	fx := newFixture(t, hub.URL)
+	in := goodInputs()
+	in.imageFormat = "sif"
+	if code, errs := fx.run(t, in); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	hex := strings.TrimPrefix(in.imageDigest, "sha256:")
+	for _, c := range []struct {
+		name string
+		want bool
+	}{{agentapi.StagedImagePath(in.imageDigest, agentapi.ImageFormatSIF), true},
+		{agentapi.StagedImagePath(in.imageDigest, agentapi.ImageFormatSIF) + ".sha256", true},
+		{agentapi.StagedImagePath(in.imageDigest, agentapi.ImageFormatSandbox), false}} {
+		_, err := os.Stat(filepath.Join(fx.staging, c.name))
+		if (err == nil) != c.want {
+			t.Errorf("%s (digest %.8s): present %t, want %t (%v)", filepath.Base(c.name), hex, err == nil, c.want, err)
+		}
+	}
+	if calls := apptainerCalls(t, fx); !slices.Equal(calls, []string{"pull"}) {
+		t.Errorf("the fake Apptainer recorded %v, want one pull", calls)
+	}
+	if line := fx.result(t); !okLine(line) || !strings.Contains(line, "image_built=true") {
+		t.Errorf("result line %q is not the success line of a staged image", line)
+	}
+}
+
 // A file that is present and does not match is counted and left as it is: the
 // agent's first start does not restage (CheckpointRequest.Restage is for a
 // whole-Instance restart).
@@ -146,6 +177,8 @@ func TestFailureLineNamesTheStep(t *testing.T) {
 		{name: "empty checkpoint repository", step: "config", set: func(_ *testing.T, _ *fixture, in *inputs) { in.checkpointRepo = "" }},
 		{name: "empty checkpoint revision", step: "config", set: func(_ *testing.T, _ *fixture, in *inputs) { in.checkpointRev = "" }},
 		{name: "empty load format", step: "config", set: func(_ *testing.T, _ *fixture, in *inputs) { in.loadFormat = "" }},
+		{name: "empty image format", step: "config", set: func(_ *testing.T, _ *fixture, in *inputs) { in.imageFormat = "" }},
+		{name: "an image format that is neither sandbox nor sif", step: "config", set: func(_ *testing.T, _ *fixture, in *inputs) { in.imageFormat = "docker" }},
 		{name: "no SLURM_JOB_ID", step: "config", set: func(_ *testing.T, fx *fixture, _ *inputs) { delete(fx.env, "SLURM_JOB_ID") }},
 		{name: "an image build that fails", step: "image", set: func(t *testing.T, fx *fixture, _ *inputs) { failingApptainer(t, fx) }},
 		{name: "a Hub that answers 404", step: "files",
@@ -219,7 +252,7 @@ func TestRunReadsTheCompiledInVariables(t *testing.T) {
 	for _, v := range []struct {
 		p    *string
 		want string
-	}{{&image, g.image}, {&imageDigest, g.imageDigest}, {&checkpointRepo, g.checkpointRepo}, {&checkpointRev, g.checkpointRev}, {&loadFormat, g.loadFormat}} {
+	}{{&image, g.image}, {&imageDigest, g.imageDigest}, {&checkpointRepo, g.checkpointRepo}, {&checkpointRev, g.checkpointRev}, {&loadFormat, g.loadFormat}, {&imageFormat, g.imageFormat}} {
 		old := *v.p
 		*v.p = v.want
 		t.Cleanup(func() { *v.p = old })

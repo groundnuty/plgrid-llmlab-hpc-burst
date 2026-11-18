@@ -162,3 +162,21 @@ func TestBetaHeliosNowRouter(t *testing.T) {
 func TestAlphaAthenaNowNoOverlap(t *testing.T) {
 	runRow(t, "nownooverlap", "alpha-athena-now-nooverlap")
 }
+
+// TestAlphaSanoHandover is HBEP-7's and HBEP-5's handover on Sano's gpu partition (issue #735): the Athena handover row's flow, verdict and
+// clock under host-dialed mode, one A100 each on two Allocations at once under gpu1 (chosen by the profile's qosByGpus), serving the 7B. A handover
+// with a stream in flight cuts nothing, with one restart at the worker rung. It starts warm from the pre-staging row's staging.
+//
+//livecheck:alpha-sano-handover
+func TestAlphaSanoHandover(t *testing.T) {
+	runRow(t, "handover", SanoHandoverName)
+}
+
+// TestAlphaSanoServe is row A's flow on Sano's gpu partition (issue #735) under profiles/sano.yaml: the long stream with attribution, the
+// deployment ID under its tag, HBEP-8's events and engine gauges, one worker-rung restart, and the deployment's end with its job seen ended, on
+// the 7B, through the agent's own launch unchanged. It starts warm from the pre-staging row's staging, or is NOT RUN.
+//
+//livecheck:alpha-sano-serve
+func TestAlphaSanoServe(t *testing.T) {
+	runRow(t, "nowserve", SanoServeName)
+}

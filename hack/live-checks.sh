@@ -129,10 +129,14 @@
 #   LIVE_BUILD_LOCK              optional absolute path of the shared build lock; builds, never test runs, take it
 #   LIVE_LLMLAB_CREDENTIALS      absolute path of the managed credentials file, mode 600 (llmlab-smoke)
 #   LIVE_LLMLAB_MODEL            optional model override (llmlab-smoke)
-#   LIVE_CONF_CREDENTIALS_HELIOS, LIVE_CONF_CREDENTIALS_ATHENA
+#   LIVE_CONF_CREDENTIALS_HELIOS, LIVE_CONF_CREDENTIALS_ATHENA, LIVE_CONF_CREDENTIALS_SANO
 #                                the ssh credentials files of the conformance runs, mode 600
-#   ACCOUNT_HELIOS_CPU, ACCOUNT_HELIOS_GH200, ACCOUNT_ATHENA_A100
+#   ACCOUNT_HELIOS_CPU, ACCOUNT_HELIOS_GH200, ACCOUNT_ATHENA_A100, ACCOUNT_SANO_GPU
 #                                the grant account of each job kind
+#   LIVE_SANO_STAGING_DIR        the Sano rows' (alpha-sano-*, issue #735) Provider's own spec.stagingDir: an absolute path on Sano's
+#                                shared file system, in a directory of its own (the profile has none: a cluster path carries a user
+#                                name). Account data, never printed or posted. The stage row stages into it and keeps it; the serve
+#                                and handover rows read it warm
 #   The alpha rows (issue #194; docs/alpha-runbook.md) also read, for the rows that run the stack
 #   (alpha-*, tunnel-hour-*):
 #   LIVE_DIALHOME_MODE           direct, ssh or host-dialed: how the jobs and the host reach each other (HBEP-6); the reach
@@ -228,6 +232,9 @@ tunnel-hour-helios|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|pr
 tunnel-hour-athena|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/athena.yaml|host|ready
 alpha-athena-now-serve|cluster|internal/alpha|^TestAlphaAthenaNowServe$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 alpha-athena-now-stage|cluster|internal/providerctl/conformance|^TestNowStage$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/build-stage-helper.sh|host|ready
+alpha-sano-stage|cluster|internal/providerctl/conformance|^TestSanoStage$|HPCBURST_CONFORMANCE|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml,hack/build-stage-helper.sh|host|ready
+alpha-sano-serve|cluster|internal/alpha|^TestAlphaSanoServe$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml|host|ready
+alpha-sano-handover|cluster|internal/alpha|^TestAlphaSanoHandover$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 gpu-accounting-athena-now|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml|host|ready
@@ -319,6 +326,9 @@ tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-
 alpha-athena-now-serve|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:30:00|60|-|10
+alpha-sano-stage|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|00:30:00|60|--qos=gpu1 -J hb-estimate
+alpha-sano-serve|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
+alpha-sano-handover|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
@@ -350,6 +360,9 @@ tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/h
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
+alpha-sano-stage|internal/providerctl/conformance/stagehelper
+alpha-sano-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+alpha-sano-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
@@ -373,6 +386,9 @@ tunnel-hour-helios|1
 tunnel-hour-athena|1
 alpha-athena-now-serve|1
 alpha-athena-now-stage|1
+alpha-sano-stage|1
+alpha-sano-serve|1
+alpha-sano-handover|2
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
 beta-athena-now-keeper|1
@@ -472,6 +488,8 @@ tunnel-hour-helios
 tunnel-hour-athena
 alpha-athena-now-serve
 alpha-athena-now-nooverlap
+alpha-sano-serve
+alpha-sano-handover
 beta-athena-now-router
 beta-athena-now-keeper
 beta-athena-now-bulk
@@ -635,7 +653,7 @@ load_settings() {
     [ "$k" != "$line" ] || continue
     v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
     case $k in
-      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_OWNER_GO_ATHENA_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
+      LIVE_OUT_DIR|LIVE_LOCK_DIR|LIVE_BUILD_LOCK|LIVE_LLMLAB_CREDENTIALS|LIVE_LLMLAB_MODEL|LIVE_CONF_CREDENTIALS_HELIOS|LIVE_CONF_CREDENTIALS_ATHENA|LIVE_CONF_CREDENTIALS_SANO|ACCOUNT_HELIOS_CPU|ACCOUNT_HELIOS_GH200|ACCOUNT_ATHENA_A100|ACCOUNT_SANO_GPU|LIVE_SANO_STAGING_DIR|LIVE_DIALHOME_MODE|LIVE_DIALHOME_ADDR|LIVE_DIALHOME_KEY|LIVE_DIALHOME_LISTEN|LIVE_BIN_DIR|LIVE_OWNER_GO_HELIOS_NOW|LIVE_OWNER_GO_ATHENA_NOW|LIVE_TUNNEL_LEASE_MINUTES|LIVE_PROBE_HOST|LIVE_PROBE_PORT|LIVE_PROBE_LABEL|LIVE_FRONT_HOST_LABEL)
         S[$k]=$v ;;
     esac
   done 2>/dev/null < "$HPCBURST_LIVE_SETTINGS"
@@ -669,6 +687,8 @@ check_settings() {
         case $name in
           # The pre-staging row (issue #376) is a conformance run: no stack, so no dial-home or binary setting.
           alpha-athena-now-stage) ;;
+          # Sano's pre-staging row (issue #735) is one too, with the Provider's own staging directory.
+          alpha-sano-stage) check_sano_settings || bad=1 ;;
           alpha-*|tunnel-hour-*|beta-*) check_alpha_settings "$name" || bad=1 ;;
           # The host-dialed relay rows take no probe setting; a reach row in host-dialed mode is refused when it would run
           # (run_cluster), so its probe settings are not asked for.
@@ -809,6 +829,20 @@ reach_is_host_dialed() { [ "${S[LIVE_DIALHOME_MODE]:-}" = host-dialed ]; }
 # dial-home route (the owner provides it, HBEP-6) and the directory with the pinned binaries (check_bin_dir: its layout, not
 # only that it is a directory). Every problem is reported. #174 (no-overlap queue-wait growth) needs no setting: it is on main (#208), and so in every
 # checkout that has these rows.
+# check_sano_settings: the Sano rows' Provider staging directory (issue #735), held to the form the Provider's CRD gives it: an absolute
+# path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment, and with no ':', '=' or ',' (the rows' warm-start reader
+# refuses them in the agent's log path; internal/alpha, CheckStagingDir; the package's own check runs it again). The refusal names the setting, never its value: a cluster path carries a user name.
+check_sano_settings() {
+  local d=${S[LIVE_SANO_STAGING_DIR]:-}
+  if [ -z "$d" ]; then say "live-checks: setting LIVE_SANO_STAGING_DIR is missing"; return 1; fi
+  if ! [[ $d =~ ^(/|\$[A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9._:=,/-]*$ ]] || [[ /$d/ == */../* ]] || [ "${#d}" -gt 1024 ]; then
+    say "live-checks: setting LIVE_SANO_STAGING_DIR is not an absolute path, or one that starts with a variable, of letters, digits and ._:=,/- with no .. segment"; return 1
+  fi
+  if [[ $d == *[:=,]* ]]; then
+    say "live-checks: setting LIVE_SANO_STAGING_DIR has a ':', '=' or ',' in it: the Provider's CRD takes them, but the rows read the agent's log by this path, which a command line carries unquoted, and refuse them"; return 1
+  fi
+}
+
 check_alpha_settings() {
   local name=$1 bad=0 mode host_dialed=0
   alpha_need() { [ -n "${S[$1]:-}" ] || { say "live-checks: setting $1 is missing"; bad=1; return 1; }; }
@@ -829,6 +863,15 @@ check_alpha_settings() {
   if [ "$name" = beta-athena-now-bulk ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the bulk path's buffer is read on the relays' ssh through the login node"; bad=1
   fi
+  # The Sano rows (issue #735): host-dialed alone, since Sano's compute nodes have no home for ssh mode's key (profiles/sano.yaml lists no other mode;
+  # direct is untested there, and these rows run none), and the Provider's own staging directory.
+  case $name in
+    alpha-sano-*)
+      if [ "$host_dialed" != 1 ]; then
+        say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): Sano's profile lists no other dial-home mode"; bad=1
+      fi
+      check_sano_settings || bad=1 ;;
+  esac
   if [ "$host_dialed" = 1 ]; then
     # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
     # address that is set is refused, so a row cannot read as if it had one.
@@ -896,6 +939,7 @@ EOS
 slurm_mem() {
   case $1 in
     *Gi) echo "$(( ${1%Gi} * 1024 ))M" ;;
+    *Mi) echo "${1%Mi}M" ;;
     *M) echo "$1" ;;
     *) return 1 ;;
   esac
@@ -1165,16 +1209,16 @@ not_run_verdict() {
   ! finding_present || return 1 # a FINDING's marker beside a skip is no NOT RUN: the run is a failure
   [ -n "${HOST[$n]:-}" ] || return 1
   ! second_job_marker || [ "${MOSTJOBS[$n]:-1}" -ge 2 ] || return 1
-  ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
+  ! warm_marker || case $n in alpha-athena-now-serve|alpha-athena-now-nooverlap|alpha-sano-serve) true ;; *) false ;; esac || return 1
   ! glibc_marker || case $n in beta-athena-now-router|beta-helios-now-router) true ;; *) false ;; esac || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! staged_image_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
-  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap) true ;; *) false ;; esac || return 1
+  ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap|alpha-sano-handover) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
-  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
+  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac
 }
 
 # row_a_marker: the run's NOT RUN marker says a plgrid-now row's run that did start was not put to the test (internal/alpha,
@@ -1400,7 +1444,7 @@ env_conformance() {
   up=$(printf '%s' "$host" | tr a-z A-Z)
   unset HPCBURST_CONF_GPU_MODEL HPCBURST_CONF_CPU_ARCH HPCBURST_CONF_DATA_PARSER HPCBURST_CONF_QOS HPCBURST_CONF_START_WAIT
   unset HPCBURST_CONF_PROBE_HOST HPCBURST_CONF_PROBE_PORT HPCBURST_CONF_PROBE_LABEL HPCBURST_ALPHA_PROBE_HOST HPCBURST_ALPHA_PROBE_PORT HPCBURST_ALPHA_PROBE_LABEL
-  unset HPCBURST_CONF_AGENT_BUILDS HPCBURST_ALPHA_AGENT_BIN HPCBURST_CONF_STAGE_HELPER
+  unset HPCBURST_CONF_AGENT_BUILDS HPCBURST_ALPHA_AGENT_BIN HPCBURST_CONF_STAGE_HELPER HPCBURST_CONF_STAGING_ROOT
   export HPCBURST_CONFORMANCE=1 HPCBURST_CONF_PROFILE=${PROFILE[$n]} HPCBURST_CONF_PARTITION=${PARTITION[$n]}
   export HPCBURST_CONF_CREDENTIALS=${S[LIVE_CONF_CREDENTIALS_$up]} HPCBURST_CONF_ACCOUNT=${S[${ACCTKEY[$n]}]}
   export HPCBURST_CONF_GPUS=${GPUS[$n]} HPCBURST_CONF_CPUS=${CPUS[$n]} HPCBURST_CONF_MEMORY=${MEM[$n]}
@@ -1418,6 +1462,8 @@ env_conformance() {
   case $n in
     # Only a row with no start wait: with one, the bound is the first clock and the test takes no other.
     gpu-accounting-*|reach-*) [ "${SWAIT[$n]:--}" != - ] || export HPCBURST_CONF_PENDING_MAX_SECONDS=$(pending_max "$n") ;;
+    # Sano's pre-staging row (issue #735) has no start wait either: the operator's wait in the queue is its first clock.
+    alpha-sano-stage) export HPCBURST_CONF_PENDING_MAX_SECONDS=$(pending_max "$n") ;;
   esac
   # The gateway's forwarded port reaches the reach rows only (issue #225); the host and the port are private, the label is
   # what the text to post carries.
@@ -1426,6 +1472,11 @@ env_conformance() {
     reach-host-dialed-*) export HPCBURST_CONF_AGENT_BUILDS=$HD_BUILD_DIR ;;
     # The pre-staging row (issue #376) takes its helper build, which its job runs as the Allocation's agent build.
     alpha-athena-now-stage) export HPCBURST_CONF_STAGE_HELPER=$STAGE_HELPER ;;
+    # Sano's pre-staging row (issue #735): the same helper, and the Provider's own staging directory as the root the run is below (the profile
+    # has none) and the directory it stages in, which it keeps. The directory is read from the settings here and never printed.
+    alpha-sano-stage)
+      export HPCBURST_CONF_STAGE_HELPER=$STAGE_HELPER HPCBURST_CONF_STAGING_ROOT=${S[LIVE_SANO_STAGING_DIR]}
+      export HPCBURST_CONF_STAGING=${S[LIVE_SANO_STAGING_DIR]}/hpc-burst-conformance ;;
     reach-*) export HPCBURST_CONF_PROBE_HOST=${S[LIVE_PROBE_HOST]} HPCBURST_CONF_PROBE_PORT=${S[LIVE_PROBE_PORT]} HPCBURST_CONF_PROBE_LABEL=${S[LIVE_PROBE_LABEL]} ;;
   esac
   # Where the front ran (issue #224): the variable is not HPCBURST_CONF_*, so the accounting rows' dry runs, which drop that
@@ -1452,7 +1503,9 @@ env_alpha() {
   case $n in
     tunnel-hour-*) local lh lm; IFS=: read -r lh lm _ <<<"${TLIMIT[$n]}"; export HPCBURST_ALPHA_LEASE_MINUTES=$((10#$lh * 60 + 10#$lm)) ;;
   esac
-  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN
+  unset HPCBURST_ALPHA_QOS HPCBURST_ALPHA_DIALHOME_ADDR HPCBURST_ALPHA_DIALHOME_KEY HPCBURST_ALPHA_DIALHOME_LISTEN HPCBURST_ALPHA_STAGING_DIR
+  # The Sano rows' Provider gives its own staging directory (issue #735); no other row takes one.
+  case $n in alpha-sano-*) export HPCBURST_ALPHA_STAGING_DIR=${S[LIVE_SANO_STAGING_DIR]} ;; esac
   [ "${QOS[$n]}" = - ] || export HPCBURST_ALPHA_QOS=${QOS[$n]}
   # Host-dialed mode has no address: the host dials the jobs, so none is passed.
   [ "${S[LIVE_DIALHOME_MODE]}" = host-dialed ] || export HPCBURST_ALPHA_DIALHOME_ADDR=${S[LIVE_DIALHOME_ADDR]}
@@ -1543,7 +1596,7 @@ check_slot() {
 prepare_cluster() {
   case $1 in
     real-engine) prepare_real_engine "$1" ;;
-    alpha-athena-now-stage) prepare_stage "$1" ;;
+    alpha-athena-now-stage|alpha-sano-stage) prepare_stage "$1" ;;
     alpha-*|tunnel-hour-*|beta-*) prepare_alpha "$1" ;;
     reach-host-dialed-*) prepare_host_dialed "$1" ;;
     *) build_test_binary "$1" "$OUT/$1.test" ;;
@@ -1591,6 +1644,21 @@ prepare_host_dialed() {
 # helper with the served deployment's image and checkpoint compiled in, for the compute node), before the slot is taken.
 # The test finds the helper through HPCBURST_CONF_STAGE_HELPER. Nothing here holds the slot.
 STAGE_HELPER=""
+# stage_example <name> and stage_image_format <name>: the example deployment whose image and checkpoint a pre-staging row's helper stages, and
+# the image format of the row's partition, which the helper stages (hack/build-stage-helper.sh). The Athena row's partition runs sandboxes and
+# serves the default example; Sano's runs SIFs and serves the 7B's (alpha.Row.Deployment; hack/livechecks compares them with the package's rows).
+stage_example() {
+  case $1 in
+    alpha-sano-stage) echo modeldeployment-sano-qwen25-7b-instruct.yaml ;;
+    *) echo modeldeployment-qwen25-instruct.yaml ;;
+  esac
+}
+stage_image_format() {
+  case $1 in
+    alpha-sano-stage) echo sif ;;
+    *) echo sandbox ;;
+  esac
+}
 prepare_stage() {
   local n=$1 w
   w="$OUT/$n-build-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -1598,7 +1666,7 @@ prepare_stage() {
   say "$n: building the test binary and the stage helper"
   ( cd "$ROOT" &&
     with_build_lock go test -c -o "$OUT/$n.test" "./${PKG[$n]}" &&
-    with_build_lock hack/build-stage-helper.sh "$w/stagehelper" ) >"$OUT/$n-build.log" 2>&1 ||
+    with_build_lock env STAGE_EXAMPLE="$(stage_example "$n")" STAGE_IMAGE_FORMAT="$(stage_image_format "$n")" hack/build-stage-helper.sh "$w/stagehelper" ) >"$OUT/$n-build.log" 2>&1 ||
     { say "$n: FAIL (a build step failed; see the build log in the output directory)"; return 1; }
   STAGE_HELPER=$w/stagehelper
 }
@@ -1629,6 +1697,12 @@ execute_cluster() {
     real-engine) execute_real_engine "$n" ;;
     # The pre-staging row (issue #376): a conformance run with a start wait, its first clock, inside its timeout column.
     alpha-athena-now-stage) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
+    # Sano's pre-staging row (issue #735): a conformance run with no start wait, so the operator's wait in the queue is its first clock, on top
+    # of its timeout column, as the accounting and reach rows have it.
+    alpha-sano-stage)
+      wait=$(( ($(pending_max "$n") + 59) / 60 ))
+      run_binary "$n" "$OUT/$n.test" "$(( ${TMIN[$n]} + wait ))" env_conformance
+      judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     alpha-*|tunnel-hour-*|beta-*)
       # The test owns the clocks of a queued run (HPCBURST_ALPHA_PENDING_MAX_SECONDS, then the row's run budget); this timeout
       # is the budget plus one wait in the queue for each of the row's jobs, so that no wait eats the run's time and the
@@ -1696,7 +1770,7 @@ run_cluster() {
   # A stack row's jobs carry the run's own prefix, set before the test can submit anything.
   RUN_ID=""; OWN_PREFIX=""
   case $n in
-    alpha-athena-now-stage) ;; # a conformance run: its test writes each tag down before the submit
+    alpha-athena-now-stage|alpha-sano-stage) ;; # a conformance run: its test writes each tag down before the submit
     alpha-*|tunnel-hour-*|beta-*)
       RUN_ID=$(new_run_id)
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
