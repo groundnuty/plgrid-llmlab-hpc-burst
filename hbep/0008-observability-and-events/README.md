@@ -818,7 +818,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-17: erratum: the route and the `hpcburst_events_unlogged_total` series of a controller label end with the last manager of the label that is forgotten, not the first: a Provider that changes kind has a manager of each kind for a while, and a manager set up after the label was retired revives its route (#697).
 - 2026-11-17: erratum: the S2 ratios measured for #625's publisher (#697), recorded under Retention.
 - 2026-11-18: amendment from HBEP-764: the front's series gain a `workload` label, with in-flight and waiting gauges and a speed histogram per route.
-- 2026-11-18: erratum: the OpenTelemetry mapping maps the `workload` label to the custom attribute `hpcburst.workload`, and the export check requires the label on the front's mapped histogram (the science agent's ruling on #764, Q8; for #764's PR 3). The `requestedModel` row's cut reads 1,355 bytes, as HBEP-5's Usage records says for beta.
+- 2026-11-18: erratum (the science agent's ruling Q8 on #764's stage-0 plan, 18 Nov 2026): the OpenTelemetry mapping maps the front's `workload` label to the custom attribute `hpcburst.workload`, which the export check requires; and the `requestedModel` row's bound is 1,355 bytes, as HBEP-5's Usage records has it since #769 (1,291 before Workloads).
 
 ## Amendments
 
