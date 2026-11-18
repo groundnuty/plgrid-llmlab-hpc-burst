@@ -173,23 +173,40 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 }
 
 // workloadHeaderValue is the Workload the request's header names, or "" when
-// the header is absent, empty or blank: an empty header names nothing, as an
-// empty session header does (HBEP-5, Conversation key). A header sent more than
-// once reads as its combined list (RFC 9110, section 5.3), which is one name
-// when every line says the same and otherwise names no Workload, so the
-// front's lookup refuses it with unknown_workload.
+// the header is absent or empty: an empty header names nothing, as an empty
+// session header does (HBEP-5, Conversation key). A value is trimmed of HTTP's
+// optional whitespace only, a space or a tab (RFC 9110, section 5.5); any other
+// character, a non-breaking space included, is part of the name, which then
+// names no Workload, so the front's lookup refuses it with unknown_workload and
+// such a request is never routed as one that names none (the review of #778,
+// finding 2). A header sent more than once names one Workload when every
+// non-empty value says the same. At the first value that differs from the first
+// non-empty one the walk stops and the result is those two joined by ",", which
+// is no Workload's name, so the lookup refuses it with unknown_workload. The walk
+// is one pass, a comparison for each value and none past the first difference,
+// so a request that sends thousands of values costs no more than their count
+// (finding 3).
 func workloadHeaderValue(h http.Header, name string) string {
 	if name == "" {
 		return ""
 	}
-	var vals []string
+	first := ""
 	for _, v := range h.Values(name) {
-		if v = strings.TrimSpace(v); v != "" && !slices.Contains(vals, v) {
-			vals = append(vals, v)
+		v = strings.Trim(v, " \t")
+		switch {
+		case v == "":
+		case first == "":
+			first = v
+		case !sameWorkloadValue(first, v):
+			return first + "," + v
 		}
 	}
-	return strings.Join(vals, ",")
+	return first
 }
+
+// sameWorkloadValue compares two values of the workload header. It is a variable
+// only so that a test can count the comparisons a request costs.
+var sameWorkloadValue = func(a, b string) bool { return a == b }
 
 // authenticate checks the bearer key against the client keys file.
 func (p *Proxy) authenticate(r *http.Request) (string, bool) {
@@ -226,6 +243,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		p.routeFail(w, x, rerr)
 		return
 	}
+	// The Workload this first choice resolved to, with its serving set: every later choice of this request reuses it, and none looks the name up
+	// again (HBEP-5, Workloads; the review of #778, finding 1). Nil for a request that names none.
+	wres := t.wres
 	for {
 		// Released exactly once however the request ends, including the
 		// http.ErrAbortHandler panic of a cut body (HBEP-5, Request path
@@ -279,15 +299,15 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 			unreached = append(unreached, t.key())
 			// Once the request was written somewhere, it goes only to another
 			// Instance, never to a managed provider.
-			choose := p.router.choose
+			choose := p.router.chooseAgain
 			if len(written) > 0 {
-				choose = p.router.chooseInstance
+				choose = p.router.chooseInstanceAgain
 			}
-			next, rerr := choose(x.ctx, n, key, append(slices.Clip(written), unreached...))
+			next, rerr := choose(x.ctx, n, wres, key, append(slices.Clip(written), unreached...))
 			if rerr != nil {
 				// No other target: the same one again on a fresh connection,
 				// but never one the request was written to.
-				next, rerr = choose(x.ctx, n, key, written)
+				next, rerr = choose(x.ctx, n, wres, key, written)
 			}
 			if rerr != nil {
 				p.unreachable(w, x, lastUnreached)
@@ -311,7 +331,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 		x.stopIdle()
 		x.armLease(func() (time.Time, bool) { return time.Time{}, false })
 		written = append(written, t.key())
-		next, rerr := p.router.chooseInstance(x.ctx, n, key, append(slices.Clip(written), unreached...))
+		next, rerr := p.router.chooseInstanceAgain(x.ctx, n, wres, key, append(slices.Clip(written), unreached...))
 		if rerr != nil && rerr.code != codeCapacity && rerr.cutBy == "" && rerr.status != statusClientClosed {
 			// No other Instance ready: no retry, and no header, as alpha. The
 			// failed Instance's timers are its own again.

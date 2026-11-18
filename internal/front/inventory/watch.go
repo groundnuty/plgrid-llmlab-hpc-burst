@@ -50,6 +50,9 @@ func NewWatch(client dynamic.Interface, namespaces []string, onChange func()) *W
 	if len(namespaces) == 0 {
 		namespaces = []string{""}
 	}
+	// A namespace the configuration lists twice is watched once: a second informer on it would list every object there a second time, and the
+	// view would then hold each Workload twice and refuse every request that names one as ambiguous (the review of #778, finding 4).
+	namespaces = distinct(namespaces)
 	for _, ns := range namespaces {
 		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(client, 0, ns, nil)
 		w.factories = append(w.factories, f)
@@ -63,6 +66,19 @@ func NewWatch(client dynamic.Interface, namespaces []string, onChange func()) *W
 		w.add(f, gvr)
 	}
 	return w
+}
+
+// distinct is the names without a repeat, in their order.
+func distinct(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func (w *Watch) add(f dynamicinformer.DynamicSharedInformerFactory, gvr schema.GroupVersionResource) {

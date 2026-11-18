@@ -22,6 +22,18 @@ type target struct {
 	// workload is the name of the Workload the request resolved to, "" when it
 	// named none (HBEP-5, Workloads); the usage record carries it.
 	workload string
+	// wres is that resolution, which the request's later choices reuse (Resolution); nil when it named none.
+	wres *Resolution
+}
+
+// Resolution is what a request's first choice resolved its Workload to: the Workload's namespace and name, and the ModelDeployments, by namespace and
+// name, that served it then (HBEP-5, Workloads, Who serves it). Every later choice of the same request, a retry's or a resend's, reuses it and never
+// looks the name up again, so a Workload deleted and another of the same name created in a different namespace between two attempts cannot move
+// the request to that namespace's deployments (the review of #778, finding 1). A deployment of the set that has gone since is skipped like any other
+// target that is not eligible; one that joined the Workload's namespace since is not in the set.
+type Resolution struct {
+	Namespace, Name string
+	serving         map[string]bool // namespace/name of each ModelDeployment of the serving set, served or managed-source
 }
 
 // key is the target's name for pauses and exclusion.
@@ -93,9 +105,10 @@ func errNoReadyTarget(model string) *routeError {
 
 // choose resolves a parsed name to a target (HBEP-5, Request path steps 3 to
 // 6). exclude are the targets the request already failed on, for its resend
-// and its retry (open question 5). It never widens to a broader level.
+// and its retry (open question 5). It never widens to a broader level. It is the
+// request's first choice: a Workload it names is looked up here.
 func (r *Router) choose(ctx context.Context, n naming.Name, key string, exclude []string) (*target, *routeError) {
-	return r.chooseAmong(ctx, n, key, exclude, true)
+	return r.chooseAmong(ctx, n, nil, key, exclude, true)
 }
 
 // chooseInstance is choose among Instances only, never a managed provider: a
@@ -103,10 +116,23 @@ func (r *Router) choose(ctx context.Context, n naming.Name, key string, exclude 
 // Instance (HBEP-5, open question 5: "to another ready Instance"), never run
 // again on LLMLab.
 func (r *Router) chooseInstance(ctx context.Context, n naming.Name, key string, exclude []string) (*target, *routeError) {
-	return r.chooseAmong(ctx, n, key, exclude, false)
+	return r.chooseAmong(ctx, n, nil, key, exclude, false)
 }
 
-func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exclude []string, withManaged bool) (*target, *routeError) {
+// chooseAgain is choose for a later choice of a request: res is the resolution its first choice made (target.res), nil for a request that named no
+// Workload. A named Workload is not looked up again.
+func (r *Router) chooseAgain(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string) (*target, *routeError) {
+	return r.chooseAmong(ctx, n, res, key, exclude, true)
+}
+
+// chooseInstanceAgain is chooseInstance for a later choice of a request.
+func (r *Router) chooseInstanceAgain(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string) (*target, *routeError) {
+	return r.chooseAmong(ctx, n, res, key, exclude, false)
+}
+
+// chooseAmong chooses a target. res is nil for a request's first choice, which looks up the Workload the name or the header names; it is the first
+// choice's Resolution for every later one, which then reuses it.
+func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
 	// A request waits for one rebuild, two at most under a barging reader
 	// (#417; lockFresh). The view it
 	// routes on may be a rebuild behind the transports: a target whose
@@ -126,28 +152,49 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 		return nil, errUnknownProvider(n.Provider)
 	}
 	// The Workload the request names, if it names one, is found before the model's attachment is read: the errors come in HBEP-5's order,
-	// grammar, unknown_provider, the Workload's three, then not_attached and no_ready_target (the science agent's ruling on #764, Q9).
+	// grammar, unknown_provider, the Workload's three, then not_attached and no_ready_target (the science agent's ruling on #764, Q9). It is found
+	// once, by the first choice; a later one carries the first's resolution.
+	fresh := false
 	var wl *inventory.Workload
-	if n.Workload != "" || n.HeaderWorkload != "" {
+	if res == nil && (n.Workload != "" || n.HeaderWorkload != "") {
 		var rerr *routeError
 		if wl, rerr = resolveWorkload(v, n, r.cfg.WorkloadHeader); rerr != nil {
 			r.mu.Unlock()
 			return nil, rerr
 		}
-	}
-	wname := ""
-	if wl != nil {
-		wname = wl.Name
+		fresh = true
 	}
 	m := v.Models[n.Model]
 	var serving []*inventory.Deployment
 	var sources []*inventory.ManagedSource
-	if m != nil {
+	switch {
+	case fresh && m != nil:
 		serving, sources = servingSet(m, wl)
+	case res != nil && m != nil:
+		serving, sources = savedServingSet(m, res)
+	case m != nil:
+		serving, sources = m.Served, m.ManagedSources
 	}
-	if m == nil || (wl != nil && len(serving)+len(sources) == 0) {
+	if fresh {
+		res = newResolution(wl, serving, sources)
+	}
+	wname := ""
+	if res != nil {
+		wname = res.Name
+	}
+	empty := len(serving)+len(sources) == 0
+	switch {
+	case m == nil && res == nil:
+		r.mu.Unlock()
+		return nil, errNotAttached(n.Model)
+	case fresh && empty:
+		// The Workload resolved, and no deployment serves it (or its model has none): not_attached, as HBEP-5's Errors table says.
 		r.mu.Unlock()
 		return nil, errNotAttached(n.Model).forWorkload(wname)
+	case res != nil && !fresh && empty:
+		// A later choice of a request whose serving set has gone: nothing is eligible, as for any other target that is not.
+		r.mu.Unlock()
+		return nil, errNoReadyTarget(n.Model).forWorkload(wname)
 	}
 	ring := r.rings[m.Name]
 	groups := make(map[string]*balancer.Group, len(serving))
@@ -157,7 +204,7 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 	now := r.clk.Now()
 	var managed []*inventory.ManagedTarget
 	for _, t := range m.Managed {
-		if withManaged && (wl == nil || t.Serves(wl)) && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
+		if withManaged && (res == nil || res.serving[t.Deployment]) && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) && !r.pausedLocked(t.Key, now) {
 			managed = append(managed, t)
 		}
 	}
@@ -168,12 +215,12 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 
 	tg, wait := r.chooseServed(serving, ring, groups, n, key, exclude)
 	if tg != nil {
-		tg.workload = wname
+		tg.workload, tg.wres = wname, res
 		return tg, nil
 	}
 	if len(managed) > 0 {
 		tg := chooseManaged(managed, key)
-		tg.workload = wname
+		tg.workload, tg.wres = wname, res
 		return tg, nil
 	}
 	if wait == nil {
@@ -181,7 +228,7 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, key string, exc
 	}
 	tg, rerr := r.waitServed(ctx, wait, groups[wait.Key], m, n, key, exclude)
 	if tg != nil {
-		tg.workload = wname
+		tg.workload, tg.wres = wname, res
 	}
 	if rerr != nil {
 		rerr.workload = wname
@@ -206,6 +253,36 @@ func servingSet(m *inventory.Model, wl *inventory.Workload) ([]*inventory.Deploy
 	var sources []*inventory.ManagedSource
 	for _, s := range m.ManagedSources {
 		if s.Serves(wl) {
+			sources = append(sources, s)
+		}
+	}
+	return served, sources
+}
+
+// newResolution records the serving set a Workload resolved to.
+func newResolution(wl *inventory.Workload, served []*inventory.Deployment, sources []*inventory.ManagedSource) *Resolution {
+	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, serving: map[string]bool{}}
+	for _, d := range served {
+		res.serving[d.Key] = true
+	}
+	for _, s := range sources {
+		res.serving[s.Key] = true
+	}
+	return res
+}
+
+// savedServingSet is the part of the model's ModelDeployments, in the view now, that a Resolution's serving set holds: the set the request resolved
+// to, less any deployment that has gone, and no deployment that is new.
+func savedServingSet(m *inventory.Model, res *Resolution) ([]*inventory.Deployment, []*inventory.ManagedSource) {
+	var served []*inventory.Deployment
+	for _, d := range m.Served {
+		if res.serving[d.Key] {
+			served = append(served, d)
+		}
+	}
+	var sources []*inventory.ManagedSource
+	for _, s := range m.ManagedSources {
+		if res.serving[s.Key] {
 			sources = append(sources, s)
 		}
 	}

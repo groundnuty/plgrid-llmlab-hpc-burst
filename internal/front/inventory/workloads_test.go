@@ -160,3 +160,36 @@ func TestWatchReadsWorkloads(t *testing.T) {
 		}
 	}
 }
+
+// Finding 4 of the review of #778: a namespace the configuration lists twice is watched once, so each Workload is listed once. Two different
+// namespaces holding one name still give two entries, which is the ambiguity (workload_ambiguous).
+func TestWatchWatchesARepeatedNamespaceOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := workload("team-a", "analysis", "m")
+	b := workload("team-b", "analysis", "m")
+	for name, c := range map[string]struct {
+		namespaces []string
+		want       int
+	}{
+		"a namespace listed twice":                  {[]string{"team-a", "team-a"}, 1},
+		"a namespace listed three times among more": {[]string{"team-a", "team-b", "team-a", "team-b", "team-a"}, 2},
+		"two different namespaces":                  {[]string{"team-a", "team-b"}, 2},
+		"one namespace":                             {[]string{"team-a"}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := NewWatch(newFakeDynamic(toUnstructured(t, &a, "Workload"), toUnstructured(t, &b, "Workload")), c.namespaces, nil)
+			if err := w.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			s, problems := w.Snapshot()
+			if len(problems) != 0 || len(s.Workloads) != c.want {
+				t.Fatalf("namespaces %v: %d Workloads in the snapshot, problems %v; want %d", c.namespaces, len(s.Workloads), problems, c.want)
+			}
+			v := Build(s, Inputs{Now: now, MaxRequestDuration: 2 * time.Hour})
+			if got := len(v.Workloads["m"]["analysis"]); got != c.want {
+				t.Errorf("namespaces %v: the view holds %d Workloads named analysis of model m, want %d", c.namespaces, got, c.want)
+			}
+		})
+	}
+}
