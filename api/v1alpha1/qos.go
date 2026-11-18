@@ -15,6 +15,9 @@ const (
 	LimitMaxGPUsPerUser   = "maxGpusPerUser"
 	LimitMaxCPUsPerUser   = "maxCpusPerUser"
 	LimitMaxMemPerUser    = "maxMemPerUser"
+	LimitMaxGPUsPerJob    = "maxGpusPerJob"
+	LimitMaxCPUsPerJob    = "maxCpusPerJob"
+	LimitMaxMemPerJob     = "maxMemPerJob"
 )
 
 // QOSLimits are the QOS limits that apply to a job on one partition under one
@@ -31,6 +34,12 @@ type QOSLimits struct {
 	MaxGPUsPerUser *int32
 	MaxCPUsPerUser *int32
 	MaxMemPerUser  *resource.Quantity
+	// MaxGPUsPerJob, MaxCPUsPerJob and MaxMemPerJob bound one job (the QOS's
+	// MaxTRES), each taken from the first QOS in Slurm's order that sets it,
+	// as the per-user limits are (HBEP-4, QOS limits; #745).
+	MaxGPUsPerJob *int32
+	MaxCPUsPerJob *int32
+	MaxMemPerJob  *resource.Quantity
 	// From names the QOS that set each limit, keyed by the limit's name
 	// (LimitMaxWall and the rest). A limit that no QOS sets has no entry.
 	From map[string]string
@@ -108,8 +117,43 @@ func EffectiveQOSLimits(spec *PlatformProfileSpec, partition PartitionProfile, j
 			v := q.MaxMemPerUser.DeepCopy()
 			out.MaxMemPerUser, out.From[LimitMaxMemPerUser] = &v, q.Name
 		}
+		if out.MaxGPUsPerJob == nil && q.MaxGPUsPerJob != nil {
+			v := *q.MaxGPUsPerJob
+			out.MaxGPUsPerJob, out.From[LimitMaxGPUsPerJob] = &v, q.Name
+		}
+		if out.MaxCPUsPerJob == nil && q.MaxCPUsPerJob != nil {
+			v := *q.MaxCPUsPerJob
+			out.MaxCPUsPerJob, out.From[LimitMaxCPUsPerJob] = &v, q.Name
+		}
+		if out.MaxMemPerJob == nil && q.MaxMemPerJob != nil {
+			v := q.MaxMemPerJob.DeepCopy()
+			out.MaxMemPerJob, out.From[LimitMaxMemPerJob] = &v, q.Name
+		}
 	}
 	return out, nil
+}
+
+// QOSForGPUs returns the QOS a job of gpus GPUs on the partition runs under.
+// Where the partition sets qosByGpus it is the QOS of the first entry whose
+// gpus is at least the count; a count above the last entry has no QOS and is
+// an error, never a QOS (HBEP-4, The Slurm dialect, The QOS by GPU count;
+// #745). Without qosByGpus it is providerQOS, the Provider's qos, or "" when
+// it sets none, as before. The plan and the Slurm plugin both choose through
+// this one function, so the chosen QOS is the job's QOS for every limit
+// (HBEP-4, QOS limits); a request below the first entry's gpus gets the first
+// entry's QOS (#745 does not speak of a count of 0, which the plugin refuses
+// on a GPU partition).
+func QOSForGPUs(partition PartitionProfile, providerQOS string, gpus int32) (string, error) {
+	if len(partition.QOSByGPUs) == 0 {
+		return providerQOS, nil
+	}
+	for _, e := range partition.QOSByGPUs {
+		if gpus <= e.GPUs {
+			return e.QOS, nil
+		}
+	}
+	last := partition.QOSByGPUs[len(partition.QOSByGPUs)-1]
+	return "", fmt.Errorf("partition %s: %d GPUs is above the %d of its last qosByGpus entry (qos %s), so no QOS fits it", partition.Name, gpus, last.GPUs, last.QOS)
 }
 
 // TimeLimitBound names the bound that set an Allocation's time limit, which a
@@ -152,23 +196,60 @@ func AllocationTimeLimit(maxTime, maxWall, leaseLimit *time.Duration) (limit tim
 	return limit, bound, limit >= time.Minute
 }
 
-// MaxAllocationGPUs returns the most GPUs one Allocation may request on the
-// partition under the QOS limits that apply: the smaller of the partition's
-// gpusPerNode, the node's hardware, and the limits' maxGpusPerUser, each when
-// set; the one that is set when only one is. A larger count is refused, never
-// capped, because it is the engine's tensor-parallel size times its
-// pipeline-parallel size (HBEP-4, Submission, GPU sizing; HBEP-7,
+// Names of the bounds on an Allocation's GPU count, as GPUBound.By holds them.
+const (
+	// GPUBoundPerNode is the partition's gpusPerNode, the node's hardware.
+	GPUBoundPerNode = "gpusPerNode"
+	// GPUBoundQOSByGPUs is the last entry's gpus of the partition's qosByGpus.
+	GPUBoundQOSByGPUs = "qosByGpus"
+)
+
+// GPUBound is the most GPUs one Allocation may request on a partition, and the
+// bound that sets it: GPUBoundPerNode, GPUBoundQOSByGPUs, LimitMaxGPUsPerUser
+// or LimitMaxGPUsPerJob. A tie names the first of them in that order.
+type GPUBound struct {
+	Most int32
+	By   string
+}
+
+// AllocationGPUBound returns the most GPUs one Allocation may request on the
+// partition under the QOS limits that apply: the smallest of the partition's
+// gpusPerNode, the node's hardware, the last entry's gpus of its qosByGpus
+// (the QOS depends on the count, so the list's own end bounds it; HBEP-4,
+// Submission, GPU sizing; #745), and the limits' maxGpusPerUser and
+// maxGpusPerJob, each when set; the smallest one that is set. A larger count
+// is refused, never capped, because it is the engine's tensor-parallel size
+// times its pipeline-parallel size (HBEP-4, Submission, GPU sizing; HBEP-7,
 // Provisioning). The QOS cap bounds the request even when the profile does not
-// give gpusPerNode (review of PR #155, N4). ok is false only when neither is
-// set: no bound is known.
-func MaxAllocationGPUs(partition PartitionProfile, limits QOSLimits) (int32, bool) {
-	switch {
-	case partition.GPUsPerNode == nil && limits.MaxGPUsPerUser == nil:
-		return 0, false
-	case partition.GPUsPerNode == nil:
-		return *limits.MaxGPUsPerUser, true
-	case limits.MaxGPUsPerUser == nil:
-		return *partition.GPUsPerNode, true
+// give gpusPerNode (review of PR #155, N4). ok is false only when none is set:
+// no bound is known. The limits are those of the job's QOS (QOSForGPUs).
+func AllocationGPUBound(partition PartitionProfile, limits QOSLimits) (GPUBound, bool) {
+	var best GPUBound
+	ok := false
+	consider := func(n int32, by string) {
+		if !ok || n < best.Most {
+			best, ok = GPUBound{Most: n, By: by}, true
+		}
 	}
-	return min(*partition.GPUsPerNode, *limits.MaxGPUsPerUser), true
+	if partition.GPUsPerNode != nil {
+		consider(*partition.GPUsPerNode, GPUBoundPerNode)
+	}
+	if n := len(partition.QOSByGPUs); n > 0 {
+		consider(partition.QOSByGPUs[n-1].GPUs, GPUBoundQOSByGPUs)
+	}
+	if limits.MaxGPUsPerUser != nil {
+		consider(*limits.MaxGPUsPerUser, LimitMaxGPUsPerUser)
+	}
+	if limits.MaxGPUsPerJob != nil {
+		consider(*limits.MaxGPUsPerJob, LimitMaxGPUsPerJob)
+	}
+	return best, ok
+}
+
+// MaxAllocationGPUs returns the most GPUs one Allocation may request on the
+// partition under the QOS limits that apply (AllocationGPUBound's Most). ok is
+// false only when no bound is set.
+func MaxAllocationGPUs(partition PartitionProfile, limits QOSLimits) (int32, bool) {
+	b, ok := AllocationGPUBound(partition, limits)
+	return b.Most, ok
 }

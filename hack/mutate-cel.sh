@@ -131,6 +131,7 @@ platformprofiles:$.spec#0|^TestPlatformProfileTypedFields$
 platformprofiles:$.spec#1|^TestPartitionQOSIsListed$
 platformprofiles:$.spec#2|^TestExpectedPerformanceKeyIsUnique$
 platformprofiles:$.spec#3|^TestGatewayOnlyOnAManagedProfile$
+platformprofiles:$.spec#4|^TestQOSByGPUsQOSIsListed$
 platformprofiles:$.spec.drainMargin#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.drainWindow#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.expectedPerformance[].capacityFlags#0|^TestCapacityFlagsAlwaysHoldMaxNumSeqs$
@@ -151,9 +152,13 @@ platformprofiles:$.spec.lostGrace#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.maxIdle#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.minJobAge#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.partitions[]#0|^TestPartitionTmpDirFeatureNeedsTmpDir$
+platformprofiles:$.spec.partitions[]#1|^TestQOSByGPUsIsStrictlyIncreasing$
 platformprofiles:$.spec.partitions[].maxTime#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.partitions[].tmpDir#0|^TestPartitionTmpDirRefusesDotDotSegments$
+platformprofiles:$.spec.qos[].maxCpusPerJob#0|^TestQOSMaxPerJobCapsArePositive$
 platformprofiles:$.spec.qos[].maxCpusPerUser#0|^TestQOSMaxCpusPerUserIsPositive$
+platformprofiles:$.spec.qos[].maxGpusPerJob#0|^TestQOSMaxPerJobCapsArePositive$
+platformprofiles:$.spec.qos[].maxMemPerJob#0|^TestQOSMaxPerJobCapsArePositive$
 platformprofiles:$.spec.qos[].maxMemPerUser#0|^TestQOSMaxMemPerUserIsPositive$
 platformprofiles:$.spec.qos[].maxWall#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.backoff#0|^TestDurationsArePositiveAndFit$
