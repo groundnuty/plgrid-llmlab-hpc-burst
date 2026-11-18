@@ -118,7 +118,7 @@ const frontEntryName = "front"
 // frontEntry is the front's supervised entry, or nil when no front was configured. Its command
 // line is the contract with cmd/hpcburst-front: it fills an agentapi.Host from --state-dir and
 // --port-base (the Instance keys and the agent endpoint's certificate live there), reads the
-// kubeconfig in the state directory, and takes the dial-home mode the launcher recorded.
+// front identity's kubeconfig (--kubeconfig), and takes the dial-home mode the launcher recorded.
 func (s *State) frontEntry(l layout) (*supervised, error) {
 	if s.FrontRun == nil {
 		return nil, nil
@@ -127,7 +127,9 @@ func (s *State) frontEntry(l layout) (*supervised, error) {
 		return nil, errors.New("the launcher record has no front health port")
 	}
 	health := s.Ports.FrontHealthAddr()
-	args := []string{"--config", s.FrontRun.Config, "--state-dir", l.dir, "--port-base", strconv.Itoa(s.Ports.Base()), "--health-addr", health}
+	// The front reads its own identity's kubeconfig, by path (HBEP-10, Audit; #660), never the admin one.
+	args := []string{"--config", s.FrontRun.Config, "--state-dir", l.dir, "--port-base", strconv.Itoa(s.Ports.Base()), "--health-addr", health,
+		"--kubeconfig", l.controllerKubeconfig(ControllerFrontIdentity)}
 	if s.Front.Mode != "" {
 		args = append(args, "--mode", s.Front.Mode)
 	}

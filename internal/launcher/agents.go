@@ -240,12 +240,22 @@ func sameField(got, want *unstructured.Unstructured, key string) bool {
 	return gok == wok && apiequality.Semantic.DeepEqual(g, w)
 }
 
+// resourceOf is the client of want's kind: namespaced when want names a namespace (a Role, a RoleBinding),
+// else cluster-wide (a ClusterRole, a ClusterRoleBinding).
+func resourceOf(dyn dynamic.Interface, gvr schema.GroupVersionResource, want *unstructured.Unstructured) dynamic.ResourceInterface {
+	if ns := want.GetNamespace(); ns != "" {
+		return dyn.Resource(gvr).Namespace(ns)
+	}
+	return dyn.Resource(gvr)
+}
+
 // resetFields makes the top-level fields keys of the existing object named like want equal to want's:
 // set when want has the field, removed when it has not. An object that does not exist is left to the
 // apply. A conflicting write is retried.
 func resetFields(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, want *unstructured.Unstructured, keys ...string) error {
+	res := resourceOf(dyn, gvr, want)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur, err := dyn.Resource(gvr).Get(ctx, want.GetName(), metav1.GetOptions{})
+		cur, err := res.Get(ctx, want.GetName(), metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -267,7 +277,7 @@ func resetFields(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVer
 		if !changed {
 			return nil
 		}
-		_, err = dyn.Resource(gvr).Update(ctx, cur, metav1.UpdateOptions{FieldManager: fieldManager})
+		_, err = res.Update(ctx, cur, metav1.UpdateOptions{FieldManager: fieldManager})
 		return err
 	})
 	if err != nil {

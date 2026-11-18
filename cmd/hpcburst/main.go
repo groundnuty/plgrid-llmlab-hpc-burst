@@ -12,6 +12,7 @@
 //	hpcburst scale|end|release   create an Operation that lowers capacity, show its plan, and ask to confirm it
 //	hpcburst confirm|approve OPERATION --plan ID   confirm a plan as its owner, or approve it as an approver
 //	hpcburst approvals|operation   list what the caller may approve, or show an Operation's plan and report
+//	hpcburst inventory [-n NS | -A] [--owner USER]   one read-only query: every ModelDeployment, Allocation and Instance the caller can read
 //	hpcburst version           print the binary's release from its build information
 //
 // "hpcburst version" prints one line, "hpcburst <tag> <commit> <time>[ dirty]" (internal/version
@@ -39,6 +40,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/launcher"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/version"
@@ -51,7 +53,7 @@ const (
 	exitStopped   = 3
 	exitBuilds    = 4
 	envBinDir     = "HPCBURST_BIN_DIR"
-	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|accounting|scale|end|release|confirm|approvals|approve|operation|version> [flags]  (hpcburst <command> -h lists a command's flags)"
+	usageSummary  = "usage: hpcburst <up|status|upgrade|restore|down|guard|identity|accounting|scale|end|release|confirm|approvals|approve|operation|inventory|version> [flags]  (hpcburst <command> -h lists a command's flags)"
 	stateDirUsage = "state directory (default $XDG_STATE_HOME/hpcburst, or ~/.local/state/hpcburst)"
 	binDirUsage   = "directory with the pinned k3s binaries, as hack/fetch-k3s.sh lays them out (default $" + envBinDir + ", or $XDG_CACHE_HOME/hpcburst/k3s, or ~/.cache/hpcburst/k3s)"
 )
@@ -99,6 +101,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "approve":
 		return cmdAgent(ctx, args, stdout, stderr)
 	case "operation":
+		return cmdAgent(ctx, args, stdout, stderr)
+	case "inventory":
 		return cmdAgent(ctx, args, stdout, stderr)
 	case "version":
 		return version.Command("hpcburst", args[1:], stdout, stderr)
@@ -276,6 +280,9 @@ func cmdUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case launcher.GlobalPolicyNoCRD:
 		fmt.Fprintf(stdout, "global ApprovalPolicy: not written, the definition does not exist\n")
 	}
+	for _, id := range rep.ControllerIdentities {
+		fmt.Fprintf(stdout, "controller identity %s: issued, expires %s (%s)\n", id.Name, id.Expires.Format(time.RFC3339), id.Kubeconfig)
+	}
 	printAgentBuilds(stdout, rep.AgentBuilds)
 	return done()
 }
@@ -409,6 +416,7 @@ func printStatus(w io.Writer, r *launcher.StatusReport) {
 	printAdmission(w, r.AdmissionPolicies)
 	printGlobalPolicy(w, r.GlobalApprovalPolicy)
 	printAgents(w, r)
+	printControllerIdentities(w, r)
 	// One "front:" line. The address is where Instances dial home; the front itself is the process
 	// the supervisor runs. A host with no front process says so, with the address when one is recorded.
 	switch addr := r.Front != nil && r.Front.Set(); {

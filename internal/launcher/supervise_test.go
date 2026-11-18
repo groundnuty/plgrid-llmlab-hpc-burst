@@ -265,16 +265,20 @@ func TestSupervisedSetCommandLine(t *testing.T) {
 		front Front
 		want  []string
 	}{
-		{"no front", Front{}, []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}},
+		{"no front", Front{}, []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+			"--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig"}},
 		{"direct front", Front{Mode: "direct", Addr: "front.example.test:8443"},
 			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+				"--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig",
 				"--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
 		{"ssh front", Front{Mode: "ssh", Addr: "front.example.test:22", KeyPath: "/ignored"},
 			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+				"--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig",
 				"--front-mode", "ssh", "--front-addr", "front.example.test:22"}},
 		// Host-dialed has no address: the mode is passed and --front-addr is not (HBEP-6, Dial-home modes).
 		{"host-dialed front", Front{Mode: "host-dialed"},
 			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226",
+				"--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig",
 				"--front-mode", "host-dialed"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -325,6 +329,10 @@ func TestSuperviseCommandLine(t *testing.T) {
 				"--state-dir", f.l.dir,
 				"--port-base", strconv.Itoa(f.ports.Controller - 6),
 				"--health-addr", "127.0.0.1:" + strconv.Itoa(f.ports.Controller),
+				// The controller identities' kubeconfigs, by path, typed out (HBEP-10, Audit; #660): the layout
+				// that #659's loader refuses by path.
+				"--kubeconfig", f.l.dir + "/identities/system/hpcburst-lifecycle.kubeconfig",
+				"--provider-kubeconfig", f.l.dir + "/identities/system/hpcburst-provider.kubeconfig",
 			}, c.extra...)
 			if got := f.argvOf(pid); !slices.Equal(got, want) {
 				t.Errorf("controller argv\n got %q\nwant %q", got, want)
@@ -402,7 +410,8 @@ func TestSupervisedSetRunsTheFront(t *testing.T) {
 			if f.Path != "/opt/hpcburst-front" || f.Health != "127.0.0.1:29224" {
 				t.Errorf("front entry %+v", f)
 			}
-			want := append([]string{"--config", "/etc/front.json", "--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29224"}, c.extra...)
+			want := append([]string{"--config", "/etc/front.json", "--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29224",
+				"--kubeconfig", "/run/st/identities/system/hpcburst-front.kubeconfig"}, c.extra...)
 			if !slices.Equal(f.Args, want) {
 				t.Errorf("front argv\n got %q\nwant %q", f.Args, want)
 			}

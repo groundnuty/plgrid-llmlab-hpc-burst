@@ -85,13 +85,18 @@ import (
 
 // flags are the command line, parsed.
 type flags struct {
-	host        agentapi.Host
-	kubeconfig  string
-	healthAddr  string
-	frontMode   string
-	frontAddr   string
-	leaderElect bool
-	workers     int
+	host       agentapi.Host
+	kubeconfig string
+	// providerKubeconfig is --provider-kubeconfig (HBEP-10, Audit; #660): the kubeconfig the Provider
+	// managers read, the identity hpcburst-provider's; the launcher passes it beside --kubeconfig, which is
+	// hpcburst-lifecycle's. Empty means the Provider managers share --kubeconfig's configuration, as they did
+	// before the controllers had identities of their own: a binary started by hand keeps its defaults.
+	providerKubeconfig string
+	healthAddr         string
+	frontMode          string
+	frontAddr          string
+	leaderElect        bool
+	workers            int
 	// relayKeeperSocket is the relay keeper's socket (beta; HBEP-6, The
 	// relay keeper; #343): set, host-dialed relays are the keeper's, and the
 	// controller sends it desired sets; "" is alpha, the relays the
@@ -122,7 +127,8 @@ func parse(args []string, stderr io.Writer) (flags, error) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&f.host.StateDir, "state-dir", "", "the launcher's state directory (required)")
 	fs.IntVar(&f.host.PortBase, "port-base", 0, "the launcher's loopback port base (required)")
-	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "the control plane's kubeconfig (default <state-dir>/kubeconfig)")
+	fs.StringVar(&f.kubeconfig, "kubeconfig", "", "the control plane's kubeconfig of the lifecycle and verification managers and the agent API (default <state-dir>/kubeconfig); the launcher passes the identity hpcburst-lifecycle's")
+	fs.StringVar(&f.providerKubeconfig, "provider-kubeconfig", "", "the control plane's kubeconfig of the Provider managers; the launcher passes the identity hpcburst-provider's; unset, they use --kubeconfig's")
 	fs.StringVar(&f.healthAddr, "health-addr", "", "loopback host:port of /healthz and /readyz (required)")
 	fs.StringVar(&f.frontMode, "front-mode", "", "the recorded dial-home mode: direct, ssh or host-dialed")
 	fs.StringVar(&f.frontAddr, "front-addr", "", "the recorded front address; direct and ssh need it, host-dialed takes none because the host dials the jobs")
@@ -251,6 +257,17 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return fmt.Errorf("kubeconfig: %w", err)
 	}
+	if d.wrapConfig != nil {
+		d.wrapConfig(cfg)
+	}
+	// The Provider managers' own identity, when the launcher gave one (HBEP-10, Audit; #660): a configuration
+	// of its own, never the lifecycle one's object. Without --provider-kubeconfig they share cfg, as before.
+	providerCfg := cfg
+	if f.providerKubeconfig != "" {
+		if providerCfg, err = clientcmd.BuildConfigFromFlags("", f.providerKubeconfig); err != nil {
+			return fmt.Errorf("provider kubeconfig: %w", err)
+		}
+	}
 	opts := managerOptions(f, cfg, os.Getenv)
 	opts.Registry = d.registry
 	opts.RelayKeeperSocket = f.relayKeeperSocket
@@ -282,7 +299,7 @@ func run(ctx context.Context, f flags, d deps) error {
 	if err != nil {
 		return err
 	}
-	w := wiring{cfg: cfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, events: events, eventLog: logPub, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
+	w := wiring{cfg: cfg, providerCfg: providerCfg, host: f.host, scheme: scheme, front: front, hubEndpoint: opts.HubEndpoint, newPlatform: d.newPlatform, listen: ls.Listen, events: events, eventLog: logPub, log: ctrl.Log.WithName("hpcburst-controller").WithValues("portBase", f.host.PortBase)}
 	w.keeperSocket = f.relayKeeperSocket
 	if err := mount(mgr, w, backend); err != nil {
 		return err
