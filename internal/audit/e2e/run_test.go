@@ -137,17 +137,31 @@ func (s *scenario) operations() {
 	if err := w.admin.c.Create(w.ctx, w.approval("ap-person", plannedA, planID, w.admin)); err != nil {
 		t.Fatalf("the person's Approval: %v", err)
 	}
-	eventually(t, 90*time.Second, "the controller counts the Approval", func() (bool, string) {
-		op := w.getOperation("end-a")
-		c := apimeta.FindStatusCondition(op.Status.Conditions, v1alpha1.ConditionExecutable)
-		if c == nil {
-			return false, fmt.Sprintf("phase %q, no Executable condition", op.Status.Phase)
-		}
-		return c.Reason == v1alpha1.ReasonExecutionNotBuilt, fmt.Sprintf("phase %q, Executable %s: %s", op.Status.Phase, c.Reason, c.Message)
+	eventually(t, 90*time.Second, "the controller counts the Approval and commits the plan", func() (bool, string) {
+		return operationCommitted(w.getOperation("end-a"))
 	})
 	windowEnd := time.Now()
 	s.plannedA, s.planID, s.purposeA, s.purposeB, s.markerB, s.secretMarker, s.windowStart, s.windowEnd =
 		plannedA, planID, purposeA, purposeB, markerB, secretMarker, windowStart, windowEnd
+}
+
+// operationCommitted says whether the controller has counted the Approval: it commits an approved plan and executes it, so the
+// Operation's Executable reason is Executing (or Done, once its targets are over), or its phase is Executing, PartlyFailed or
+// Done. The message reports the phase and the condition either way. It does not wait for Done: this world has no Provider
+// controller to carry a release out.
+func operationCommitted(op *v1alpha1.Operation) (bool, string) {
+	c := apimeta.FindStatusCondition(op.Status.Conditions, v1alpha1.ConditionExecutable)
+	cond := "no Executable condition"
+	committed := false
+	if c != nil {
+		cond = fmt.Sprintf("Executable %s: %s", c.Reason, c.Message)
+		committed = c.Reason == v1alpha1.ReasonExecuting || c.Reason == v1alpha1.ReasonDone
+	}
+	switch op.Status.Phase {
+	case v1alpha1.OperationPhaseExecuting, v1alpha1.OperationPhasePartlyFailed, v1alpha1.OperationPhaseDone:
+		committed = true
+	}
+	return committed, fmt.Sprintf("phase %q, %s", op.Status.Phase, cond)
 }
 
 // secret has the person create, read and patch a Secret whose value is the random marker.
