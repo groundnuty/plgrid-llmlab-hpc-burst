@@ -42,9 +42,6 @@ type agentState struct {
 	reportAt   time.Time
 	reportFrom string
 	health     map[string]*tracker
-	// kv is the record of each Instance's status.kvCacheTokens: the key of every worker whose report gave
-	// the value now written, by the Instance's UID (kvcache.go).
-	kv map[string]map[string]kvKey
 }
 
 // tracker follows one engine process's health over successive samples, for

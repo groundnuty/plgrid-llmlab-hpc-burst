@@ -61,8 +61,7 @@ func verifiedGeneration(in *v1alpha1.Instance) *int64 {
 
 // routerHealthy is the workers the router holds healthy and not ejected, from a report that echoes the
 // desired router generation: none once the router has exited. ok is false when the report says nothing
-// current. It is the one set healthyCount counts and the KV cache size's smallest value is taken over
-// (kvcache.go).
+// current. It is the set healthyCount counts; the KV cache size is taken over a subset of it (kvRouterWorkers).
 func routerHealthy(in *v1alpha1.Instance, av agentView) (names []string, ok bool) {
 	rr := currentRouter(in, av)
 	switch {
@@ -89,16 +88,35 @@ func healthyCount(in *v1alpha1.Instance, av agentView) (int32, bool) {
 	return int32(len(names)), ok
 }
 
-// writeHealthyWorkers writes status.healthyWorkers when a current report changes it.
-func (p *pass) writeHealthyWorkers(in *v1alpha1.Instance, av agentView) error {
-	if !routed(in) {
+// writeWorkerCounts writes status.healthyWorkers and status.kvCacheTokens from a report, in ONE status
+// update when either changes, and none when neither does. The front's cap is healthyWorkers times
+// launch.maxNumSeqs and its token budget is kvCacheTokens times healthyWorkers, so two updates would
+// let it read a mixed pair between them: 2 workers at 400000 before 2 workers at 100000 lands, when a
+// 100000 worker rejoins a 400000 one (PR 780's review). healthyWorkers follows #429's rule only
+// (healthyCount, behind a router); the KV cache size follows kvcache.go's.
+func (p *pass) writeWorkerCounts(in *v1alpha1.Instance, av agentView) error {
+	var changes []func(*v1alpha1.InstanceStatus)
+	if routed(in) {
+		if n, ok := healthyCount(in, av); ok && (in.Status.HealthyWorkers == nil || *in.Status.HealthyWorkers != n) {
+			changes = append(changes, func(s *v1alpha1.InstanceStatus) { s.HealthyWorkers = &n })
+		}
+	}
+	if kv := kvTokens(in, av); !equalInt64Ptr(in.Status.KVCacheTokens, kv) {
+		changes = append(changes, func(s *v1alpha1.InstanceStatus) { s.KVCacheTokens = kv })
+	}
+	if len(changes) == 0 {
 		return nil
 	}
-	n, ok := healthyCount(in, av)
-	if !ok || (in.Status.HealthyWorkers != nil && *in.Status.HealthyWorkers == n) {
-		return nil
-	}
-	return p.setStatus(in, func(s *v1alpha1.InstanceStatus) { s.HealthyWorkers = &n })
+	return p.setStatus(in, func(s *v1alpha1.InstanceStatus) {
+		for _, f := range changes {
+			f(s)
+		}
+	})
+}
+
+// equalInt64Ptr reports whether two optional numbers are both absent or equal.
+func equalInt64Ptr(a, b *int64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 // routerCheckSignal is the worker's own signal behind a router: the router holds it failing its active

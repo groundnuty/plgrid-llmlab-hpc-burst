@@ -69,11 +69,11 @@ func TestTwoWorkersKVCacheSizeFollowsTheRoutersHealthySet(t *testing.T) {
 	startUntil(rg, "md", 2*time.Minute, "the field 380000", func() bool { return kvTokensOf(rg, name) == "380000" })
 }
 
-// One worker, no router: the field is its reported size, 400000. A report with no size, at the same
-// generation, leaves it (the agent carries the size past a failed read, so a report without one is an
-// agent that has none). The worker's process restarts at generation 1, with no size at first: the field
-// is unset, and when the new process reports its own, 420000, that is the field.
-func TestOneWorkersKVCacheSizeSurvivesASizelessReportAndNotARestart(t *testing.T) {
+// One worker, no router: the field is its reported size, 400000. A report with no size UNSETS it (the
+// revised Q4: the field is the size of the counted workers of the report, with no memory), and the size
+// the worker reports next is written again. The worker's process then restarts at generation 1, with no
+// size at first: the field is unset, and when the new process reports its own, 420000, that is the field.
+func TestOneWorkersKVCacheSizeIsUnsetByASizelessReportAndFollowsARestart(t *testing.T) {
 	silent, hold := false, false
 	rg := newRig(t)
 	rg.engine = func(string) afake.Engine {
@@ -98,18 +98,14 @@ func TestOneWorkersKVCacheSizeSurvivesASizelessReportAndNotARestart(t *testing.T
 		t.Fatalf("one worker reporting 400000: the field is %s", got)
 	}
 
-	// No size in the reports, the same generation: the field stays. The last report is shown to have none.
+	// No size in the reports: the field is unset. The last report is shown to have none.
 	silent = true
-	for range 3 {
-		startStep(rg, "md", startTick)
-	}
+	startUntil(rg, "md", 2*time.Minute, "the field unset by reports with no size", func() bool { return kvTokensOf(rg, in.Name) == "unset" })
 	if h := lastWorkerHealth(ag, "worker-0"); h == nil || h.KVCacheTokens != nil {
 		t.Fatalf("the last report carries %+v, want a Health with no KVCacheTokens", h)
 	}
-	if got := kvTokensOf(rg, in.Name); got != "400000" {
-		t.Fatalf("after reports with no size at the same generation the field is %s, want 400000 left", got)
-	}
 	silent = false
+	startUntil(rg, "md", 2*time.Minute, "the size written again", func() bool { return kvTokensOf(rg, in.Name) == "400000" })
 
 	// The worker's process dies and restarts at generation 1, whose reports carry no size yet.
 	hold = true
