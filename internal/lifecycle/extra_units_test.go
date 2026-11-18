@@ -536,3 +536,51 @@ func TestAnAllocationOfTheProviderWhoseDeploymentViewDoesNotShowItCountsItsHando
 		}
 	}
 }
+
+// TestAnUnresolvedReplacementHedgesMembersCountOnTheirOwnProvider (D2, point 2; the U5 erratum): md-a (no end time) has its primary p
+// Running on provider-a, and p's replacement hedge, unresolved: r-b on provider-b and r-c on provider-c, both Pending with their
+// Allocations listed, r-c the older. md-e's extra on provider-b (md-e ends at 09:30; its primary pe listed there). By hand,
+// listed pe 1 + r-b 1 = 2, and r-b's handover, which it holds if it wins, 1, and the extra 1 = 4: refused at limit 3 and
+// admitted at limit 4. The old reader skipped p (a live replacement carries its handover) and counted nothing for the hedge:
+// 3 <= 3, admitted at limit 3. Once the hedge has a winner (r-c Ready) it is resolved and counts none on provider-b (the winner's
+// slot is a reserved one on provider-c): 3 <= 3, admitted. With countEachMember false only the hedge's representative counts, r-c
+// on provider-c, none on provider-b: admitted.
+func TestAnUnresolvedReplacementHedgesMembersCountOnTheirOwnProvider(t *testing.T) {
+	end := hoT(9, 30, 0)
+	for _, c := range []struct {
+		name   string
+		winner bool
+		each   bool
+		limit  int32
+		ok     bool
+	}{
+		{"unresolved, limit 3", false, true, 3, false},
+		{"unresolved, limit 4", false, true, 4, true},
+		{"resolved by r-c, limit 3", true, true, 3, true},
+		{"unresolved, countEachMember false, limit 3", false, false, 3, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			old := countEachMember
+			countEachMember = c.each
+			t.Cleanup(func() { countEachMember = old })
+			f := &unitFx{}
+			f.md("md-e", &end)
+			f.md("md-a", nil)
+			f.inst("md-e", "pe", provB, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+			f.alloc("md-e", "pe", provB, false)
+			f.inst("md-a", "p", provA, "uid-p", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
+			f.alloc("md-a", "p", provA, true)
+			f.inst("md-a", "r-b", provB, "uid-rb", hoT(8, 30, 10), v1alpha1.InstancePending, map[string]string{v1alpha1.AnnotationPredecessor: "p"})
+			f.alloc("md-a", "r-b", provB, false)
+			rc := f.inst("md-a", "r-c", "provider-c", "uid-rc", hoT(8, 30, 0), v1alpha1.InstancePending, map[string]string{v1alpha1.AnnotationPredecessor: "p", v1alpha1.AnnotationHedgeGroup: "r-b"})
+			f.alloc("md-a", "r-c", "provider-c", false)
+			if c.winner {
+				rt := metav1.NewTime(hoT(8, 35, 0))
+				rc.Status.Phase, rc.Status.ReadyTime = v1alpha1.InstanceReady, &rt
+			}
+			if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provB, "alloc-ex", i32(c.limit), nil, rigNS+"/md-e", "")); a.ok != c.ok {
+				t.Fatalf("limit %d: ok %v with a count of %d, want %v", c.limit, a.ok, a.count, c.ok)
+			}
+		})
+	}
+}

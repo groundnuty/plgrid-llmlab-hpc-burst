@@ -117,7 +117,9 @@ type handoverReads struct {
 // and gone when that Allocation is listed.
 //
 // 2. A hedge counts by countEachMember: each live member on this Provider of an unresolved hedge, else only the hedge's
-// winner when it has one.
+// winner when it has one. A primary's REPLACEMENT hedge counts the same way while the primary serves: each live member on
+// this Provider of an unresolved replacement hedge of two or more members counts, whatever its Allocation's phase, since it
+// holds no reserved slot until it wins; a hedge with a winner counts none here (the winner's slot is a reserved one).
 //
 // 3. A unit's slot is judged as the controller judges it for the replacement (servesPast): the deployment has no end
 // time, or one after the drain start of the Instance, its creation plus its Allocation's time limit (an in-flight
@@ -183,7 +185,36 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		sz, gpus := a.future(md)
 		add(extraUnit{uid: types.UID(s.uid), role: roleHandover, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: gpus})
 	}
-	// The chosen primaries that have not started, or have no Allocation yet.
+	// addMember counts the member m of deployment key's view v, on this Provider, as a primary that will hand over: a unit
+	// when its deployment serves past m's drain start, judged by its Allocation's time limit, or, in flight, by its recorded
+	// launch's. A chosen primary skips a Running or ended Allocation (the reserved slots above hold a Running one's); a
+	// member of an unresolved replacement hedge counts whatever its Allocation's phase, since it holds no reserved slot
+	// until it wins.
+	addMember := func(m *v1alpha1.Instance, v deploymentView, md *v1alpha1.ModelDeployment, key string, primary bool) {
+		if m.Labels[v1alpha1.LabelProvider] != r.provider || (a.exclude != "" && m.UID == a.exclude) {
+			return
+		}
+		al := v.allocs[m.Spec.AllocationRef.Name]
+		if primary && al != nil && !notYetRunning(al) {
+			return // Running: a reserved slot above; ended: it holds none
+		}
+		judged := al
+		if judged == nil {
+			// In flight: its own Allocation is not made yet, and its drain start is read from the time limit its
+			// recorded launch is sized for.
+			own, _ := a.recorded(md, m)
+			judged = &v1alpha1.Allocation{}
+			judged.Spec.ForProvider.Batch = &own
+		}
+		if !holdsSlotOnceRunning(md, m, judged, *r.profile, time.Time{}) {
+			return
+		}
+		// Its replacement does not exist yet: the current spec sizes it.
+		sz, gpus := a.future(md)
+		add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: gpus})
+	}
+	// The chosen primaries that have not started, or have no Allocation yet, and the members of an unresolved replacement
+	// hedge.
 	for _, v := range r.views {
 		if len(v.insts) == 0 {
 			continue
@@ -219,7 +250,11 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 				held = held || replaced[m.Name]
 			}
 			if held {
-				continue // a live replacement carries the handover
+				// A live replacement carries the handover, but an UNRESOLVED replacement hedge's members each count.
+				for _, m := range replacementHedgeMembers(v, u, countEachMember) {
+					addMember(m, v, md, key, false)
+				}
+				continue
 			}
 			members := u.members
 			if w := hedgeWinner(members); w != nil {
@@ -228,29 +263,38 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 				members = []*v1alpha1.Instance{u.rep}
 			}
 			for _, m := range members {
-				if m.Labels[v1alpha1.LabelProvider] != r.provider {
-					continue
-				}
-				al := v.allocs[m.Spec.AllocationRef.Name]
-				if al != nil && !notYetRunning(al) {
-					continue // Running: a reserved slot above; ended: it holds none
-				}
-				judged := al
-				if judged == nil {
-					// In flight: its own Allocation is not made yet, and its drain start is read from the time limit its
-					// recorded launch is sized for.
-					own, _ := a.recorded(md, m)
-					judged = &v1alpha1.Allocation{}
-					judged.Spec.ForProvider.Batch = &own
-				}
-				if !holdsSlotOnceRunning(md, m, judged, *r.profile, time.Time{}) {
-					continue
-				}
-				// Its replacement does not exist yet: the current spec sizes it.
-				sz, gpus := a.future(md)
-				add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: gpus})
+				addMember(m, v, md, key, true)
 			}
 		}
+	}
+	return out
+}
+
+// replacementHedgeMembers returns the members, by Instance, of the unresolved replacement hedges of the held unit u: those of
+// its live replacements that make a hedge of two or more live members with no winner yet (a hedge of one is a plain
+// replacement, whose own slot the reserved slots hold; a winner's slot is a reserved slot too). With each false only the
+// hedge's representative counts, as for a primary's hedge (countEachMember).
+func replacementHedgeMembers(v deploymentView, u selUnit, each bool) []*v1alpha1.Instance {
+	names := map[string]bool{}
+	for _, m := range u.members {
+		names[m.Name] = true
+	}
+	var repls []*v1alpha1.Instance
+	for _, in := range v.insts {
+		if pred := in.Annotations[v1alpha1.AnnotationPredecessor]; pred != "" && names[pred] && countable(in) {
+			repls = append(repls, in)
+		}
+	}
+	var out []*v1alpha1.Instance
+	for _, g := range groupHedges(repls, func(*v1alpha1.Instance) bool { return true }) {
+		if len(g.members) < 2 || hedgeWinner(g.members) != nil {
+			continue
+		}
+		if !each {
+			out = append(out, hedgeRepresentative(g.members, func(in *v1alpha1.Instance) *v1alpha1.Allocation { return v.allocs[in.Spec.AllocationRef.Name] }))
+			continue
+		}
+		out = append(out, g.members...)
 	}
 	return out
 }
