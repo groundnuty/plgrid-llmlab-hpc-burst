@@ -149,9 +149,14 @@ func (p *pass) headroomWhere(pv *providerView, sc *qosScope) func(context.Contex
 				continue
 			}
 			if sc != nil {
-				if plan, err := checkServed(md); err == nil && !sc.under(plan.gpus*plan.workers) {
-					continue // its missing primary runs under another QOS of the Provider
+				// Each missing primary is charged to the QOS it will run under: an existing pending unit at its OWN
+				// launch, a unit not made yet at the current spec (shortageUnder).
+				n, err := shortageUnder(ctx, p.r.Reader, md, sc)
+				if err != nil {
+					return 0, err
 				}
+				h += n
+				continue
 			}
 			short, err := shortageOfDeployment(ctx, p.r.Reader, md)
 			if err != nil {
@@ -188,22 +193,75 @@ func (p *pass) shortage() int { return shortageOf(p.selection(nil), p.desiredCou
 // shortageOfDeployment is shortageOf the deployment's own Instances and Allocations, read through the Reader by its
 // model-deployment label in its namespace, as its own pass reads them (selectionOfView).
 func shortageOfDeployment(ctx context.Context, r client.Reader, md *v1alpha1.ModelDeployment) (int, error) {
+	v, err := deploymentViewOf(ctx, r, md)
+	if err != nil {
+		return 0, err
+	}
+	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances)), nil
+}
+
+// deploymentViewOf reads the deployment's own Instances and Allocations, by its model-deployment label in its namespace.
+func deploymentViewOf(ctx context.Context, r client.Reader, md *v1alpha1.ModelDeployment) (deploymentView, error) {
 	v := deploymentView{key: md.Namespace + "/" + md.Name, allocs: map[string]*v1alpha1.Allocation{}}
 	var il v1alpha1.InstanceList
 	if err := r.List(ctx, &il, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
-		return 0, fmt.Errorf("list Instances of %s for the extra's headroom: %w", v.key, err)
+		return v, fmt.Errorf("list Instances of %s for the extra's headroom: %w", v.key, err)
 	}
 	for i := range il.Items {
 		v.insts = append(v.insts, &il.Items[i])
 	}
 	var al v1alpha1.AllocationList
 	if err := r.List(ctx, &al, client.InNamespace(md.Namespace), client.MatchingLabels{v1alpha1.LabelModelDeployment: v1alpha1.LabelValue(md.Name)}); err != nil {
-		return 0, fmt.Errorf("list Allocations of %s for the extra's headroom: %w", v.key, err)
+		return v, fmt.Errorf("list Allocations of %s for the extra's headroom: %w", v.key, err)
 	}
 	for i := range al.Items {
 		v.allocs[al.Items[i].Name] = &al.Items[i]
 	}
-	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances)), nil
+	return v, nil
+}
+
+// shortageUnder is shortageOfDeployment counting only the missing primaries that will run under the scope's QOS: a
+// missing primary that already has an Instance (made, its Allocation not yet) will be sized at that Instance's own launch,
+// so it is charged at its own GPU count; one not made yet is sized at the deployment's current spec (HBEP-7, Per-user
+// limits). A spec that gives no plan counts its unmade primaries, so the count never falls short.
+func shortageUnder(ctx context.Context, r client.Reader, md *v1alpha1.ModelDeployment, sc *qosScope) (int, error) {
+	v, err := deploymentViewOf(ctx, r, md)
+	if err != nil {
+		return 0, err
+	}
+	sel := selectionOfView(md, v)
+	has := 0
+	var pending []int32 // the GPU count of each existing unit that has no Allocation yet
+	for _, u := range sel.units() {
+		made := false
+		for _, m := range u.members {
+			if sel.allocOf(m) != nil {
+				made = true
+				break
+			}
+		}
+		if made {
+			has++
+		} else {
+			pending = append(pending, launchGPUs(u.first))
+		}
+	}
+	short := max(int(md.Spec.Instances)-has, 0)
+	current := int32(0) // 0: not known, counted under every QOS
+	if plan, err := checkServed(md); err == nil {
+		current = plan.gpus * plan.workers
+	}
+	n := 0
+	for i := range short {
+		gpus := current
+		if i < len(pending) {
+			gpus = pending[i]
+		}
+		if sc.under(gpus) {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // extraAlsoLeave is how many slots the extra leaves free beside itself on the Provider: one for each of the

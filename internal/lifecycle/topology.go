@@ -371,3 +371,7 @@ func rawBound(bound v1alpha1.TimeLimitBound, maxTime, maxWall, leaseLimit *time.
 
 // mibShift converts bytes to MiB.
 const mibShift = 20
+
+// memMiBUp is a memory request in the whole MiB Slurm charges for it: rounded up, as the plugin sends it (--mem=<MiB>M,
+// internal/slurm checkRequest). The aggregate checks sum these, never raw bytes.
+func memMiBUp(q resource.Quantity) int64 { return (q.Value() + (1<<mibShift - 1)) >> mibShift }

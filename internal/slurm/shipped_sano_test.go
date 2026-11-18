@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
 )
 
@@ -61,8 +62,10 @@ func TestShippedSanoProfile(t *testing.T) {
 			t.Errorf("qosByGpus[%d] = %v, want %v", i, part.QOSByGPUs[i], w)
 		}
 	}
-	if len(part.DialHomeModes) != 2 || part.DialHomeModes[0] != v1alpha1.ProfileDialHomeMode("ssh") || part.DialHomeModes[1] != v1alpha1.ProfileDialHomeMode("host-dialed") {
-		t.Errorf("dialHomeModes %v, want [ssh host-dialed]", part.DialHomeModes)
+	// Sano never lists ssh: its compute nodes have no home directories, where ssh mode's agent reads the dial-home key
+	// (HBEP-4, the platform profile schema; #735's probe 1).
+	if len(part.DialHomeModes) != 1 || part.DialHomeModes[0] != v1alpha1.ProfileDialHomeMode("host-dialed") {
+		t.Errorf("dialHomeModes %v, want [host-dialed]", part.DialHomeModes)
 	}
 	if !pp.Spec.HoldRelease {
 		t.Errorf("holdRelease is false, want true (the probe of 18 Nov 2026)")
@@ -186,5 +189,25 @@ func TestReadProfileQOSByGPUs(t *testing.T) {
 			}
 			t.Errorf("field %s with %q not named in %v", c.field, c.say, inv.Fields)
 		})
+	}
+}
+
+// ReadProfile refuses the shipped Sano profile under the ssh dial-home mode, and accepts it under host-dialed: the
+// agent of an ssh-mode job reads <login HOME>/.hpcburst/dial-home, which a Sano compute node cannot reach, so its jobs
+// would never register (HBEP-4: "Sano never lists ssh"; Carbon's review of #756).
+func TestShippedSanoProfileIsRefusedUnderSSHMode(t *testing.T) {
+	pp := readShippedSano(t)
+	r := newProfileRig(t)
+	r.pp = pp.DeepCopy()
+	r.pp.Spec.StagingDir = "$SCRATCH/stage"
+	r.prov.Spec.PlatformProfileRef.Name = "sano"
+	r.prov.Spec.AllowedPartitions = []string{"gpu"}
+	if _, err := r.readUnder(agentapi.DialHomeHostDialed); err != nil {
+		t.Fatalf("under host-dialed: %v", err)
+	}
+	_, err := r.readUnder(agentapi.DialHomeSSH)
+	var inv *provider.InvalidProfileError
+	if !errors.As(err, &inv) || !hasField(inv, "spec.partitions[gpu].dialHomeModes") {
+		t.Fatalf("under ssh: %v; want spec.partitions[gpu].dialHomeModes named", err)
 	}
 }

@@ -47,16 +47,41 @@ func (p *pass) checkTimeLimits() {
 				continue
 			}
 		}
-		lim, bound, err := allocationTimeLimit(rv, p.md.Spec.LeaseLimit)
-		if err != nil {
-			continue
+		if why := p.tooShortText(pv, rv); why != "" {
+			pv.tooShort = why
+			p.degrade(v1alpha1.ReasonPartitionTooShort, "%s", pv.tooShort)
 		}
-		lead, drain := leadOf(pv, p.md)
-		if lim > lead && lim >= time.Minute {
-			continue // a known limit under a minute is too short whatever the lead (Slurm counts whole minutes)
-		}
-		pv.tooShort = fmt.Sprintf("partition %s of Provider %s: its time limit %s, set by %s, is not longer than the lead %s an Instance needs (drain window %s + handoverMargin %s + health.startTimeout %s), so no Allocation is created there (HBEP-7, Provisioning, A partition too short)",
-			pv.partition.Name, pv.name, lim, bound, lead, drain, pv.settings.handoverMargin, pv.settings.startTimeout)
-		p.degrade(v1alpha1.ReasonPartitionTooShort, "%s", pv.tooShort)
 	}
+}
+
+// tooShortText says why the time limit of an Allocation under the resolved view rv cannot host an Instance, or "" when it
+// can: it is not longer than the lead the Instance needs, or is under a minute (HBEP-7, Provisioning, A partition too
+// short). pv is the Provider's own view, whose settings and name the message carries.
+func (p *pass) tooShortText(pv, rv *providerView) string {
+	lim, bound, err := allocationTimeLimit(rv, p.md.Spec.LeaseLimit)
+	if err != nil {
+		return ""
+	}
+	lead, drain := leadOf(pv, p.md)
+	if lim > lead && lim >= time.Minute {
+		return "" // a known limit under a minute is too short whatever the lead (Slurm counts whole minutes)
+	}
+	return fmt.Sprintf("partition %s of Provider %s: its time limit %s, set by %s, is not longer than the lead %s an Instance needs (drain window %s + handoverMargin %s + health.startTimeout %s), so no Allocation is created there (HBEP-7, Provisioning, A partition too short)",
+		pv.partition.Name, pv.name, lim, bound, lead, drain, pv.settings.handoverMargin, pv.settings.startTimeout)
+}
+
+// atLaunch is the Provider's view for an Instance whose Allocation is not made yet, judged at the Instance's OWN launch: where
+// the partition sets qosByGpus, the time limit it will get is the wall of the QOS ITS GPU count chooses, which may not be the
+// QOS the deployment's current plan chooses. An existing unit is charged at its own recorded size, a future one at the
+// current spec (the ruling on #756's review). Any other Provider, and one the launch gives no QOS, keeps its view.
+func (p *pass) atLaunch(pv *providerView, in *v1alpha1.Instance) *providerView {
+	if pv == nil || p.md == nil || len(pv.partition.QOSByGPUs) == 0 {
+		return pv
+	}
+	out := *pv
+	out.tooShort = ""
+	if rv, err := pv.forGPUs(launchGPUs(in)); err == nil {
+		out.tooShort = p.tooShortText(pv, rv)
+	}
+	return &out
 }

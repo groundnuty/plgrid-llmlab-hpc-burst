@@ -384,3 +384,22 @@ func TestAnExtrasHeadroomIsCountedOverItsOwnQOSAlone(t *testing.T) {
 		}
 	}
 }
+
+// TestSubmitLimitReachedNamesTheLimitOfTheQOSTheAllocationRunsUnder (review of #756, Astra 10 and Carbon C3): on a Sano
+// Provider in host-dialed mode, whose gpu1 allows 1 job, a refusal for a full submit limit of a 1-GPU Allocation names
+// gpu1's own limit, "maxSubmitPerUser 1 of QOS gpu1", and never the host-dialed ceiling of 2, which Slurm does not apply.
+func TestSubmitLimitReachedNamesTheLimitOfTheQOSTheAllocationRunsUnder(t *testing.T) {
+	opts := append(sanoRigOpts(func(q []v1alpha1.QOSProfile) { q[0].MaxSubmitPerUser = i32(1) }), withBatchConfig(oneJobUser), withHostDialed())
+	rg := newRig(t, opts...)
+	rg.batch.AddOutsideJob("example-other-project", rigPartition, 1, 4*time.Hour)
+	rg.create(mdSpec("md"))
+	var msg string
+	rg.until(10*time.Minute, 10*time.Second, "a refusal for a full submit limit", func() bool {
+		c := rg.condition("md", v1alpha1.ConditionDegraded)
+		msg = c.Message
+		return c.Reason == v1alpha1.ReasonSubmitLimitReached && strings.Contains(c.Message, submitLimitLine)
+	})
+	if !strings.Contains(msg, "maxSubmitPerUser 1 of QOS gpu1") || strings.Contains(msg, "host-dialed") {
+		t.Fatalf("Degraded message %q; want gpu1's own limit (maxSubmitPerUser 1 of QOS gpu1) and no host-dialed ceiling", msg)
+	}
+}

@@ -44,7 +44,7 @@ spec:
         - {gpus: 4, qos: gpu4}
         - {gpus: 8, qos: gpu8}
       imageFormat: sif # facts.containers.apptainer_compute_nodes (probe 5): a SIF was pulled to the job's scratch and run on both node classes
-      dialHomeModes: [ssh, host-dialed] # facts.reachability.dial_home (probe 1): ssh mode reaches this host's sshd from both node classes; host-dialed carries bytes both ways. direct is plausible and untested, so it is not listed
+      dialHomeModes: [host-dialed] # HBEP-4 (the platform profile schema): "Sano never lists ssh: its compute nodes have no home directories", where ssh mode's agent reads the dial-home key; facts.slurm.srun_chdir and facts.reachability.dial_home (probe 1 of 18 Nov 2026): host-dialed carries bytes both ways and the compute nodes have no home. direct is plausible and untested, and is no profile value
       # Not set on this partition: billingUnit (no fact: facts.slurm.priority says billing counts CPUs only,
       # and no billing weight was read), tmpDir and tmpDirFeature (no measured node-local variable).
       # computeGlibc is 2.39 (facts.compute_node.glibc, probe 2) but the field is not in the schema yet:

@@ -172,7 +172,7 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 				return nil, err
 			}
 			if md != nil && md.DeletionTimestamp.IsZero() {
-				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor, gpus: launchGPUs(in)})
+				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor, gpus: futureGPUs(md, in)})
 			}
 			continue
 		}
@@ -214,9 +214,20 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 		if err != nil || !servesPast(md, ds) {
 			continue
 		}
-		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, gpus: launchGPUs(in)})
+		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, gpus: futureGPUs(md, in)})
 	}
 	return out, nil
+}
+
+// futureGPUs is the GPU count of an Allocation that is not made yet and will be, for the deployment: a replacement or a
+// successor is sized at the deployment's CURRENT spec (the plan: tensor-parallel-size times pipeline-parallel-size times
+// workers), whatever the Instance it follows launched (HBEP-4, QOS limits: "charged to the QOS it would submit under").
+// An existing unit is charged at its own launch (launchGPUs) instead. A spec that gives no plan leaves the launch's count.
+func futureGPUs(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) int32 {
+	if plan, err := checkServed(md); err == nil && plan.gpus*plan.workers > 0 {
+		return plan.gpus * plan.workers
+	}
+	return launchGPUs(in)
 }
 
 // launchGPUs is the GPU count of the Allocation an Instance runs on: its launch's GPUs times its workers.

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -361,7 +362,7 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 // behind a cap our own jobs hold. An Allocation with no batch parameters adds
 // nothing.
 func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected map[string]v1alpha1.BatchParameters, add v1alpha1.BatchParameters, scope *qosScope) (bool, string) {
-	gpus, cpus, mem := add.GPUs, add.CPUsPerTask, add.Memory.DeepCopy()
+	gpus, cpus, memMiB := add.GPUs, add.CPUsPerTask, memMiBUp(add.Memory)
 	// With a scope, the caps are those of its QOS, and the sums run over the Allocations under it alone.
 	counts := func(b *v1alpha1.BatchParameters) bool { return scope == nil || scope.under(b.GPUs) }
 	sum := func(b *v1alpha1.BatchParameters) {
@@ -370,7 +371,7 @@ func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected ma
 		}
 		gpus += b.GPUs
 		cpus += b.CPUsPerTask
-		mem.Add(b.Memory)
+		memMiB += memMiBUp(b.Memory)
 	}
 	for k, a := range rd.allocs {
 		if rd.listed[k] && a.Spec.ForProvider.Batch != nil {
@@ -389,8 +390,10 @@ func capsFit(provider string, caps v1alpha1.QOSLimits, rd slotReads, expected ma
 	if q := caps.MaxCPUsPerUser; q != nil && cpus > *q {
 		over = append(over, fmt.Sprintf("%d CPUs, above the %s %d of QOS %s", cpus, v1alpha1.LimitMaxCPUsPerUser, *q, caps.From[v1alpha1.LimitMaxCPUsPerUser]))
 	}
-	if q := caps.MaxMemPerUser; q != nil && mem.Cmp(*q) > 0 {
-		over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", mem.String(), v1alpha1.LimitMaxMemPerUser, q.String(), caps.From[v1alpha1.LimitMaxMemPerUser]))
+	// Each request is charged in whole MiB, rounded up, against the cap in whole MiB, rounded down, as the plugin sends and
+	// compares them: Slurm charges a 1.5 MiB request 2 MiB (review of #756, Astra 8).
+	if q := caps.MaxMemPerUser; q != nil && memMiB > q.Value()>>mibShift {
+		over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", resource.NewQuantity(memMiB<<mibShift, resource.BinarySI).String(), v1alpha1.LimitMaxMemPerUser, q.String(), caps.From[v1alpha1.LimitMaxMemPerUser]))
 	}
 	if len(over) == 0 {
 		return true, ""

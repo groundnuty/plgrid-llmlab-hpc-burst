@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -254,10 +255,11 @@ func capsOver(l v1alpha1.QOSLimits, pred, repl v1alpha1.BatchParameters) []strin
 		over = append(over, fmt.Sprintf("%d CPUs, above the %s %d of QOS %s", pred.CPUsPerTask+repl.CPUsPerTask, v1alpha1.LimitMaxCPUsPerUser, *q, l.From[v1alpha1.LimitMaxCPUsPerUser]))
 	}
 	if q := l.MaxMemPerUser; q != nil {
-		sum := pred.Memory.DeepCopy()
-		sum.Add(repl.Memory)
-		if sum.Cmp(*q) > 0 {
-			over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", sum.String(), v1alpha1.LimitMaxMemPerUser, q.String(), l.From[v1alpha1.LimitMaxMemPerUser]))
+		// Each request is charged in whole MiB, rounded up, against the cap in whole MiB, rounded down: as the plugin sends
+		// and compares them (internal/slurm checkRequest), so the sum is never short of what Slurm counts.
+		sum := memMiBUp(pred.Memory) + memMiBUp(repl.Memory)
+		if sum > q.Value()>>mibShift {
+			over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", resource.NewQuantity(sum<<mibShift, resource.BinarySI).String(), v1alpha1.LimitMaxMemPerUser, q.String(), l.From[v1alpha1.LimitMaxMemPerUser]))
 		}
 	}
 	return over

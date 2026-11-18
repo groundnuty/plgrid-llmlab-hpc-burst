@@ -142,10 +142,12 @@ type PartitionProfile struct {
 	// since only it reads the Provider and its profile (HBEP-4, The Slurm
 	// dialect). At most 8 entries: the estimated CEL cost of the rule that
 	// checks each qos against the profile's qos nests partitions, entries and
-	// the qos list. Absent, the partition's QOS is the Provider's qos, as before.
+	// the qos list. Absent, the partition's QOS is the Provider's qos, as before; present, it has at
+	// least one entry, since an empty list would pass both rules vacuously and leave no tier to cover a request.
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=8
 	QOSByGPUs []QOSByGPUs `json:"qosByGpus,omitempty"`
 
