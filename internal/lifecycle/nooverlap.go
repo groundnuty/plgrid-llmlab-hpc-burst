@@ -168,6 +168,11 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 // provisioning would place it on (warmFor, the one predicate, so placement and
 // this decision agree), or one whose agent has not registered again yet after
 // the controller's restart, which provisioning waits for.
+//
+// A registered warm Allocation counts as room beside from the moment this pass reads it until an Instance is placed on
+// it, a short window: another placement of the deployment, or the Allocation's release, can take it in between. The
+// decision is made afresh by the next pass from what it then reads, so the window is bounded by one pass, and a
+// replacement that finds the warm Allocation gone then meets the ordinary slot and caps checks (#725, from #724's review).
 func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) bool {
 	warm, deferUntil := p.warmFor(pv, params, pred)
 	return warm != nil || !deferUntil.IsZero()

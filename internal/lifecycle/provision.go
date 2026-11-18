@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -113,29 +112,35 @@ type placeOpts struct {
 	// never reached: capacity() calls provisionWith for the extra outside its missing-primary loop, and reads
 	// only the Provider that loop placed on.
 	extra bool
-	// alsoLeave is how many of the deployment's own chosen primaries on the Provider hold no reserved slot yet but
-	// will once Running (extraAlsoLeave), left free beside the new Allocation: the extra's slot is beyond its own
-	// handovers (HBEP-7, Its checks, a slot beyond its own handovers). Set with extra, on the Provider named by only.
-	alsoLeave int
-	// headroom is the extra's admission headroom (extraChecks): how many more slots the reservation leaves free, read
-	// under the Provider's lock (slotAsk.headroom). Set with extra.
-	headroom func(context.Context) (int, error)
+	// ask is what the extra's checks add to its reservation (extraChecks): the slots left free beside the new
+	// Allocation for the primaries that will hold one once Running (HBEP-7, Its checks, a slot beyond its own
+	// handovers), the replacements its caps check counts and the admission headroom, read under the Provider's lock.
+	// Set with extra, on the Provider named by only.
+	ask extraAsk
 }
 
 // placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
-// every reservation takes (slots.go), and clears the Allocation's idle anchor: the Allocation is no longer idle
+// every reservation takes (slots.go), and then clears the Allocation's idle anchor: the Allocation is no longer idle
 // (v1alpha1.ClearIdleSince). The Instance becomes a Running primary that reserves a handover slot and ends its
 // deployment's missing primary, so both the reserved slots and the admission headroom an extra reads change with
 // it; made outside the lock, another pass could read the one before and the other after (#708, the delta review of the
-// headroom). The lock is held across two API writes of no other lock of this package.
+// headroom). The lock is held across that one API write and no other lock of this package. The anchor's clear changes
+// neither the count nor the headroom, so it is written AFTER the lock is released: a slow API there stalls no other
+// reservation on the Provider (#725; the anchor is idle-since, which the Instance's own placement makes stale and the
+// next pass clears again if this write is lost).
 func (p *pass) placeOnWarm(pv *providerView, cid *classID, pred *v1alpha1.Instance, warm *v1alpha1.Allocation, o placeOpts) error {
-	l := p.r.slots().slotLock(pv.name)
-	l.Lock()
-	defer l.Unlock()
-	if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+	if err := p.createInstanceUnderLock(pv, cid, pred, warm.Name, o); err != nil {
 		return err
 	}
 	return p.writeIdleSince(warm, nil)
+}
+
+// createInstanceUnderLock creates the Instance with the Provider's lock held for the create alone.
+func (p *pass) createInstanceUnderLock(pv *providerView, cid *classID, pred *v1alpha1.Instance, allocName string, o placeOpts) error {
+	l := p.r.slots().slotLock(pv.name)
+	l.Lock()
+	defer l.Unlock()
+	return p.createInstance(pv, cid, pred, allocName, o)
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
@@ -215,7 +220,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if o.caps {
 			capsOf = &params
 		}
-		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, o.headroom)
+		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.ask)
 		if err != nil {
 			return false, err
 		}
@@ -610,17 +615,17 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	// checks, the bound, the slot beyond its primary's handover, the admission headroom and the caps, silently, and is ended
 	// when one refuses (#708, finding 4); otherwise it is a primary, which waits for a slot.
 	takers := p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor]))
-	var headroom func(context.Context) (int, error)
+	var ask extraAsk
 	var capsOf *v1alpha1.BatchParameters
-	alsoLeave, quiet := 0, false
+	quiet := false
 	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() == 0 {
 		var admitted bool
-		if alsoLeave, headroom, admitted = p.extraChecks(pv, in); !admitted {
+		if ask, admitted = p.extraChecks(pv, in); !admitted {
 			return p.endCutShortExtra(in, "the bound on extras")
 		}
 		capsOf, quiet = &params, true
 	}
-	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, alsoLeave, headroom)
+	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, ask)
 	if err != nil {
 		return err
 	}
