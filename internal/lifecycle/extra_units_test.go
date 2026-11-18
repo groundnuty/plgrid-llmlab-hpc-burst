@@ -458,3 +458,55 @@ func TestAnExtrasUnitsAreSummedProviderWideOrPerQOSByOneFilter(t *testing.T) {
 		}
 	}
 }
+
+// A deployment md-a that ends at 09:30 has a listed pending primary p, created at 08:00:10 on a 3 h Allocation (so its drain
+// start is 08:50:10, before the end: it hands over), and an Instance x made in the same second with no Allocation, in flight or
+// a cut-short extra's, whose launch is sized at the lease limit now, 4 h (its drain start would be 09:50:10, after the end: no
+// handover) as after a lease increase. x has the lower UID, so the selection's UID tie chooses x and leaves p surplus.
+func leaseIncreaseTwins(f *unitFx, end time.Time) {
+	f.md("md-a", &end)
+	f.inst("md-a", "p", provA, "uid-b", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	f.alloc("md-a", "p", provA, false)
+	f.objs[len(f.objs)-1].(*v1alpha1.Allocation).Spec.ForProvider.Batch.TimeLimit = "3h"
+	f.inst("md-a", "x", provA, "uid-a", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+}
+
+// TestAnExtrasRetryKeepsItsListedSiblingsHandoverAfterALeaseIncrease (D6a, M4): md-a asks for its extra x, a retry of the Instance
+// x that a pass cut short, beside its listed p (see leaseIncreaseTwins). The asking Instance is left out of md-a's selection by its
+// UID, so p is the chosen unit and its handover counts: by hand, listed p 1 + p's handover 1 + the extra 1 = 3, so refused at
+// limit 2 and admitted at limit 3. Without the exclusion x is chosen, its drain start (09:50:10) is after the end, and md-a's
+// handover is in no count: 2 <= 2, admitted at limit 2.
+func TestAnExtrasRetryKeepsItsListedSiblingsHandoverAfterALeaseIncrease(t *testing.T) {
+	f := &unitFx{}
+	leaseIncreaseTwins(f, hoT(9, 30, 0))
+	for _, c := range []struct {
+		limit int32
+		ok    bool
+	}{{2, false}, {3, true}} {
+		if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-x", i32(c.limit), nil, rigNS+"/md-a", "uid-a")); a.ok != c.ok {
+			t.Fatalf("limit %d: ok %v with a count of %d, want %v: p's handover is counted beside the retry", c.limit, a.ok, a.count, c.ok)
+		}
+	}
+}
+
+// TestAnotherDeploymentsListedPrimaryIsPreferredToItsInFlightTwin (D6b): md-e's extra on provider-a (md-e ends at 09:30; pe
+// listed) beside md-a's p and x (see leaseIncreaseTwins). Another deployment's unit choice prefers the Instance with an
+// Allocation to a same-tier, same-second one without, so x never displaces p: by hand, listed pe 1 + p 1 + p's handover 1 +
+// the extra 1 = 4, so refused at limit 3 and admitted at limit 4. Left to the UID, x is chosen, no handover is counted and it
+// is 3 <= 3: admitted at limit 3.
+func TestAnotherDeploymentsListedPrimaryIsPreferredToItsInFlightTwin(t *testing.T) {
+	end := hoT(9, 30, 0)
+	f := &unitFx{}
+	f.md("md-e", &end)
+	f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
+	f.alloc("md-e", "pe", provA, false)
+	leaseIncreaseTwins(f, end)
+	for _, c := range []struct {
+		limit int32
+		ok    bool
+	}{{3, false}, {4, true}} {
+		if a := ask(t, newSlotTable(), f.reader(t), extraSlotAsk(provA, "alloc-ex", i32(c.limit), nil, rigNS+"/md-e", "")); a.ok != c.ok {
+			t.Fatalf("limit %d: ok %v with a count of %d, want %v: md-a's listed p is the unit, not its in-flight twin", c.limit, a.ok, a.count, c.ok)
+		}
+	}
+}

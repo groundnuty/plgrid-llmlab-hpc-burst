@@ -204,7 +204,10 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 				replaced[pred] = true
 			}
 		}
-		chosen, _ := selectUnits(sel, int(md.Spec.Instances))
+		chosen, surplus := selectUnits(sel, int(md.Spec.Instances))
+		if key != a.deployment {
+			chosen = preferAllocated(sel, chosen, surplus)
+		}
 		for _, u := range chosen {
 			held := false
 			for _, m := range u.members {
@@ -242,6 +245,30 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 				sz, gpus := a.future(md)
 				add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: gpus})
 			}
+		}
+	}
+	return out
+}
+
+// preferAllocated is chosen with each unit that has no Allocation swapped for a surplus unit that has one and is its equal by
+// the selection's order before the UID, one of the same tier made at the same time with no job started: the selection's UID
+// tie would let a lower-UID Instance in flight displace its listed twin, whose Allocation is the one whose time limit, and so
+// drain start, is real (the in-flight one is sized at the lease limit now, which an increase has moved). It is applied to the
+// OTHER deployments' selections; the asking deployment's own retry is left out of its selection by its UID instead.
+func preferAllocated(sel selection, chosen, surplus []selUnit) []selUnit {
+	has := func(u selUnit) bool { return sel.allocOf(u.rep) != nil }
+	out := append([]selUnit(nil), chosen...)
+	used := map[int]bool{}
+	for i, c := range out {
+		if has(c) {
+			continue
+		}
+		for j, s := range surplus {
+			if used[j] || s.marked || s.candidate || !has(s) || s.tier() != c.tier() || !s.first.CreationTimestamp.Equal(&c.first.CreationTimestamp) {
+				continue
+			}
+			out[i], used[j] = s, true
+			break
 		}
 	}
 	return out
