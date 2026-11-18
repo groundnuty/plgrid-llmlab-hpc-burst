@@ -152,7 +152,8 @@ type Profile struct {
 }
 
 // Settings are a Provider's settings (HBEP-4, Provider settings): account,
-// grant, credentials reference, allowed partition, labels and an optional QOS.
+// grant, credentials reference, allowed partition, labels, an optional QOS and
+// an optional staging directory.
 // The grant and the account are copied into the accounting record (beta;
 // HBEP-8, Provider accounting, Billing).
 type Settings struct {
@@ -169,6 +170,12 @@ type Settings struct {
 	// ReadProfile fills it, checking that the profile lists it; the Slurm
 	// plugin sends it as --qos.
 	QOS string
+	// StagingDir is the Provider's own stagingDir, "" when its settings give
+	// none (HBEP-4, Provider settings; #757, #735). Like the account it is
+	// account data: it never appears in a status, an event or a log. Read the
+	// staging directory only through StagingDirOf, which lets this value win
+	// over the profile's.
+	StagingDir string
 	// CredentialsFile is the path of the mode-600 credentials file on the
 	// control-plane host: for a Slurm provider an ssh client configuration
 	// naming the login node, the user and the key file; for a managed
@@ -177,6 +184,21 @@ type Settings struct {
 	// Labels are the Provider's labels (organization, platform, partition,
 	// account; HBEP-3).
 	Labels map[string]string
+}
+
+// StagingDirOf is THE staging directory of a Provider (HBEP-4, Provider
+// settings; #757): its own stagingDir when its settings give one, else the
+// profile's, as written (an absolute path, or one that starts with an
+// environment variable, which the Batch resolves on the login node). It is ""
+// only when neither gives one, which ReadProfile refuses for a batch
+// Provider. Every reader of the staging directory goes through it, so the
+// Provider's value wins everywhere HBEP-4 says stagingDir. Its result is
+// account data: it is never put in a status, an event or a log.
+func StagingDirOf(p Profile, s Settings) string {
+	if s.StagingDir != "" {
+		return s.StagingDir
+	}
+	return p.Spec.StagingDir
 }
 
 // SubmitRequest is one submission. The provider adds the fixed options

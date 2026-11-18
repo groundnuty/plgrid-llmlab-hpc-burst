@@ -270,12 +270,15 @@ func TestBootstrapRefusesTheWrongBinary(t *testing.T) {
 	}
 }
 
-// With no tmpDir the bootstrap is the line it was before tmpDir existed, byte
-// for byte (written out here by hand), so a partition without one keeps the
-// scheduler's TMPDIR.
+// With no tmpDir the bootstrap is the digest check and the exec alone (written
+// out here by hand), so a partition without one keeps the scheduler's TMPDIR.
+// The line changed in #762, which keeps the staged binary's path off job.err:
+// sha256sum's error is silenced, a binary that cannot be executed is found by a
+// test before the exec, and a failure prints one fixed line and exits 1.
 func TestBootstrapWithoutTmpDirIsUnchanged(t *testing.T) {
 	const agent, alloc = "/s/agent/d/hb-agent", "/s/alloc/hb-x"
-	want := "[ $(sha256sum /s/agent/d/hb-agent | cut -c1-64) = " + testDigest + " ] && exec /s/agent/d/hb-agent /s/alloc/hb-x"
+	want := `if [ "$(sha256sum /s/agent/d/hb-agent 2>/dev/null | cut -c1-64)" = ` + testDigest + ` ] && [ -x /s/agent/d/hb-agent ]; then exec /s/agent/d/hb-agent /s/alloc/hb-x; ` +
+		`else echo "hb: the staged agent binary is missing, changed or not executable" >&2; exit 1; fi`
 	if got := bootstrapIn(agent, testDigest, alloc, ""); got != want {
 		t.Errorf("bootstrap without tmpDir:\n got %s\nwant %s", got, want)
 	}
@@ -294,8 +297,9 @@ func TestBootstrapSetsTMPDIRBeforeTheDigestCheck(t *testing.T) {
 	const agent, alloc = "/s/agent/d/hb-agent", "/s/alloc/hb-x"
 	got := bootstrapIn(agent, testDigest, alloc, "$HB_TEST_LOCAL/hb")
 	const head = "TMPDIR=${HB_TEST_LOCAL:?}/hb && case "
-	tail := ` && mkdir -p "$TMPDIR" && export TMPDIR && [ $(sha256sum /s/agent/d/hb-agent | cut -c1-64) = ` + testDigest +
-		" ] && exec /s/agent/d/hb-agent /s/alloc/hb-x"
+	tail := ` && mkdir -p "$TMPDIR" && export TMPDIR && if [ "$(sha256sum /s/agent/d/hb-agent 2>/dev/null | cut -c1-64)" = ` + testDigest +
+		` ] && [ -x /s/agent/d/hb-agent ]; then exec /s/agent/d/hb-agent /s/alloc/hb-x; ` +
+		`else echo "hb: the staged agent binary is missing, changed or not executable" >&2; exit 1; fi`
 	if !strings.HasPrefix(got, head) {
 		t.Errorf("the bootstrap does not start by setting TMPDIR:\n got %s\nwant it to start %q", got, head)
 	}
