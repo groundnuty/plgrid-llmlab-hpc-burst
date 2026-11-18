@@ -77,6 +77,38 @@
 #     the credential plugin's exec from every test, while the fake client these tests use does neither. The same
 #     graph reports TestManagerOnControlPlane, TestOperationsOnAControlPlaneWithTwoAgents, TestAgentCLIOnAControlPlane
 #     and TestMetricsStandbyOnTwoManagers (testenv, exec, port constants, kill), so it can see what it checks for;
+#   - lifecycle-slow5: ten more of internal/lifecycle's fake-clock tests (issue #295, part B5). Train 16 of 18 Nov 2026 read the
+#     package's run at 269.7 s in the go job and 434.3 s in crd and envtest (the same tests, the second runner 1.61x slower),
+#     over the 400 s that the worst of three readings must not pass in either job, with part B4's thirty-four rows already
+#     out of it. crd and envtest's log keeps only the ok and FAIL lines (hack/check.sh filters it), so the tests' own times
+#     are the go job's of the same run and tree. The group is the one test with parallel subtests that is left,
+#     TestAMovedLeaseEndKeepsTheTwoJobGuardToTwoAllocations (its own line reads 0.00 s, and its three subtests ran side by side
+#     for 28 to 33 s, so it left the 32.9 s that the top-level lines do not carry, 269.7 s less their 236.8 s, as
+#     lifecycle-slow3 counted its two), and the nine serial tests that rank next by the median of their time over train 16, the
+#     three trains of the day before it and a quiet 4-CPU Sano run (a row that reads 1.4 s in three runs reads 4.6 s in the
+#     fourth, so one run's top of the list is partly noise), 29.5 s in train 16's run and 62.4 s with the parallel test. Three
+#     rows of the same ranks are left out on purpose: TestEveryAllocationDeleteWritesItsCause and TestEveryEndReasonHasAnOutcome
+#     run go list inside golang.org/x/tools, which the call graph below does not enter, and TestAgentCLIOnAControlPlane
+#     (21.5 s) starts a control plane. Taking the ten out, the package's run would have read 269.7 s - 62.4 s = 207.3 s in the
+#     go job, 332 s at 1.6x, and 434.3 s - 62.4 s x 1.61 = 333.8 s in crd and envtest. On a quiet 4-CPU Sano node, the
+#     package's run as this script runs it read 184.8 s on main and 149.8 s with the group out (35.0 s less, a smaller peel
+#     than train 16's, since the group's rows read 1.5 to 3.8 s there and the parallel tail 6.8 s), which CI's 1.46x over Sano
+#     scales to 219 s in the go job and, at 1.6x, to 350 s in either job: under 400 s (a projection: CI's runs of this change are
+#     the measurement). The group alone read 38.7 s on that node, so about 40 s in its lane on CI, 82 s at the most (the sum of
+#     worsts), against its -timeout of 245 s, two thirds of which is 163 s (#295's rule for a group that sets its own
+#     timeout). The lane adds that to its 575 s in crd and envtest (the job read 1,805 s of its 2,700 s, so about 1,845 s,
+#     1,887 s at the most) and to its 550 s in go own-timeout (696 s of 1,800 s: about 736 s, 778 s at the most). Like
+#     lifecycle-slow's, the ten run reconcile passes over a fake provider, fake agents and a fake clock: read through the
+#     package's helpers with a type-checked call graph (golang.org/x/tools/go/packages, go/ssa and RTA, with every Test function as
+#     a root), they reach no control plane (internal/testenv), listener (net.Listen*, httptest's servers, an http.Server's Serve),
+#     process (os/exec's Command and Start, os.StartProcess, syscall.Kill), timer (time.Sleep, After, NewTimer, NewTicker,
+#     AfterFunc, Tick) or port constant (28000 to 29999, as an integer or inside a string). The graph follows static calls,
+#     interface calls by the types the program instantiates, and closures and functions taken as values from where they are
+#     taken; it reads only this module's own functions, so a call through a function value is not followed and a library's
+#     insides are not entered. Its controls, from the same run, are the tests it must catch: TestManagerOnControlPlane
+#     (control plane, port constants, timers), TestOperationsOnAControlPlaneWithTwoAgents (control plane, timer),
+#     TestAgentCLIOnAControlPlane (control plane, timers) and TestMetricsStandbyOnTwoManagers (control plane, process, kill, port
+#     constants, timers);
 #   - controller-failover: cmd/hpcburst-controller's two HBEP-11 failover tests, 150 s of its 400 s, whose
 #     takeover waits for two of controller-runtime's 15 s Leases to expire after a SIGKILL (issue #295);
 #   - controller-identities: four of the same package's tests that prove the controllers' own identities
@@ -149,6 +181,9 @@ cd "$root" || exit 1
 # 378.3 s of the top-level lines). That is 115.9 s, which gives 350 s.
 # Part B4's lifecycle-slow4 takes the sum of each test's worst over the go-job logs of main before #708 (f05028df), of
 # main after #708 and #739 (5919a554) and of train 11, 163.5 s, which gives 490 s.
+# Part B5's lifecycle-slow5 takes the sum of each test's worst over the go-job logs of the four trains of 18 Nov 2026 before it
+# (train 16 the last), 81.7 s, which gives 245 s: 48.8 s for the nine serial tests (each one's worst of the four) and the 32.9 s that
+# the parallel test left in train 16's package run, as lifecycle-slow3 counted its two.
 # Issue #660's controller-identities takes the four tests' times in the go job of run 44203460856 (18 Nov 2026,
 # the head that added them): 13.0 s, 11.2 s, 13.6 s and 11.5 s, 49.3 s, which gives 150 s.
 groups=(
@@ -161,6 +196,7 @@ groups=(
   "lifecycle-slow2|./internal/lifecycle|TestReservedSlotKeepsAFailedSuccessorsSlotForItsRetry TestRetentionNoneOutlivesHardEnd TestReservedSlotKeepsACutShortSuccessorsSlotAcrossARestart TestMetricsNoProgressNeedsFreshKnownCounters TestNoOverlapModeBoundaries TestRetentionJobEndsAndLeavesListing TestTunnelDownAloneRestartsNothing TestMetricsDrainEndsOnAKnownZeroReadAfterTheDrainBegan|330s"
   "lifecycle-slow3|./internal/lifecycle|TestVerifyRefusedGenerationConfigStopsClass TestReadyInstanceStaysReadyWhenTunnelDrops TestGateAMissTheFullRecordCantHoldSuspendsItsEntry TestGateTwoProvidersOfOneClassSuspendAWrongEntryWithinTwoReleases TestTheTwoJobGuardKeepsALongWaitToTwoAllocations TestADeadStepLeavesTheDeploymentAtItsLastEnd|350s"
   "lifecycle-slow4|./internal/lifecycle|TestACandidateRanksAgainstItsServingPeer TestTheFirstToPassIsChosenAndTheLaterOutranksIt TestAnExtraIsRankedOutWhenItsPeerHasAReplacement TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsAtLeastTheLeadLater TestNoExtraWhereThePassMadeNoNewAllocationForAPrimary TestAKeptLoserIsNeverRankedAgainstAnotherPrimaryWhenItsWinnerLeaves TestGateDoesNotJudgeAWaitingCandidateAgainAfterItRestarts TestAnExtraThatPassesFirstWaitsForTheRanking TestAStartedLoserEndsAtTheWinWhenAnyOfItsConditionsFails TestAKeptLosersMarkIsReadAfterARestart TestHandoverRestartPlansTheSameTime TestAFailedPrimaryWithAReplacementLeavesTheWaitingExtraChosen TestAnOutrankingCandidateThatRestartsBeforeItsWinnerDrains TestHandoverControllerKilledAtEachStep TestGateRecordOnlyIsFinalForAWaitingCandidate TestAKeptLoserRankingPointCases TestAReReadyOutrankerWaitsTheFullWindowFromItsNewTransition TestHandoverBothServeThenPrimaryDrainsAndSecondReplacementIsPlanned TestAStartedLoserIsRankedAgainstItsWinnerAlone TestHandoverSameClassSameIDAndRollout TestTheExtraAndTheSlotBeyondItsOwnHandovers TestAStartedLoserIsNeverComparedWithAnotherPrimary TestAKeptLoserIsChosenWhenTheDeploymentIsShort TestAFailedPrimaryLeavesTheExtraAsThePrimary TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement TestAStartedLoserIsKept TestHandoverLeaseEndExtensionMovesDrainStart TestAStartedLoserThirtyMinutesAfterItsPredecessorIsNotPlacedOn TestAWarmPlacementCannotSlipBetweenTheCountAndTheHeadroom TestLoweringInstancesLeavesANonReadyPrimaryAsTheExtra TestAWinnerThatFailsLeavesTheLoserChosen TestAReplacementGoesOnAWarmAllocationOnlyIfItDrainsLater TestAKeptLoserThatFailsACheckIsReleased TestNoOverlapWarmAllocationTakesTheReplacement|490s"
+  "lifecycle-slow5|./internal/lifecycle|TestAMovedLeaseEndKeepsTheTwoJobGuardToTwoAllocations TestAnEndNeverReleasesAJobThatStartedAfterItsCancelWasApprovedAsQueued TestHeartbeatMissedAgentUnreachable TestGateAMissWhosePassWasLostStillCounts TestAQueuedPathSuccessorRecordsNoWaitAndNormalModePlansFromGenuineWaits TestMetricsDrainAgesAtTheBoundary TestHealthPlainLoadAndShortPrefillRestartNothing TestGateTwoProvidersSharingAProfileReleaseAtMostTwoInAll TestGateAFullListingMakesTheGateRecordOnly TestNoOverlapOneSlotPath|245s"
   "controller-failover|./cmd/hpcburst-controller|TestControllerProcessesFailOverMidSubmit TestControllerProcessesFailOverBeforeSubmit|460s"
   "controller-identities|./cmd/hpcburst-controller|TestEachManagerOfTheBinaryRunsUnderItsOwnIdentity TestAnOperationsCommitIsRecoveredAndExecutedUnderTheLifecycleIdentity TestTheLifecycleIdentityStampsTheOwnerHashLabel TestControllerIdentitiesAreWhoTheyClaimAndNothingElseCan|150s"
   "envoy-timeouts|./internal/agent|TestEnvoyStreamIdleOutlivesTheDefault TestEnvoyClosesIdleUpstreamConnectionsFirst|1200s"
