@@ -366,7 +366,10 @@ func TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpec
 	f := &unitFx{}
 	f.md("md-e", &end)
 	f.md("md-a", nil)
-	f.md("md-b", nil)
+	mb := f.md("md-b", nil)
+	// A spec that can be read, one GPU: futureGPUs (#756) charges a future replacement at the plan, and at the launch's GPUs only
+	// when the spec gives no plan, which the empty spec of these fixtures does not.
+	mb.Spec.Source.Served, mb.Spec.Workload = mdSpec("md-b").Spec.Source.Served.DeepCopy(), mdSpec("md-b").Spec.Workload
 	f.inst("md-e", "pe", provA, "uid-pe", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
 	f.alloc("md-e", "pe", provA, false)
 	f.inst("md-a", "p", provA, "uid-p", hoT(8, 0, 10), v1alpha1.InstanceReady, nil)
