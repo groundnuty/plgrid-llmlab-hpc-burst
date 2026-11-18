@@ -22,7 +22,15 @@ var baselineCases = []dryCase{
 	// Two first-turn requests of ONE session count once; and a turn repeated is a failed check of its own.
 	{"llmlab-one-spiller-twice", "LLMLab answered the first turn of 1 distinct session(s), want exactly k = 2"},
 	{"llmlab-first-turn-twice", "request(s) repeat a session's turn that was already sent"},
-	{"llmlab-spill-below-the-cap", "arrived while the Instance was below its cap of 11"},
+	// Guard 2: the front's own log names the requests resent after a failed dial. A line for another target, at another level, in another message's error field
+	// or cut short is no failure of ours; a log that cannot be read fails closed.
+	{"dial-failure-other-target", ""},
+	{"dial-failure-wrong-level", ""},
+	{"dial-failure-in-error-field", ""},
+	{"dial-failure-malformed", ""},
+	{"front-log-unread", "the front's log could not be read, so a failed dial of the Instance could not be ruled out"},
+	// A burst stamped a tick apart is healthy: the rule's tolerance (ArrivalTick) passes it.
+	{"llmlab-spill-1ms-before-the-cap", ""},
 	{"llmlab-over-its-guard", "LLMLab was asked for more than 144 requests in one phase, so the generator was stopped"},
 	{"llmlab-after-the-detach", "request(s) after it was detached"},
 	// The rest of the detach phase's conditions: the count back at 0 when the phase ends, the count read, ONE served deployment, all 13 first turns 200.
@@ -114,6 +122,16 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"long-serialized", "P1-long: the front's records show at most 1 requests in flight at once on the Instance, want the cap's 11"},
 	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
 	{"ratio-impossible", "no word count reaches 24000 to 28672 tokens"},
+	// A request the front's own log reports resent after a failed dial of the Instance makes its phase INVALID, in every phase (#776's review, point 5, guard 2).
+	{"dial-failure-p1", "P1: 1 request(s) of the phase were resent after a failed dial of the Instance, by the front's own log"},
+	{"dial-failure-p1long", "P1-long: 1 request(s) of the phase were resent after a failed dial of the Instance"},
+	{"dial-failure-p2", "P2: 1 request(s) of the phase were resent after a failed dial of the Instance"},
+	{"dial-failure-p3", "P3: 1 request(s) of the phase were resent after a failed dial of the Instance"},
+	// A P2 LLMLab request with fewer than the cap in flight on the Instance at its arrival, or within one tick after it, is no cap spill (#776's review,
+	// point 5): INVALID, and posted as such. 2 s, 50 ms (the reviewer's case) and 2 ms apart; a LLMLab request in P1 is still a FAIL (llmlab-in-the-control).
+	{"llmlab-spill-below-the-cap", "LLMLab request(s) arrived while the front's records showed fewer than the cap's 11 requests in flight on the Instance, at the arrival or within 1ms after it: not a cap spill"},
+	{"llmlab-spill-50ms-before-the-cap", "not a cap spill"},
+	{"llmlab-spill-2ms-before-the-cap", "not a cap spill"},
 	// A KV figure is posted as at the cap only from a read taken inside the cap's stretch (#776's review, point 7).
 	{"long-no-read-in-window", "no distinct engine read was taken inside the stretch with the cap's 11 requests in flight"},
 	{"ratio-unread", "the ratio probe's usage record holds no prompt tokens"},
@@ -192,6 +210,7 @@ type dryBaseline struct {
 	calls            []string
 	configs          map[string][]byte
 	preBumped        bool
+	frontLog         string
 	waitCalls        int
 	phaseWaits       bool
 	phaseCalls       int
@@ -410,6 +429,52 @@ func (w *dryBaseline) genDone() bool {
 	}
 }
 
+// The fake front log's invented text: distinctive strings that must reach no post, no test log and no record (TestTheFrontLogIsPrivateAndOnlyItsCountIsPosted).
+const (
+	dryDialError   = "dial tcp 192.0.2.77:4242: connect: refused-by-INVENTED-9c1f"
+	dryOtherTarget = "other-ns-4b2e/other-inst-71"
+)
+
+// dryLogLines are the lines the dry front writes to its log in a phase: one unrelated INFO line, and, in the faults, a line about a request of the phase
+// (its first turn) in the form of internal/front/proxy.go:253's, each with the invented error text and the target in its field.
+func (w *dryBaseline) dryLogLines(ph Phase) string {
+	req := ph.Name + "-s000-t01"
+	line := func(level, msg, target string) string {
+		return fmt.Sprintf(`{"time":"2026-11-18T12:00:00Z","level":%q,"msg":%q,"request":%q,"target":%q,"error":%q}`+"\n", level, msg, req, target, dryDialError)
+	}
+	out := `{"time":"2026-11-18T12:00:00Z","level":"INFO","msg":"serving a request","request":"unrelated","target":"` + dryServedInstance + `"}` + "\n"
+	for fault, phase := range map[string]string{"dial-failure-p1": PhaseP1, "dial-failure-p1long": PhaseP1Long, "dial-failure-p2": PhaseP2, "dial-failure-p3": PhaseP3} {
+		if w.d.fault(fault) && ph.Name == phase {
+			out += line("WARN", dialFailureMsg, dryServedInstance)
+		}
+	}
+	if ph.Name == PhaseP2 {
+		switch {
+		case w.d.fault("dial-failure-other-target"):
+			out += line("WARN", dialFailureMsg, dryOtherTarget) // another target's failed dial: not ours
+		case w.d.fault("dial-failure-wrong-level"):
+			out += line("INFO", dialFailureMsg, dryServedInstance)
+		case w.d.fault("dial-failure-in-error-field"):
+			// The message of another line, whose error field quotes the text: never a substring of the whole line.
+			out += fmt.Sprintf(`{"time":"2026-11-18T12:00:00Z","level":"WARN","msg":"another message","request":%q,"target":%q,"error":%q}`+"\n", req, dryServedInstance, dialFailureMsg)
+		case w.d.fault("dial-failure-malformed"):
+			// A line cut short, and one that is no JSON object: skipped, never a failure found and never a pass.
+			out += `{"time":"2026-11-18T12:00:00Z","level":"WARN","msg":"` + dialFailureMsg + `","request":"` + req + `","target":"` + dryServedInstance + "\n" + "not json at all\n"
+		}
+	}
+	return out
+}
+
+// DialFailures reads the dry front's log.
+func (w *dryBaseline) DialFailures(context.Context) ([]DialFailure, bool) {
+	if w.d.fault("front-log-unread") {
+		return nil, false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return ParseDialFailures([]byte(w.frontLog), dryServedInstance), true
+}
+
 // FrontWaiting is the front's own count of requests in its FIFO: while the detach phase's generator runs, none, then two for two reads, then one, then none; at
 // the end of the phase none. The faults change that pattern; a phase in which nobody waited reads none throughout.
 func (w *dryBaseline) FrontWaiting(context.Context) (int, bool) {
@@ -586,6 +651,7 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 	w.generated++
 	w.phase, w.reads = ph, 0
 	w.phaseT0, w.phaseCalls, w.waitCalls = w.d.now(), 0, 0
+	w.frontLog += w.dryLogLines(ph)
 	gen, rows, llm, instance, length := w.build(ph)
 	w.rows = append(w.rows, rows...)
 	w.phaseLLM, w.running = llm, float64(min(instance, w.cap))
@@ -666,8 +732,19 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 	// late is when the sessions beyond the cap start in the faults where the cap is never reached: after the others have ended.
 	late := time.Duration(ph.Turns)*step + time.Second
 	neverReached := (w.d.fault("cap-never-binds") && ph.Kind == KindFull) || (w.d.fault("detach-no-wait") && ph.Kind == KindDetach)
-	if w.d.fault("llmlab-spill-below-the-cap") && ph.Kind == KindFull {
-		delay = 2 * time.Second // the Instance's sessions arrive after LLMLab's: at LLMLab's arrival the Instance held none
+	// The Instance's sessions are stamped after LLMLab's: at LLMLab's arrival the Instance held none. By how much decides the rule (ArrivalTick): 2 s and 50 ms
+	// (the reviewer's case) are no cap spill, and one tick is a healthy burst.
+	if ph.Kind == KindFull {
+		switch {
+		case w.d.fault("llmlab-spill-below-the-cap"):
+			delay = 2 * time.Second
+		case w.d.fault("llmlab-spill-50ms-before-the-cap"):
+			delay = 50 * time.Millisecond
+		case w.d.fault("llmlab-spill-1ms-before-the-cap"):
+			delay = time.Millisecond
+		case w.d.fault("llmlab-spill-2ms-before-the-cap"):
+			delay = 2 * time.Millisecond
+		}
 	}
 	// serialized runs the phase's sessions one after another, each of two turns, so that at most one request is ever in flight: the control that proves nothing.
 	serialized := (w.d.fault("p1-serialized") && ph.Name == PhaseP1) || (w.d.fault("long-serialized") && ph.Name == PhaseP1Long)

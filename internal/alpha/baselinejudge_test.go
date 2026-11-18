@@ -353,14 +353,28 @@ func TestInFlightFromTheRecordsIntervals(t *testing.T) {
 	if peak, _, _ := inFlightStats([]FrontRow{{Start: at(0), End: at(1)}, {Start: at(1), End: at(2)}}, -1); peak != 1 {
 		t.Errorf("two back-to-back requests were counted %d at once", peak)
 	}
-	// The cap at an LLMLab arrival, with the tolerance of 100 ms each way: A [0,10) and B [0,10.05) held a cap of 2 until 10.0 and 10.05.
-	served := []FrontRow{{Start: at(0), End: at(10)}, {Start: at(0), End: at(10.05)}}
+	// The cap-spill rule, by hand (#776's review, point 5), cap 2, times in milliseconds: at least the cap in flight (Start <= t < End) at the arrival or within one tick
+	// (1 ms) after it; a request that ends at t is released at t; no window before the arrival.
+	ms := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Millisecond) }
+	ours := []FrontRow{{Start: ms(1000), End: ms(9000)}, {Start: ms(1001), End: ms(9000)}}
 	for _, c := range []struct {
-		arrival float64
+		name    string
+		served  []FrontRow
+		arrival int
 		held    bool
-	}{{5, true}, {10.05, true}, {10.2, false}, {12, false}} {
-		if got := heldItsCapAt(served, at(c.arrival), 2); got != c.held {
-			t.Errorf("at %vs the Instance held its cap: %t, want %t", c.arrival, got, c.held)
+	}{
+		{"both in flight at the arrival", ours, 5000, true},
+		{"the second of ours is stamped one tick after the arrival: a healthy burst", ours, 1000, true},
+		{"the second of ours is stamped two ticks after the arrival", ours, 999, false},
+		{"the reviewer's case: none of ours at the arrival, both 50 ms later", []FrontRow{{Start: ms(1000), End: ms(9000)}, {Start: ms(1000), End: ms(9000)}}, 950, false},
+		{"one of ours ends at the arrival: it is released at it", []FrontRow{{Start: ms(0), End: ms(5000)}, {Start: ms(0), End: ms(9000)}}, 5000, false},
+		{"one of ours ends a tick after the arrival: still in flight", []FrontRow{{Start: ms(0), End: ms(5001)}, {Start: ms(0), End: ms(9000)}}, 5000, true},
+		{"more than the cap in flight: the Instance is at its cap", append([]FrontRow{{Start: ms(0), End: ms(9000)}}, ours...), 5000, true},
+		{"one short of the cap for the whole span", ours[:1], 5000, false},
+		{"none of ours", nil, 5000, false},
+	} {
+		if got := heldItsCapAt(c.served, ms(c.arrival), 2); got != c.held {
+			t.Errorf("%s: held its cap %t, want %t", c.name, got, c.held)
 		}
 	}
 	if got := nearestRank([]float64{5, 1, 3, 2, 4}, 0.5); got != 3 {
@@ -895,5 +909,90 @@ func TestTheLongestWaitingStretchIsALowerBound(t *testing.T) {
 	}
 	if _, _, ok := indirectWaitWitness(joined[:2], LLMLabProviderName, 2); ok {
 		t.Error("an indirect witness was made of two first turns")
+	}
+}
+
+// ParseDialFailures reads the front's slog JSON lines, typed by hand in the form of internal/front/proxy.go:253's: a line counts only if its msg EQUALS the text
+// (never a substring of the line), its level is WARN, its target is ours and it names a request. A line that is not a JSON object, is cut short, or has a
+// non-string member is skipped: never a failure found, and never a pass.
+func TestDialFailuresAreParsedFromTheFrontsSlogLines(t *testing.T) {
+	const ours, msg = "ns/inst-a", "no connection to the target; nothing was sent"
+	line := func(level, m, req, target, errText string) string {
+		return `{"time":"2026-11-18T12:00:00.123456789Z","level":"` + level + `","msg":"` + m + `","request":"` + req + `","target":"` + target + `","error":"` + errText + `"}` + "\n"
+	}
+	log := line("WARN", msg, "r1", ours, "dial tcp: refused") + // counts
+		line("WARN", msg, "r2", "ns/inst-b", "x") + // another target
+		line("INFO", msg, "r3", ours, "x") + // another level
+		line("WARN", "another message", "r4", ours, msg) + // the text only in another line's error field
+		line("WARN", msg, "", ours, "x") + // no request
+		`{"level":"WARN","msg":"` + msg + `","request":"r5","target":"` + ours + `"` + "\n" + // cut short
+		"not json at all\n" +
+		`{"level":"WARN","msg":"` + msg + `","request":7,"target":"` + ours + `"}` + "\n" + // a request that is no string
+		"\n" +
+		line("WARN", msg, "r6", ours, "again")
+	got := ParseDialFailures([]byte(log), ours)
+	if len(got) != 2 || got[0] != (DialFailure{"r1", ours}) || got[1] != (DialFailure{"r6", ours}) {
+		t.Errorf("parsed %+v, want r1 and r6 of the target alone", got)
+	}
+	if got := ParseDialFailures(nil, ours); len(got) != 0 {
+		t.Errorf("an empty log gave %+v", got)
+	}
+	// A whole line of the other front messages, none of them a dial failure.
+	if got := ParseDialFailures([]byte(strings.Repeat(line("WARN", "a request was cut", "r1", ours, "x"), 3)), ours); len(got) != 0 {
+		t.Errorf("another message gave %+v", got)
+	}
+}
+
+// The front's log is the stack's PRIVATE state: read only to match request IDs, and only the COUNT reaches the text to post, the test's log, the record or the
+// screen (team lead's condition on guard 2). The dry front's log carries invented text in the error and target fields of the line it writes for a request of P2;
+// none of it, and not the matched request's ID, may appear in the post, the record, the run's log or the error that ends the run, while the count does.
+func TestTheFrontLogIsPrivateAndOnlyItsCountIsPosted(t *testing.T) {
+	cfg := Config{Row: BaselineRow(), Dry: true, DryFault: "dial-failure-p2", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel,
+		Phases: DefaultPhases(CapSano)}
+	rec, err := NewRecorder(cfg.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := newDrySteps(t, cfg, "baseline")
+	var logged strings.Builder
+	logf := func(f string, a ...any) {
+		fmt.Fprintf(&logged, f+"\n", a...)
+		t.Logf(f, a...)
+	}
+	failures, err := Run(context.Background(), cfg, st, rec, logf)
+	if len(failures) != 0 || !errors.Is(err, ErrBaselineInvalid) {
+		t.Fatalf("failures %v, err %v: want INVALID", failures, err)
+	}
+	post, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+	record, _ := os.ReadFile(filepath.Join(cfg.Out, RecordFile))
+	everywhere := map[string]string{"the post": string(post), "the record": string(record), "the run's log": logged.String(), "the run's error": err.Error()}
+	// The record is the run's private file and holds the front's USAGE records, which name the Instance and the request IDs; what only the log holds, its error text
+	// and its path, is in none of them. The Instance's key and the matched request's ID, which the log and the usage records share, are kept out of what is posted, logged
+	// or printed.
+	logOnly := []string{dryDialError, "INVENTED-9c1f", "192.0.2.77", "front.log"}
+	for where, text := range everywhere {
+		for _, secret := range logOnly {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s holds %q, which only the front's private log holds", where, secret)
+			}
+		}
+		if where == "the record" {
+			continue
+		}
+		for _, secret := range []string{dryServedInstance, "P2-s000-t01"} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s holds %q, which names the front's private log's match", where, secret)
+			}
+		}
+	}
+	// The count does reach them: in the post, the run's log and the error, and the other phases show none.
+	if !strings.Contains(string(post), "- requests resent after a failed dial of the Instance, by the front's own log (a count only; the log is private): 1\n") {
+		t.Errorf("the post lacks the count:\n%s", post)
+	}
+	if !strings.Contains(logged.String(), "P2:") || !strings.Contains(logged.String(), "1 resent after a failed dial") || !strings.Contains(err.Error(), "1 request(s) of the phase were resent after a failed dial of the Instance") {
+		t.Errorf("the count is not in the run's log or the error:\n%s\n%v", logged.String(), err)
+	}
+	if n := strings.Count(string(post), "(a count only; the log is private): 0\n"); n != 3 {
+		t.Errorf("%d other phases show a count of 0, want 3 (P1, P1-long and P3)", n)
 	}
 }

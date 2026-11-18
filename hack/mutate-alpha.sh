@@ -1240,6 +1240,10 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
+  # #776's review, point 5: the cap-spill rule's tick (0 rejects a healthy burst), guard 2 (a failed dial in a phase) and the front log's privacy (the post prints the matches).
+  'baseline.go@@	ArrivalTick = time.Millisecond@@	ArrivalTick = 0'
+  'baselinejudge.go@@		case po.DialFailures > 0:@@		case false:'
+  'baselinejudge.go@@(a count only; the log is private): %d\n", po.DialFailures)@@(a count only; the log is private): %d %v\n", po.DialFailures, po.DialFailed)'
   # #776's review, point 6: the detach phase passes only on the front's own waiting count reaching 2 and returning to 0.
   'baselinejudge.go@@			if maxWaiting < LLMLabK {@@			if maxWaiting < 1 {'
   'baselinejudge.go@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 {@@			if last := po.Waiting[len(po.Waiting)-1].N; last != 0 && false {'

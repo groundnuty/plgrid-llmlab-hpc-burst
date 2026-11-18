@@ -141,18 +141,16 @@ func countAt(rows []FrontRow, t time.Time) int {
 	return n
 }
 
-// heldItsCapAt says the Instance held its cap at an LLMLab request's arrival: with ArrivalTolerance each way (milliseconds in the records, and the
-// release that follows the relay), its count reached the cap at the arrival or at an instant within the tolerance of it. That is how this row reads the
-// tolerance of "one request within 100 ms": a count one short of the cap at the arrival is accepted only as the edge of an instant at the cap within 100 ms,
-// and a count that stays below the cap for longer is a spill that was not the cap's.
+// heldItsCapAt is the cap-spill rule (#776's review, point 5): the records show AT LEAST cap requests of the Instance in flight at the arrival of an LLMLab
+// request, or at an instant within ArrivalTick after it (the arrival instant, the tick's end, and each start of ours in between). In flight is
+// Start <= t < End: a request that ends at t is released at t, and one that starts at t is in flight at t. There is no window before the arrival, and none
+// beyond the tick.
 func heldItsCapAt(served []FrontRow, arrival time.Time, cap int) bool {
-	cands := []time.Time{arrival, arrival.Add(-ArrivalTolerance), arrival.Add(ArrivalTolerance)}
-	lo, hi := arrival.Add(-ArrivalTolerance), arrival.Add(ArrivalTolerance)
+	hi := arrival.Add(ArrivalTick)
+	cands := []time.Time{arrival, hi}
 	for _, r := range served {
-		for _, t := range []time.Time{r.Start, r.End.Add(-time.Nanosecond)} {
-			if !t.Before(lo) && !t.After(hi) {
-				cands = append(cands, t)
-			}
+		if r.Start.After(arrival) && !r.Start.After(hi) {
+			cands = append(cands, r.Start)
 		}
 	}
 	for _, t := range cands {
@@ -527,6 +525,18 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		f("the front's request metric says LLMLab was asked %.0f time(s) and its usage records name %d", po.LLMLabMetric, len(llm))
 	}
 
+	// Guard 2 (team lead's decision on #776's review, point 5): a request of the phase that the front's own log reports resent after a failed dial of the served
+	// Instance makes the phase INVALID, in P1, P1-long, P2 and P3 alike: it went to another target for a reason that is no cap, and the usage record cannot say
+	// so. A log that could not be read fails closed.
+	if po.Stopped != StopGuardUnread {
+		switch {
+		case !po.DialLogRead:
+			f("the front's log could not be read, so a failed dial of the Instance could not be ruled out")
+		case po.DialFailures > 0:
+			inv("%d request(s) of the phase were resent after a failed dial of the Instance, by the front's own log: the phase did not measure the cap", po.DialFailures)
+		}
+	}
+
 	// The FINAL count, from the front's own records of every request LLMLab answered in the phase's window, sent by the generator or not, above the guard FAILS
 	// the verdict, whatever the last poll said: the guard polls, and a burst between its last look and the generator's exit escapes it.
 	if final := len(rowsFrom(po.Rows, managed)); final > LLMLabGuard {
@@ -618,7 +628,9 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 				}
 			}
 			if notHeld > 0 {
-				f("%d LLMLab request(s) arrived while the Instance was below its cap of %d (by the usage records' intervals, within %s): the spill was not the cap's", notHeld, cap, ArrivalTolerance)
+				// An LLMLab request that is no cap spill (a failed dial resent to LLMLab, or a stamp out of order by more than one tick) makes P2 INVALID, and is
+				// posted as such: it measured no cap. In P1 and P1-long any LLMLab request is a FAIL, the control's own rule (above).
+				inv("%d LLMLab request(s) arrived while the front's records showed fewer than the cap's %d requests in flight on the Instance, at the arrival or within %s after it: not a cap spill", notHeld, cap, ArrivalTick)
 			}
 		}
 	case KindDetach:
@@ -664,8 +676,8 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 
 	// Over the cap by the usage records' intervals, outside the detach phase, where waiters are in the front by design.
 	if ph.Kind != KindDetach {
-		if _, over, top := inFlightStats(rowsOn(joined, managed, RouteServed), cap); top >= cap+2 || over > ArrivalTolerance {
-			f("the Instance had more than its cap of %d requests in flight for longer than %s (%d at most), by the usage records", cap, ArrivalTolerance, max(top, cap))
+		if _, over, top := inFlightStats(rowsOn(joined, managed, RouteServed), cap); top >= cap+2 || over > OverCapTolerance {
+			f("the Instance had more than its cap of %d requests in flight for longer than %s (%d at most), by the usage records", cap, OverCapTolerance, max(top, cap))
 		}
 	}
 
@@ -895,6 +907,14 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 				rr.Route, rr.Requests, rr.Sessions, rr.MostInFlight, rr.SpillsIn, rr.SpillsOut, rr.Errors, rr.TTFTp50, rr.TTFTp95, rr.SpeedP50, rr.SpeedMin, rr.PromptTokens, rr.CompletionTokens)
 		}
 		b.WriteString(waitsLine(o, po, joined))
+		if po.DialLogRead {
+			fmt.Fprintf(&b, "  - requests resent after a failed dial of the Instance, by the front's own log (a count only; the log is private): %d\n", po.DialFailures)
+		} else if po.Stopped != StopGuardUnread {
+			b.WriteString("  - the front's log could not be read: a failed dial of the Instance could not be ruled out\n")
+		}
+		if po.Phase.Kind == KindFull {
+			b.WriteString(spillRuleLine)
+		}
 		if len(po.Engine) > 0 {
 			peak, kv, waiting, waitPeak := 0.0, 0.0, 0, 0.0
 			pre := po.Engine[len(po.Engine)-1].Preemptions - po.Engine[0].Preemptions
@@ -931,6 +951,9 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 	}
 	return b.String()
 }
+
+// spillRuleLine is posted with P2: how a request LLMLab answered is judged a cap spill, with its measurement and its limit.
+const spillRuleLine = "  - the cap-spill rule: a request LLMLab answered is a cap spill only if the front's records show at least the cap's requests in flight on the Instance at its StartTime or within 1 ms after it (the timestamps' tick; a request ending at t is released at t); measured on a real-clock front harness (one Instance with a cap of 11, the LLMLab double, 13 simultaneous first turns, 200 runs): with the tick 0 of 400 healthy spillers were rejected, with no tolerance 45 of 400 (11%), in 36 of 200 runs (18%); a request with none in flight at its arrival and 11 arriving 50 ms later is rejected. A request resent after a failed dial is told from an overflow by the front's own log (above), so no burst residual is left.\n"
 
 // sessionsWithFirstTurn are the distinct sessions that have a first turn among the joined requests, answered whole or not.
 func sessionsWithFirstTurn(joined []joinedRow) map[string]bool {

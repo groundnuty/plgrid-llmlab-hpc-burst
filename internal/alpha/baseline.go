@@ -191,9 +191,20 @@ const (
 	LongTargetTokens = 26_000
 	// maxStudyWords is the most words the generator takes in one context (hack/studyload/config.go, maxTokens).
 	maxStudyWords = 1 << 20
-	// ArrivalTolerance is the tolerance on a count read from the usage records' intervals, one request within 100 ms: the records carry milliseconds, and
-	// the reservation's release follows the relay (internal/front/proxy.go:238-239).
-	ArrivalTolerance = 100 * time.Millisecond
+	// ArrivalTick is the tolerance of the cap-spill rule: one tick of the usage records' timestamps, a millisecond (internal/front/usage, Time). A P2 request
+	// that LLMLab answered is a cap spill only if the front's records show at least the cap's requests in flight on the Instance at its StartTime or within one
+	// tick after it (#776's review, point 5; the science agent's and team lead's rulings). StartTime is the arrival stamp, taken before the route is chosen
+	// (internal/front/request.go:78), and a request decided late can be stamped a tick earlier than one it spilled past; EndTime is stamped in finish() after the
+	// reservation's release (proxy.go:238, :595), so the records never show fewer in flight than the front held, which is why the rule asks for AT LEAST the cap.
+	// A request that ends at an instant is released at it. MEASURED on a real-clock front harness (one Instance with routing.instanceCap 11 and the LLMLab double;
+	// 13 simultaneous first turns of 13 sessions, the front's own usage records, 200 runs and 400 cap spillers): with the one-tick tolerance 0 of 400 spillers
+	// were rejected; with none 45 of 400 (11%), in 36 of 200 runs (18%); the least tolerance that passed every one was 1 ms. The reviewer's case, no request of ours
+	// in flight at the arrival and all 11 arriving 50 ms later, is rejected. What the rule cannot do alone is tell a request resent to LLMLab after a failed dial
+	// of the Instance from an overflow, since the record names only the final target: the front's own log does (DialFailedRequests, guard 2).
+	ArrivalTick = time.Millisecond
+	// OverCapTolerance is how long the records may show more than the cap in flight on the Instance outside the detach phase: a record's EndTime is stamped
+	// after the reservation's release, so a request that has been released still shows for a moment (internal/front/proxy.go:238-239, :595).
+	OverCapTolerance = 100 * time.Millisecond
 )
 
 // BaselineRow is Row 1: one job of one A100 on Sano's gpu partition under host-dialed mode, the 106-minute lease, posting to #764, with the cap, the
@@ -542,4 +553,41 @@ func LongContextWords(probeWords int, promptTokens int64, target int) (words int
 		}
 	}
 	return best, best > 0
+}
+
+// dialFailureMsg is the front's log message when a connection to the target could not be made and nothing was sent (internal/front/proxy.go:253, slog at
+// WARN, JSON on stderr: <state>/logs/front.log, internal/launcher/state.go:57). The request is then sent again, to another target, and may go to LLMLab even
+// with a free slot on the Instance (proxy.go:266-275: the retry excludes the Instance that failed), so the usage record, which names only the final target,
+// cannot tell it from an overflow. The log can: its "request" is the usage record's requestID and its "target" the Instance's namespace/name.
+const dialFailureMsg = "no connection to the target; nothing was sent"
+
+// DialFailure is a request the front resent after a failed dial of a target: its request ID and the target. It holds nothing else of the log line: the front's
+// log is the stack's PRIVATE state, read only to match request IDs, and only a COUNT of such requests reaches the text to post, the test's log or the screen
+// (team lead's condition on guard 2). The error text of the line is never read.
+type DialFailure struct{ Request, Target string }
+
+// ParseDialFailures reads the front's log, one slog JSON object a line, and returns the requests it reports resent after a failed dial of target. A line
+// counts only if its "msg" EQUALS dialFailureMsg (never a substring of the line: the error field of another line may quote it), its "level" is WARN and its
+// "target" is target. A line that is not a JSON object with string members, or has no request, is skipped: it is never a failure found, and never a pass.
+func ParseDialFailures(log []byte, target string) []DialFailure {
+	var out []DialFailure
+	for _, line := range bytes.Split(log, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var l struct {
+			Level   string `json:"level"`
+			Msg     string `json:"msg"`
+			Request string `json:"request"`
+			Target  string `json:"target"`
+		}
+		if json.Unmarshal(line, &l) != nil {
+			continue
+		}
+		if l.Msg == dialFailureMsg && l.Level == "WARN" && l.Target == target && l.Request != "" {
+			out = append(out, DialFailure{Request: l.Request, Target: l.Target})
+		}
+	}
+	return out
 }

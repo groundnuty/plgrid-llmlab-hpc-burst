@@ -60,6 +60,9 @@ type BaselineWorld interface {
 	LoggedKV(ctx context.Context) (int64, bool)
 	// Gate is one request at model@<provider>, which only the served Instance answers.
 	Gate(ctx context.Context) (GateObs, error)
+	// DialFailures reads the front's own log, the stack's private state, and returns the requests it reports resent after a failed dial of the served Instance
+	// (ParseDialFailures). False when the log could not be read, which fails closed. Nothing of the log but these requests leaves the world.
+	DialFailures(ctx context.Context) ([]DialFailure, bool)
 	// FrontWaiting is the front's own count of requests waiting in its FIFO, read from its /healthz ("waiting", internal/front/server.go:554): it sums every
 	// group's queue (router.go:609). False when it could not be read.
 	FrontWaiting(ctx context.Context) (int, bool)
@@ -336,7 +339,24 @@ loop:
 	if po.Rows, err = w.FrontRows(ctx, po.Start, ids); err != nil {
 		return po, fmt.Errorf("%s: the front's usage records could not be read: %w", ph.Name, err)
 	}
-	s.logf("%s: %d generator records, %d front records, stopped %q", ph.Name, len(po.Gen), len(po.Rows), po.Stopped)
+	// Guard 2: the front's own log, read after the phase while the stack is up. A request of the phase that it reports resent after a failed dial of the served
+	// Instance makes the phase INVALID: the record cannot tell it from an overflow. Only the count is logged.
+	if fails, ok := w.DialFailures(ctx); ok {
+		po.DialLogRead = true
+		inPhase := map[string]bool{}
+		for _, r := range po.Rows {
+			inPhase[r.RequestID] = true
+		}
+		seen := map[string]bool{}
+		for _, d := range fails {
+			if inPhase[d.Request] && !seen[d.Request] {
+				seen[d.Request] = true
+				po.DialFailed = append(po.DialFailed, d)
+			}
+		}
+		po.DialFailures = len(po.DialFailed)
+	}
+	s.logf("%s: %d generator records, %d front records, %d resent after a failed dial, stopped %q", ph.Name, len(po.Gen), len(po.Rows), po.DialFailures, po.Stopped)
 	return po, nil
 }
 

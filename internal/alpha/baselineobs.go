@@ -107,9 +107,14 @@ type PhaseObs struct {
 	// Waiting are the reads of the front's OWN count of requests waiting in its FIFO (its /healthz "waiting"), taken every BaselineWaitingPoll in the detach
 	// phase and once more when the generator had ended. It sums every group, so it is read as the count of one deployment's FIFO only because the front holds
 	// ONE served deployment of the model: ServedOfModel counts them, read when the phase began.
-	Waiting           []WaitSample `json:"waiting,omitempty"`
-	ServedOfModel     int          `json:"servedOfModel,omitempty"`
-	ServedOfModelRead bool         `json:"servedOfModelRead,omitempty"`
+	Waiting []WaitSample `json:"waiting,omitempty"`
+	// DialFailures counts the requests of the phase that the front's own log reports resent after a failed dial of the served Instance (a count only: the log
+	// is private state), DialLogRead says the log could be read, and DialFailed holds the matched requests for the count, never written to a record or a post.
+	DialFailures      int           `json:"dialFailures,omitempty"`
+	DialLogRead       bool          `json:"dialLogRead"`
+	DialFailed        []DialFailure `json:"-"`
+	ServedOfModel     int           `json:"servedOfModel,omitempty"`
+	ServedOfModelRead bool          `json:"servedOfModelRead,omitempty"`
 }
 
 // WaitSample is one read of the front's count of requests waiting in its FIFO.
