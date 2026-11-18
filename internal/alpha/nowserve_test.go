@@ -733,3 +733,27 @@ func TestTheReaderAcceptsLinesThatAreNotTheAgentsBeforeItsFirstLine(t *testing.T
 		t.Errorf("the text to post does not say how many lines came first, or names them:\n%s", post)
 	}
 }
+
+// Through Run, the dry log whose first two lines are the scheduler's (the shape of the Sano serve run) still shows the warm start: no failure, no NOT RUN,
+// a PASS whose text says how many lines came first and not what they were. The control is the unlisted agent line before the start, which is NOT RUN
+// (TestAWarmStartTheAgentsLogDidNotShowIsNotRun, warm-unknown-first).
+func TestARowALogThatOpensWithTheSchedulersLinesStillShowsTheWarmStart(t *testing.T) {
+	for _, name := range []string{"alpha-athena-now-serve", SanoServeName} {
+		t.Run(name, func(t *testing.T) {
+			row := rowOf(name)
+			cfg := Config{Row: row, Dry: true, DryFault: "warm-foreign-first", Out: filepath.Join(t.TempDir(), "out"), PendingMax: time.Minute, FrontLabel: testFrontLabel}
+			rec, err := NewRecorder(cfg.Out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failures, err := Run(context.Background(), cfg, newDrySteps(t, cfg, "nowserve"), rec, t.Logf)
+			if err != nil || len(failures) != 0 {
+				t.Fatalf("failures %v, err %v; want a pass", failures, err)
+			}
+			posts, _ := os.ReadFile(filepath.Join(cfg.Out, PostsFile))
+			if !strings.Contains(string(posts), name+": PASS") || !strings.Contains(string(posts), "opened with 2 line(s) that are not the agent's") || strings.Contains(string(posts), "invented scheduler notice") {
+				t.Errorf("the text to post does not say PASS with the count of the lines that came first, or names them:\n%s", posts)
+			}
+		})
+	}
+}
