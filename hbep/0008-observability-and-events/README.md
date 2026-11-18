@@ -332,10 +332,13 @@ Prometheus's advice to export 0 for series that may exist ([instrumentation prac
 
 | Metric | Type and labels | Notes |
 |---|---|---|
-| `hpcburst_front_requests_total` | counter: `code` (the HTTP status the client got), `endpoint` (`chat`, `completions`, `responses`, `embeddings`, `models` or `other`), `provider`, `model_deployment` | one per usage record; the last two are empty for an error raised before a target is chosen. The client's `model` is not a label, since its values are unbounded |
-| `hpcburst_front_cuts_total` | counter: `cut_by` (HBEP-5's values: `front_deadline`, `front_idle`, `front_headers`, `tunnel`, `upstream`, `lease_end`, `client`, `front_shutdown`), `provider`, `model_deployment` | |
+| `hpcburst_front_requests_total` | counter: `code` (the HTTP status the client got), `endpoint` (`chat`, `completions`, `responses`, `embeddings`, `models` or `other`), `provider`, `model_deployment`, `workload` (beta, proposed) | one per usage record; the last two are empty for an error raised before a target is chosen. The client's `model` is not a label, since its values are unbounded |
+| `hpcburst_front_cuts_total` | counter: `cut_by` (HBEP-5's values: `front_deadline`, `front_idle`, `front_headers`, `tunnel`, `upstream`, `lease_end`, `client`, `front_shutdown`), `provider`, `model_deployment`, `workload` (beta, proposed) | |
 | `hpcburst_front_pauses_total` | counter: `provider`, `model_deployment` | each pause of a target (HBEP-5, Load bound and cap) |
-| `hpcburst_front_time_to_first_token_seconds` | histogram: `provider`, `model_deployment`, `endpoint`; buckets 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600 and 7200 s | from `firstTokenMs`; a request without a first token is not observed. The buckets reach past S2's first token after 1,100 s and the 2 h default `maxRequestDuration` (HBEP-5) |
+| `hpcburst_front_time_to_first_token_seconds` | histogram: `provider`, `model_deployment`, `endpoint`, `workload` (beta, proposed); buckets 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600 and 7200 s | from `firstTokenMs`; a request without a first token is not observed. The buckets reach past S2's first token after 1,100 s and the 2 h default `maxRequestDuration` (HBEP-5) |
+| `hpcburst_front_in_flight` (beta, proposed) | gauge: `workload`, `provider`, `model_deployment` | requests in flight per route, from dispatch to completion, as the balancer counts them (HBEP-5, Load bound and cap) |
+| `hpcburst_front_waiting` (beta, proposed) | gauge: `workload`, `model_deployment` | requests waiting in the front's FIFO (HBEP-5, Load bound and cap) |
+| `hpcburst_front_output_tokens_per_second` (beta, proposed) | histogram: `workload`, `provider`, `model_deployment`; buckets 1, 2, 5, 10, 20, 50, 100, 200 and 500 | per completed stream: `usage.completion_tokens` over the time from its first token to its end, the speed per session (HBEP-764, R7) |
 | `hpcburst_usage_records_total` | counter | records written and synced |
 | `hpcburst_usage_write_failures_total` | counter | records not written: a failed write or sync of their batch, or a failed counter-block reservation |
 | `hpcburst_usage_dir_free_bytes` | gauge | free space of `usageDir`'s file system |
@@ -813,6 +816,7 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
 - 2026-11-17: erratum: an event still queued for a controller whose manager has stopped for good counts nothing when it is lost and raises nothing, one log line each (#697).
 - 2026-11-17: erratum: the route and the `hpcburst_events_unlogged_total` series of a controller label end with the last manager of the label that is forgotten, not the first: a Provider that changes kind has a manager of each kind for a while, and a manager set up after the label was retired revives its route (#697).
 - 2026-11-17: erratum: the S2 ratios measured for #625's publisher (#697), recorded under Retention.
+- 2026-11-18: amendment from HBEP-764: the front's series gain a `workload` label, with in-flight and waiting gauges and a speed histogram per route.
 
 ## Amendments
 
@@ -887,3 +891,4 @@ Events and accounting replace www-2027's exit-to-wake watchers, its append-only 
   Before, the job-ID rule covered the typed Allocation events only, an empty stream replayed every file, the floor read the streams' logical bytes, and a restore could pair the log with a later backup.
 - **2026-11-16: no path or name in a logged note** (Allocation events, No job ID in a note). An amendment by the science agent's ruling on #640 (#625's PR C). A note the log keeps names no path, user name, account or grant, as well as no job ID, and a note that would copy another component's error text gives the reason code and a fixed description, with the detail left in status. Before, the rule named job IDs only, and `AllocationRefused`'s note copied the profile reader's error, which can name a credentials file's path on the host.
 - **2026-11-16: the envelope's time** (The durable log, Streams). An amendment by the science agent's ruling on #625's PR E2. The CloudEvent's `time` is the publishing wrapper's clock, read once per call, and the API's `eventTime` is client-go's own, read microseconds later in the same call, so the two copies match on their fields and agree on their times within 1 s. Before, the text said the envelope's `time` was the event's `eventTime` and that the copies agree, which client-go's recorder can't give without being re-implemented.
+- **2026-11-18: signals per Workload** (Front metrics). An amendment from HBEP-764, R7. The front's request, cut and first-token series gain a `workload` label: the request's Workload name, empty for one that names none. Workloads are objects, so the label stays bounded. Three series are added: requests in flight and waiting, and a speed histogram per completed stream, per route. Before, the front's series had no Workload and no in-flight, waiting or speed series.

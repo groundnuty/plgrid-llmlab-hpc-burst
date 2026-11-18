@@ -159,7 +159,7 @@ Routes to LLMLab still pass through LLMLab's own cut and injection. The front ca
    - **Decided:** each bound is a decimal string with a floor of 1.0, since a bound below the mean load cannot place every request. Admission refuses `tight` above `loose`; equal values are allowed. Source: science-agent decision, 31 Oct 2026, built in the contracts (PR #71).
 4. **Choice under `model`.**
    - **Decided** (owner decision, 30 Oct 2026): routing policy is the ModelDeployments of the name (Notes). Our own deployments come first. An attached managed provider takes a request only when no Instance of ours can: none is eligible, or every eligible one is at its cap (Request path). A conversation then moves to the managed provider and returns at its next turn once its home has room. Among several of our own ModelDeployments, the key's home on one ring over all their routable Instances names the ModelDeployment (Request path). Source of the spill rule: HBEP-7, open question 10 (owner, 29 Oct 2026, PR #14): no spill to a provider that is not attached.
-   - **Decided for beta (owner, 17 Nov 2026, recorded on #679): LLMLab takes overflow only.** It takes traffic only when our Instances are full: none is eligible, or every eligible one is at its cap (Request path). That keeps the decision of 30 Oct 2026 above for beta. Before, whether LLMLab should share load while our Instances have room was open, blocking beta.
+   - **Decided for beta (owner, 17 Nov 2026, recorded on #679): LLMLab takes overflow only.** That is the default; a Workload may set `ManagedFirst` instead (owner, 18 Nov 2026; Workloads). It takes traffic only when our Instances are full: none is eligible, or every eligible one is at its cap (Request path). That keeps the decision of 30 Oct 2026 above for beta. Before, whether LLMLab should share load while our Instances have room was open, blocking beta.
    - **Open (blocks beta): weighting by measured capacity** (sharpened 17 Nov 2026):
      - **Weighting.** S10, S10b and S10c ran Instances of equal speed only, so nothing in the repository shows whether the in-flight bound alone serves Instances of unequal speed, as across A100 and GH200 classes. **What decides it** needs no GPU (proposal): S10's simulator with two Instance service rates, in S10's tight regime and seeds 1–3, swept over rate ratios, unweighted against a ring whose points are weighted by the rates. The ratio that applies is the one between the two classes' expected-performance entries once both have one (HBEP-4, Expected performance). Athena's first entry is a beta run; a GH200 entry waits for Helios's return, so the sweep runs now and its reading waits for that. **The rule:** if, at that ratio, the weighted ring's hit rate and throughput are within the seed-to-seed spread of the unweighted one's, beta weighs nothing. Otherwise each Instance's ring points are weighted by its own measured rate, from its throughput gate (HBEP-7, Over-allocation and qualification (beta)), with equal weights while it has none.5. **Retries.**
    - **Decided for alpha** (science-agent decision, 30 Oct 2026; the guard HBEP-7's poison-request risk relies on): the front sends a request again only when no byte of it was written to the upstream: a refused or timed-out connection, or a reused idle connection closed before the write. It sends it once more, to the next Instance on the ring, or on a fresh connection to the same one. A request that reached an engine is never sent again; the client sees its error.
@@ -236,8 +236,8 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
 ### Request path
 
 1. **Authenticate.** The `Authorization: Bearer` key must equal one of the client keys in `clientKeysFile` (mode 600, HBEP-11 Credentials). Each entry has an ID, which usage records carry; the key itself is never logged. Otherwise 401.
-2. **Parse the name** by HBEP-3's grammar: split at the last `@`; `model`, `model@<provider>` or `model@<provider>/<deployment-id>`. A grammar error, an unknown provider or a malformed ID is a 400 and never falls back to a plain model (HBEP-3).
-3. **Resolve the candidates.** The ModelDeployments whose `spec.model` is the model name, in the namespaces the front watches. Then:
+2. **Parse the name** by HBEP-3's grammar: split at the last `@`; `model`, `model@<provider>` or `model@<provider>/<deployment-id>`. In beta a `#<workload>` suffix is split off first, at the last `#` (Workloads; HBEP-3). A grammar error, an unknown provider or a malformed ID is a 400 and never falls back to a plain model (HBEP-3).
+3. **Resolve the candidates.** The ModelDeployments whose `spec.model` is the model name, in the namespaces the front watches; for a request that names a Workload, only those that serve it (Workloads). Then:
    - `model`: every routable target of those ModelDeployments;
    - `model@<provider>`: those on that provider only;
    - `model@<provider>/<deployment-id>`: those on that provider whose deployment ID has that display form. For a managed entry that is its managed ID.
@@ -247,7 +247,7 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
    - No eligible candidate: 503 `model_inactive` (Errors). It never widens to a broader level.
 4. **Compute the conversation key** (Conversation key).
 5. **Choose the ModelDeployment.**
-   - Our own first. With one candidate ModelDeployment of ours, it is chosen. With several, the front places all their routable Instances on one ring, KubeAI's (256 points per Instance, xxhash of the Instance's name and the point's index), and the key's home on it names the ModelDeployment. That ring holds no counts; it only picks the deployment.
+   - Our own first, unless the request's Workload sets `ManagedFirst` (Workloads). With one candidate ModelDeployment of ours, it is chosen. With several, the front places all their routable Instances on one ring, KubeAI's (256 points per Instance, xxhash of the Instance's name and the point's index), and the key's home on it names the ModelDeployment. That ring holds no counts; it only picks the deployment.
    - If the chosen ModelDeployment has no eligible Instance, or none below its cap while its cap is in force, the walk continues to the next ModelDeployment on the ring.
    - If none of ours can take the request, an eligible managed target takes it: the key's home on a ring of the managed targets, with no bound.
    - If there is none, the request waits in the front queue of the first ModelDeployment on the walk that has an eligible Instance (Load bound and cap).
@@ -291,6 +291,25 @@ As listed in Notes. Extensions are additive: response headers, extra fields in e
   - **The run and its reset.** Failures count in a row. A request that completes with a 2xx response resets the run, a capped reply included: a `length` finish reason, a `response.incomplete`, or a `response.completed` whose response has status `incomplete`. A 4xx before streaming starts is the client's error: it passes through, and neither counts nor resets.
   - **Managed targets:** only connection failures pause them. Every HTTP status, LLMLab's 503 for an inactive model included, goes to the client as the Errors table says (The LLMLab route).
   - **A new registration clears the old one's pause** (the science agent's ruling (a) of 11 Nov 2026, for #418, from spike S16, #412). A pause, or a run of failures short of one, belongs to the registration epoch it began in (Reachability, A new registration). When the Instance registers again in a later epoch and a probe passes there, the pause and its failure count clear. A pause from the current epoch is untouched, and a new registration whose probe fails clears nothing. A flapping frpc still passes its probe each time before it takes traffic.
+
+### Workloads (beta, proposed)
+
+Amended 2026-11-18 from HBEP-764, a single study with several workloads, and the owner's decisions of 18 Nov 2026. A Workload (HBEP-3) declares one class of a study's requests: its `model`, its `shape` (HBEP-7's `workload` type), its expected `sessions`, its `routeOrder`, and its `managedSessions` for managed targets.
+
+- **Naming it.** A request names a Workload by the header `workloadHeader` sets (`x-hpcburst-workload`), or by the name suffix `#<workload>` (HBEP-3). With both, they must name the same Workload. A Workload that isn't one of the model's, in the namespaces the front watches, is a 400, never a fallback to no Workload (Errors). Neither the suffix nor the header is sent on: the `model` field is rewritten as step 7 says, and the header is dropped. A request that names no Workload takes the Request path unchanged.
+- **Who serves it.** A ModelDeployment serves the Workloads its `spec.workloads` lists (HBEP-7), and one with an empty list serves every Workload of its model. That holds for managed-source ModelDeployments too. A request that names a Workload resolves only to the ModelDeployments that serve it (Request path, step 3).
+- **Pinning.** Steps 5 and 6 run unchanged on that smaller set. The conversation key is placed on a ring of only the serving ModelDeployments' Instances, and within one on its balancer group, so a Workload's sessions stay on its own deployments, and within one on their home Instance.
+- **Route order.**
+  - With `routeOrder: OwnFirst`, the default, step 5 is as written: LLMLab takes overflow only (open question 4).
+  - With `ManagedFirst`, an eligible managed target that serves the Workload takes the request first, while that Workload's requests in flight on managed targets are fewer than its `managedSessions`. Past that, or with no eligible managed target, step 5's walk over our own ModelDeployments follows, and when none of ours can take the request it waits as step 5 says.
+  - The front can't see LLMLab's capacity, so `managedSessions` is the study's own bound on it (HBEP-764, R5), and admission requires it with `ManagedFirst`. LLMLab's own answers pass through as The LLMLab route says.
+  - A conversation moves between routes as it does today (open question 4). One that spilled to our Instances returns to LLMLab at its next turn once there's room, and loses our cache when it does, a stated limit.
+- **The count in tokens.** An Instance whose status carries `kvCacheTokens` (HBEP-7, The KV cache size) has a token budget B: `kvCacheTokens` times its workers, counted as its cap counts them (Load bound and cap).
+  - A request of a Workload is charged its shape's `contextTokens.typical` plus `outputTokens.typical`. A request that names no Workload is charged B divided by the Instance's cap, so an Instance that serves only such requests reaches its budget exactly at its cap, as today.
+  - In the capped pick (Load bound and cap), an Instance holds its cap when its count is at the cap, or when its charged tokens plus the request's charge exceed B. The rest of Load bound and cap is unchanged: the budget is in force exactly when the cap is; a skip keeps an Instance's charges as it keeps its count; and each charge is released exactly once, with its reservation.
+  - Without `kvCacheTokens`, such as for an engine run with `disable-log-stats` or before the agent reports it, the count alone applies, as today. A set `instanceCap` still caps the count.
+  - **Stated limits.** The charge is the declared typical shape, not a request's real size, and the prefix cache a Workload's sessions share isn't credited. For a hybrid-attention model, `kvCacheTokens` counts requests at `max-model-len`, so the budget is approximate. A study that finds it off sets `instanceCap` (HBEP-764, open question 3).
+- **Edits.** A Workload changes routing only and releases nothing, so HBEP-10's capacity guard doesn't apply to it. An edit applies to requests that arrive after the front sees it.
 
 ### Inside an Instance
 
@@ -376,6 +395,7 @@ Every error the front raises has the body `{"error": {"message": <text>, "type":
 | No client key, or a wrong one | 401 | `invalid_api_key` | | the front |
 | Body is not JSON, or has no string `model` | 400 | `invalid_request` | | the front |
 | The name breaks HBEP-3's grammar, or names an unknown provider | 400 | `invalid_model_name` | `grammar` or `unknown_provider` | the front |
+| The name or the workload header names no Workload of the model, or the two name different Workloads (beta, proposed; Workloads) | 400 | `invalid_model_name` | `unknown_workload` or `workload_conflict` | the front |
 | No ModelDeployment has the model name, so no provider is attached | 503, `Retry-After: 30` | `model_inactive` | `not_attached` | the front |
 | Attached, with no eligible target at that level | 503, `Retry-After: 30` | `model_inactive` | `no_ready_target` | the front |
 | Every candidate at its cap past `queueTimeout` | 503, `Retry-After: 10` | `capacity` | | the front; the ModelDeployment only in the usage record, since no header names one |
@@ -457,6 +477,7 @@ Front settings, in the front's configuration file, which the launcher passes (HB
 | Setting | Default | Meaning |
 |---|---|---|
 | `clientListen` | the IPv4 loopback address, port 8000 | the client listener |
+| `workloadHeader` (beta, proposed) | `x-hpcburst-workload` | the request header that names a Workload (Workloads) |
 | `dialHomeListen` | direct mode: required; ssh and host-dialed modes: the IPv4 loopback address at the launcher's port base + 7 (loopback only in host-dialed mode) | the dial-home port (HBEP-11, open question 8): in direct mode an address compute nodes reach, in ssh mode the loopback port that the restricted key's second forward targets (Listeners) |
 | `frpsBindAddr`, `frpsMuxAddr` | the IPv4 loopback address at base + 9 and base + 10 | frps's bind port, where the tunnel's websocket goes, and its tcpmux port, which the transport dials (HBEP-6). Proposed names |
 | `frpsBulkBindAddr`, `frpsBulkMuxAddr` (beta) | the IPv4 loopback address at base + 13 and base + 14 | the second frps's bind and tcpmux ports, for the bulk path (HBEP-6, The bulk path); unset without it |
@@ -695,6 +716,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-16: the usage record cuts `requestedModel` at 1,291 bytes and the decoded `path` at 1,302 bytes, at a character boundary, with a marker (for #645).
 - 2026-11-17: beta's open questions sharpened without a live job: S2c's rule and its three outcomes; GH200's glibc rule; membership's stale "open" label fixed (erratum); the bound's return rule; weighting's GPU-free measurement; the front's `capacity` answer matches `gateway.overloadStatus`, whose value no longer gates beta.
 - 2026-11-17: revised by its Fable and Gemini Carbon reviews (PR #679), and the owner's answers of 17 Nov 2026: S2c's default router applies per platform, only where the profile records the compute nodes' glibc at 2.30 or later (open question 2); LLMLab takes overflow only (open question 4), and one front for beta, revisited with the team option (open question 11).
+- 2026-11-18: amendment from HBEP-764: Workloads, named per request, served by their own deployments, ordered per Workload, and counted against a token budget per Instance (Workloads).
 
 ## Amendments
 
@@ -774,3 +796,4 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
     - **LLMLab takes overflow only** (owner; open question 4): traffic reaches it only when our Instances are full, as in alpha, so no code changes. Before, whether it should share load while our Instances have room was open, blocking beta;
     - **one front for beta** (owner; open question 11), revisited with the team option. Before, replicas for the team option were open, blocking beta;
     - **HBEP-4's `gateway.overloadStatus` row** now reads the records' status alone, as open question 6 does. Before, it named `errorCode` as a source too.
+- **2026-11-18: Workloads** (Request path; Workloads; Errors; Parameters; open question 4). An amendment from HBEP-764 and the owner's decisions of 18 Nov 2026. A request may name a Workload by a header or a `#<workload>` suffix. It then resolves only to the ModelDeployments that serve that Workload, is pinned among their Instances, follows the Workload's route order (`OwnFirst` by default, or `ManagedFirst` up to its `managedSessions`), and is counted against each Instance's token budget, `kvCacheTokens`, at the Workload's typical shape. A request that names no Workload is routed as before. Before, every request to a model name was routed alike, LLMLab took overflow only, and the cap counted requests alone.

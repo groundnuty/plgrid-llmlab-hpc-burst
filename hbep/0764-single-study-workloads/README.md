@@ -98,10 +98,10 @@ These are for the amendments. Each names the HBEP expected to own it, and each i
 
 ### Open questions
 
-1. **Where workloads live:** a new resource, or fields on the ModelDeployment (R1). Owner and HBEP-3.
-2. **The name form** for a workload in a model name (R2). HBEP-3 splits a name at its last `@`, so the new form must parse without ambiguity.
+1. **Where workloads live:** a new resource, or fields on the ModelDeployment (R1). **Decided** (owner, 18 Nov 2026): a new resource kind, Workload (HBEP-3, HBEP-11).
+2. **The name form** for a workload in a model name (R2). **Decided:** a `#<workload>` suffix, split off before the last `@` (HBEP-3, Name grammar).
 3. **What a session is charged** (R4): the typical shape or the longest; whether prefix-cache sharing among a workload's sessions, such as a common system prompt, lowers it; and whether the engine's measured cache use corrects it. The owner suspects that for LLMLab the binding limit is the number of sessions served efficiently rather than the cache size (18 Nov 2026), which awareness of speed (R8) is meant to find.
-4. **Workloads mixed on one Instance,** or one workload per deployment first. The lean: design the count for mixing, and deploy one workload per deployment first.
+4. **Workloads mixed on one Instance,** or one workload per deployment first. **Decided:** the token budget allows mixing (HBEP-5, Workloads), and a study keeps workloads apart by listing them on separate ModelDeployments.
 5. **Where a cluster's measured cache lives** for planning (R6): an `expectedPerformance` entry, or a field of its own.
 6. **The dynamic mode's trigger:** sessions waiting at the front, LLMLab's speed per session falling, or both.
 7. **The LLMLab route's model:** LLMLab's current model under the study's name, read from its model list, and whether our pinned engine can serve the same model. If it can't, raising the engine version is the owner's decision.
@@ -192,6 +192,7 @@ The operator reads each workload's signals per route (R7) to see whether its dec
 ## Implementation history
 
 - 2026-11-18: proposed, from the owner's discussion with the science agent on 18 Nov 2026 (issue #764).
+- 2026-11-18: the owner chose a new resource kind, Workload (open question 1). R1 to R5 and R7 are amended into HBEP-3, HBEP-5, HBEP-7, HBEP-8 and HBEP-11; R6, planning for pre-staging, and R8, awareness of speed, come later.
 
 ## Amendments
 
