@@ -125,6 +125,7 @@ func setupEstimates(mgr manager.Manager, c *Controller) error {
 		if err != nil {
 			return err
 		}
+		//rbac:resources hpcburst.groundnuty.github.io/operations
 		return kube.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(u),
 			client.FieldOwner(v1alpha1.FieldManagerProviderEstimate(name)), client.ForceOwnership)
 	}
