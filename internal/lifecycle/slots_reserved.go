@@ -46,10 +46,6 @@ type reservedSlot struct {
 	// before the younger (before).
 	created time.Time
 	uid     string
-	// size is the Allocation's size, for the per-user caps of an extra's check (futureReplacements): the replacement a
-	// slot is reserved for needs the room its primary has. Nil for a slot whose Allocation reads no batch parameters,
-	// or is not made.
-	size *v1alpha1.BatchParameters
 	// winner marks a slot held from a replacement hedge's win, beside a predecessor that still serves on another
 	// Provider (the winner rule of reservedOn below), as against a chosen primary's own.
 	winner bool
@@ -77,10 +73,6 @@ const (
 	// slotForOwnAllocation is a live replacement's or successor's, for its own Allocation not made yet: once
 	// that Allocation is reserved (an expectation) or listed, the slot is that, and no longer counted as reserved.
 	slotForOwnAllocation
-	// slotOnceRunning is a chosen primary's whose Allocation has not started and that will hold a slot for its
-	// replacement once it runs (the extra's checks, #725): it is NEVER among a reservation's reserved slots, only in
-	// slotReads.later, which an extra's reservation alone reads.
-	slotOnceRunning
 )
 
 // reservedOn returns the slots reserved on the Provider, from reads made under its lock: the Instances that carry
@@ -111,22 +103,20 @@ const (
 // deployment recreated under the same name are not told apart here (noOverlapCarriers drops them as stale),
 // since a carrier's name is random and a stale successor naming it is not a case that arises.
 func reservedOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) ([]reservedSlot, error) {
-	reserved, _, err := reservedAndLaterOn(ctx, r, provider, profile, allocs)
+	reserved, _, err := reservedAndReadsOn(ctx, r, provider, profile, allocs)
 	return reserved, err
 }
 
-// reservedAndLaterOn is reservedOn and, from the same reads, the slots chosen primaries whose Allocations have not
-// started will hold once Running (slotOnceRunning), of every deployment: the extra's checks read them (#725), so an
-// extra beside another deployment's pending primary leaves the slot and the caps room its replacement will need.
-// They are kept apart from the reserved slots, which every reservation counts: no other ask counts them.
-func reservedAndLaterOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) (reserved, later []reservedSlot, err error) {
+// reservedAndReadsOn is reservedOn and, from the same reads, those reads themselves (handoverReads), which an extra's unit
+// set is made from under the same lock (extraUnits, #725): the extra's checks read no more of the API than the count does.
+func reservedAndReadsOn(ctx context.Context, r client.Reader, provider string, profile *v1alpha1.PlatformProfileSpec, allocs map[string]*v1alpha1.Allocation) (reserved []reservedSlot, reads handoverReads, err error) {
 	var il v1alpha1.InstanceList
 	if err := r.List(ctx, &il, client.MatchingLabels{v1alpha1.LabelProvider: provider}); err != nil {
-		return nil, nil, fmt.Errorf("list Instances for Provider %s's reserved slots: %w", provider, err)
+		return nil, handoverReads{}, fmt.Errorf("list Instances for Provider %s's reserved slots: %w", provider, err)
 	}
 	views, err := deploymentViews(ctx, r, il.Items)
 	if err != nil {
-		return nil, nil, err
+		return nil, handoverReads{}, err
 	}
 	// Every read below but the slots' own is of the deployments' Instances on every Provider (#617): a primary
 	// whose replacement or hedge member is on another Provider is replaced all the same, and a gap's chain and a
@@ -173,7 +163,7 @@ func reservedAndLaterOn(ctx context.Context, r client.Reader, provider string, p
 	for _, v := range views {
 		set, err := surplusOf(ctx, r, v, mds)
 		if err != nil {
-			return nil, nil, err
+			return nil, handoverReads{}, err
 		}
 		for in := range set {
 			surplus[in] = true
@@ -186,7 +176,7 @@ func reservedAndLaterOn(ctx context.Context, r client.Reader, provider string, p
 		if carriers[in] {
 			md, err := deploymentOf(ctx, r, in, mds)
 			if err != nil {
-				return nil, nil, err
+				return nil, handoverReads{}, err
 			}
 			if md != nil && md.DeletionTimestamp.IsZero() {
 				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor})
@@ -212,17 +202,7 @@ func reservedAndLaterOn(ctx context.Context, r client.Reader, provider string, p
 		}
 		a := allocs[allocKey]
 		if a != nil && notYetRunning(a) {
-			// A chosen primary whose job has not started: it will hold a slot for its replacement once it runs, which
-			// no reservation counts yet (the extra's checks do, slotReads.later). A replacement of a serving
-			// predecessor is never here: the continue above took it.
-			md, err := deploymentOf(ctx, r, in, mds)
-			if err != nil {
-				return nil, nil, err
-			}
-			if md != nil && md.DeletionTimestamp.IsZero() && holdsSlotOnceRunning(md, in, a, *profile, time.Time{}) {
-				later = append(later, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotOnceRunning, size: a.Spec.ForProvider.Batch})
-			}
-			continue
+			continue // a chosen primary that has not started holds no slot yet: the extra's unit set counts the one it will hold (extraUnits)
 		}
 		if a == nil || a.Status.AtProvider.Phase != v1alpha1.AllocationRunning {
 			continue
@@ -236,7 +216,7 @@ func reservedAndLaterOn(ctx context.Context, r client.Reader, provider string, p
 		}
 		md, err := deploymentOf(ctx, r, in, mds)
 		if err != nil {
-			return nil, nil, err
+			return nil, handoverReads{}, err
 		}
 		if md == nil || !md.DeletionTimestamp.IsZero() {
 			continue
@@ -245,9 +225,9 @@ func reservedAndLaterOn(ctx context.Context, r client.Reader, provider string, p
 		if err != nil || !servesPast(md, ds) {
 			continue
 		}
-		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, size: a.Spec.ForProvider.Batch, winner: viaWin})
+		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, uid: string(in.UID), winner: viaWin})
 	}
-	return out, later, nil
+	return out, handoverReads{provider: provider, profile: profile, views: views, mds: mds, reserved: out}, nil
 }
 
 // deploymentView is one deployment's Instances on every Provider.
@@ -404,33 +384,6 @@ func counted(slots []reservedSlot, key string, takers []string, expected map[str
 		}
 	}
 	return n, by
-}
-
-// futureReplacements is what an extra's reservation counts of the primaries that will hand over on the Provider, from the
-// reads made under its lock (HBEP-7, Over-allocation and qualification (beta), Its checks; #725 and its amendment): the
-// number of pending chosen primaries of the deployments other than self (namespace/name) that hold no reserved slot yet
-// but will once Running, each leaving one more slot free, and the sizes of the replacements, for the per-user caps, of
-// every primary that will hand over: each reserved replacement slot of every deployment, self's included (a Running
-// chosen primary's, and a replacement hedge's winner's from its win), and the pending primaries of the other
-// deployments. This deployment's own pending primaries are the pass's to count (extraAlsoLeave), since its selection
-// leaves out the very Instance whose Allocation the extra's retry asks for. It is the one place that reads the other
-// deployments' primaries; a narrower ruling changes only it.
-func futureReplacements(rd slotReads, self string) (pendingOthers int, sizes []v1alpha1.BatchParameters) {
-	for _, s := range rd.reserved {
-		if s.kind == slotForReplacement && s.size != nil {
-			sizes = append(sizes, *s.size)
-		}
-	}
-	for _, s := range rd.later {
-		if s.deployment == self {
-			continue
-		}
-		pendingOthers++
-		if s.size != nil {
-			sizes = append(sizes, *s.size)
-		}
-	}
-	return pendingOthers, sizes
 }
 
 // reservedText names the handovers whose reserved slots a count holds, for a

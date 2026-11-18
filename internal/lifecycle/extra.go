@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -88,31 +88,40 @@ func (p *pass) selectionWithout(exclude *v1alpha1.Instance) selection {
 // extraAsk is what an extra's checks add to its reservation, in ONE value for createExtras, which makes the extra, and
 // ensureAllocation, which retries one whose Allocation's create was cut short (extraChecks).
 type extraAsk struct {
-	// deployment is the asking deployment (namespace/name). Non-empty marks an extra's reservation: it then also counts,
-	// under the Provider's lock, the primaries of the OTHER deployments that will hand over (slotAsk.deployment).
+	// deployment is the asking deployment (namespace/name). Non-empty marks an extra's reservation: it then reads, under the
+	// Provider's lock, the unit set of the handovers it must leave room for (extraUnits, slotAsk.deployment).
 	deployment string
-	// alsoLeave is how many slots the extra leaves free beside itself for the deployment's own chosen primaries that are
-	// pending and will hold a handover slot once Running (extraAlsoLeave).
-	alsoLeave int
-	// replacements are those primaries' sizes: their future replacements need that much of the per-user caps (capsFit).
-	replacements []v1alpha1.BatchParameters
+	// exclude is the asking Instance, the cut-short extra that retries (zero for a new one), left out of the unit set.
+	exclude types.UID
+	// sizeOf is the size a new Allocation of a deployment requests on the Provider now (extraUnits).
+	sizeOf func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
 	// headroom is the admission headroom (headroomOf), read under the Provider's lock by the reservation.
 	headroom func(context.Context) (int, error)
 }
 
 // extraChecks are the extra's checks on a Provider, in ONE place for createExtras, which makes the extra, and
 // ensureAllocation, which retries one whose Allocation's create was cut short, so the two never drift (#708, finding 4):
-// the bound, the slot beyond its own handovers (alsoLeave), the room its own pending primaries' replacements will need
-// under the per-user caps (replacements) and the admission headroom (headroom, read under the Provider's lock by the
-// reservation). exclude is the Instance that retries (nil for a new extra). The other deployments' primaries, a
-// pending one's slot and every handing-over primary's caps room (futureReplacements), and the per-user caps and the
-// silence are the reservation's own, asked with params and quiet. ok is false when the bound refuses.
+// the bound, the admission headroom (headroom) and what the unit set of the handovers needs of the reservation: the
+// asking deployment, the Instance to leave out, and how to size a deployment's new Allocation here. The slot beyond the
+// handovers and the room the per-user caps keep for their replacements are read by the reservation itself, from the unit set
+// (extraUnits), and the caps and the silence are its own, asked with params and quiet. exclude is the Instance that retries
+// (nil for a new extra). ok is false when the bound refuses.
 func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (ask extraAsk, ok bool) {
 	if !p.extraBoundWithout(pv, exclude) {
 		return extraAsk{}, false
 	}
-	n, sizes := p.extraAlsoLeaveWithout(pv, exclude)
-	return extraAsk{deployment: p.key.Namespace + "/" + p.key.Name, alsoLeave: n, replacements: sizes, headroom: p.headroomOf(pv)}, true
+	ask = extraAsk{deployment: p.key.Namespace + "/" + p.key.Name, headroom: p.headroomOf(pv),
+		sizeOf: func(md *v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) {
+			plan, err := checkServed(md)
+			if err != nil {
+				return v1alpha1.BatchParameters{}, err
+			}
+			return partitionSizingFor(pv, plan.gpus, plan.workers, md.Spec.LeaseLimit)
+		}}
+	if exclude != nil {
+		ask.exclude = exclude.UID
+	}
+	return ask, true
 }
 
 // headroomOf is the admission headroom H of an extra on the Provider (HBEP-7, Over-allocation and qualification (beta), Its
@@ -209,50 +218,6 @@ func shortageOfDeployment(ctx context.Context, r client.Reader, md *v1alpha1.Mod
 	return shortageOf(selectionOfView(md, v), int(md.Spec.Instances)), nil
 }
 
-// extraAlsoLeave is how many slots the extra leaves free beside itself on the Provider: one for each of the
-// deployment's chosen primaries there that holds no reserved slot yet but will once Running (HBEP-7, Its checks, a
-// slot beyond its own handovers). A primary will hold one when the controller would create its replacement
-// (reservedOn): it has none yet, and the deployment has no end time or one after its expected drain start, its
-// creation plus its Allocation's time limit minus the drain window. Without it an extra made beside a pending
-// primary takes the slot that primary reserves once it runs, and its handover finds none (Per-user limits, Why).
-//
-// It reads the pass's own objects, and gives with the count the size of each such primary, which its future
-// replacement needs of the per-user caps (the caps' own, #725). The slots reserved by Running primaries, and by other
-// deployments', and the other deployments' pending primaries that will hold one, are read under the Provider's lock
-// (reservedAndLaterOn, slotAsk.deployment), so none is counted twice here: a primary whose Allocation is Running holds
-// its slot there, and is no part of alsoLeave.
-func (p *pass) extraAlsoLeaveWithout(pv *providerView, exclude *v1alpha1.Instance) (n int, sizes []v1alpha1.BatchParameters) {
-	chosen, _ := selectPrimaries(p.selectionWithout(exclude), p.desiredCount())
-	var fallback *v1alpha1.BatchParameters // the size a primary with no Allocation yet will have: the extra's own, as provisionWith sizes it
-	for _, c := range chosen {
-		if c.Labels[v1alpha1.LabelProvider] != pv.name || p.replaced(c) {
-			continue
-		}
-		a := p.allocOf(c)
-		if a != nil && !notYetRunning(a) {
-			continue // Running: reservedOn counts its slot; ended, failed, lost or refused: it will hold none
-		}
-		if !p.holdsHandoverSlotLater(c, a, pv) {
-			continue
-		}
-		n++
-		switch {
-		case a != nil && a.Spec.ForProvider.Batch != nil:
-			sizes = append(sizes, *a.Spec.ForProvider.Batch)
-		default:
-			if fallback == nil {
-				if params, err := partitionSizingFor(pv, p.plan.gpus, p.plan.workers, p.md.Spec.LeaseLimit); err == nil {
-					fallback = &params
-				} else {
-					fallback = &v1alpha1.BatchParameters{}
-				}
-			}
-			sizes = append(sizes, *fallback)
-		}
-	}
-	return n, sizes
-}
-
 // notYetRunning reports whether the Allocation has not started and still may: its phase is none, Submitting,
 // SubmissionUnknown, Held or Pending.
 func notYetRunning(a *v1alpha1.Allocation) bool {
@@ -261,37 +226,6 @@ func notYetRunning(a *v1alpha1.Allocation) bool {
 		return true
 	}
 	return false
-}
-
-// holdsHandoverSlotLater reports whether the primary c, whose Allocation a has not started, will hold a reserved
-// slot once it runs: the deployment serves past its expected drain start (holdsSlotOnceRunning, which reservedOn reads
-// for the other deployments' primaries by the same test). An Allocation not made yet, or without a readable time
-// limit, is counted: a slot left over is a refused extra, and a slot taken is a refused handover.
-func (p *pass) holdsHandoverSlotLater(c *v1alpha1.Instance, a *v1alpha1.Allocation, pv *providerView) bool {
-	return holdsSlotOnceRunning(p.md, c, a, pv.profile.Spec, p.now)
-}
-
-// holdsSlotOnceRunning is that test, over what a pass and reservedOn both hold: the deployment md, the primary in and
-// its not yet started Allocation a (nil: not made yet), the Provider's profile, and now, the time of an Instance this
-// pass made before the API server stamped its creation (the zero time for a reader of stored Instances, which are
-// all stamped).
-func holdsSlotOnceRunning(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance, a *v1alpha1.Allocation, profile v1alpha1.PlatformProfileSpec, now time.Time) bool {
-	if a == nil || a.Spec.ForProvider.Batch == nil {
-		return true
-	}
-	limit, err := a.Spec.ForProvider.Batch.TimeLimit.AsDuration()
-	if err != nil {
-		return true
-	}
-	created := in.CreationTimestamp.Time
-	if created.IsZero() {
-		created = now
-	}
-	window, err := v1alpha1.InstanceDrainWindow(profile, md.Spec.Routing)
-	if err != nil {
-		window = v1alpha1.DefaultDrainWindow
-	}
-	return servesPast(md, created.Add(limit).Add(-window))
 }
 
 // appendOnce appends s to the list unless it is there.

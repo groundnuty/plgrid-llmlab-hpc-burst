@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
@@ -78,10 +79,9 @@ const listTimeout = 30 * time.Second
 // ModelDeployment of each deployment among them (reservedOn), all under one
 // context bounded by listTimeout. An extra's reservation (slotAsk.deployment) makes the same reads on a
 // Provider with no submit limit too, since its caps check counts every handing-over primary's future replacement
-// (#725). slotTable.mu is never held across any of them. The extra's own deployment's pending primaries
-// (slotAsk.alsoLeave and slotAsk.replacements) are counted by the asking pass from its own objects before it asks;
-// the other deployments' pending primaries, and every deployment's Running ones, come from the same reads under the
-// lock (reservedAndLaterOn, futureReplacements), with no read of their own.
+// (#725). slotTable.mu is never held across any of them. The handovers an extra must leave room for, of every
+// deployment, its own included (its slot check and its caps check), are one unit set read under the lock from those
+// same reads, with no read of its own (extra_units.go, extraUnits; reservedAndReadsOn).
 //
 // The extra's admission headroom (extra.go, headroomOf; #616 PR 4) adds reads under the same lock, by slotAsk.headroom,
 // for an extra's reservation alone, made after the count's: one List of the Providers and one of the ModelDeployments of
@@ -203,24 +203,18 @@ type slotAsk struct {
 	// member asks it (HBEP-7, Hedging (beta), Which Provider is next).
 	params *v1alpha1.BatchParameters
 	caps   v1alpha1.QOSLimits
-	// alsoLeave is how many slots the reservation leaves free beside the new Allocation, for the asking
-	// deployment's own chosen primaries that hold no reserved slot yet but will once Running (the extra's
-	// slot beyond its own handovers: HBEP-7, Over-allocation and qualification (beta), Its checks). The
-	// reservation then succeeds only when listed + expected + reserved + alsoLeave + 1 is within the limit.
-	// The pass counts it from its own objects (extraAlsoLeave); it adds to what reservedOn reads from the
-	// other deployments' and the Running primaries' own slots. For an extra (deployment set) the reservation adds, under
-	// the lock, one more for each OTHER deployment's pending primary that will hold one once Running (#725). Zero for every
+	// alsoLeave is how many slots the reservation leaves free beside the new Allocation: the extra's admission headroom
+	// (headroom below) and, for an extra, one for each unit of its unit set whose slot is not reserved yet (extraUnits). The
+	// reservation then succeeds only when listed + expected + reserved + alsoLeave + 1 is within the limit. Zero for every
 	// other ask.
 	alsoLeave int
 	// deployment, when set, marks an extra's reservation and names the asking deployment (namespace/name): the reservation
-	// reads, beside the reserved slots, the slots the other deployments' pending primaries will hold once Running
-	// (slotReads.later; added to alsoLeave) and, for the per-user caps, the future replacement of every primary that will
-	// hand over, of any deployment but the asker's own pending ones, which the pass counts (replacements): see
-	// futureReplacements.
-	deployment string
-	// replacements are the sizes of the asking deployment's own pending primaries' future replacements (extraAlsoLeave),
-	// counted by the caps check as if already expected.
-	replacements []v1alpha1.BatchParameters
+	// reads, beside the reserved slots, the unit set of the handovers it must leave room for (extraUnits), for its slot check
+	// (alsoLeave) and its per-user caps check (the units' sizes). unitExclude is the asking Instance, left out of the set, and
+	// unitSize sizes a deployment's new Allocation on the Provider now.
+	deployment  string
+	unitExclude types.UID
+	unitSize    func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
 	// headroom, when set (an extra's reservation), is called under the Provider's lock, before the count is decided,
 	// and returns how many more slots the reservation leaves free: the admission headroom H of the extra's checks
 	// (HBEP-7, Over-allocation and qualification (beta), Its checks), one for each missing primary of the other
@@ -285,20 +279,25 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 		}
 		q.alsoLeave += h
 	}
-	// An extra also leaves the slot of each OTHER deployment's pending primary that will hold one once Running, and counts
-	// the future replacement of every handing-over primary against the caps (futureReplacements), from the reads already made.
-	var future []v1alpha1.BatchParameters
-	if q.deployment != "" {
-		var others int
-		others, future = futureReplacements(rd, q.deployment)
-		q.alsoLeave += others
-		future = append(future, q.replacements...)
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	c := t.observe(q.provider, rd.seen, rd.listed, at)
 	if t.holds(q.provider, q.key, c) {
 		return slotAnswer{ok: true, count: c.total(), holds: holds}, nil
+	}
+	// An extra's unit set (extraUnits): the slot of each unit not reserved yet is left free, and each unit's size is counted
+	// by the caps check as if already expected, but for a replacement's own Allocation that an expectation already sizes.
+	var future []v1alpha1.BatchParameters
+	if q.deployment != "" {
+		for _, u := range extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, sizeOf: q.unitSize}) {
+			if !u.reserved {
+				q.alsoLeave++
+			}
+			if _, sized := t.params[q.provider][u.key]; u.role == roleOwn && sized {
+				continue
+			}
+			future = append(future, u.size)
+		}
 	}
 	if q.params != nil {
 		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], future, *q.params); !ok {
@@ -331,8 +330,8 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 // capsFit reports whether a new Allocation of size add fits the Provider's
 // per-user caps on GPUs, CPUs and memory beside our Allocations there that
 // hold a slot (rd.listed), those reserved and not listed yet (expected,
-// with their sizes) and, for an extra, the replacements that primaries will need
-// (future: futureReplacements), and if not, why (HBEP-7, Hedging (beta), Which Provider is
+// with their sizes) and, for an extra, the sizes of the handovers it leaves room for
+// (future: extraUnits), and if not, why (HBEP-7, Hedging (beta), Which Provider is
 // next: "the member and our Allocations on that Provider that have not ended
 // must fit its QOS's per-user caps"; the extra's check is the same, #616). "Ours"
 // is every Allocation the controller lists on the Provider, of every
@@ -431,9 +430,8 @@ type slotReads struct {
 	allocs       map[string]*v1alpha1.Allocation
 	// reserved are the Provider's reserved slots (reservedOn).
 	reserved []reservedSlot
-	// later are the slots chosen primaries whose Allocations have not started will hold once Running (reservedAndLaterOn):
-	// no reservation counts them as reserved, an extra's alone reads them.
-	later []reservedSlot
+	// handovers are the reads an extra's unit set is made from (reservedAndReadsOn).
+	handovers handoverReads
 }
 
 // readBounded makes the count's reads under one context bounded by the table's
@@ -447,7 +445,7 @@ func (t *slotTable) readBounded(ctx context.Context, r client.Reader, provider s
 		return slotReads{}, err
 	}
 	if withReserved {
-		if rd.reserved, rd.later, err = reservedAndLaterOn(ctx, r, provider, profile, rd.allocs); err != nil {
+		if rd.reserved, rd.handovers, err = reservedAndReadsOn(ctx, r, provider, profile, rd.allocs); err != nil {
 			return slotReads{}, err
 		}
 	}
@@ -528,12 +526,11 @@ func (p *pass) reserveSlotFor(pv *providerView, name, holder string, takers []st
 	return p.reserveSlotWith(pv, name, holder, takers, params, quiet, extraAsk{})
 }
 
-// reserveSlotWith is reserveSlotFor with an extra's ask: the slots it leaves free beside the new Allocation
-// (slotAsk.alsoLeave), the replacements its caps check counts (slotAsk.replacements), the admission headroom
-// (slotAsk.headroom) and the other deployments' primaries (slotAsk.deployment). The zero extraAsk is every other ask.
+// reserveSlotWith is reserveSlotFor with an extra's ask: the admission headroom (slotAsk.headroom) and what the unit set of
+// the handovers it leaves room for needs (slotAsk.deployment, unitExclude, unitSize). The zero extraAsk is every other ask.
 func (p *pass) reserveSlotWith(pv *providerView, name, holder string, takers []string, params *v1alpha1.BatchParameters, quiet bool, x extraAsk) (ok, holds bool, err error) {
 	q := slotAsk{provider: pv.name, key: p.key.Namespace + "/" + name, holder: holder, takers: takers, limit: pv.limits.MaxSubmitPerUser,
-		params: params, caps: pv.limits, alsoLeave: x.alsoLeave, headroom: x.headroom, deployment: x.deployment, replacements: x.replacements}
+		params: params, caps: pv.limits, headroom: x.headroom, deployment: x.deployment, unitExclude: x.exclude, unitSize: x.sizeOf}
 	if pv.profile != nil {
 		q.profile = &pv.profile.Spec
 	}
