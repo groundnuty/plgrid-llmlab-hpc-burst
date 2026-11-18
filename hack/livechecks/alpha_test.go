@@ -663,7 +663,9 @@ func TestAStepThatDiesMidWaitFailsAndItsJobsAreCancelled(t *testing.T) {
 // either cluster (the science agent's ruling on PR 255), with the script's line for it, and the cleanup cancels
 // a job of the run's prefix still pending then, whether or not its tag was written down.
 func TestATunnelRowNotRunAtItsFirstEndIsCleanedUpByItsPrefix(t *testing.T) {
-	for _, row := range []string{"tunnel-hour-helios", "tunnel-hour-athena"} {
+	// The Sano serve row (issue #735) is a row of one job with no start wait, so its first clock is cut at its deployment's first end too: a queue
+	// wait of 90 minutes is NOT RUN there, not a FAIL (internal/alpha, FirstClock).
+	for _, row := range []string{"tunnel-hour-helios", "tunnel-hour-athena", "alpha-sano-serve"} {
 		t.Run(row, func(t *testing.T) {
 			w := newAlphaWorld(t)
 			res := w.run([]string{"STUB_ALPHA_MODE=untagged-not-run"}, "--run", row, "--yes")
@@ -678,9 +680,11 @@ func TestATunnelRowNotRunAtItsFirstEndIsCleanedUpByItsPrefix(t *testing.T) {
 	}
 	// The handover row has no first end: a marker that names one is no NOT RUN there (its other bound, the wait in the
 	// queue, is NOT RUN with a marker that names that: TestEveryRowCanBeNotRunWhateverItsBound).
-	w := newAlphaWorld(t)
-	if res := w.run([]string{"STUB_ALPHA_MODE=untagged-not-run"}, "--run", "alpha-athena-handover", "--yes"); res.code != 1 || strings.Contains(res.out, "NOT RUN") {
-		t.Errorf("alpha-athena-handover with a not-run marker: exit %d, want 1 and no NOT RUN:\n%s", res.code, res.out)
+	for _, row := range []string{"alpha-athena-handover", "alpha-sano-handover"} {
+		w := newAlphaWorld(t)
+		if res := w.run([]string{"STUB_ALPHA_MODE=untagged-not-run"}, "--run", row, "--yes"); res.code != 1 || strings.Contains(res.out, "NOT RUN") {
+			t.Errorf("%s with a not-run marker: exit %d, want 1 and no NOT RUN:\n%s", row, res.code, res.out)
+		}
 	}
 }
 

@@ -1215,7 +1215,7 @@ not_run_verdict() {
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
   ! lead_marker || case $n in alpha-athena-handover|alpha-helios-nooverlap|alpha-athena-now-nooverlap|alpha-sano-handover) true ;; *) false ;; esac || return 1
   ! long_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac || return 1
-  ! first_end_marker || case $n in tunnel-hour-*) true ;; *) false ;; esac
+  ! first_end_marker || case $n in tunnel-hour-*|alpha-sano-serve) true ;; *) false ;; esac
 }
 
 # row_a_marker: the run's NOT RUN marker says a plgrid-now row's run that did start was not put to the test (internal/alpha,
