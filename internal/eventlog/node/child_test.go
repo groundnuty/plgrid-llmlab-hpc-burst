@@ -6,7 +6,9 @@ package node
 // that died of something other than the signal sent fails the test (S8's harness did the same).
 // Never a recorded PID, never a signal to a process group (IMPL-COMMON, 12 and 13 Nov 2026).
 //
-// Ports: #625's block is 28480-28519, and 28500-28509 belong to these tests (IMPL-COMMON).
+// Ports: #625's block is 28480-28519 (IMPL-COMMON). These tests use 28500 and 28501; 28502 and 28503 are
+// cmd/hpcburst-front's durable-log test's, 28504 and 28505 cmd/hpcburst-controller's, and 28506 to 28509
+// stay spare.
 
 import (
 	"bytes"
