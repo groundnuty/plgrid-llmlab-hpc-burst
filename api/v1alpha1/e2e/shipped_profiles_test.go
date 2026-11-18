@@ -35,26 +35,29 @@ var shippedProfiles = []struct {
 	file, name string
 	s1Facts    [][]string
 	managed    bool
+	// minEnvelopes is the fewest fact envelopes the untyped block holds; 0 is 50, the count of a draft with the facts of
+	// spike S1 added. A profile without S1's facts says its own count, which a lost fact would still lower.
+	minEnvelopes int
 }{
 	{"helios.yaml", "helios", [][]string{
 		{"slurm", "hold_release"}, {"containers", "apptainer_compute_nodes"}, {"containers", "user_namespaces_compute_nodes"},
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
-	}, false},
+	}, false, 0},
 	{"athena.yaml", "athena", [][]string{
 		{"slurm", "hold_release"}, {"containers", "apptainer_compute_nodes"}, {"containers", "user_namespaces_compute_nodes"},
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_node_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
-	}, false},
+	}, false, 0},
 	// The profile for short test deployments on plgrid-now (issue #376): the same facts, whole.
 	{"athena-now.yaml", "athena-now", [][]string{
 		{"slurm", "hold_release"}, {"containers", "apptainer_compute_nodes"}, {"containers", "user_namespaces_compute_nodes"},
 		{"storage", "home_readable_from_compute_nodes"}, {"reachability", "compute_node_outbound_internet"},
 		{"compute_node", "host_python3"}, {"compute_node", "architecture"},
-	}, false},
+	}, false, 0},
 	// Sano (#735): its facts are S5's and the probes of 18 Nov 2026; spike S1 ran only on Helios and Athena, so it has none of S1's.
-	{"sano.yaml", "sano", nil, false},
-	{"llmlab.yaml", "llmlab", nil, true},
+	{"sano.yaml", "sano", nil, false, 40}, // S5's 29 facts and the 11 of #735's probes: 40 envelopes
+	{"llmlab.yaml", "llmlab", nil, true, 0},
 }
 
 // loadShipped reads a shipped manifest as the object an operator would apply.
@@ -351,8 +354,12 @@ func TestShippedProfilesKeepTheEnvelope(t *testing.T) {
 				}
 			}
 			walk("spec.profile", profile)
-			if seen < 50 {
-				t.Errorf("only %d envelopes found in spec.profile; the drafts' facts are missing", seen)
+			least := 50
+			if sp.minEnvelopes != 0 {
+				least = sp.minEnvelopes
+			}
+			if seen < least {
+				t.Errorf("only %d envelopes found in spec.profile, want at least %d; the drafts' facts are missing", seen, least)
 			}
 
 			// The facts of spike S1 are measured and name issue #18 as their source.
