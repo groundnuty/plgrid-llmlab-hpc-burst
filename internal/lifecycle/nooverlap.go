@@ -123,11 +123,17 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 	}
 	// The primary's own reserved slot is held for this very replacement, which takes it (slots_reserved.go).
 	takers := []string{in.Namespace + "/" + in.Spec.AllocationRef.Name}
-	slotFree, slotWhy, err := p.slotFor(pv, skip, takers)
+	slotFree, slotWhy, err := p.slotFor(pv, params.GPUs, skip, takers)
 	if err != nil {
 		return overlapCheck{}, err
 	}
-	capWhy := capsExceeded(pv, in.Name, *a.Spec.ForProvider.Batch, params)
+	// The replacement's QOS, where the partition sets qosByGpus, is the one its GPU count chooses (sizing refused
+	// above a count no QOS fits, so the view resolves).
+	rv, err := pv.forGPUs(params.GPUs)
+	if err != nil {
+		return overlapCheck{beside: true}, nil
+	}
+	capWhy := capsExceeded(rv, in.Name, *a.Spec.ForProvider.Batch, params)
 	if slotFree && capWhy == "" {
 		return overlapCheck{beside: true}, nil
 	}
@@ -148,7 +154,7 @@ func (p *pass) decideOverlap(in *v1alpha1.Instance) (overlapCheck, error) {
 		if err != nil {
 			continue
 		}
-		free, _, err := p.slotFor(q, skip, takers)
+		free, _, err := p.slotFor(q, qparams.GPUs, skip, takers)
 		if err != nil {
 			return overlapCheck{}, err
 		}
@@ -181,34 +187,65 @@ func (p *pass) reusableWarm(pv *providerView, params v1alpha1.BatchParameters, p
 	return waits
 }
 
-// slotFor reports whether the Provider's count leaves a free submit slot,
+// slotFor reports whether the Provider's count leaves a free submit slot for a replacement of gpus GPUs,
 // not counting the Allocations in skip nor the reserved slots of takers, and
 // if not, why, naming the Provider, its limit and the handovers whose
-// reserved slots are counted, if any.
-func (p *pass) slotFor(pv *providerView, skip, takers []string) (bool, string, error) {
-	lim := pv.limits.MaxSubmitPerUser
-	if lim == nil {
-		return true, "", nil
-	}
-	q := slotAsk{provider: pv.name, takers: takers}
-	if pv.profile != nil {
-		q.profile = &pv.profile.Spec
-	}
-	n, reserved, by, err := p.r.slots().countAsk(p.ctx, p.r.Reader, q, p.now, skip...)
+// reserved slots are counted, if any. Where the partition sets qosByGpus the replacement's QOS is the one its GPU
+// count chooses: its own submit limit counts that QOS's Allocations and reserved slots alone, and the Provider-wide
+// limit, the partition QOS's and the host-dialed ceiling, still counts every one (HBEP-7, Per-user limits).
+func (p *pass) slotFor(pv *providerView, gpus int32, skip, takers []string) (bool, string, error) {
+	rv, err := pv.forGPUs(gpus)
 	if err != nil {
 		return false, "", err
 	}
-	if n+1 <= int(*lim) {
+	lim, qLim := rv.limits.MaxSubmitPerUser, rv.scope.submitLimit()
+	if lim == nil && qLim == nil {
 		return true, "", nil
 	}
-	return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s%s", pv.name, n-reserved, submitLimitText(pv), reservedText(reserved, by)), nil
+	q := slotAsk{provider: pv.name, takers: takers, scope: rv.scope, gpus: gpus}
+	if pv.profile != nil {
+		q.profile = &pv.profile.Spec
+	}
+	c, err := p.r.slots().countScoped(p.ctx, p.r.Reader, q, p.now, skip...)
+	if err != nil {
+		return false, "", err
+	}
+	if lim != nil && c.n+1 > int(*lim) {
+		return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations still holding a slot, at its %s%s", pv.name, c.n-c.reserved, submitLimitText(rv), reservedText(c.reserved, c.by)), nil
+	}
+	if qLim != nil && c.nq+1 > int(*qLim) {
+		return false, fmt.Sprintf("Provider %s has no free submit slot for a replacement: %d Allocations under QOS %s still holding a slot, at its %s%s", pv.name, c.nq-c.reservedQ, rv.scope.qos, scopedLimitText(rv.scope), reservedText(c.reservedQ, c.byQ)), nil
+	}
+	return true, "", nil
 }
 
 // capsExceeded returns why the predecessor's Allocation (pred) and its
 // replacement (repl) together exceed the Provider's per-user caps on GPUs,
 // CPUs or memory, or "" when they fit (HBEP-7, Provisioning, Per-user limits).
 func capsExceeded(pv *providerView, inst string, pred, repl v1alpha1.BatchParameters) string {
-	l := pv.limits
+	over := capsOver(pv.limits, pred, repl)
+	if sc := pv.scope; sc != nil && sc.hasLimits() {
+		// The caps of the replacement's own QOS count that QOS's Allocations alone: each of the two that runs under it.
+		var in []v1alpha1.BatchParameters
+		for _, b := range []v1alpha1.BatchParameters{pred, repl} {
+			if sc.under(b.GPUs) {
+				in = append(in, b)
+			}
+		}
+		if len(in) == 2 {
+			over = append(over, capsOver(sc.limits, in[0], in[1])...)
+		} else if len(in) == 1 {
+			over = append(over, capsOver(sc.limits, in[0], v1alpha1.BatchParameters{})...)
+		}
+	}
+	if len(over) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Instance %s and its replacement together need %s on Provider %s", inst, strings.Join(over, " and "), pv.name)
+}
+
+// capsOver lists which of the limits' per-user caps on GPUs, CPUs and memory the two Allocations together are above.
+func capsOver(l v1alpha1.QOSLimits, pred, repl v1alpha1.BatchParameters) []string {
 	var over []string
 	if q := l.MaxGPUsPerUser; q != nil && pred.GPUs+repl.GPUs > *q {
 		over = append(over, fmt.Sprintf("%d GPUs, above the %s %d of QOS %s", pred.GPUs+repl.GPUs, v1alpha1.LimitMaxGPUsPerUser, *q, l.From[v1alpha1.LimitMaxGPUsPerUser]))
@@ -223,10 +260,7 @@ func capsExceeded(pv *providerView, inst string, pred, repl v1alpha1.BatchParame
 			over = append(over, fmt.Sprintf("%s of memory, above the %s %s of QOS %s", sum.String(), v1alpha1.LimitMaxMemPerUser, q.String(), l.From[v1alpha1.LimitMaxMemPerUser]))
 		}
 	}
-	if len(over) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("Instance %s and its replacement together need %s on Provider %s", inst, strings.Join(over, " and "), pv.name)
+	return over
 }
 
 // placeReplacement creates the primary's replacement at its planned time

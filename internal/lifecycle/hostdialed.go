@@ -29,6 +29,11 @@ const hostDialedLimitSource = "host-dialed mode, HBEP-6"
 // untouched. The slot count, the no-overlap check and the status messages all
 // read the capped value, so the cap is planned like any QOS limit (HBEP-7,
 // Provisioning, Per-user limits).
+//
+// Under qosByGpus (qosscope.go) a QOS's own submit limit counts that QOS's Allocations alone, but the ceiling counts
+// every Allocation on the Provider, so providerView.forGPUs takes the QOS's own limit out of limits BEFORE this folds
+// the ceiling in: left in, a QOS limit at or below the ceiling would stand for it, and the ceiling would count only
+// that QOS's Allocations (#745).
 func hostDialedLimits(limits v1alpha1.QOSLimits) v1alpha1.QOSLimits {
 	if q := limits.MaxSubmitPerUser; q != nil && *q <= HostDialedMaxAllocations {
 		return limits

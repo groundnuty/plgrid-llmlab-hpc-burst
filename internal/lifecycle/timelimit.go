@@ -34,7 +34,20 @@ func (p *pass) checkTimeLimits() {
 		if !pv.usable() {
 			continue
 		}
-		lim, bound, err := allocationTimeLimit(pv, p.md.Spec.LeaseLimit)
+		// Under qosByGpus the time limit is the chosen QOS's: the plan's GPU count resolves it before the limit is
+		// read, so a gpuN QOS's 3-day wall bounds it, not Sano's 7-day partition (HBEP-4, QOS limits; #745). With no
+		// plan (an unsupported spec) or a count no QOS fits, sizing reports it, not this check.
+		rv := pv
+		if len(pv.partition.QOSByGPUs) > 0 {
+			var err error
+			if p.specErr != "" || p.plan.gpus*p.plan.workers < 1 {
+				continue
+			}
+			if rv, err = pv.forGPUs(p.plan.gpus * p.plan.workers); err != nil {
+				continue
+			}
+		}
+		lim, bound, err := allocationTimeLimit(rv, p.md.Spec.LeaseLimit)
 		if err != nil {
 			continue
 		}

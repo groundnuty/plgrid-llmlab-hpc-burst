@@ -46,6 +46,10 @@ type reservedSlot struct {
 	// before the younger (before).
 	created time.Time
 	uid     string
+	// gpus is the GPU count of the Allocation the slot is held for: the holding Instance's launch, its GPUs times its
+	// workers, which is what the replacement is sized by. Under qosByGpus it says which QOS the slot is charged to
+	// (qosScope.reservedUnder); 0 is not known, and counts under every QOS.
+	gpus int32
 }
 
 // before reports whether s's Instance is older than o's: by creation time, then by UID. Of two replacements
@@ -168,12 +172,12 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 				return nil, err
 			}
 			if md != nil && md.DeletionTimestamp.IsZero() {
-				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor})
+				out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForSuccessor, gpus: launchGPUs(in)})
 			}
 			continue
 		}
 		if _, made := allocs[allocKey]; countable(in) && !made && in.Annotations[v1alpha1.AnnotationPredecessor] != "" {
-			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation, created: in.CreationTimestamp.Time, uid: string(in.UID)})
+			out = append(out, reservedSlot{key: allocKey, deployment: deploymentKey(in), kind: slotForOwnAllocation, created: in.CreationTimestamp.Time, uid: string(in.UID), gpus: launchGPUs(in)})
 			continue
 		}
 		if profile == nil || !countable(in) || replaced[in.Namespace+"/"+in.Name] || surplus[in] {
@@ -210,9 +214,14 @@ func reservedOn(ctx context.Context, r client.Reader, provider string, profile *
 		if err != nil || !servesPast(md, ds) {
 			continue
 		}
-		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement})
+		out = append(out, reservedSlot{key: allocKey, deployment: md.Namespace + "/" + md.Name, kind: slotForReplacement, gpus: launchGPUs(in)})
 	}
 	return out, nil
+}
+
+// launchGPUs is the GPU count of the Allocation an Instance runs on: its launch's GPUs times its workers.
+func launchGPUs(in *v1alpha1.Instance) int32 {
+	return in.Spec.Launch.GPUs * v1alpha1.LaunchWorkers(in.Spec.Launch)
 }
 
 // deploymentView is one deployment's Instances on every Provider.

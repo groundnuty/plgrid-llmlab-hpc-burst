@@ -121,6 +121,10 @@ type placeOpts struct {
 	// headroom is the extra's admission headroom (extraChecks): how many more slots the reservation leaves free, read
 	// under the Provider's lock (slotAsk.headroom). Set with extra.
 	headroom func(context.Context) (int, error)
+	// qosAlsoLeave and qosHeadroom are alsoLeave and headroom counted over the Allocations under the extra's own QOS,
+	// for a Provider whose partition sets qosByGpus (extraChecks; HBEP-7, Per-user limits). Set with extra.
+	qosAlsoLeave int
+	qosHeadroom  func(context.Context) (int, error)
 }
 
 // placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
@@ -562,17 +566,17 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	// checks, the bound, the slot beyond its primary's handover, the admission headroom and the caps, silently, and is ended
 	// when one refuses (#708, finding 4); otherwise it is a primary, which waits for a slot.
 	takers := p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor]))
-	var headroom func(context.Context) (int, error)
+	var x extraAsk
 	var capsOf *v1alpha1.BatchParameters
-	alsoLeave, quiet := 0, false
+	quiet := false
 	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() == 0 {
 		var admitted bool
-		if alsoLeave, headroom, admitted = p.extraChecks(pv, in); !admitted {
+		if x, admitted = p.extraChecks(pv, in, params.GPUs); !admitted {
 			return p.endCutShortExtra(in, "the bound on extras")
 		}
 		capsOf, quiet = &params, true
 	}
-	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, alsoLeave, headroom)
+	ok, holds, err := p.reserveSlotAs(pv, params.GPUs, name, holder, takers, capsOf, quiet, x)
 	if err != nil {
 		return err
 	}

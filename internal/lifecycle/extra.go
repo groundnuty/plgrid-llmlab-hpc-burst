@@ -33,11 +33,12 @@ func (p *pass) createExtras(placed []string) error {
 		if pv == nil {
 			continue
 		}
-		alsoLeave, headroom, ok := p.extraChecks(pv, nil)
+		x, ok := p.extraChecks(pv, nil, p.plan.gpus*p.plan.workers)
 		if !ok {
 			continue
 		}
-		if _, err := p.provisionWith(nil, placeOpts{only: pv.name, extra: true, caps: true, alsoLeave: alsoLeave, headroom: headroom}); err != nil {
+		if _, err := p.provisionWith(nil, placeOpts{only: pv.name, extra: true, caps: true, alsoLeave: x.alsoLeave, headroom: x.headroom,
+			qosAlsoLeave: x.qosAlsoLeave, qosHeadroom: x.qosHeadroom}); err != nil {
 			return err
 		}
 	}
@@ -88,12 +89,19 @@ func (p *pass) selectionWithout(exclude *v1alpha1.Instance) selection {
 // ensureAllocation, which retries one whose Allocation's create was cut short, so the two never drift (#708, finding 4):
 // the bound, the slot beyond its own handovers (alsoLeave) and the admission headroom (headroom, read under the Provider's
 // lock by the reservation). exclude is the Instance that retries (nil for a new extra). The per-user caps and the silence
-// are the reservation's own, asked with params and quiet. ok is false when the bound refuses.
-func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLeave int, headroom func(context.Context) (int, error), ok bool) {
+// are the reservation's own, asked with params and quiet. ok is false when the bound refuses. gpus is the extra's GPU
+// count: where the Provider's partition sets qosByGpus it says which QOS the extra runs under, and the same slots and
+// headroom are then asked a second time over the Allocations under that QOS alone (HBEP-7, Per-user limits).
+func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance, gpus int32) (x extraAsk, ok bool) {
 	if !p.extraBoundWithout(pv, exclude) {
-		return 0, nil, false
+		return extraAsk{}, false
 	}
-	return p.extraAlsoLeaveWithout(pv, exclude), p.headroomOf(pv), true
+	x = extraAsk{alsoLeave: p.extraAlsoLeaveWithout(pv, exclude), headroom: p.headroomOf(pv)}
+	if rv, err := pv.forGPUs(gpus); err == nil && rv.scope != nil {
+		x.qosAlsoLeave = p.extraAlsoLeaveWhere(pv, exclude, rv.scope)
+		x.qosHeadroom = p.headroomWhere(pv, rv.scope)
+	}
+	return x, true
 }
 
 // headroomOf is the admission headroom H of an extra on the Provider (HBEP-7, Over-allocation and qualification (beta), Its
@@ -107,6 +115,13 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (alsoLe
 // Instances, has not passed its end time (by the clock read under the lock), allows the Provider (selectedProviderNames, as its own pass reads it) and its
 // shortage by Allocation presence (shortageOfDeployment) is above zero.
 func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
+	return p.headroomWhere(pv, nil)
+}
+
+// headroomWhere is headroomOf counting, with a scope, only the other deployments whose missing primary would run
+// under the scope's QOS: the extra's admission headroom over the Allocations under its own QOS alone (HBEP-7,
+// Per-user limits). A deployment whose size cannot be read counts, so the headroom never falls short.
+func (p *pass) headroomWhere(pv *providerView, sc *qosScope) func(context.Context) (int, error) {
 	return func(ctx context.Context) (int, error) {
 		var mds v1alpha1.ModelDeploymentList
 		if err := p.r.Reader.List(ctx, &mds); err != nil {
@@ -132,6 +147,11 @@ func (p *pass) headroomOf(pv *providerView) func(context.Context) (int, error) {
 			allowed, err := selectedProviderNames(md.Spec.Providers, provs.Items)
 			if err != nil || !slices.Contains(allowed, pv.name) {
 				continue
+			}
+			if sc != nil {
+				if plan, err := checkServed(md); err == nil && !sc.under(plan.gpus*plan.workers) {
+					continue // its missing primary runs under another QOS of the Provider
+				}
 			}
 			short, err := shortageOfDeployment(ctx, p.r.Reader, md)
 			if err != nil {
@@ -200,10 +220,19 @@ func (p *pass) extraAlsoLeave(pv *providerView) int { return p.extraAlsoLeaveWit
 
 // extraAlsoLeaveWithout is extraAlsoLeave over the chosen primaries of the selection without one Instance (extraChecks).
 func (p *pass) extraAlsoLeaveWithout(pv *providerView, exclude *v1alpha1.Instance) int {
+	return p.extraAlsoLeaveWhere(pv, exclude, nil)
+}
+
+// extraAlsoLeaveWhere is extraAlsoLeaveWithout counting, with a scope, only the chosen primaries whose Allocation
+// runs under the scope's QOS (HBEP-7, Per-user limits).
+func (p *pass) extraAlsoLeaveWhere(pv *providerView, exclude *v1alpha1.Instance, sc *qosScope) int {
 	n := 0
 	chosen, _ := selectPrimaries(p.selectionWithout(exclude), p.desiredCount())
 	for _, c := range chosen {
 		if c.Labels[v1alpha1.LabelProvider] != pv.name || p.replaced(c) {
+			continue
+		}
+		if sc != nil && !sc.under(launchGPUs(c)) {
 			continue
 		}
 		a := p.allocOf(c)
