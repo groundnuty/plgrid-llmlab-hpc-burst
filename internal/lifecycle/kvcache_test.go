@@ -45,8 +45,13 @@ func tok(n int64) *int64 { return &n }
 
 var kvNow = time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 
-// kvProbe is the probe interval of these reports: a router read is fresh for twice it, 20 s.
-const kvProbe = 10 * time.Second
+// kvProbe is the probe interval of these reports, and kvWindow how old a router read may be at the report
+// and still count, typed by hand: two of the agent's router polls, a poll being the probe interval plus
+// its two bounded reads of 2 s each, 14 s here, so 28 s (#764, the ruling for #784).
+const (
+	kvProbe  = 10 * time.Second
+	kvWindow = 28 * time.Second
+)
 
 // kvView is the agentView of one report at kvNow, instance generation instGen, whose router read was at kvNow.
 func kvView(instGen int64, router bool, ws ...kvWorker) agentView {
@@ -377,28 +382,29 @@ func TestHealthyWorkersAndTheKVCacheSizeAreWrittenInOneUpdate(t *testing.T) {
 
 // Row (4a): the router's report names a worker and no process. A replacement whose process started after
 // the router's last read is not counted for the size under its predecessor's healthy flag: the field stays
-// the other worker's until a read taken after the replacement's start marks it healthy. healthyWorkers is
-// not changed by the identity rule: it counts the replacement under the old flag, as today.
+// the other worker's until a read taken after the replacement's start marks it healthy. healthyWorkers
+// follows the same identity rule since the ruling on #764 of 18 Nov 2026 (identityHealthy): 1 meanwhile, not 2.
 func TestAReplacementCountsForTheKVCacheSizeOnlyOnceTheRouterHasReadItsProcess(t *testing.T) {
 	rg := newKVRig(t, 2)
 	read := kvNow.Add(-10 * time.Second) // the router's last read, fresh
 	replaced := kvWorker{name: "worker-1", gen: 1, tokens: tok(100000), healthy: true, started: kvNow.Add(-5 * time.Second)}
 	rg.run([]kvStep{
 		kvstep("both serving: the old worker-1 is 380000", kvView(0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), true)), "380000", "2", 1),
-		kvstep("worker-1 replaced after the router's read, still flagged healthy: its 100000 does not count", kvViewRead(read, 0, true, kvw("worker-0", 0, tok(400000), true), replaced), "400000", "2", 1),
+		kvstep("worker-1 replaced after the router's read, still flagged healthy: its 100000 does not count", kvViewRead(read, 0, true, kvw("worker-0", 0, tok(400000), true), replaced), "400000", "1", 1),
 		kvstep("the router reads again, after the replacement started: it is healthy and counts", kvView(0, true, kvw("worker-0", 0, tok(400000), true), replaced), "100000", "2", 1),
 	})
 	// A worker with no start time is a process the controller cannot place: not counted.
 	rg = newKVRig(t, 2)
 	av := kvView(0, true, kvw("worker-0", 0, tok(400000), true), kvw("worker-1", 0, tok(380000), true))
 	av.report.Workers[1].StartTime = nil
-	rg.run([]kvStep{kvstep("worker-1 with no start time", av, "400000", "2", 1)})
+	rg.run([]kvStep{kvstep("worker-1 with no start time", av, "400000", "1", 1)})
 }
 
 // Row (4b): a failed or stale /clusters read is unknown, so no worker counts for the size and it is UNSET.
 // The agent keeps the last read when a read fails and its time says how old it is (routerRead): a read
-// older than two probe intervals (20 s here) at the report's time is unknown, exactly two is still
-// fresh. healthyWorkers, #429's, is not changed by it: it keeps counting the old set.
+// older than two router polls (28 s here) at the report's time is unknown, exactly that old is still
+// fresh. healthyWorkers follows the same read (identityHealthy): past the window it is 0, the Instance is
+// skipped, and a fresh read writes the count again.
 func TestAStaleRouterReadMakesEveryWorkerUnknownForTheKVCacheSize(t *testing.T) {
 	rg := newKVRig(t, 2)
 	both := func(read time.Time) agentView {
@@ -406,16 +412,16 @@ func TestAStaleRouterReadMakesEveryWorkerUnknownForTheKVCacheSize(t *testing.T) 
 	}
 	rg.run([]kvStep{
 		kvstep("a fresh read", both(kvNow), "380000", "2", 1),
-		kvstep("a read exactly two probe intervals old is still fresh", both(kvNow.Add(-2*kvProbe)), "380000", "2", 0),
-		kvstep("a read a second older than that is unknown: no size, healthyWorkers unchanged", both(kvNow.Add(-2*kvProbe-time.Second)), "unset", "2", 1),
-		kvstep("a read a minute old, the same", both(kvNow.Add(-time.Minute)), "unset", "2", 0),
+		kvstep("a read exactly two router polls (28 s) old is still fresh", both(kvNow.Add(-kvWindow)), "380000", "2", 0),
+		kvstep("a read a millisecond older than that is unknown: no size, healthyWorkers 0", both(kvNow.Add(-kvWindow-time.Millisecond)), "unset", "0", 1),
+		kvstep("a read a minute old, the same", both(kvNow.Add(-time.Minute)), "unset", "0", 0),
 		kvstep("a read again, fresh", both(kvNow), "380000", "2", 1),
 	})
 	// A probe interval that is not known judges nothing fresh.
 	rg = newKVRig(t, 2)
 	av := both(kvNow)
 	av.probeInterval = 0
-	rg.run([]kvStep{kvstep("no probe interval", av, "unset", "2", 1)})
+	rg.run([]kvStep{kvstep("no probe interval", av, "unset", "0", 1)})
 	// A router report with no read at all says nothing about the workers: healthyCount takes none either.
 	rg = newKVRig(t, 2)
 	av = both(kvNow)
@@ -423,8 +429,9 @@ func TestAStaleRouterReadMakesEveryWorkerUnknownForTheKVCacheSize(t *testing.T) 
 	rg.run([]kvStep{kvstep("no read yet", av, "unset", "-", 0)})
 }
 
-// The set the size is taken over is a subset of healthyCount's: they agree when every healthy worker's
-// process is older than a fresh read, and only the size drops a worker the router's read does not cover.
+// The set the size is taken over is a subset of healthyCount's, and since the ruling of 18 Nov 2026 on
+// healthyWorkers they are one join (identityHealthy): the counts below are typed by hand, and equal the
+// KV set's length in every row but the past-the-window one, where the count is 0 and the set empty.
 func TestTheKVCacheSetIsASubsetOfHealthyCountsSet(t *testing.T) {
 	in := &v1alpha1.Instance{}
 	two := int32(2)
@@ -440,8 +447,8 @@ func TestTheKVCacheSetIsASubsetOfHealthyCountsSet(t *testing.T) {
 		{"one unhealthy", kvView(0, true, kvw("worker-0", 0, nil, false), kvw("worker-1", 0, nil, true)), 1, []string{"worker-1"}},
 		{"one ejected", kvView(0, true, kvWorker{name: "worker-0", healthy: true, ejected: true}, kvw("worker-1", 0, nil, true)), 1, []string{"worker-1"}},
 		{"none", kvView(0, true, kvw("worker-0", 0, nil, false), kvw("worker-1", 0, nil, false)), 0, nil},
-		{"one replaced after the read", kvViewRead(kvNow.Add(-time.Second), 0, true, kvw("worker-0", 0, nil, true), kvWorker{name: "worker-1", healthy: true, started: kvNow}), 2, []string{"worker-0"}},
-		{"a stale read", kvViewRead(kvNow.Add(-time.Minute), 0, true, kvw("worker-0", 0, nil, true), kvw("worker-1", 0, nil, true)), 2, nil},
+		{"one replaced after the read", kvViewRead(kvNow.Add(-time.Second), 0, true, kvw("worker-0", 0, nil, true), kvWorker{name: "worker-1", healthy: true, started: kvNow}), 1, []string{"worker-0"}},
+		{"a stale read", kvViewRead(kvNow.Add(-time.Minute), 0, true, kvw("worker-0", 0, nil, true), kvw("worker-1", 0, nil, true)), 0, nil},
 	} {
 		n, ok := healthyCount(in, tc.av)
 		got := kvRouterWorkers(in, tc.av)

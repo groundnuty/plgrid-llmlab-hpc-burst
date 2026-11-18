@@ -19,9 +19,6 @@ import (
 // x-session-id, which reaches a worker Envoy holds healthy. Both go into the router's report; the
 // controller writes status.healthyWorkers from the first and judges the router from the second.
 
-// routerReadTimeout bounds one admin read or one probe.
-const routerReadTimeout = 2 * time.Second
-
 // watchRouterHealth starts the polling of a running router, until it exits or the agent ends.
 func (a *Agent) watchRouterHealth(r *routerPart) {
 	g := r.proc.Group
@@ -81,7 +78,7 @@ func (a *Agent) routerRead(r *routerPart, now time.Time, ws []agentapi.RouterWor
 
 // unixGet sends one GET to a Unix socket and returns the status and body, at most 4 MiB of it.
 func unixGet(ctx context.Context, socket, url string) (int, []byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, routerReadTimeout)
+	ctx, cancel := context.WithTimeout(ctx, agentapi.RouterReadTimeout)
 	defer cancel()
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		var d net.Dialer
