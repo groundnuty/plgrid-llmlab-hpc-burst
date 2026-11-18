@@ -76,9 +76,12 @@ const listTimeout = 30 * time.Second
 // its model-deployment label, in its namespace; the Allocations are what the
 // selection that reservedOn applies reads, #616 PR 4) and one Get of the
 // ModelDeployment of each deployment among them (reservedOn), all under one
-// context bounded by listTimeout. slotTable.mu is never held across any of
-// them. The extra's alsoLeave (slotAsk) is counted by the asking pass from its
-// own deployment's objects before it asks, so nothing under the lock reads it.
+// context bounded by listTimeout. An extra's reservation (slotAsk.deployment) makes the same reads on a
+// Provider with no submit limit too, since its caps check counts every handing-over primary's future replacement
+// (#725). slotTable.mu is never held across any of them. The extra's own deployment's pending primaries
+// (slotAsk.alsoLeave and slotAsk.replacements) are counted by the asking pass from its own objects before it asks;
+// the other deployments' pending primaries, and every deployment's Running ones, come from the same reads under the
+// lock (reservedAndLaterOn, futureReplacements), with no read of their own.
 //
 // The extra's admission headroom (extra.go, headroomOf; #616 PR 4) adds reads under the same lock, by slotAsk.headroom,
 // for an extra's reservation alone, made after the count's: one List of the Providers and one of the ModelDeployments of
@@ -88,8 +91,9 @@ const listTimeout = 30 * time.Second
 // no lock of this package and write nothing, so the order above holds.
 //
 // A primary placed on a warm Allocation creates no Allocation to reserve, yet the Instance it makes reserves a handover
-// slot and ends its deployment's missing primary: so placeOnWarm (provision.go) creates it under this same lock, with two
-// API writes and no other lock of this package, and a count and a headroom read in one reservation never straddle it.
+// slot and ends its deployment's missing primary: so placeOnWarm (provision.go) creates it under this same lock, with one
+// API write and no other lock of this package, and a count and a headroom read in one reservation never straddle it. The
+// Allocation's idle anchor is cleared after the lock is released: it changes neither.
 type slotTable struct {
 	// listTimeout bounds the List call made under a Provider's lock, so one
 	// hung API call cannot hold every worker that reserves on that Provider.
