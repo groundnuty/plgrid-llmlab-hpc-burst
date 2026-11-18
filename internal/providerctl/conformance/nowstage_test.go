@@ -683,6 +683,8 @@ func TestTheSanoStageRowDryRunStagesASIFInTheProvidersOwnDirectory(t *testing.T)
 // The stage row's post says what the job did (stageKind): the cold staging the row measures, and not that for a rerun over artifacts already in the
 // directory, or for a run that found some of them (the review of PR 770). The expected words are written out here from the row's rule, one case for
 // each pair of (the image built, the checkpoint files found present), and the cold case keeps the sentence the row has always posted.
+//
+//livecheck:none a unit test of the stage row's post text over the helper's results, no cluster
 func TestTheStageRowsPostNamesWhatTheJobDid(t *testing.T) {
 	row, ok := alpha.RowByName(alpha.SanoStageName)
 	if !ok {

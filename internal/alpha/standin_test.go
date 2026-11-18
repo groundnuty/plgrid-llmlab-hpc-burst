@@ -757,6 +757,8 @@ func standInHelperFlags() string {
 // helper refuses to run when one is empty: a flag left out fails them in the pre-staging, which only a stand-in run sees, and that takes the launcher lock.
 // The six are the helper's own list (stagehelper's inputs, pinned by its drift test), written out here, and the image format is the stand-in profile's:
 // a sandbox, as standInWorldShaped makes it on every Athena row.
+//
+//livecheck:none a unit test over the stand-ins' stage helper build flags on this host, no cluster
 func TestTheStandInsStageHelperGetsEveryCompiledInValue(t *testing.T) {
 	flags := standInHelperFlags()
 	for _, name := range []string{"image", "imageDigest", "checkpointRepo", "checkpointRev", "loadFormat", "imageFormat"} {
