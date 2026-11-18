@@ -122,6 +122,7 @@ func eventLogFixture(t *testing.T, cfg EventLogConfig) *ctlFixture {
 	if err := l.saveState(f.st); err != nil {
 		t.Fatal(err)
 	}
+	writePlaceholderKubeconfigs(t, l, "placeholder-token") // what up issues before the supervisor starts
 	t.Setenv("FAKECTRL_DIR", f.ctl)
 	t.Cleanup(func() { noLeftovers(t, l.dir) })
 	return f

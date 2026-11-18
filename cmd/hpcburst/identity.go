@@ -135,3 +135,12 @@ func printAgents(w io.Writer, r *launcher.StatusReport) {
 		}
 	}
 }
+
+// printControllerIdentities prints the status text of the controllers' own identities (HBEP-10, Audit; #660):
+// one line each, with the token's expiry, and a WARNING line under one whose token has 30 days or fewer left.
+// An expiring or rejected token is a state, not a fault: the next down and up issue new ones.
+func printControllerIdentities(w io.Writer, r *launcher.StatusReport) {
+	for _, s := range r.ControllerIdentities {
+		fmt.Fprintln(w, launcher.ControllerIdentityLine(s))
+	}
+}

@@ -83,6 +83,11 @@ type StatusReport struct {
 	// Identities are the agents' identities with each one's expiry and whether the API server accepts
 	// its token (identity_status.go). An expired or rejected one is a state, not a fault.
 	Identities []IdentityState `json:"identities,omitempty"`
+	// ControllerIdentities are the controllers' own identities, one per kubeconfig up issued, each with its
+	// token's expiry, whether the API server accepts it, and Expiring once 30 days or fewer are left
+	// (controller_identity_status.go; HBEP-10, Audit). Set where controllers run. An expiring, expired or
+	// rejected one is a state, not a fault.
+	ControllerIdentities []ControllerIdentityState `json:"controller_identities,omitempty"`
 }
 
 // StatusOptions are the inputs of Status.
@@ -291,6 +296,7 @@ func Status(ctx context.Context, o StatusOptions) (*StatusReport, error) {
 	statusAdmission(ctx, cfg, rep, bad)
 	statusGlobalPolicy(ctx, cfg, rep, bad)
 	statusAgents(ctx, cfg, l, st.Ports, rep, bad)
+	statusControllerIdentities(ctx, l, st, now(), rep, bad)
 	return rep, nil
 }
 

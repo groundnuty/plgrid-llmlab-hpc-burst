@@ -22,11 +22,11 @@ func TestControllerArgsWithoutBulkAreUnchanged(t *testing.T) {
 		front Front
 		want  []string
 	}{
-		{"no front", Front{}, []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226"}},
+		{"no front", Front{}, []string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig"}},
 		{"direct front", Front{Mode: "direct", Addr: "front.example.test:8443"},
-			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
+			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig", "--front-mode", "direct", "--front-addr", "front.example.test:8443"}},
 		{"host-dialed front", Front{Mode: "host-dialed"},
-			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--front-mode", "host-dialed"}},
+			[]string{"--state-dir", "/run/st", "--port-base", "29220", "--health-addr", "127.0.0.1:29226", "--kubeconfig", "/run/st/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", "/run/st/identities/system/hpcburst-provider.kubeconfig", "--front-mode", "host-dialed"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			st := &State{
@@ -76,7 +76,9 @@ func TestControllerArgsWithKeeperAndBulk(t *testing.T) {
 	st := &State{Ports: ports, Front: Front{Mode: "host-dialed"}, RelayKeeper: true,
 		Controllers: &ControllerConfig{Binary: "/opt/hpcburst-controller"}, Frps: &FrpsRunConfig{Binary: "/opt/frp/frps", Version: "0.71.1"}}
 	sock := l.host(ports).RelayKeeperSocket()
-	line := []string{"--state-dir", l.dir, "--port-base", "28020", "--health-addr", ports.ControllerAddr(), "--front-mode", "host-dialed"}
+	line := []string{"--state-dir", l.dir, "--port-base", "28020", "--health-addr", ports.ControllerAddr(),
+		"--kubeconfig", l.dir + "/identities/system/hpcburst-lifecycle.kubeconfig", "--provider-kubeconfig", l.dir + "/identities/system/hpcburst-provider.kubeconfig",
+		"--front-mode", "host-dialed"}
 
 	set, err := st.supervisedSet(l)
 	if err != nil {
