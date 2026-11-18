@@ -81,6 +81,9 @@ type Config struct {
 	// DefaultQOS is the QOS of a job that sends no --qos: the association's
 	// default. Empty means none.
 	DefaultQOS string
+	// JobSubmit, when set, models a site's job_submit plugin (jobsubmit.go):
+	// Sano's rules on its gpu partition, with Sano's message shapes.
+	JobSubmit *JobSubmit
 	// NoisyScancel makes scancel of an ended or unknown job print the error
 	// the fake printed before #199 ("scancel: error: Kill job error on job id
 	// N: Invalid job id specified", or "...Job/step already completing or

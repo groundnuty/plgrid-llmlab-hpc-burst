@@ -31,6 +31,13 @@ type QOS struct {
 	// (MaxTRESPerUser gres/gpu). A job that fits alone but not beside the
 	// user's running jobs is accepted and pends; Start refuses it.
 	MaxGPUsPerUser *int
+	// MaxGPUsPerJob, MaxCPUsPerJob and MaxMemMiBPerJob are the QOS's MaxTRES:
+	// the most GPUs, CPUs and memory (in MiB) one job may ask for, and
+	// MaxWallMinutes its wall limit in minutes. They are enforced only where a
+	// JobSubmit plugin is configured (jobsubmit.go), as Sano's job_submit
+	// plugin enforces them, at submission and with the plugin's message (#735's
+	// probe 3).
+	MaxGPUsPerJob, MaxCPUsPerJob, MaxMemMiBPerJob, MaxWallMinutes *int
 }
 
 // Cap is a limit that is set to n, 0 included, for QOS's fields.
