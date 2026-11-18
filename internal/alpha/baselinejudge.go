@@ -679,11 +679,16 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		}
 	}
 
-	// (d) the engine: running at most the cap, nothing waiting, no new preemption; a phase with no fresh sample checks nothing. In the long phase the engine's
-	// requests waiting and its preemptions are readings (ruling H0, #764): eleven prompts of 24k tokens that arrive together queue in the engine's own
-	// prefill, and the reading is what R4's budget is compared against; only the cap is a check there.
+	// (d) the engine: running at most the cap, nothing waiting for long, no new preemption; a phase with no fresh read checks nothing. A sample is a DISTINCT
+	// read, told by the agent's own read time (the controller's gauges repeat a read between reads: #776's review, point 7), so a repeated copy of one read
+	// satisfies neither the minimum nor the sustain rule. In the long phase the engine's requests waiting and its preemptions are readings (ruling H0, #764):
+	// eleven prompts of 24k tokens that arrive together queue in the engine's own prefill, and the reading is what R4's budget is compared against; only the cap
+	// is a check there, and the reading must have been taken at the cap.
+	if ph.Kind == KindLong && ph.Sessions == cap && len(readsAtTheCap(po, joined, managed, cap)) == 0 {
+		inv("no distinct engine read was taken inside the stretch with the cap's %d requests in flight (a read counts when its first scrape came more than %s after the stretch began), so the KV use at the cap was not witnessed", cap, EngineReadLag)
+	}
 	if len(po.Engine) < 2 {
-		f("fewer than 2 engine samples were read, so the engine's running, waiting and preemptions were not checked")
+		f("fewer than 2 distinct engine reads (by the agent's own read time) were taken in the phase, so the engine's running, waiting and preemptions were not checked: repeated copies of one read count once")
 	} else {
 		over := 0
 		for _, s := range po.Engine {
@@ -696,7 +701,8 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		}
 		if ph.Kind != KindLong {
 			if run := longestWaitingRun(po.Engine); run >= EngineWaitingSustain {
-				f("the engine had requests waiting in %d consecutive samples, past the %d that a burst of first prefills explains (%s at the %s cadence)", run, EngineWaitingSustain-1, time.Duration(run)*BaselinePoll, BaselinePoll)
+				f("the engine had requests waiting in %d consecutive distinct reads, past the %d that a burst of first prefills explains (%s to %s apart at Sano's probe interval of %s)",
+					run, EngineWaitingSustain-1, time.Duration(run-1)*EngineProbeInterval, time.Duration(run)*EngineProbeInterval, EngineProbeInterval)
 			}
 			if d := po.Engine[len(po.Engine)-1].Preemptions - po.Engine[0].Preemptions; d != 0 {
 				f("the engine preempted %.0f request(s) during the phase", d)
@@ -704,6 +710,54 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		}
 	}
 	return dedupe(fail), dedupe(invalid)
+}
+
+// atCapWindows are the stretches in which the front's records show at least cap requests in flight at once, by the overlap of their StartTime and EndTime
+// (a request ending at t is released at t).
+func atCapWindows(rows []FrontRow, cap int) [][2]time.Time {
+	type ev struct {
+		at    time.Time
+		delta int
+	}
+	var evs []ev
+	for _, r := range rows {
+		evs = append(evs, ev{r.Start, +1}, ev{r.End, -1})
+	}
+	sort.SliceStable(evs, func(i, j int) bool {
+		if !evs[i].at.Equal(evs[j].at) {
+			return evs[i].at.Before(evs[j].at)
+		}
+		return evs[i].delta < evs[j].delta
+	})
+	var out [][2]time.Time
+	n := 0
+	var from time.Time
+	for _, e := range evs {
+		was := n
+		n += e.delta
+		if was < cap && n >= cap {
+			from = e.at
+		}
+		if was >= cap && n < cap {
+			out = append(out, [2]time.Time{from, e.at})
+		}
+	}
+	return out
+}
+
+// readsAtTheCap are the phase's distinct engine reads taken inside a stretch with the cap's requests in flight on the Instance. A read is placed by the time of
+// the scrape that first saw it (At), which may be up to a probe interval after the read was taken, so it counts only when that scrape came more than
+// EngineReadLag after the stretch began and before it ended: a stale KV figure is never posted as at the cap.
+func readsAtTheCap(po PhaseObs, joined []joinedRow, managed string, cap int) []EngineSample {
+	var out []EngineSample
+	for _, w := range atCapWindows(rowsOn(joined, managed, RouteServed), cap) {
+		for _, s := range po.Engine {
+			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // longestWaitingRun is the longest stretch of consecutive engine samples with requests waiting.
@@ -820,19 +874,30 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 			peak, kv, waiting, waitPeak := 0.0, 0.0, 0, 0.0
 			pre := po.Engine[len(po.Engine)-1].Preemptions - po.Engine[0].Preemptions
 			for _, s := range po.Engine {
-				peak, kv = max(peak, s.Running), max(kv, s.KVUsage)
+				peak = max(peak, s.Running)
 				if s.Waiting > 0 {
 					waiting++
 					waitPeak = max(waitPeak, s.Waiting)
 				}
 			}
 			run := longestWaitingRun(po.Engine)
+			kvReads, kvWhat := po.Engine, "of the cache (vllm:kv_cache_usage_perc)"
 			reading := ""
 			if po.Phase.Kind == KindLong {
-				reading = " (a READING, ruling H0: the declared charge of 1,152 tokens a session against the cache's real use at the cap)"
+				// The KV use is posted as AT THE CAP only from the distinct reads taken inside the stretch with the cap's requests in flight.
+				kvReads = readsAtTheCap(po, joined, o.LLMLabProvider, o.Cap)
+				kvWhat = fmt.Sprintf("of the cache (vllm:kv_cache_usage_perc) over the %d distinct read(s) taken inside the stretch with the cap's requests in flight", len(kvReads))
+				reading = " (a READING, ruling H0: the declared charge of 1,152 tokens a session against the cache's real use at the cap; a read is placed by the first scrape that saw it, and counted only more than the probe interval after the stretch began)"
 			}
-			fmt.Fprintf(&b, "  - the engine, over %d samples: running at most %.0f (the cap %d); requests waiting in %d samples, the longest run %d, at most %.0f; preemptions %.0f; KV use at most %.1f%% of the cache (vllm:kv_cache_usage_perc)%s\n",
-				len(po.Engine), peak, o.Cap, waiting, run, waitPeak, pre, kv*100, reading)
+			kvLine := "KV use at the cap NOT witnessed: no distinct read was taken inside the stretch with the cap's requests in flight"
+			if len(kvReads) > 0 {
+				for _, s := range kvReads {
+					kv = max(kv, s.KVUsage)
+				}
+				kvLine = fmt.Sprintf("KV use at most %.1f%% %s", kv*100, kvWhat)
+			}
+			fmt.Fprintf(&b, "  - the engine, over %d distinct reads: running at most %.0f (the cap %d); requests waiting in %d reads, the longest run %d, at most %.0f; preemptions %.0f; %s%s\n",
+				len(po.Engine), peak, o.Cap, waiting, run, waitPeak, pre, kvLine, reading)
 		}
 	}
 	b.WriteString("- the mapping to #769 (hbep-764-amend at 9cc8368d), measurement then the rule it will be compared against:\n")

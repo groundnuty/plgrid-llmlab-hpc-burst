@@ -170,10 +170,19 @@ const (
 	// declared longest context, 28,672 (the served example's workload block). The generator sizes in words, so the size is read, never assumed.
 	LongPromptMin = 24_000
 	LongPromptMax = 28_672
-	// EngineWaitingSustain is how many consecutive engine samples with requests waiting fail a phase: 3, which is 6 s at BaselinePoll's 2 s. N sessions that
-	// start together can have their first prefills briefly above the engine's batched-token budget, so a sample or two of waiting requests is no sign that the
-	// engine is the bottleneck: such a blip is a reading, posted with its count and its longest run (the science agent's ruling of 18 Nov 2026 on #764's row).
-	// Running above the cap, or preemptions rising, fail at any sample.
+	// EngineProbeInterval is Sano's health.probeInterval (profiles/sano.yaml:143): the agent reads the engine's metrics once an interval, and the controller's
+	// gauges repeat the last read between reads, so a scrape every BaselinePoll sees the same read several times. The agent's own read time
+	// (hpcburst_instance_metrics_read_timestamp_seconds, internal/lifecycle/metrics.go:132) tells the reads apart, and only DISTINCT reads are samples.
+	EngineProbeInterval = 10 * time.Second
+	// EngineReadLag is how long before the first scrape that saw it a read may have been taken: the agent's report reaches the controller up to a probe
+	// interval after the read. A read is placed by the time of the scrape that first saw it, so it counts as taken inside a stretch only when that scrape was
+	// more than this after the stretch began: a stated limit, never a read taken before the stretch posted as at it.
+	EngineReadLag = EngineProbeInterval
+	// EngineWaitingSustain is how many consecutive DISTINCT engine reads with requests waiting fail a phase: 3, which at Sano's 10 s probe interval is about
+	// 20 to 30 s of waiting. N sessions that start together can have their first prefills briefly above the engine's batched-token budget, so a read or two with
+	// requests waiting is no sign that the engine is the bottleneck: such a blip is a reading, posted with its count and its longest run (the science agent's
+	// ruling of 18 Nov 2026 on #764's row, and its ruling on #776's review, point 7: the window is in reads, not in polls). Running above the cap, or
+	// preemptions rising, fail at any read.
 	EngineWaitingSustain = 3
 	// RatioProbeWords is the context, in words, of the one probe that measures the tokens a word comes to on the engine's own tokenizer, PhaseRatio, and
 	// LongTargetTokens the length P1-long's contexts are set to reach, 26,000 tokens, the middle of LongPromptMin to LongPromptMax. The probe sets the SHAPE of

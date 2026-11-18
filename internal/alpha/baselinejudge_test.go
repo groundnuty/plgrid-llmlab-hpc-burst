@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -495,7 +496,7 @@ func TestTheLongPhasesEngineReadingsArePostedAndNeverFailed(t *testing.T) {
 		t.Fatalf("failures %v, err %v: the long phase's readings are no failure", failures, err)
 	}
 	post, _ := os.ReadFile(filepath.Join(out, PostsFile))
-	if !strings.Contains(string(post), "requests waiting in 1 samples, the longest run 1, at most 2; preemptions 3; KV use at most 74.0% of the cache (vllm:kv_cache_usage_perc) (a READING, ruling H0") {
+	if !strings.Contains(string(post), "requests waiting in 1 reads, the longest run 1, at most 2; preemptions 3; KV use at most 74.0% of the cache (vllm:kv_cache_usage_perc) over the 1 distinct read(s) taken inside the stretch with the cap's requests in flight (a READING, ruling H0") {
 		t.Errorf("the text to post lacks the long phase's readings:\n%s", post)
 	}
 	if n := strings.Count(string(post), "(a READING, ruling H0"); n != 1 {
@@ -566,12 +567,14 @@ func TestTheRowsSettingsAreNoInputOfTheDeploymentID(t *testing.T) {
 	}
 }
 
-// Requests waiting in the engine fail a phase only when SUSTAINED, 3 consecutive samples, which is 6 s at the 2 s cadence (the science agent's ruling of 18 Nov
-// 2026): N sessions that start together can have first prefills above the batched-token budget for a sample or two. Hand-typed runs: a blip of 1 and 2 in a
-// row pass, 3 in a row fail, and two runs of 2 split by a clear sample pass. Preemptions and running above the cap fail at any sample, as before.
-func TestEngineWaitingFailsOnlyWhenSustainedForThreeSamples(t *testing.T) {
-	if EngineWaitingSustain != 3 || BaselinePoll != 2*time.Second {
-		t.Fatalf("sustain %d at %s, want 3 at 2s: 6 s", EngineWaitingSustain, BaselinePoll)
+// Requests waiting in the engine fail a phase only when SUSTAINED, 3 consecutive DISTINCT reads, which at Sano's 10 s probe interval is about 20 to 30 s (the
+// science agent's rulings of 18 Nov 2026 and on #776's review, point 7): N sessions that start together can have first prefills above the batched-token budget
+// for a read or two. A read is told by the agent's own read time, since the controller's gauges repeat a read between reads, so one waiting read scraped
+// several times counts once. Hand-typed runs: a blip of 1 and 2 in a row pass, 3 in a row fail, and two runs of 2 split by a clear read pass. Preemptions and
+// running above the cap fail at any read, as before.
+func TestEngineWaitingFailsOnlyWhenSustainedForThreeDistinctReads(t *testing.T) {
+	if EngineWaitingSustain != 3 || EngineProbeInterval != 10*time.Second {
+		t.Fatalf("sustain %d at a probe interval of %s, want 3 at 10s: 20 to 30 s", EngineWaitingSustain, EngineProbeInterval)
 	}
 	samples := func(waiting ...float64) []EngineSample {
 		out := make([]EngineSample, len(waiting))
@@ -605,6 +608,12 @@ func TestEngineWaitingFailsOnlyWhenSustainedForThreeSamples(t *testing.T) {
 		if got != c.failing {
 			t.Errorf("%s: failed on waiting %t, want %t (%q)", c.name, got, c.failing, fail)
 		}
+	}
+	// The failure names reads and the window they span, never polls or the old 6 s.
+	po := PhaseObs{Phase: DefaultPhases(CapSano)[2], Engine: samples(1, 1, 1)}
+	fail3, _ := judgePhase(BaselineObs{Cap: CapSano, LLMLabProvider: LLMLabProviderName}, po)
+	if !strings.Contains(Summary(fail3), "3 consecutive distinct reads, past the 2 that a burst of first prefills explains (20s to 30s apart at Sano's probe interval of 10s)") {
+		t.Errorf("the failure reads %q", Summary(fail3))
 	}
 	// The long phase reads, and never fails on waiting, however long.
 	fail, _ := judgePhase(BaselineObs{Cap: CapSano, LLMLabProvider: LLMLabProviderName}, PhaseObs{Phase: DefaultPhases(CapSano)[1], Engine: samples(2, 2, 2, 2, 2)})
@@ -769,5 +778,51 @@ func TestTheLLMLabGuardFailsClosed(t *testing.T) {
 		if po.Stopped != "" {
 			t.Errorf("%s was stopped for %q: the polls never saw the guard crossed, so only the final count can fail it", po.Phase.Name, po.Stopped)
 		}
+	}
+}
+
+// The controller's gauges repeat a read between reads, and a scrape every 2 s sees one read up to five times (Sano probes every 10 s): only a read NEWER than the
+// last one taken, by the agent's own read time, is a sample, and a scrape with no read time is never fresh (#776's review, point 7). The read time is the
+// agent's clock and is used only to tell reads apart.
+func TestOnlyANewReadIsAnEngineSample(t *testing.T) {
+	base := time.Date(2026, 11, 18, 3, 0, 0, 0, time.UTC)
+	read := func(sec int) EngineSample {
+		return EngineSample{ReadAt: base.Add(time.Duration(sec) * time.Second), Waiting: 1}
+	}
+	s := BaselineSettings{lastRead: new(time.Time)}
+	var po PhaseObs
+	for _, smp := range []EngineSample{read(0), read(0), read(0), read(10), read(10), {Waiting: 1}, read(5), read(20)} {
+		s.takeRead(&po, smp)
+	}
+	if len(po.Engine) != 3 {
+		t.Fatalf("%d samples, want 3: the reads at 0, 10 and 20 s once each, a repeat, an unknown read time and an older read dropped", len(po.Engine))
+	}
+	// A read is taken once in the whole run: the next phase's first scrape of the last read is no sample of it.
+	var next PhaseObs
+	s.takeRead(&next, read(20))
+	s.takeRead(&next, read(30))
+	if len(next.Engine) != 1 || !next.Engine[0].ReadAt.Equal(base.Add(30*time.Second)) {
+		t.Errorf("the next phase holds %+v, want the read at 30 s alone", next.Engine)
+	}
+}
+
+// A KV figure is posted as at the cap only from a distinct read taken inside the stretch with the cap's requests in flight, and a first scrape that came less
+// than the probe interval after the stretch began does not count, since its read may predate it. By hand: eleven requests from 0 s to 40 s make the stretch
+// [0, 40]; a scrape at 5 s (read before the stretch may be), 10 s (the lag is not exceeded) and 45 s (after) do not count, one at 11 s and one at 40 s do.
+func TestKVIsPostedAsAtTheCapOnlyFromReadsInsideTheStretch(t *testing.T) {
+	t0 := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	var joined []joinedRow
+	for i := 0; i < CapSano; i++ {
+		joined = append(joined, joinedRow{Gen: GenRow{Session: fmt.Sprintf("s%d", i), Turn: 1}, Front: FrontRow{Emitter: "instance", Start: t0, End: t0.Add(40 * time.Second)}})
+	}
+	at := func(s int) EngineSample { return EngineSample{At: t0.Add(time.Duration(s) * time.Second)} }
+	po := PhaseObs{Engine: []EngineSample{at(5), at(10), at(11), at(40), at(45)}}
+	got := readsAtTheCap(po, joined, LLMLabProviderName, CapSano)
+	if len(got) != 2 || !got[0].At.Equal(t0.Add(11*time.Second)) || !got[1].At.Equal(t0.Add(40*time.Second)) {
+		t.Errorf("the reads at the cap are %v, want the scrapes at 11 s and 40 s", got)
+	}
+	// One request short of the cap for the whole phase: no stretch, no read at the cap.
+	if got := readsAtTheCap(po, joined[:CapSano-1], LLMLabProviderName, CapSano); len(got) != 0 {
+		t.Errorf("%d reads at the cap with %d requests in flight", len(got), CapSano-1)
 	}
 }

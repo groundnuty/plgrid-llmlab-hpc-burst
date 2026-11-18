@@ -224,13 +224,20 @@ func (b *liveBaseline) ServedEligible(ctx context.Context) bool {
 	return false
 }
 
-// EngineSample reads the controller's /metrics for the served Instance's worker-0 gauges. A gauge that is absent makes the sample none: an unknown is never 0.
+// EngineSample reads the controller's /metrics for the served Instance's worker-0 gauges, with the agent's own read time. A gauge that is absent, or a read
+// time that is, makes the sample none: an unknown is never 0 and never fresh. The sequencer keeps a sample only when its read is newer than the last one kept.
 func (b *liveBaseline) EngineSample(ctx context.Context) (EngineSample, bool) {
 	ss, err := obscheck.Scrape(b.r.h.Ports.URL(12, "/metrics"))
 	if err != nil {
 		return EngineSample{}, false
 	}
 	want := map[string]string{"instance_uid": string(b.in.UID), "worker": "worker-0"}
+	// The agent's own read time: the gauges repeat the last read between reads, and only this tells two reads apart. Absent: no read yet, so no sample.
+	rt := obscheck.Find(ss, "hpcburst_instance_metrics_read_timestamp_seconds", want)
+	if len(rt) != 1 || rt[0].Value <= 0 {
+		return EngineSample{}, false
+	}
+	readAt := time.Unix(0, int64(rt[0].Value*1e9))
 	var v [4]float64
 	for i, g := range []string{obscheck.GaugeRunning, obscheck.GaugeWaiting, obscheck.GaugePreempt, obscheck.GaugeKV} {
 		f := obscheck.Find(ss, g, want)
@@ -239,7 +246,7 @@ func (b *liveBaseline) EngineSample(ctx context.Context) (EngineSample, bool) {
 		}
 		v[i] = f[0].Value
 	}
-	return EngineSample{At: time.Now(), Running: v[0], Waiting: v[1], Preemptions: v[2], KVUsage: v[3]}, true
+	return EngineSample{At: time.Now(), ReadAt: readAt, Running: v[0], Waiting: v[1], Preemptions: v[2], KVUsage: v[3]}, true
 }
 
 // EndServed is the run's end: the served deployment goes, and the cluster's record shows its job ended (liveRun.endDeployment). The release removes

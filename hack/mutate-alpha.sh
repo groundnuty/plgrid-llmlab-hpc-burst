@@ -1237,6 +1237,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 	if o.P0, err = w.Probe(ctx); err != nil {'
   'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
   'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
+  'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
+  'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
   # #776's review, point 3: the control and the long phase need all N sessions, N requests in flight at once on the Instance, and N of them in the long range.
   'baselinejudge.go@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < cap {@@			if n := len(distinctSessionsOn(joined, managed, RouteServed)); n < 0 {'
   'baselinejudge.go@@			if peak, _, _ := inFlightStats(served, -1); peak < cap {@@			if peak, _, _ := inFlightStats(served, -1); peak < 0 {'

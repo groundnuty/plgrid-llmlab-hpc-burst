@@ -85,6 +85,20 @@ type BaselineSettings struct {
 	// Poll, FitMargin, DetachWait and DetachEvery are BaselinePoll, BaselineFitMargin, BaselineDetachWait and BaselineDetachEvery unless a test sets them.
 	Poll, FitMargin, DetachWait, DetachEvery time.Duration
 	Logf                                     func(format string, args ...any)
+	// lastRead is the agent's read time of the last engine read taken anywhere in the run, shared by every phase (RunBaseline sets it).
+	lastRead *time.Time
+}
+
+// takeRead adds an engine read to the phase if it is a NEW read: the controller's gauges repeat the last read between reads, so a scrape that shows the read
+// time it showed before is the same read, and one with no read time is never fresh (#776's review, point 7).
+func (s BaselineSettings) takeRead(po *PhaseObs, smp EngineSample) {
+	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {
+		return
+	}
+	if s.lastRead != nil {
+		*s.lastRead = smp.ReadAt
+	}
+	po.Engine = append(po.Engine, smp)
 }
 
 func (s BaselineSettings) logf(f string, a ...any) {
@@ -122,6 +136,7 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 	if s.DetachEvery <= 0 {
 		s.DetachEvery = BaselineDetachEvery
 	}
+	s.lastRead = new(time.Time)
 	o := BaselineObs{Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
 	var err error
 	if o.Managed, err = w.AttachManaged(ctx); err != nil {
@@ -222,7 +237,7 @@ func runPhase(ctx context.Context, w BaselineWorld, s BaselineSettings, ph Phase
 		return po, nil
 	}
 	if smp, ok := w.EngineSample(ctx); ok {
-		po.Engine = append(po.Engine, smp)
+		s.takeRead(&po, smp)
 	}
 	gen, err := w.StartGenerator(ctx, ph)
 	if err != nil {
@@ -259,7 +274,7 @@ loop:
 			break loop
 		}
 		if smp, ok := w.EngineSample(ctx); ok {
-			po.Engine = append(po.Engine, smp)
+			s.takeRead(&po, smp)
 		}
 		if w.Now().After(deadline) {
 			po.Stopped = StopBound
@@ -273,7 +288,7 @@ loop:
 	}
 	po.End = w.Now()
 	if smp, ok := w.EngineSample(ctx); ok {
-		po.Engine = append(po.Engine, smp)
+		s.takeRead(&po, smp)
 	}
 	if after, ok := w.LLMLabCount(ctx); ok {
 		po.LLMLabMetric, po.MetricRead = after-before, true

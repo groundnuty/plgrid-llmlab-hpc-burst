@@ -29,13 +29,16 @@ var baselineCases = []dryCase{
 	{"instance-ineligible", "the served Instance became ineligible, so the generator was stopped"},
 	{"engine-over-the-cap", "the engine ran more than the cap of 11 requests"},
 	// Waiting requests fail only when sustained for 3 consecutive samples (EngineWaitingSustain); a blip, two in a row, and two runs of two are readings.
-	{"engine-waiting", "the engine had requests waiting in 5 consecutive samples"},
-	{"engine-waiting-thrice", "the engine had requests waiting in 3 consecutive samples"},
+	{"engine-waiting", "the engine had requests waiting in 5 consecutive distinct reads"},
+	{"engine-waiting-thrice", "the engine had requests waiting in 3 consecutive distinct reads"},
 	{"engine-waiting-twice", ""},
 	{"engine-waiting-blip", ""},
 	{"engine-waiting-split", ""},
 	{"engine-preempts", "the engine preempted"},
-	{"engine-unread", "fewer than 2 engine samples were read"},
+	{"engine-unread", "fewer than 2 distinct engine reads"},
+	// The controller's gauges repeat a read between reads: repeated idle data is no read, and one read scraped four times is one read (#776's review, point 7).
+	{"engine-cached-idle", "fewer than 2 distinct engine reads"},
+	{"engine-waiting-cached", ""},
 	// In the long phase the engine's waiting requests and preemptions are readings (ruling H0), posted and never failed on.
 	{"long-engine-readings", ""},
 	{"front-503-in-the-control", "a request failed (status 503, emitter \"front\")"},
@@ -104,6 +107,8 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"long-serialized", "P1-long: the front's records show at most 1 requests in flight at once on the Instance, want the cap's 11"},
 	{"phases-do-not-fit", "did not fit before the Instance's drain start"},
 	{"ratio-impossible", "no word count reaches 24000 to 28672 tokens"},
+	// A KV figure is posted as at the cap only from a read taken inside the cap's stretch (#776's review, point 7).
+	{"long-no-read-in-window", "no distinct engine read was taken inside the stretch with the cap's 11 requests in flight"},
 	{"ratio-unread", "the ratio probe's usage record holds no prompt tokens"},
 }
 
@@ -122,6 +127,9 @@ func init() {
 	dryFaults["baseline"] = append(faults, "pend-past-bound")
 	dryCases[BetaBaselineName] = baselineCases
 }
+
+// dryReadEpoch is the agent's clock for the dry engine's reads: its own, unrelated to the fake clock.
+var dryReadEpoch = time.Date(2026, 11, 18, 3, 0, 0, 0, time.UTC)
 
 const (
 	dryServedUID      = "00000000-0000-4000-8000-0000000000a1"
@@ -177,6 +185,9 @@ type dryBaseline struct {
 	calls            []string
 	configs          map[string][]byte
 	preBumped        bool
+	phaseCalls       int
+	readSeq          int
+	phaseT0          time.Time
 	p1LongRowsRead   bool
 	phaseSamples     int
 	released         bool
@@ -414,8 +425,35 @@ func (w *dryBaseline) EngineSample(context.Context) (EngineSample, bool) {
 		return EngineSample{}, false
 	}
 	w.d.tick(time.Second) // each look is a second of the fake clock, so a generator that never ends reaches the phase's bound
-	s := EngineSample{At: w.d.now(), Running: w.running, KVUsage: w.kv, Preemptions: w.pre}
+	w.phaseCalls++
+	// Every scrape is a new read of the engine, 10 s after the last, except in the faults whose gauges repeat a read: the controller's gauges do between reads,
+	// and only the agent's read time tells two scrapes of one read apart (#776's review, point 7).
+	newRead := true
 	switch {
+	case w.d.fault("engine-cached-idle") && w.phase.Name == PhaseP2:
+		newRead = false // idle data, repeated: it must not satisfy the minimum number of reads
+	case w.d.fault("engine-waiting-cached") && w.phase.Name == PhaseP2:
+		newRead = w.phaseCalls%4 == 1 // one read every four scrapes
+	}
+	if newRead {
+		w.readSeq++
+	}
+	// A scrape while the phase's generator runs is first seen inside the phase's stretch, 20 s apart; the one before a phase starts and the one after its generator
+	// ended are first seen outside it, at the clock's own time.
+	at := w.d.now()
+	if !w.genDone() {
+		at = w.phaseT0.Add(time.Duration(w.phaseCalls) * 20 * time.Second)
+	}
+	s := EngineSample{At: at, ReadAt: dryReadEpoch.Add(time.Duration(w.readSeq) * EngineProbeInterval), Running: w.running, KVUsage: w.kv, Preemptions: w.pre}
+	if w.d.fault("long-no-read-in-window") && w.phase.Name == PhaseP1Long {
+		s.At = w.phaseT0.Add(time.Hour) // every read first seen long after the cap's stretch
+	}
+	switch {
+	case w.d.fault("engine-waiting-cached") && w.phase.Name == PhaseP2:
+		// The single read with requests waiting is scraped four times.
+		if (w.phaseCalls-1)/4 == 1 {
+			s.Waiting = 1
+		}
 	case w.d.fault("engine-over-the-cap") && w.phase.Name == PhaseP2:
 		s.Running = float64(w.cap + 1)
 	case w.waitingFault() && w.inPhase(PhaseP2):
@@ -505,6 +543,7 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 	}
 	w.generated++
 	w.phase, w.reads = ph, 0
+	w.phaseT0, w.phaseCalls = w.d.now(), 0
 	gen, rows, llm, instance, length := w.build(ph)
 	w.rows = append(w.rows, rows...)
 	w.phaseLLM, w.running = llm, float64(min(instance, w.cap))
@@ -516,6 +555,9 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 	w.phaseSamples = 0
 	if w.waitingFault() && ph.Name == PhaseP2 {
 		g.needed = 6 // five looks of the engine in the phase, to show a run of consecutive samples
+	}
+	if w.d.fault("engine-waiting-cached") && ph.Name == PhaseP2 {
+		g.needed = 10 // twelve scrapes: three reads, one of them with requests waiting
 	}
 	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 || w.d.fault("instance-ineligible") && ph.Name == PhaseP1Long {
 		g.never = true // the phase ends only by the sequencer's stop
@@ -563,7 +605,13 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 	if (w.d.fault("llmlab-over-its-guard") || w.d.fault("llmlab-over-final-count")) && ph.Name == PhaseP2 {
 		llmSessions = 150 // one request each: the guard is the metric's, past 144
 	}
-	step := 2*time.Second + ph.Think
+	// A turn takes two seconds, and in the long phase forty (eleven prompts of 26k tokens prefill together, so the cap's stretch is long enough to hold a read
+	// taken after the probe interval); the next turn starts after the think time.
+	turnDur := 2 * time.Second
+	if ph.Kind == KindLong {
+		turnDur = 40 * time.Second
+	}
+	step := turnDur + ph.Think
 	delay := time.Duration(0)
 	// late is when the sessions beyond the cap start in the faults where the cap is never reached: after the others have ended.
 	late := time.Duration(ph.Turns)*step + time.Second
@@ -603,17 +651,20 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		}
 		if serialized {
 			turns = 2
+			if ph.Kind == KindLong {
+				turns = 1 // forty seconds a request: one turn each keeps the phase inside its bound
+			}
 		}
 		// A turn takes two seconds, on the Instance and on LLMLab, and the next starts after the think time.
 		for t := 1; t <= turns; t++ {
 			start := t0.Add(time.Duration(t-1) * step)
 			if serialized {
-				start = start.Add(time.Duration(i) * 2 * step) // each session starts after the one before it has ended
+				start = start.Add(time.Duration(i*turns) * step) // each session starts after the one before it has ended
 			}
 			if neverReached && i >= cap {
 				start = start.Add(late)
 			}
-			dur, status, emitter, provider, first := 2*time.Second, 200, "instance", dryServedProvider, int64(50)
+			dur, status, emitter, provider, first := turnDur, 200, "instance", dryServedProvider, int64(50)
 			switch {
 			case onLLMLab:
 				emitter, provider, first = "provider", LLMLabProviderName, 300
