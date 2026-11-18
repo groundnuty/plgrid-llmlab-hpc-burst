@@ -729,8 +729,8 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-17: revised by its Fable and Gemini Carbon reviews (PR #679), and the owner's answers of 17 Nov 2026: S2c's default router applies per platform, only where the profile records the compute nodes' glibc at 2.30 or later (open question 2); LLMLab takes overflow only (open question 4), and one front for beta, revisited with the team option (open question 11).
 - 2026-11-18: amendment from HBEP-764: Workloads, named per request, served by their own deployments, ordered per Workload, and counted against a token budget per Instance (Workloads).
 - 2026-11-18: erratum (the science agent's ruling Q1 on #764's stage-0 plan, 18 Nov 2026): Request path step 2 splits a Workload suffix off at the name's only `#`, as HBEP-3's Grammar does; it read "the last `#`".
-- 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764, for #783): at partial membership only a Workload request's budget inequality stays in force; its count clause is off, as the count cap is for every request.
 - 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764, for #784): `status.healthyWorkers` counts a worker only on a router read of its current process, joined by its identity, not its name, and at most two of the agent's router polls old.
+- 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764, for #783): at partial membership only a Workload request's budget inequality stays in force; its count clause is off, as the count cap is for every request.
 - 2026-11-18: erratum (the science agent's ruling Q5 of 18 Nov 2026 on #764, for PR 5): when one freed slot could take either, a ModelDeployment's own waiters are placed before the Workloads' FIFOs, which follow in the order of their oldest requests.
 
 ## Amendments
