@@ -903,9 +903,28 @@ func TestStandInOperations(t *testing.T) {
 		}
 		return true, ""
 	})
-	// Each job ended because the End released it: the fake Slurm says CANCELLED (the Provider's finalizer cancelled it), or the
-	// release cause its Allocation carried, which the watch saw, names this End by namespace, name and UID. A job that ran out
-	// its time limit (TIMEOUT), or failed, is neither: it fails the check, whatever else holds.
+	// What ended each job depends on what the End committed for its Allocation (HBEP-10, The release cause).
+	//   - A target the End committed to RELEASE: the End released it, so the fake Slurm says CANCELLED (the Provider's finalizer
+	//     cancelled it), or the release cause its Allocation carried, which the watch saw, names this End by namespace, name
+	//     and UID.
+	//   - A target the End committed as KEEP (a started Allocation of an End that sets the end time, not one that deletes the
+	//     deployment: the keep date becomes now, and retention releases it): the End never released it, retention does, after its
+	//     idle time and under retention's own cause. The job then ends COMPLETED or CANCELLED, and which of the two is a race
+	//     the End does not decide. The release deletes the Allocation; the controller then sends the Allocation's agent `stop`
+	//     (internal/lifecycle/desired.go:42-46, a deleting Allocation), which, with no worker left (the Instance drained),
+	//     exits 0 at once (internal/agent/agent.go:259-274), and the job's batch shell with it, and the fake Slurm records
+	//     COMPLETED (internal/slurm/fakeslurm/runwait.go:131-137) if that exit comes before the Provider's finalizer has looked
+	//     the job up and cancelled it (internal/providerctl/delete.go:36-110: two ssh round trips). A hosted run of this test
+	//     ended COMPLETED once and CANCELLED on its rerun, on the same code. Either way retention's cause is what must stand on
+	//     the Allocation, never the End's.
+	// A job that ran out its time limit (TIMEOUT), or failed (FAILED, NODE_FAIL), is none of these: it fails the check in
+	// every case, whatever else holds.
+	committed := map[types.UID]v1alpha1.PlanEffect{}
+	for _, c := range end.Status.Committed {
+		if c.Kind == v1alpha1.TargetKindAllocation {
+			committed[c.UID] = c.Effect
+		}
+	}
 	got := jobsOf()
 	for _, tag := range tags {
 		state, seen := got[tag]
@@ -913,14 +932,18 @@ func TestStandInOperations(t *testing.T) {
 			t.Errorf("the fake Slurm holds no job under the tag %s: the check read nothing", tag)
 			continue
 		}
+		if committed[tagUID[tag]] == v1alpha1.PlanEffectKeep {
+			// The job is terminal, so the Allocation was released; the watch has seen its cause once it has seen the
+			// update that wrote it, which came first.
+			stack.WaitState(t, 30*time.Second, "the watch to have seen the release cause of the kept Allocation of tag "+tag, func() (bool, string) {
+				return s.causeOf(tagUID[tag]) != "", "no release cause seen"
+			})
+		}
 		cause := s.causeOf(tagUID[tag])
-		ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(cause)
-		byThisEnd := ok && ns == end.Namespace && name == end.Name && uid == end.UID
-		switch {
-		case state == fakeslurm.Timeout || state == fakeslurm.NodeFail || state == fakeslurm.Failed:
-			t.Errorf("the job %s ended %s: it ran out its time limit or failed, the End did not end it", tag, state)
-		case state != fakeslurm.Cancelled && !byThisEnd:
-			t.Errorf("the job %s ended %s, and its Allocation's release cause was %q: want CANCELLED or the cause of Operation %s/%s %s", tag, state, cause, end.Namespace, end.Name, end.UID)
+		if problem := endJobProblem(state, committed[tagUID[tag]], cause, end); problem != "" {
+			t.Errorf("the job %s: %s", tag, problem)
+		} else if committed[tagUID[tag]] == v1alpha1.PlanEffectKeep {
+			t.Logf("the job %s of the Allocation the End kept ended %s, released by retention, cause %q", tag, state, cause)
 		}
 	}
 	// At the end of the run, again: a late re-provision after a Scale, or any Instance after the End's commit, is caught too.
@@ -938,5 +961,35 @@ func TestStandInOperations(t *testing.T) {
 	}
 	s.instanceLines("end of the run, P", opsMDP)
 	s.instanceLines("end of the run, Q", opsMDQ)
+	// Under the controllers' own identities (HBEP-10, Audit; #660) a request a controller was refused joins its pass's error and the
+	// pass goes on, so a stand-in that reached the end may still have lacked a verb: the API server's audit log says none was refused,
+	// and that each of the three identities (the lifecycle manager, the Provider's managers, the front) had a request answered 2xx, so
+	// a log that is missing, empty or from a controller that never reached the API server cannot pass.
+	h.AssertControllerAudit(t)
 	// The stack's own stop is down's, registered by StartHost; the cluster's clean-up kills what is left.
+}
+
+// endJobProblem judges one job of an End's Allocations once it has ended: its fake-Slurm state, the effect the End committed for
+// its Allocation, the release cause the watch saw on the Allocation, and the End. It returns what is wrong, or "" (the rules are
+// the comment above the check). A job that ran out its time limit or failed is wrong in every case. For a target the End
+// committed to release, the job is CANCELLED or the cause is the End's own; for a target it committed as Keep, the job is
+// CANCELLED or COMPLETED and the cause is retention's: present, and not any Operation's.
+func endJobProblem(state string, effect v1alpha1.PlanEffect, cause string, end *v1alpha1.Operation) string {
+	ns, name, uid, ok := v1alpha1.ParseReleaseCauseOperation(cause)
+	switch {
+	case state == fakeslurm.Timeout || state == fakeslurm.NodeFail || state == fakeslurm.Failed:
+		return fmt.Sprintf("it ended %s: it ran out its time limit or failed, the End did not end it", state)
+	case effect == v1alpha1.PlanEffectKeep:
+		switch {
+		case state != fakeslurm.Cancelled && state != fakeslurm.Completed:
+			return fmt.Sprintf("it ended %s, and its Allocation is a Keep: want CANCELLED or COMPLETED", state)
+		case cause == "":
+			return fmt.Sprintf("it ended %s, and the watch saw no release cause on its Allocation, which the End committed as Keep and retention released", state)
+		case ok:
+			return fmt.Sprintf("it ended %s, and its Allocation, committed as Keep by the End, carries the cause %q, which is Operation %s/%s %s's: a Keep is retention's to release, under retention's own cause", state, cause, ns, name, uid)
+		}
+	case state != fakeslurm.Cancelled && !(ok && ns == end.Namespace && name == end.Name && uid == end.UID):
+		return fmt.Sprintf("it ended %s, and its Allocation's release cause was %q: want CANCELLED or the cause of Operation %s/%s %s", state, cause, end.Namespace, end.Name, end.UID)
+	}
+	return ""
 }
