@@ -23,7 +23,7 @@ const (
 	unknownQueueWaits    = "the Provider has recorded no queue waits yet"
 	unknownNoProvider    = "the Provider is not read, so its queue waits are not known"
 	unknownStartToReady  = "not measured yet; the controller plans with 30 min"
-	unknownEstimateNow   = "the estimate operation is beta step 4 (HBEP-4 amendment pending)"
+	unknownEstimateNow   = "the estimate is in status.estimates, filled in by the Provider's controller"
 )
 
 // costInput is what one target's cost reads.
@@ -60,7 +60,10 @@ func releaseCost(in costInput) *v1alpha1.ReleaseCost {
 	}
 	c.QueueWaits = queueWaitsFigure(in.prov)
 	c.StartToReady = startToReadyFigure(in.startToReady, in.class)
-	// Always unknown in step 1: no sbatch --test-only is made, and nothing plans one.
+	// Always unknown here, and never read: the Provider's controller writes the estimate into the Operation's
+	// status.estimates by server-side apply, outside the plan, so it never changes the plan's ID, and this
+	// controller carries that list over untouched (HBEP-10, The release cost; `@hpc-burst-science-agent`, 17 Nov
+	// 2026, #661).
 	c.EstimateNow = &v1alpha1.TimeFigure{Unknown: unknownEstimateNow, ObservedAt: &at, Advisory: true}
 	return c
 }

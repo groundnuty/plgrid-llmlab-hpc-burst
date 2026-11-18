@@ -11,9 +11,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
@@ -299,5 +301,77 @@ func TestSanoJobSubmitRulesAreMetByThePluginAndEnforcedByTheFixture(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+// An estimate on Sano reads epoch seconds (probe 4 of #735, the shipped profile's startEstimateTime) and carries the flags of
+// the real job: the QOS of its GPU count, --mem and --cpus-per-task, which Sano's job_submit plugin requires of an
+// sbatch --test-only as of a submission (the source of probe 3's plugin rules is "sbatch --test-only with each flag left out in
+// turn"), under a job name that is not one the plugin calls generic. The fake's --test-only path does not run the plugin's
+// refusal (fakeslurm/testonly.go), so "not refused" is read here from the words the plugin requires, hand-written below, and
+// from the words of the real Submit of the same request, never from the estimate's own builder.
+func TestSanoEstimateCarriesTheRealJobsFlagsAndReadsEpochSeconds(t *testing.T) {
+	b, plat, _ := sanoRig(t, nil)
+	want := fakeStart.Add(95 * time.Minute)
+	plat.SetTestOnlyStart(want)
+	req := sanoReq(2, 22, "271808Mi", "72h") // 2 GPUs: gpu2, 22 CPUs and 271,808 MiB, which are 2 x 11 and 2 x 135,904
+	res, err := b.Estimate(context.Background(), req)
+	if err != nil || res.Unknown != "" || res.Start == nil || !res.Start.Equal(want) {
+		t.Fatalf("Estimate = %+v, %v; want the fake's start %s read as epoch seconds", res, err, want)
+	}
+	if plat.CountTestOnly() != 1 || plat.CountSubmits() != 0 {
+		t.Fatalf("%d --test-only calls and %d submissions, want 1 and 0", plat.CountTestOnly(), plat.CountSubmits())
+	}
+	var call fakeslurm.Call
+	for _, c := range plat.Calls() {
+		if c.TestOnly() {
+			call = c
+		}
+	}
+	if len(call.Words) < 4 || call.Words[0] != "env" || call.Words[1] != "SLURM_TIME_FORMAT=%s" {
+		t.Fatalf("the estimate's call %q lacks the epoch time format prefix", call.Words)
+	}
+	est := call.Command()
+	if id, outcome, err := b.Submit(context.Background(), req); outcome != provider.Accepted || err != nil || id == "" {
+		t.Fatalf("Submit = %q, %s, %v; want it accepted, to compare its words", id, outcome, err)
+	}
+	subs := sbatchWords(plat)
+	if len(subs) != 1 {
+		t.Fatalf("%d submissions, want 1", len(subs))
+	}
+	sub := subs[0]
+	with := func(words []string, prefix string) []string {
+		var got []string
+		for _, w := range words {
+			if strings.HasPrefix(w, prefix) {
+				got = append(got, w)
+			}
+		}
+		return got
+	}
+	// What the plugin requires, written out: the QOS, the memory and the CPUs of the job.
+	for _, w := range []struct{ prefix, word string }{
+		{"--qos=", "--qos=gpu2"}, {"--mem=", "--mem=271808M"}, {"--cpus-per-task=", "--cpus-per-task=22"},
+		{"--gres=", "--gres=gpu:2"}, {"--partition=", "--partition=gpu"},
+	} {
+		if got := with(est, w.prefix); !slices.Equal(got, []string{w.word}) {
+			t.Errorf("the estimate's %s words are %q, want [%s]", w.prefix, got, w.word)
+		}
+		if got := with(sub, w.prefix); !slices.Equal(got, with(est, w.prefix)) {
+			t.Errorf("the submission's %s words are %q, the estimate's are %q: an estimate must carry the real job's", w.prefix, got, with(est, w.prefix))
+		}
+	}
+	// The name is the estimate's own, and not generic; the estimate is never held, and it is a --test-only.
+	name := with(est, "--job-name=")
+	if len(name) != 1 || name[0] != "--job-name=hpcburst-estimate" {
+		t.Errorf("the estimate's job names are %q, want [--job-name=hpcburst-estimate]", name)
+	}
+	for _, generic := range []string{"wrap", "job", "bash"} {
+		if slices.Contains(est, "--job-name="+generic) {
+			t.Errorf("the estimate's job name is %q, which Sano's plugin refuses as generic", generic)
+		}
+	}
+	if slices.Contains(est, "--hold") || !slices.Contains(sub, "--hold") {
+		t.Errorf("hold: estimate %v, submission %v; want the estimate unheld and the (held) submission held", slices.Contains(est, "--hold"), slices.Contains(sub, "--hold"))
 	}
 }

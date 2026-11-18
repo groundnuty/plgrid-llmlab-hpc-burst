@@ -18,6 +18,9 @@ const (
 	PlatformStatic  PlatformKind = "static"
 )
 
+// StartEstimateEpochSeconds is the one value of PlatformProfileSpec.StartEstimateTime.
+const StartEstimateEpochSeconds = "epoch-seconds"
+
 // PartitionProfile is what the framework reads of one partition: its name and
 // its accelerator class (HBEP-11, API, PlatformProfile schema).
 //
@@ -586,6 +589,15 @@ type PlatformProfileSpec struct {
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:Pattern=`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$`
 	TimeZone string `json:"timeZone,omitempty"`
+
+	// StartEstimateTime says how Estimate reads sbatch --test-only's start (HBEP-4, Core operations, Estimate;
+	// Platform profile schema): epoch-seconds runs it with SLURM_TIME_FORMAT=%s and reads epoch seconds, set where
+	// a probe decided it; absent means undecided, and Estimate is unknown with that reason
+	// (`@hpc-burst-science-agent`, 17 Nov 2026, #661).
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=epoch-seconds
+	StartEstimateTime string `json:"startEstimateTime,omitempty"`
 
 	// RequeueDefault says whether the scheduler requeues a job by default (for
 	// Slurm, JobRequeue). The framework submits with --no-requeue either way;

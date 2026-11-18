@@ -171,6 +171,22 @@ rules:
   - apiGroups: ["hpcburst.groundnuty.github.io"]
     resources: ["providers/status"]
     verbs: ["update"]
+  # An Operation's start estimates (#661; HBEP-4, Estimate; the science agent's S4 ruling, 17 Nov 2026): the Provider's
+  # estimate controller (internal/providerctl/estimate.go) writes status.estimates and NOTHING else of an Operation, so
+  # the role has no update, create or delete of an Operation and no write to its spec or its metadata (RBAC cannot narrow
+  # a status patch to one field: that the patch is only the estimates is the code's, which the row of
+  # cmd/hpcburst-controller/estimates_identity_test.go checks in the audit log). Its calls, each
+  # a different verb: its controller's For(Operation) and its cached Gets are a LIST and a WATCH of operations
+  # (setupEstimates, Reconcile); freshPlan reads the Operation again through the API reader, a GET, before it writes
+  # (freshPlan); and the entries go by server-side apply to the status subresource, a PATCH of operations/status
+  # (the apply func of setupEstimates). The Operation's Allocations and Instances are read from the cache already
+  # granted above, and the Provider and its profile by the profile reader.
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["operations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["hpcburst.groundnuty.github.io"]
+    resources: ["operations/status"]
+    verbs: ["patch"]
   # The accounting record of a deleted Allocation and the managed catalog's identity records.
   - apiGroups: ["apps"]
     resources: ["controllerrevisions"]

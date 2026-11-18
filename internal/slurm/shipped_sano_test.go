@@ -70,6 +70,12 @@ func TestShippedSanoProfile(t *testing.T) {
 	if !pp.Spec.HoldRelease {
 		t.Errorf("holdRelease is false, want true (the probe of 18 Nov 2026)")
 	}
+	// Probe 4 of #735 (facts.slurm.time_format): SLURM_TIME_FORMAT=%s gives epoch seconds in sbatch --test-only's start, so
+	// Sano's profile decides the estimate's reading. Without the field Estimate answers unknown and runs no command (HBEP-4,
+	// Estimate). The literal is the value of the probe, not the constant the code reads.
+	if pp.Spec.StartEstimateTime != "epoch-seconds" {
+		t.Errorf("startEstimateTime %q, want epoch-seconds (probe 4 of #735)", pp.Spec.StartEstimateTime)
+	}
 
 	// Each QOS: a 3-day wall and the caps of probe 3, per job. 1,061.75 GiB is 1,087,232 MiB.
 	for _, w := range []struct {

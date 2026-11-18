@@ -95,6 +95,8 @@ var wantControllerRules = map[string][]string{
 		"hpcburst.groundnuty.github.io allocations: get list watch update",
 		"hpcburst.groundnuty.github.io allocations/status: update patch",
 		"hpcburst.groundnuty.github.io providers/status: update",
+		"hpcburst.groundnuty.github.io operations: get list watch",
+		"hpcburst.groundnuty.github.io operations/status: patch",
 		"apps controllerrevisions: get create",
 		"core events: create patch",
 		"events.k8s.io events: create patch",
