@@ -271,10 +271,24 @@ func (r *Router) waitNamed(ctx context.Context, ws *wlState, w *wlWaiter) (*targ
 // wakeNow runs a wake pass in the calling goroutine, which must hold no lock: a completion's goroutine, after the group's or the Workload's mutex is
 // released. It skips only when no request is active, and an arrival counts as active before it reads the view.
 func (r *Router) wakeNow() {
-	if r.wlActive.Load() == 0 {
+	if r.wlActive.Load() == 0 && !r.wlOrphan.Load() {
 		return
 	}
 	r.wakePass()
+}
+
+// recomputeOrphanLocked sets wlOrphan from the registry and the view's Workloads. The caller holds Router.mu, which both the rebuild and a pass take for
+// it, so a flag set by one is never cleared by a pass that did not see its state.
+func (r *Router) recomputeOrphanLocked() {
+	r.wlMu.Lock()
+	defer r.wlMu.Unlock()
+	for key := range r.wls {
+		if !r.wlKnown[key] {
+			r.wlOrphan.Store(true)
+			return
+		}
+	}
+	r.wlOrphan.Store(false)
 }
 
 // wakeAsync hands a wake pass to a goroutine of its own: the rebuild's, which runs under Router.mu and so may not take a Workload's mutex. Wakes that
@@ -394,6 +408,9 @@ func (r *Router) pruneWorkloads() {
 		}
 		ws.mu.Unlock()
 	}
+	r.mu.Lock()
+	r.recomputeOrphanLocked()
+	r.mu.Unlock()
 }
 
 // wlWaitingTotal is the requests waiting in the Workloads' FIFOs.

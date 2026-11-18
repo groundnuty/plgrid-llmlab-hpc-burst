@@ -66,13 +66,16 @@ type Router struct {
 	// The Workloads' state (workload_route.go). wls holds one state per Workload that has had a request, under wlMu, a leaf lock; wlN is its size, wlSeq
 	// numbers the arrivals in the FIFOs, and wlActive counts the requests that are deciding or waiting, so that a wake pass skips only when none is. passMu
 	// serialises the wake passes. wlKnown is the namespace/name of each Workload in the view, replaced by every rebuild under mu.
-	wlMu      sync.Mutex
-	wls       map[string]*wlState
-	wlN       atomic.Int64
-	wlSeq     atomic.Uint64
-	wlActive  atomic.Int64
-	passMu    sync.Mutex
-	wlKnown   map[string]bool
+	wlMu     sync.Mutex
+	wls      map[string]*wlState
+	wlN      atomic.Int64
+	wlSeq    atomic.Uint64
+	wlActive atomic.Int64
+	passMu   sync.Mutex
+	wlKnown  map[string]bool
+	// wlOrphan says some Workload state is of a Workload that has left the view, so that a completion or a waiter that gives up runs a wake pass, which
+	// drops the state once it is empty (pruneWorkloads). It is set by a rebuild and cleared by a pass, both under mu (recomputeOrphanLocked).
+	wlOrphan  atomic.Bool
 	wakeAgain atomic.Bool
 	// wakeRunning says a goroutine of wakeAsync runs.
 	wakeRunning atomic.Bool
@@ -312,6 +315,7 @@ func (r *Router) indexLocked() {
 			}
 		}
 	}
+	r.recomputeOrphanLocked()
 	r.keyUID = map[string]types.UID{}
 	for i := range r.snap.Instances {
 		in := &r.snap.Instances[i]
