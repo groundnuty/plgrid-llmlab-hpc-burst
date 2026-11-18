@@ -46,6 +46,16 @@ type extraUnit struct {
 	gpus int32
 }
 
+// unitSizing is how the unit set sizes an Allocation on the Provider, read under the Provider's lock (extraAsk.sizing).
+// sizeOf is the size of a replacement that does not exist yet on this Provider, a handing-over primary's next one: the
+// deployment's CURRENT served plan and lease limit through the Provider's partition (partitionSizingFor). sizeRecorded is
+// the size of the Allocation of an Instance that exists, from the Instance's RECORDED launch (its GPUs a worker and its
+// workers), as ensureAllocation will request it. Both read nothing but their arguments and the Provider's view.
+type unitSizing struct {
+	sizeOf       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
+	sizeRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
+}
+
 // unitAsk is what the unit set needs to know of the extra that asks.
 type unitAsk struct {
 	// deployment is the asking deployment (namespace/name): it counts like any other.
@@ -53,12 +63,7 @@ type unitAsk struct {
 	// exclude is the asking Instance, the cut-short extra that retries (zero for a new one): it is left out of its
 	// deployment's selection, so a retry never counts itself.
 	exclude types.UID
-	// sizeOf is the size of a replacement that does not exist yet on this Provider, a handing-over primary's next one: the
-	// deployment's CURRENT served plan and lease limit through the Provider's partition (partitionSizingFor). sizeRecorded is
-	// the size of the Allocation of an Instance that exists, from the Instance's RECORDED launch (its GPUs a worker and its
-	// workers), as ensureAllocation will request it. Both read nothing but their arguments and the Provider's view.
-	sizeOf       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
-	sizeRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
+	unitSizing
 }
 
 // future is the size of a handing-over primary's next replacement, which does not exist yet: the CURRENT spec's, and its

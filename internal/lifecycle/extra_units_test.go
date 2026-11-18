@@ -124,13 +124,24 @@ func recordedSize(_ *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.
 	return b, nil
 }
 
+// stubSizing is the unit set's sizing in the table-level rows: a replacement that does not exist yet is one GPU (oneGPU), and
+// an existing Instance's Allocation is sized by recorded.
+func stubSizing(recorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)) func(context.Context) (unitSizing, error) {
+	return func(context.Context) (unitSizing, error) {
+		return unitSizing{
+			sizeOf:       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) { return oneGPU(), nil },
+			sizeRecorded: recorded,
+		}, nil
+	}
+}
+
 // extraSlotAsk is the extra's reservation for a new Allocation of one GPU, on the Provider with a submit limit and a GPU cap
-// (nil: none), asked by the deployment, leaving the Instance out of it. sizeOf sizes a new Allocation of any deployment at one
-// GPU. THE ONLY CODE HERE THAT NAMES THE UNIT SET'S ASK FIELDS.
+// (nil: none), asked by the deployment, leaving the Instance out of it. The sizing stubs size a new Allocation of any deployment
+// at one GPU and an existing Instance's at its recorded launch's. THE ONLY CODE HERE THAT NAMES THE UNIT SET'S ASK FIELDS.
 func extraSlotAsk(provider, key string, limit, gpuCap *int32, asker string, exclude types.UID) slotAsk {
 	size := oneGPU()
 	return slotAsk{provider: provider, key: rigNS + "/" + key, limit: limit, params: &size, caps: v1alpha1.QOSLimits{MaxGPUsPerUser: gpuCap}, profile: unitProfile,
-		deployment: asker, unitExclude: exclude, unitSize: func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) { return oneGPU(), nil }, unitRecorded: recordedSize}
+		deployment: asker, unitExclude: exclude, unitSizing: stubSizing(recordedSize)}
 }
 
 func ask(t *testing.T, tab *slotTable, r client.Reader, q slotAsk) slotAnswer {
@@ -337,9 +348,8 @@ func unitsOf(t *testing.T, f *unitFx, prov, asker string) []extraUnit {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return extraUnits(reads, unitAsk{deployment: asker,
-		sizeOf:       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) { return oneGPU(), nil },
-		sizeRecorded: recordedSize})
+	us, _ := stubSizing(recordedSize)(context.Background())
+	return extraUnits(reads, unitAsk{deployment: asker, unitSizing: us})
 }
 
 // TestAnInFlightReplacementIsCountedAtItsRecordedLaunchAndAFutureOneAtTheSpecNow (U4, k616's precision to #751's fix round,
@@ -402,11 +412,11 @@ func TestAnInFlightPrimarysSlotIsJudgedByItsRecordedLaunchsTimeLimit(t *testing.
 			f.alloc("md-e", "pe", provA, false)
 			f.inst("md-q", "q", provA, "uid-q", hoT(8, 0, 10), v1alpha1.InstancePending, nil)
 			q := extraSlotAsk(provA, "alloc-ex", i32(2), nil, rigNS+"/md-e", "")
-			q.unitRecorded = func(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
+			q.unitSizing = stubSizing(func(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
 				b, err := recordedSize(md, in)
 				b.TimeLimit = v1alpha1.Duration(tc.limit)
 				return b, err
-			}
+			})
 			if a := ask(t, newSlotTable(), f.reader(t), q); a.ok != tc.ok {
 				t.Fatalf("limit %s: ok %v with a count of %d, want %v", tc.limit, a.ok, a.count, tc.ok)
 			}

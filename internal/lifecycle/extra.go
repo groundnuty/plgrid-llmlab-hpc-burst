@@ -92,10 +92,9 @@ type extraAsk struct {
 	deployment string
 	// exclude is the asking Instance, the cut-short extra that retries (zero for a new one), left out of the unit set.
 	exclude types.UID
-	// sizeOf is the size of a replacement that does not exist yet on the Provider, from the deployment's current spec, and
-	// sizeRecorded the size of an existing Instance's Allocation, from its recorded launch (extraUnits).
-	sizeOf       func(*v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error)
-	sizeRecorded func(*v1alpha1.ModelDeployment, *v1alpha1.Instance) (v1alpha1.BatchParameters, error)
+	// sizing reads the Provider under the Provider's lock and returns how the unit set sizes an Allocation on it
+	// (sizingUnderLock), never from the pass's own read before the lock.
+	sizing func(context.Context) (unitSizing, error)
 	// headroom is the admission headroom (headroomOf), read under the Provider's lock by the reservation.
 	headroom func(context.Context, slotSnapshot) (int, error)
 }
@@ -103,7 +102,7 @@ type extraAsk struct {
 // extraChecks are the extra's checks on a Provider, in ONE place for createExtras, which makes the extra, and
 // ensureAllocation, which retries one whose Allocation's create was cut short, so the two never drift (#708, finding 4):
 // the bound, the admission headroom (headroom) and what the unit set of the handovers needs of the reservation: the
-// asking deployment, the Instance to leave out, and how to size a deployment's replacement and an Instance's Allocation here. The slot beyond the
+// asking deployment, the Instance to leave out, and how to size a deployment's replacement and an Instance's Allocation here, read under the lock. The slot beyond the
 // handovers and the room the per-user caps keep for their replacements are read by the reservation itself, from the unit set
 // (extraUnits), and the caps and the silence are its own, asked with params and quiet. exclude is the Instance that retries
 // (nil for a new extra). ok is false when the bound refuses.
@@ -112,20 +111,63 @@ func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance) (ask ex
 		return extraAsk{}, false
 	}
 	ask = extraAsk{deployment: p.key.Namespace + "/" + p.key.Name, headroom: p.headroomOf(pv),
-		sizeOf: func(md *v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) {
-			plan, err := checkServed(md)
-			if err != nil {
-				return v1alpha1.BatchParameters{}, err
-			}
-			return partitionSizingFor(pv, plan.gpus, plan.workers, md.Spec.LeaseLimit)
-		},
-		sizeRecorded: func(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
-			return partitionSizingFor(pv, in.Spec.Launch.GPUs, v1alpha1.LaunchWorkers(in.Spec.Launch), md.Spec.LeaseLimit)
-		}}
+		sizing: p.sizingUnderLock(pv.name)}
 	if exclude != nil {
 		ask.exclude = exclude.UID
 	}
 	return ask, true
+}
+
+// sizingUnderLock is the callback a reservation calls under the Provider's lock (slotAsk.unitSizing) to size the unit set: it
+// reads the Provider and its PlatformProfile there, through the uncached Reader, and sizes from that view (providerViewOf),
+// never from the pass's own read before the lock, which a spec edit (cpusPerGpu, a QOS limit) may have left behind. A Provider
+// whose partition cannot be resolved under the lock cannot be sized: the reservation fails with an error and the pass is
+// retried.
+func (p *pass) sizingUnderLock(name string) func(context.Context) (unitSizing, error) {
+	return func(ctx context.Context) (unitSizing, error) {
+		// The controller may list Providers and PlatformProfiles but not get them (config/rbac/controllers.yaml), so both are
+		// listed and picked by name, as the headroom lists Providers.
+		var provs v1alpha1.ProviderList
+		if err := p.r.Reader.List(ctx, &provs); err != nil {
+			return unitSizing{}, fmt.Errorf("list Providers for the extra's sizing: %w", err)
+		}
+		var prov *v1alpha1.Provider
+		for i := range provs.Items {
+			if provs.Items[i].Name == name {
+				prov = &provs.Items[i]
+			}
+		}
+		pv, err := p.r.providerViewOf(ctx, name, prov, false, func(ctx context.Context, profName string) (*v1alpha1.PlatformProfile, error) {
+			var profs v1alpha1.PlatformProfileList
+			if err := p.r.Reader.List(ctx, &profs); err != nil {
+				return nil, fmt.Errorf("list PlatformProfiles for the extra's sizing: %w", err)
+			}
+			for i := range profs.Items {
+				if profs.Items[i].Name == profName {
+					return &profs.Items[i], nil
+				}
+			}
+			return nil, nil
+		})
+		if err != nil {
+			return unitSizing{}, err
+		}
+		if pv.profile == nil || !pv.hasClass {
+			return unitSizing{}, fmt.Errorf("cannot size the extra's handovers on Provider %s: %s", name, pv.problem)
+		}
+		return unitSizing{
+			sizeOf: func(md *v1alpha1.ModelDeployment) (v1alpha1.BatchParameters, error) {
+				plan, err := checkServed(md)
+				if err != nil {
+					return v1alpha1.BatchParameters{}, err
+				}
+				return partitionSizingFor(pv, plan.gpus, plan.workers, md.Spec.LeaseLimit)
+			},
+			sizeRecorded: func(md *v1alpha1.ModelDeployment, in *v1alpha1.Instance) (v1alpha1.BatchParameters, error) {
+				return partitionSizingFor(pv, in.Spec.Launch.GPUs, v1alpha1.LaunchWorkers(in.Spec.Launch), md.Spec.LeaseLimit)
+			},
+		}, nil
+	}
 }
 
 // headroomOf is the admission headroom H of an extra on the Provider (HBEP-7, Over-allocation and qualification (beta), Its

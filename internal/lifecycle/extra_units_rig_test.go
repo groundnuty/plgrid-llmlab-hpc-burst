@@ -120,3 +120,43 @@ func TestAnOwnPrimaryTurningRunningBeforeTheLockedReadIsCountedOnce(t *testing.T
 		t.Fatal("X's Allocation was not made: P's replacement was counted twice (once from the pass's read, once from the lock's)")
 	}
 }
+
+// profileRaisedUnderTheLock is a Reader whose lists of PlatformProfiles show partition 0's cpusPerGpu at 32, as a profile edited
+// since the pass's own read would, which the pass made through the client and which still shows 16.
+type profileRaisedUnderTheLock struct{ client.Reader }
+
+func (l profileRaisedUnderTheLock) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	err := l.Reader.List(ctx, list, opts...)
+	if pl, ok := list.(*v1alpha1.PlatformProfileList); ok && err == nil {
+		for i := range pl.Items {
+			pl.Items[i].Spec.Partitions[0].CPUsPerGPU = ptrTo(int32(32))
+		}
+	}
+	return err
+}
+
+// TestTheExtrasSizingReadsTheProviderUnderTheLock (point 6): a per-user cap of 70 CPUs, 1 GPU per Allocation, the partition at 16
+// CPUs per GPU. md-o (k = 0, no end time) has a Running primary po on 16 CPUs, which will hand over. md-e (k = 1, ends at 14:00,
+// so it hands nothing over) is created, and its pass read the partition at 16 CPUs, but the Provider read under the lock shows
+// 32 (the operator raised cpusPerGpu after the pass's read). By hand, listed po 16 + pe 16 + the extra 16 = 48, and po's
+// replacement, which a launch sizes at 32 as the lock reads the Provider: 80 > 70, so NO extra. Sized from the pass's own
+// read, at 16, it is 64 <= 70 and the extra is made. md-e's primary is made at the pass's 16 CPUs either way.
+func TestTheExtrasSizingReadsTheProviderUnderTheLock(t *testing.T) {
+	rg := newRig(t, append(qosOpts([]v1alpha1.QOSProfile{{Name: "example-cpu", MaxCPUsPerUser: i32(70)}}, "", "example-cpu"), withMaxTime(12*time.Hour))...)
+	rg.create(mdSpec("md-o"))
+	for range 7 {
+		tick10(rg) // 08:01:10: po is ready on 16 CPUs
+	}
+	if as := rg.allocations("md-o"); len(as) != 1 || as[0].Spec.ForProvider.Batch.CPUsPerTask != 16 || as[0].Status.AtProvider.Phase != v1alpha1.AllocationRunning {
+		t.Fatalf("md-o's Allocations %+v, want po Running on 16 CPUs", as)
+	}
+	rg.r.Reader = profileRaisedUnderTheLock{Reader: rg.c}
+	rg.create(extraMD("md-e"))
+	tick10(rg) // 08:01:20: md-e's primary, and its extra if admitted
+	tick10(rg)
+	as := rg.allocations("md-e")
+	if len(as) != 1 || as[0].Spec.ForProvider.Batch.CPUsPerTask != 16 {
+		t.Fatalf("md-e's Allocations %+v, want its primary alone, on 16 CPUs: po's replacement needs 32 as the lock reads the Provider (48 + 32 = 80 > 70)", as)
+	}
+	noSlotReasonOn(t, rg, "md-e")
+}
