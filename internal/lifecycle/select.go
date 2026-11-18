@@ -207,17 +207,58 @@ func (s selection) ordered() []selUnit {
 	return us
 }
 
+// selectUnits is the selection by hedge: the chosen units, the first desired in HBEP-7's order (a marked peer
+// excepted: it is surplus), and the surplus units, both in that order. Instances that do not count, and a
+// replacement whose predecessor still counts, are in neither: a replacement is never ranked. selectPrimaries
+// reads the representatives of these units; reservedOn reads their members (a surplus hedge's every member
+// holds no reserved slot).
+func selectUnits(s selection, desired int) (chosen, surplus []selUnit) {
+	for _, u := range s.ordered() {
+		if !u.marked && len(chosen) < desired {
+			chosen = append(chosen, u)
+			continue
+		}
+		surplus = append(surplus, u)
+	}
+	return chosen, surplus
+}
+
 // selectPrimaries returns the deployment's chosen primaries, the first desired of its Instances in HBEP-7's order
 // (a marked peer excepted: it is surplus), and its surplus, both in that order, one Instance per hedge: the hedge's
 // representative (hedgeRepresentative). Instances that do not count, and a replacement whose predecessor still
 // counts, are in neither: a replacement is never ranked.
 func selectPrimaries(s selection, desired int) (chosen, surplus []*v1alpha1.Instance) {
-	for _, u := range s.ordered() {
-		if !u.marked && len(chosen) < desired {
-			chosen = append(chosen, u.rep)
-			continue
-		}
+	cu, su := selectUnits(s, desired)
+	for _, u := range cu {
+		chosen = append(chosen, u.rep)
+	}
+	for _, u := range su {
 		surplus = append(surplus, u.rep)
 	}
 	return chosen, surplus
+}
+
+// selectionOfView is the selection a deployment's own pass makes, from its Instances and Allocations read by label
+// (reservedOn's views and the headroom's re-read of the other deployments): its Instances in the pass's order, the ones an earlier
+// ModelDeployment of the same name owned marked stale, and its Allocations by name.
+func selectionOfView(md *v1alpha1.ModelDeployment, v deploymentView) selection {
+	var insts []*v1alpha1.Instance
+	stale := map[types.UID]bool{}
+	for _, in := range v.insts {
+		owned, old := ownedBy(in, md.Name, md)
+		if owned || old {
+			insts = append(insts, in)
+		}
+		if old {
+			stale[in.UID] = true
+		}
+	}
+	sort.Slice(insts, func(i, j int) bool {
+		a, b := insts[i], insts[j]
+		if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+			return a.CreationTimestamp.Before(&b.CreationTimestamp)
+		}
+		return a.Name < b.Name
+	})
+	return selection{insts: insts, stale: stale, allocOf: func(in *v1alpha1.Instance) *v1alpha1.Allocation { return v.allocs[in.Spec.AllocationRef.Name] }}
 }

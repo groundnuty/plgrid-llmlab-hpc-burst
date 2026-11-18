@@ -1,11 +1,13 @@
 package lifecycle
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -102,11 +104,46 @@ type placeOpts struct {
 	// caps checks the Provider's per-user caps for the new Allocation beside
 	// ours there, inside the slot's reservation (capsFit).
 	caps bool
+	// extra marks the over-allocation extra (HBEP-7, Over-allocation and qualification (beta), When the extra is
+	// submitted; #616 PR 4): a Provider that refuses it is passed over in silence, since a refused extra is k = 0
+	// there in effect and no degradation. It implies quiet, which skips each of the three records a refusal
+	// would otherwise leave: p.noSlot (reserveSlotFor's quiet, so no SubmitLimitReached text), p.sizingRefused
+	// (the sizing branch's `if o.quiet { continue }`) and a Degraded reason (the loopPaused branch's
+	// `if !o.quiet`, and the same sizing branch for ProviderUnavailable). The fourth place, noProvider(), is
+	// never reached: capacity() calls provisionWith for the extra outside its missing-primary loop, and reads
+	// only the Provider that loop placed on.
+	extra bool
+	// alsoLeave is how many of the deployment's own chosen primaries on the Provider hold no reserved slot yet but
+	// will once Running (extraAlsoLeave), left free beside the new Allocation: the extra's slot is beyond its own
+	// handovers (HBEP-7, Its checks, a slot beyond its own handovers). Set with extra, on the Provider named by only.
+	alsoLeave int
+	// headroom is the extra's admission headroom (extraChecks): how many more slots the reservation leaves free, read
+	// under the Provider's lock (slotAsk.headroom). Set with extra.
+	headroom func(context.Context) (int, error)
+}
+
+// placeOnWarm creates the Instance that goes on the deployment's warm Allocation, under the Provider's own lock, the one
+// every reservation takes (slots.go), and clears the Allocation's idle anchor: the Allocation is no longer idle
+// (v1alpha1.ClearIdleSince). The Instance becomes a Running primary that reserves a handover slot and ends its
+// deployment's missing primary, so both the reserved slots and the admission headroom an extra reads change with
+// it; made outside the lock, another pass could read the one before and the other after (#708, the delta review of the
+// headroom). The lock is held across two API writes of no other lock of this package.
+func (p *pass) placeOnWarm(pv *providerView, cid *classID, pred *v1alpha1.Instance, warm *v1alpha1.Allocation, o placeOpts) error {
+	l := p.r.slots().slotLock(pv.name)
+	l.Lock()
+	defer l.Unlock()
+	if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+		return err
+	}
+	return p.writeIdleSince(warm, nil)
 }
 
 func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error) {
 	if !p.canProvision() {
 		return false, nil
+	}
+	if o.extra {
+		o.quiet = true // see placeOpts.extra
 	}
 	order := p.providers
 	if pred != nil {
@@ -145,7 +182,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			}
 			continue
 		}
-		warm, deferUntil := p.warmAllocation(pv, params)
+		warm, deferUntil := p.warmFor(pv, params, pred)
 		if warm == nil && !deferUntil.IsZero() {
 			p.at(deferUntil)
 			p.deferred = true
@@ -156,14 +193,13 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			// is written once, in an Allocation's create request, and an existing one is never marked later
 			// (HBEP-7, Handover, No-overlap mode: "fixed at creation"). A reusable warm Allocation also
 			// means the primary has room beside it (decideOverlap), so this is not a queued-path successor.
-			if err := p.createInstance(pv, cid, pred, warm.Name, o); err != nil {
+			if err := p.placeOnWarm(pv, cid, pred, warm, o); err != nil {
 				if errors.Is(err, errDeploymentGone) {
 					return false, nil
 				}
 				return false, err
 			}
-			// Placed: the Allocation is no longer idle (v1alpha1.ClearIdleSince).
-			return true, p.writeIdleSince(warm, nil)
+			return true, nil
 		}
 		name, err := randomName(pv.name)
 		if err != nil {
@@ -179,7 +215,7 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 		if o.caps {
 			capsOf = &params
 		}
-		ok, holds, err := p.reserveSlotFor(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet)
+		ok, holds, err := p.reserveSlotWith(pv, name, p.primaryAllocKey(o.primaryName(pred)), p.takersOf(pred), capsOf, o.quiet, o.alsoLeave, o.headroom)
 		if err != nil {
 			return false, err
 		}
@@ -199,32 +235,71 @@ func (p *pass) provisionWith(pred *v1alpha1.Instance, o placeOpts) (bool, error)
 			}
 			return true, err
 		}
+		// A new Allocation, a submission: capacity() reads where the missing primaries made one (the extra goes
+		// to those Providers only; a placement on a warm Allocation, which returned above, is none).
+		p.submitted = append(p.submitted, pv.name)
 		return true, nil
 	}
 	return false, nil
 }
 
-// warmAllocation returns a Running Allocation of this deployment on the
-// Provider that hosts no live Instance and has lease left above twice the
-// class's start-to-ready time plus the drain window (HBEP-7, open question 14).
-//
-// The Allocation must fit the launch: the same partition (so the same class)
-// and GPU count, and at least the CPUs and memory a new Allocation would
-// request (review of PR 88: a spec edit can change the GPUs an Instance needs).
-// One marked RelayEndedForGood is passed over (relayEnded): step 7, which
-// places, runs before step 9, which releases an empty one, so one pass would
-// otherwise place an Instance on it and the next would fail that Instance,
-// which counts toward RestartLoop (issue #332).
-// One whose agent has not registered again yet, during the grace after the
-// controller's own restart, is waited for rather than passed over: deferUntil
-// says until when.
-func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters) (warm *v1alpha1.Allocation, deferUntil time.Time) {
-	need := 2*startToReady(p.md, pv.class) + drainWindowOf(pv, p.md)
+// warmOf returns the deployment's warm Allocations on the Provider: Running, not deleting, hosting no live
+// Instance, not pending release (releasePending), whose relay has not ended for good (relayEnded) and not committed for
+// release by an Executing Operation (committedForRelease: the Operation ends it, so nothing is placed on it and the
+// extra's bound does not count it), the latest hard end first, then by name (HBEP-7, Over-allocation and qualification
+// (beta), When the extra is submitted: "Warm Allocations count toward k only here, in the extra's creation bound"). It
+// checks no fit, no lease and no registration: warmFor, which places on one, keeps those, and the extra's bound only
+// asks whether one exists. One predicate, so the placement and the bound never disagree about what is warm. An
+// Allocation with no hard end yet sorts last.
+func (p *pass) warmOf(pv *providerView) []*v1alpha1.Allocation {
+	var out []*v1alpha1.Allocation
 	for _, a := range p.allocs {
-		obs := a.Status.AtProvider
 		if a.Labels[v1alpha1.LabelProvider] != pv.name || !a.DeletionTimestamp.IsZero() ||
-			obs.Phase != v1alpha1.AllocationRunning || obs.HardEnd == nil || len(p.liveOn(a.Name)) > 0 ||
-			obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || p.releasePending(a) || relayEnded(a) || p.committedForRelease(a) {
+			a.Status.AtProvider.Phase != v1alpha1.AllocationRunning || len(p.liveOn(a.Name)) > 0 ||
+			p.releasePending(a) || relayEnded(a) || p.committedForRelease(a) {
+			continue
+		}
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		hi, hj := out[i].Status.AtProvider.HardEnd, out[j].Status.AtProvider.HardEnd
+		switch {
+		case hi != nil && hj == nil:
+			return true
+		case hi == nil && hj != nil:
+			return false
+		case hi != nil && !hi.Equal(hj):
+			return hi.After(hj.Time)
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// warmFor returns the warm Allocation provisioning places an Instance of the given size on, and when the first one
+// has not registered, until when to wait for it (HBEP-7, open question 14; #616 PR 4, built to #604 PR 3's contract).
+// It is warmOf plus the placement's checks: a Running Allocation of this deployment that hosts no live Instance has
+// lease left above twice the class's start-to-ready time plus the drain window, fits the launch (the same partition,
+// so the same class, and GPU count, and at least the CPUs and memory a new Allocation would request: review of PR
+// 88), and has a registered agent. One marked RelayEndedForGood is passed over in warmOf (relayEnded): step 7, which
+// places, runs before step 9, which releases an empty one, so one pass would otherwise place an Instance on it and the
+// next would fail that Instance, which counts toward RestartLoop (issue #332). One whose agent has not registered
+// again yet, during the grace after the controller's own restart, is waited for rather than passed over.
+//
+// For a replacement (pred != nil) the warm Allocation's drain start must be later than its predecessor's BY AT LEAST the
+// lead an Instance needs (leadOf: the drain window, handoverMargin and health.startTimeout; HBEP-7, Hedging (beta), Started
+// losers are kept, and Over-allocation and qualification (beta), The lowest-ranked is kept; the science agent's ruling on
+// #708's Fable review, amendment #711): "a replacement goes there only when the warm Allocation's drain start is later than
+// its predecessor's by at least the lead an Instance needs, or it would drain with or soon after it, before its own
+// replacement could start". One that drains with the predecessor, as the ranked-out extra's does, would end the replacement at
+// the very moment it is meant to take over, and one that drains moments after it would leave the deployment without a ready
+// Instance until the replacement's own replacement, planned only then, starts and is ready. At exactly the lead it is used.
+// The pick is the first of warmOf's, the latest hard end first, so it is the same on every pass.
+func (p *pass) warmFor(pv *providerView, params v1alpha1.BatchParameters, pred *v1alpha1.Instance) (warm *v1alpha1.Allocation, deferUntil time.Time) {
+	need := 2*startToReady(p.md, pv.class) + drainWindowOf(pv, p.md)
+	for _, a := range p.warmOf(pv) {
+		obs := a.Status.AtProvider
+		if obs.HardEnd == nil || obs.HardEnd.Sub(p.now) <= need || !fits(a, params) || !p.drainsAfter(pv, a, pred) {
 			continue
 		}
 		if len(p.r.Backend.registrations(a.UID)) > 0 {
@@ -235,6 +310,34 @@ func (p *pass) warmAllocation(pv *providerView, params v1alpha1.BatchParameters)
 		}
 	}
 	return nil, deferUntil
+}
+
+// drainsAfter reports whether the warm Allocation's drain start (its hard end minus the Provider's drain window,
+// as v1alpha1.DrainStart reads it) is later than the predecessor's (drainStart: its lease end, the Provider's profile and
+// the deployment's routing) by at least the lead an Instance needs on the warm Allocation's Provider (leadOf). It is true
+// with no predecessor, and when the predecessor has no drain start to compare with (it never started, so nothing serves
+// that the replacement must outlive).
+func (p *pass) drainsAfter(pv *providerView, warm *v1alpha1.Allocation, pred *v1alpha1.Instance) bool {
+	if pred == nil {
+		return true
+	}
+	ps, ok := p.drainStart(pred, p.pvOf(pred.Labels))
+	if !ok {
+		return true
+	}
+	var routing *v1alpha1.Routing
+	if p.md != nil {
+		routing = p.md.Spec.Routing
+	}
+	if pv.profile == nil || warm.Status.AtProvider.HardEnd == nil {
+		return false
+	}
+	ws, err := v1alpha1.DrainStart(warm.Status.AtProvider.HardEnd.Time, pv.profile.Spec, routing)
+	if err != nil {
+		return false
+	}
+	lead, _ := leadOf(pv, p.md)
+	return !ws.Before(ps.Add(lead))
 }
 
 // releasePending reports whether an Instance on the Allocation failed, so the
@@ -501,9 +604,28 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 	}
 	// It takes the reserved slot of its predecessor's chain, and a no-overlap successor its own, which is held
 	// for it while its Allocation waits for the slot its predecessor frees (slots_reserved.go).
-	ok, holds, err := p.reserveSlotFor(pv, name, holder, p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor])), nil, false)
+	// An Instance with no Allocation is one of two things: a successor, a replacement or a hedge's member, which waits as
+	// it always did, or a deployment's first-round Instance. When the units that have an Allocation already number the
+	// deployment's desired count (shortageOf, never the selection's tie) it is THE EXTRA, whose retry takes the extra's own
+	// checks, the bound, the slot beyond its primary's handover, the admission headroom and the caps, silently, and is ended
+	// when one refuses (#708, finding 4); otherwise it is a primary, which waits for a slot.
+	takers := p.takersOf(p.instanceNamed(in.Annotations[v1alpha1.AnnotationPredecessor]))
+	var headroom func(context.Context) (int, error)
+	var capsOf *v1alpha1.BatchParameters
+	alsoLeave, quiet := 0, false
+	if !handover && in.Annotations[v1alpha1.AnnotationHedgeGroup] == "" && p.shortage() == 0 {
+		var admitted bool
+		if alsoLeave, headroom, admitted = p.extraChecks(pv, in); !admitted {
+			return p.endCutShortExtra(in, "the bound on extras")
+		}
+		capsOf, quiet = &params, true
+	}
+	ok, holds, err := p.reserveSlotWith(pv, name, holder, takers, capsOf, quiet, alsoLeave, headroom)
 	if err != nil {
 		return err
+	}
+	if !ok && quiet {
+		return p.endCutShortExtra(in, "the slot beyond its primary's handover, the admission headroom or the caps")
 	}
 	if !ok {
 		p.degrade(v1alpha1.ReasonSubmitLimitReached, "Instance %s waits for a submit slot for its Allocation %s: %s", in.Name, name, p.noSlot[pv.name])
@@ -513,6 +635,13 @@ func (p *pass) ensureAllocation(in *v1alpha1.Instance) error {
 		return err
 	}
 	return nil
+}
+
+// endCutShortExtra ends a pending extra whose Allocation was never made and whose checks refuse it now, as step 7 ends
+// a pending surplus beyond k: over-allocation's own trim, outcome-neutral, with no Degraded and no SubmitLimitReached
+// (a refused extra is silent, D7).
+func (p *pass) endCutShortExtra(in *v1alpha1.Instance, why string) error {
+	return p.applyScaleTarget(scaleTarget{instance: in, effect: effectCancelPending, why: "scaled down: its Provider refuses the extra (" + why + ")", cause: scaleOverAllocationTrim})
 }
 
 // ensureCredential writes an Allocation's credential file, 256 random bits as

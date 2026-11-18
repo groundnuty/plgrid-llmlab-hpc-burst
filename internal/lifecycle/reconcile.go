@@ -127,6 +127,10 @@ type pass struct {
 	// noSlot collects the Providers that had no free submit slot, by name,
 	// naming each one's count and limit (SubmitLimitReached).
 	noSlot map[string]string
+	// submitted lists, in order, the Providers on which provisionWith made a NEW Allocation this pass (a submission,
+	// never a placement on a warm Allocation). capacity() reads what its missing-primary loop appended, to give each
+	// such Provider its extra (extra.go).
+	submitted []string
 	// overlaps memoizes the no-overlap decision per primary (nooverlap.go).
 	overlaps map[types.UID]overlapCheck
 	// overlapErrs collects the failed no-overlap checks of the replacement

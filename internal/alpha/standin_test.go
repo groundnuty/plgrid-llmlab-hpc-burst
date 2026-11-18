@@ -263,6 +263,9 @@ func standInWorldShaped(t *testing.T, row Row, reshape func(*stack.ClusterShape)
 		engine = "token-delay=" + BulkTokenDelay.String() + ",reply-bytes=" + strconv.Itoa(BulkReplyBytes)
 	}
 	md := stack.ServedDeployment(stm, v1alpha1.EnvVar{Name: "HB_ENGINE_DOUBLE", Value: engine})
+	// As the live deployment's (steps_live_test.go, liveWorld): no over-allocation extra, which would add a job to the rows' counts.
+	noExtra := int32(0)
+	md.Spec.OverAllocation = &noExtra
 	if strings.HasPrefix(row.Name, "tunnel-hour-") || row.Name == "alpha-athena-now-serve" || IsRouterRow(row.Name) || row.Name == BetaKeeperName {
 		// The live deployment's context (steps_live_test.go), so that a large body (MinLargeBody) fits under it.
 		for i, f := range md.Spec.Source.Served.Flags {

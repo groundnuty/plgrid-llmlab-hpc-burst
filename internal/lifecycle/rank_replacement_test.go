@@ -86,11 +86,18 @@ func TestAnExtraThatPassesFirstWaitsForTheRanking(t *testing.T) {
 				t.Fatalf("X is %s at %s, want it waiting in verifying until P is ready", xi.Status.Phase, h.clock.Now().Format(time.TimeOnly))
 			}
 		})
-		h.tick(10 * time.Second) // 00:40:00: P is ready, and X is ranked in the same pass
+		h.tick(10 * time.Second) // 00:40:00: P is ready
 		if got := h.readyAt(p); !got.Equal(rkAt(0, 40, 0)) {
 			t.Fatalf("P ready at %v, want 00:40", got)
 		}
-		rkAssertRankedOut(t, h, x, "", rkAt(0, 40, 0))
+		// P and X are made in the same second, so a pass handles them in the order of their random names: X is ranked in the
+		// pass that makes P ready, 00:40:00, when P is handled first, and in the next, 00:40:10, when X is.
+		h.tick(10 * time.Second)
+		at := rkAt(0, 40, 0)
+		if end := h.mustInstance(x).Status.EndTime; end != nil && end.Time.Equal(rkAt(0, 40, 10)) {
+			at = rkAt(0, 40, 10)
+		}
+		rkAssertRankedOut(t, h, x, "", at)
 	})
 }
 
@@ -113,20 +120,23 @@ func TestAFailedPrimaryWithAReplacementLeavesTheWaitingExtraChosen(t *testing.T)
 		if in := h.mustInstance(p); in.Status.Phase != v1alpha1.InstanceEnded || in.Status.EndReason != v1alpha1.ReasonAllocationFailed {
 			t.Fatalf("P is %s, ended for %q at 00:38:00, want ended for AllocationFailed", in.Status.Phase, in.Status.EndReason)
 		}
-		if got := h.readyAt(x); !got.Equal(rkAt(0, 38, 0)) {
-			t.Fatalf("X ready at %v, want 00:38:00, in the pass that sees P gone", got)
+		// P and X are made in the same second, so a pass handles them in the order of their random names: X is ready in
+		// the pass that sees P gone, 00:38:00, when P is handled first, and in the next, 00:38:10, when X is.
+		h.tick(10 * time.Second)
+		if got := h.readyAt(x); !got.Equal(rkAt(0, 38, 0)) && !got.Equal(rkAt(0, 38, 10)) {
+			t.Fatalf("X ready at %v, want 00:38:00 or 00:38:10, in the pass that sees P gone or the next", got)
 		}
 	})
 }
 
-// TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement: X's job starts at 00:05 (a wait of 4 min 50 s from
-// its submission at 08:00:30), before P's at 00:10. X is the more advanced, so it is chosen and its replacement is
+// TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement: X's job starts at 00:05 (a wait of 5 min from
+// its submission at 08:00:20, with P's), before P's at 00:10. X is the more advanced, so it is chosen and its replacement is
 // created at 00:05, 08:05:20. P, started later, is surplus: it gets no replacement. X is ready at 00:35. P reaches
 // its point at 00:40 and is ranked out against no peer, since X, chosen and ready, has a live replacement.
 func TestAnExtraWhoseJobStartsFirstIsChosenAndGetsTheReplacement(t *testing.T) {
 	rkBoth(t, func(t *testing.T, pTpot time.Duration) {
 		h := newRkRig(t, true)
-		p, x := h.start(nil, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 4*time.Minute + 50*time.Second}, pfake.Script{QueueWait: 3 * time.Hour})
+		p, x := h.start(nil, pfake.Script{QueueWait: 10 * time.Minute}, pfake.Script{QueueWait: 5 * time.Minute}, pfake.Script{QueueWait: 3 * time.Hour})
 		h.engineOf(x, rk200, 0)
 		h.engineOf(p, pTpot, 0)
 		h.stepTo(rkAt(0, 5, 20), 10*time.Second, nil)
@@ -218,7 +228,15 @@ func TestAWaitingCandidateIsNotFailedByStartTimeout(t *testing.T) {
 		if got := h.readyAt(p); got.Before(rkAt(1, 29, 0)) || got.After(rkAt(1, 31, 0)) {
 			t.Fatalf("P ready at %v, want about 01:30 (a rung-1 restart at 01:00:10, then 30 min)", got)
 		}
-		rkAssertRankedOut(t, h, x, "", h.readyAt(p))
+		// P and X are made in the same second, so the pass handles them in the order of their random names: X is ranked in
+		// the pass that makes P ready when P comes first, and in the next one when X does. Either way it is the end time.
+		ready := h.readyAt(p)
+		h.tick(10 * time.Second)
+		at := ready
+		if end := h.mustInstance(x).Status.EndTime; end != nil && end.Time.Equal(ready.Add(10*time.Second)) {
+			at = ready.Add(10 * time.Second)
+		}
+		rkAssertRankedOut(t, h, x, "", at)
 	})
 }
 
