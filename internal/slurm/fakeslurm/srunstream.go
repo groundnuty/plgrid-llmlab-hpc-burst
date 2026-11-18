@@ -2,11 +2,11 @@ package fakeslurm
 
 // New. Stream: an srun line that runs as a duplex stream instead of one
 // request and one reply (issue #298, HBEP-6's host-dialed mode: a relay runs
-// "srun -u --overlap --jobid=<id> --ntasks=1 <agent> relay <channel>" on the
-// login node and carries one multiplexed session over the step's standard
-// input and output for the job's whole life). The step is the one srunstep.go
-// starts; only its input, its output and its end differ from the buffered
-// srun of Run.
+// "srun -u --overlap --jobid=<id> --ntasks=1 --chdir=<dir> <agent> relay
+// <channel>" on the login node and carries one multiplexed session over the
+// step's standard input and output for the job's whole life). The step is the
+// one srunstep.go starts; only its input, its output and its end differ from
+// the buffered srun of Run.
 
 import (
 	"bytes"
@@ -190,14 +190,15 @@ func (st *srunStep) closeStream() {
 // as its caller wants it:
 //
 //   - The line is exactly one simple command whose first word is srun:
-//     "srun [-u] --overlap --jobid=<id> [--ntasks=1] [--time=<t>] <program>
-//     [args...]" (doc.go has the grammar). Anything else is refused with
-//     the fake's own codes and a message on stderr, and nothing runs: a line
-//     that does not parse is exit 2, one that is a chain (" && "), carries a
-//     redirection or whose first word is not srun is exit 1. A refused line is
-//     not in the call log. Faults (FailNext) and gates (Gate("srun")) apply as
-//     for Run, and so do srun's own checks (run mode, the job, the program),
-//     which refuse as they do there, with their exit codes on stderr.
+//     "srun [-u] --overlap --jobid=<id> [--ntasks=1] [--chdir=<dir>]
+//     [--time=<t>] <program> [args...]" (doc.go has the grammar). Anything
+//     else is refused with the fake's own codes and a message on stderr, and
+//     nothing runs: a line that does not parse is exit 2, one that is a chain
+//     (" && "), carries a redirection or whose first word is not srun is exit
+//     1. A refused line is not in the call log. Faults (FailNext) and gates
+//     (Gate("srun")) apply as for Run, and so do srun's own checks (run mode,
+//     the job, the directory, the program), which refuse as they do there,
+//     with their exit codes on stderr.
 //   - The step's standard input is fed from stdin as bytes arrive, in reads of
 //     at most 32 KiB, and the end of stdin closes the step's input: half-close
 //     semantics, the step's output goes on. A nil stdin is an empty one. Stream

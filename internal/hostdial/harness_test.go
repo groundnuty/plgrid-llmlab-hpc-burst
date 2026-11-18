@@ -231,6 +231,10 @@ type worldConfig struct {
 	stepEnv map[string]string
 	// jobEnv is added to every job's environment.
 	jobEnv map[string]string
+	// noComputeHome is a cluster whose compute nodes have no home directory
+	// (fakeslurm.RunMode's NoComputeHome): an srun step with no --chdir fails
+	// to start, as Sano's does (#735).
+	noComputeHome bool
 }
 
 func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
@@ -257,7 +261,7 @@ func newWorld(t *testing.T, mods ...func(*worldConfig)) *world {
 	w.firstID = 30_000_000 + (os.Getpid()%10_000)*1_000 + int(worldSeq.Add(1))*20
 	w.plat = fakeslurm.New(fake.NewClock(time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)), fakeslurm.Config{
 		FirstJobID: w.firstID,
-		Run:        &fakeslurm.RunMode{Root: root, JobDir: filepath.Join(base, "j"), KillWait: 2 * time.Second, StepEnv: cfg.stepEnv},
+		Run:        &fakeslurm.RunMode{Root: root, JobDir: filepath.Join(base, "j"), KillWait: 2 * time.Second, StepEnv: cfg.stepEnv, NoComputeHome: cfg.noComputeHome},
 	})
 	t.Cleanup(func() {
 		if err := w.plat.Close(); err != nil {

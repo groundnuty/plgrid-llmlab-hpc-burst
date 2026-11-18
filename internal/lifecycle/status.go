@@ -232,8 +232,10 @@ func (p *pass) submissionRejected() {
 		}
 		if sub.Code == v1alpha1.ReasonSubmitLimitReached {
 			limit := ""
-			if pv := p.pvOf(a.Labels); pv != nil && pv.limits.MaxSubmitPerUser != nil {
-				limit = ", at its " + submitLimitText(pv)
+			if pv := p.pvOf(a.Labels); pv != nil {
+				if t := refusedLimitText(pv, a); t != "" {
+					limit = ", at its " + t
+				}
 			}
 			p.degrade(v1alpha1.ReasonSubmitLimitReached, "Allocation %s on Provider %s%s: attempt %d was refused for a full submit limit and waits for the backoff: %s", a.Name, a.Labels[v1alpha1.LabelProvider], limit, sub.Attempt, sub.Reason)
 			continue
@@ -355,4 +357,26 @@ func (r *Reconciler) catalogReady(ctx context.Context, md *v1alpha1.ModelDeploym
 		return metav1.ConditionFalse, v1alpha1.ReasonCredentialsRejected, fmt.Sprintf("Provider %s lists %s, but its key is rejected", rejected, m.CatalogName), nil
 	}
 	return metav1.ConditionFalse, v1alpha1.ReasonCatalogEntryUnlisted, fmt.Sprintf("no allowed managed Provider on platform %s lists %s now", m.Platform, m.CatalogName), nil
+}
+
+// refusedLimitText names the submit limit that a refusal of the Allocation's submission stands for, or "" for none the
+// profile models. Where the partition sets qosByGpus the Allocation runs under the QOS its own GPU count chooses, so the
+// limit is that QOS's own when it has one; the host-dialed ceiling is the controller's, never Slurm's, and is named only
+// for a Provider without qosByGpus, as it always was (HBEP-4, QOS limits; HBEP-7, Events and conditions).
+func refusedLimitText(pv *providerView, a *v1alpha1.Allocation) string {
+	if b := a.Spec.ForProvider.Batch; b != nil {
+		if rv, err := pv.forGPUs(b.GPUs); err == nil && rv.scope != nil {
+			if rv.scope.submitLimit() != nil {
+				return scopedLimitText(rv.scope)
+			}
+			if rv.limits.MaxSubmitPerUser != nil && rv.limits.From[v1alpha1.LimitMaxSubmitPerUser] != hostDialedLimitSource {
+				return submitLimitText(rv)
+			}
+			return ""
+		}
+	}
+	if pv.limits.MaxSubmitPerUser != nil {
+		return submitLimitText(pv)
+	}
+	return ""
 }

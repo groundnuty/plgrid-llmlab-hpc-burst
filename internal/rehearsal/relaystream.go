@@ -2,10 +2,11 @@ package rehearsal
 
 // New. The streaming half of the relay: the forced command's side and the
 // server's side of an srun line (wire.go, Streaming). The relay of HBEP-6's
-// host-dialed mode runs "srun -u --overlap --jobid=<id> --ntasks=1 <agent>
-// relay <channel>" through this login node and carries one multiplexed
-// session over the step's standard input and output for the job's whole life,
-// which the one request and one reply of relay.go cannot carry.
+// host-dialed mode runs "srun -u --overlap --jobid=<id> --ntasks=1
+// --chdir=<dir> <agent> relay <channel>" through this login node and carries
+// one multiplexed session over the step's standard input and output for the
+// job's whole life, which the one request and one reply of relay.go cannot
+// carry.
 
 import (
 	"context"
