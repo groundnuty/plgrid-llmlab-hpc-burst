@@ -95,6 +95,60 @@ func NowStageRow() Row {
 		PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow}
 }
 
+// HBEP-7's ending-soon event (Events and conditions, hbep/0007-lifecycle-controller/README.md:797): raised "when a ready Instance's drain start is less
+// than an hour away and no replacement is ready". Row A's steps expect it, and whether a run must have seen it depends on the lease: on Athena's plgrid-now
+// (a 48-minute lease, the drain start under an hour away from the Instance's ready on) it must; on Sano's 106-minute lease the drain start is over an hour
+// away for the first 31 minutes of the job, so a run that ends in 12 minutes must NOT have seen it (the science agent's ruling on #735, 18 Nov 2026). The
+// rule below is computed from the Instance's ready time, its drain start (the recorded lease end less the drain window: a lease and a window, never what the
+// run emitted, issue #193) and the end of the observed window.
+
+// EndingSoonLead is how far before its drain start HBEP-7's condition begins to hold: "less than an hour away".
+const EndingSoonLead = time.Hour
+
+// EndingSoonBand is the dead band at the boundary, one status interval: the agent reports at least this often (agentapi.ReportInterval,
+// pkg/agentapi/protocol.go:101-103) and the controller acts on what it has reported, so when the condition begins to hold within this long of the
+// window's end, the controller may not have raised the event yet (or, by clock skew, may raise it a moment early). The run then judges neither way.
+const EndingSoonBand = agentapi.ReportInterval
+
+// EndingSoonVerdict is what the rule asks of a run.
+type EndingSoonVerdict int
+
+const (
+	// EndingSoonOptional: the condition began to hold within EndingSoonBand of the window's end; the event may be there or not.
+	EndingSoonOptional EndingSoonVerdict = iota
+	// EndingSoonExpected: the condition had held for at least EndingSoonBand before the window's end, so the event must be there.
+	EndingSoonExpected
+	// EndingSoonForbidden: the condition begins to hold at least EndingSoonBand after the window's end, so the event must not be there.
+	EndingSoonForbidden
+)
+
+// EndingSoonAt is the rule at the end of an observed window: the Instance ready at ready, its drain start at drainStart, the window ending at end.
+// The condition first holds at the later of ready and one hour before the drain start (due). It is expected when due is at least EndingSoonBand before
+// end, forbidden when due is at least EndingSoonBand after it, and optional between (both edges of the band are the expected and forbidden cases).
+func EndingSoonAt(ready, drainStart, end time.Time) EndingSoonVerdict {
+	due := drainStart.Add(-EndingSoonLead)
+	if due.Before(ready) {
+		due = ready
+	}
+	switch {
+	case !due.After(end.Add(-EndingSoonBand)):
+		return EndingSoonExpected
+	case !due.Before(end.Add(EndingSoonBand)):
+		return EndingSoonForbidden
+	}
+	return EndingSoonOptional
+}
+
+// EndingSoonOf is what a row asks of the ending-soon event at the window's end at. Athena's row asks for it unconditionally, as it did before #735: its
+// 48-minute lease always puts the drain start under an hour away, and the rule must not read the Instance's lease end, which a wrong one would turn
+// into a forbidden event (the review of PR 770). Sano's serve row, whose 106-minute lease does not, follows the rule (EndingSoonAt).
+func EndingSoonOf(rowName string, ready, drainStart, at time.Time) EndingSoonVerdict {
+	if !IsSanoServe(rowName) {
+		return EndingSoonExpected
+	}
+	return EndingSoonAt(ready, drainStart, at)
+}
+
 // HBEP3Tag is an Allocation's job tag computed from HBEP-3 (Allocation and job identity), here and not with the
 // contracts' helper, as the rehearsal's part 3 does (internal/rehearsal/scenario, part3_requeue_test.go): hb-<n>-<h>,
 // <n> the name cut to its first 40 characters, <h> the first 12 hex characters of the SHA-256 of
@@ -284,7 +338,8 @@ func VerifyNowServe(row Row, o NowServeObs, jobs []provider.Job) []string {
 func nowServePost(row Row, o NowServeObs, failures []string) string {
 	var b strings.Builder
 	head := verdictLine(row, failures)
-	warm := warmStartShownByTheAgentsOwnLog(o.Warm)
+	allowed := LeadingForeignAllowed(row.Name)
+	warm := warmStartShownAllowing(o.Warm, allowed)
 	if len(failures) == 0 {
 		var why []string
 		if warm != nil {
@@ -305,6 +360,9 @@ func nowServePost(row Row, o NowServeObs, failures []string) string {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: the image staged already, its digest named (%s, or %s), and all %d checkpoint files %s\n", StagedAlreadyVerified, StagedByAnother, len(o.Warm.Files), StagedPresentMatching)
 	} else {
 		fmt.Fprintf(&b, "- the warm start, from the agent's own log: NOT shown (%s): NOT RUN, never a pass\n", warm.counts())
+	}
+	if n := LeadingForeign(o.Warm.Log); n > 0 && allowed > 0 {
+		fmt.Fprintf(&b, "- the job's standard error opened with %d line(s) that are not the agent's (the scheduler's or the shell's), before the agent's first line; the agent's own log is judged from its first line on\n", n)
 	}
 	b.WriteString(rehashLine("the job", o.Warm))
 	return b.String()
@@ -345,6 +403,55 @@ const (
 	// sound, so it is no warm start, and a following StagedByAnother would otherwise read as one.
 	StagedFailedCheck = "failed its check"
 )
+
+// MaxLeadingForeign is the most lines the warm start's check skips at the head of the agent's log, before its first line, because they are not the agent's
+// (AgentLogLine.Foreign): the science agent's bound on #735, 18 Nov 2026, on the relaxation that lets Sano's two scheduler lines come first. A fourth is no
+// longer a few lines of a scheduler or a shell: the log is not accounted for, and the warm start is not shown.
+const MaxLeadingForeign = 3
+
+// LeadingForeignAllowed is how many leading lines that are not the agent's a row's warm-start check skips: MaxLeadingForeign on Sano's serve row, whose
+// jobs write them, and none on any other row, so that Athena's verdict is exactly what it was before #735 (the review of PR 770: an Athena log with one
+// scheduler line stays NOT RUN).
+func LeadingForeignAllowed(rowName string) int {
+	if IsSanoServe(rowName) {
+		return MaxLeadingForeign
+	}
+	return 0
+}
+
+// LeadingForeign is how many lines at the very head of the agent's log are not the agent's (AgentLogLine.Foreign): the lines the check skips before the
+// agent's first line, counted for the text to post, which says how many and never what. A foreign line after the agent's first line is not leading.
+func LeadingForeign(log []AgentLogLine) int {
+	n := 0
+	for n < len(log) && log[n].Foreign {
+		n++
+	}
+	return n
+}
+
+// leadingTextMax is how many bytes of each leading foreign line the private record keeps.
+const leadingTextMax = 300
+
+// LeadingForeignText is the text of the lines at the head of the agent's log that are not the agent's, the first MaxLeadingForeign+1 of them (so a refusal for
+// a fourth shows it), each cut at leadingTextMax bytes. It is for the run's PRIVATE record only (WarmObs.LeadingText, record.json): a scheduler's line can name a
+// directory, and so a login, which no post may carry, and the next run reads it there to confirm what the lines are.
+func LeadingForeignText(raw []byte) []string {
+	var out []string
+	text := strings.TrimSuffix(string(raw), "\n")
+	if text == "" {
+		return nil
+	}
+	for _, l := range strings.Split(text, "\n") {
+		if len(out) > MaxLeadingForeign || !parseAgentLine(l).Foreign {
+			break
+		}
+		if len(l) > leadingTextMax {
+			l = strings.ToValidUTF8(l[:leadingTextMax], "")
+		}
+		out = append(out, l)
+	}
+	return out
+}
 
 // The agent's own messages the warm start's check reads, each the msg of one slog line of the agent (pinned to their
 // call sites in warmpin_test.go): its start (cmd/hb-agent/main.go), an image build and a failed staging attempt
@@ -443,7 +550,12 @@ const (
 // restartCount (-1 when it has none), and a stager line's reason and tokens, among which it names its digest or file.
 // The record keeps these, not the line: an Apptainer line can name a path.
 type AgentLogLine struct {
-	Kind         string   `json:"kind"`
+	Kind string `json:"kind"`
+	// Foreign is set on an "other" line that is not the agent's: not in slog's text form, and not a stager line ("stage: ..."). A job's standard
+	// error can open with such lines, written by the scheduler or the shell before the agent runs (Sano's, issue #735), which are no part of the
+	// agent's first execution and say nothing against its log being whole (warmStartShownByTheAgentsOwnLog). A slog line the agent's messages do
+	// not list is NOT foreign: it is an agent line the check was not taught, and the log is then not accounted for.
+	Foreign      bool     `json:"foreign,omitempty"`
 	RestartCount int      `json:"restartCount,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
 	Tokens       []string `json:"tokens,omitempty"`
@@ -514,7 +626,7 @@ func parseAgentLine(l string) AgentLogLine {
 		}
 	}
 	if kind == "" {
-		return AgentLogLine{Kind: LineOther}
+		return AgentLogLine{Kind: LineOther, Foreign: msg == "" && !strings.HasPrefix(strings.TrimSpace(l), "stage: ")}
 	}
 	var toks []string
 	for _, w := range strings.Fields(l) {
@@ -538,6 +650,9 @@ type WarmObs struct {
 	Files       []string       `json:"files"`
 	Skipped     []string       `json:"skipped,omitempty"`
 	Log         []AgentLogLine `json:"log,omitempty"`
+	// LeadingText is the text of the lines at the head of the log that are not the agent's (LeadingForeignText). PRIVATE: it goes to the record (record.json)
+	// and to no text to post, since such a line can name a path.
+	LeadingText []string `json:"leadingText,omitempty"`
 	// Rehash is the staging's rehash, from the same log (RehashOf): information for the text to post, which the warm start's
 	// check never reads.
 	Rehash RehashObs `json:"rehash"`
@@ -548,6 +663,13 @@ type WarmObs struct {
 // pass the stage package's own (stage.SkippedFiles, PR #393's export), never a rule of this package's, and never one
 // read off the log.
 type SkipRule func(files []agentapi.FileDigest, loadFormat string) []bool
+
+// WithLog is the observation with the agent's log of the job read: whether it was read, its parsed lines, the rehash line, and the text of the leading lines that
+// are not the agent's (private, LeadingText). The live flows and the dry steps both fill a WarmObs through it, so one test run covers the one place.
+func (w WarmObs) WithLog(raw []byte) WarmObs {
+	w.LogRead, w.Log, w.Rehash, w.LeadingText = true, ParseAgentLog(raw), RehashOf(raw), LeadingForeignText(raw)
+	return w
+}
 
 // ExpectedWarmFiles is the set of checkpoint files of which every one must show "present and matching", from OUTSIDE
 // the log (the science agent's point of 11 Nov 2026 on #376): the checkpoint's own file list from the Instance's identity
@@ -569,10 +691,12 @@ func ExpectedWarmFiles(files []agentapi.FileDigest, loadFormat string, skip Skip
 	return expected, skipped
 }
 
-// warmStartShownByTheAgentsOwnLog is the warm-start check's one seam (the ruling 1(b) on #376 and its conditions), nil
-// when the warm start is shown:
+// warmStartShownByTheAgentsOwnLog is the warm-start check's one seam (the ruling 1(b) on #376 and its conditions) as every row but Sano's serve row
+// takes it, nil when the warm start is shown; warmStartShownAllowing is the same seam with a row's allowance of leading lines that are not the agent's
+// (LeadingForeignAllowed). The conditions:
 //   - the log is whole: it opens with the agent's start line, restartCount 0, after the agent's pre-start lines only
-//     (AgentPreStartMsgs), and the read reaches the end of the first staging;
+//     (AgentPreStartMsgs), and, on a row with an allowance, after at most that many lines that are not the agent's, and the read reaches the end of
+//     the first staging;
 //   - the window is that first execution's first staging: from the start line to the first of a worker's start
 //     (AgentWorkerMsg, which comes only once staging is done) and a second start line (a second execution);
 //   - in it, the first attempt alone: no image build, no failed attempt, no failed image check (StagedFailedCheck), and
@@ -580,11 +704,24 @@ func ExpectedWarmFiles(files []agentapi.FileDigest, loadFormat string, skip Skip
 //   - that one image line names the Instance's image digest, and for each expected file (ExpectedWarmFiles) a file
 //     line names it; a line naming another digest or file shows nothing.
 func warmStartShownByTheAgentsOwnLog(w WarmObs) *WarmUnshownError {
+	return warmStartShownAllowing(w, 0)
+}
+
+// warmStartShownAllowing is warmStartShownByTheAgentsOwnLog for a row that skips up to leading lines at the head of the log that are not the agent's.
+func warmStartShownAllowing(w WarmObs, leading int) *WarmUnshownError {
 	e := &WarmUnshownError{LogRead: w.LogRead, FilesOf: len(w.Files)}
 	if !w.LogRead {
 		return e
 	}
-	i := 0
+	// The log opens with at most leading lines that are not the agent's (the scheduler's or the shell's: the read is the file's head from its
+	// first byte, agentLogLine, so what comes first is the job's own first output; none on a row with no allowance), then the agent's pre-start lines.
+	// A foreign line after the agent's first line, or one more than the allowance before it, is not accounted for. The first line of the agent's that is not a pre-start line must be its start, restartCount 0:
+	// a staging line, an unlisted agent line or a restarted agent's start there is no first execution, and that start is what proves the log whole.
+	i := LeadingForeign(w.Log)
+	if i > leading {
+		e.NotWhole = true
+		return e
+	}
 	for i < len(w.Log) && w.Log[i].Kind == LinePreStart {
 		i++
 	}
@@ -643,8 +780,8 @@ func slicesContains(list []string, s string) bool {
 }
 
 // nowServeNotRun is what ends a run of row A NOT RUN when nothing failed: the warm start the agent's own log did not show.
-func nowServeNotRun(o NowServeObs) error {
-	if w := warmStartShownByTheAgentsOwnLog(o.Warm); w != nil {
+func nowServeNotRun(rowName string, o NowServeObs) error {
+	if w := warmStartShownAllowing(o.Warm, LeadingForeignAllowed(rowName)); w != nil {
 		return w
 	}
 	return nil

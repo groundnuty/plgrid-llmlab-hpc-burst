@@ -21,7 +21,7 @@ func buildHelper(t *testing.T, in inputs) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "stagehelper")
 	flags := "-X main.image=" + in.image + " -X main.imageDigest=" + in.imageDigest + " -X main.checkpointRepo=" + in.checkpointRepo +
-		" -X main.checkpointRev=" + in.checkpointRev + " -X main.loadFormat=" + in.loadFormat
+		" -X main.checkpointRev=" + in.checkpointRev + " -X main.loadFormat=" + in.loadFormat + " -X main.imageFormat=" + in.imageFormat
 	cmd := exec.Command("go", "build", "-ldflags", flags, "-o", out, ".")
 	cmd.Dir = sourceDir(t)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")

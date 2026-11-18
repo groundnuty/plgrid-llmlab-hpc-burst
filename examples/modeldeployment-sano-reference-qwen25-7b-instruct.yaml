@@ -1,0 +1,61 @@
+# The reference run's ModelDeployment for Sano's expected-performance entry (HBEP-4, Expected
+# performance; HBEP-7, Instance start, Warm-up; issue #735, beta). It serves the same model as
+# examples/modeldeployment-sano-qwen25-7b-instruct.yaml, with the same checkpoint, engine, flags and
+# workload, so it has the same deployment ID and the entry it measures is the one that example
+# looks up. It differs only where a measurement needs it:
+#
+#   - spec.model is a name no client sends, so no client's traffic reaches it;
+#   - overAllocation is 0 and instances is 1, so exactly one Allocation runs, and no extra one is
+#     qualified beside it;
+#   - leaseLimit is 4h, a little over the lead an Instance needs on Sano (3h40m: the profile's
+#     2h10m drain window, 30m handover margin and 1h start timeout; shorter would be refused as
+#     PartitionTooShort). It caps each Allocation's time limit, not the deployment: while the
+#     deployment exists, a handover starts a successor before an Allocation ends, so it is no stop;
+#   - retentionPolicy releases an Allocation that hosts no Instance after 30 minutes. It is a
+#     backstop for a run whose Instance never started or has ended, not for a running one.
+#
+# The operator ends the run: it reads status.throughput of the Instance once it is ready, then
+# deletes the deployment, which releases its Allocation at once (docs/operations.md, Stopping a
+# deployment). For a hard stop that does not depend on that, add spec.endTime to the copy, an
+# hour or so ahead: the deployment then shuts down at that time (HBEP-7, Release), and it is no
+# deployment-ID input. Each repeat applies a copy with its own metadata.name, such as
+# sano-reference-qwen25-7b-2, on a fresh Allocation. The Provider is a private copy of
+# examples/provider-sano-a100.yaml, named sano-a100 here.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: sano-reference-qwen25-7b
+  namespace: default
+spec:
+  model: reference/sano-qwen25-7b-instruct
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen2.5-7B-Instruct
+        revision: a09a35458c702b33eeacc393d103063234e8bc28
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "32768"
+  instances: 1
+  overAllocation: 0
+  providers:
+    names:
+      - sano-a100
+  leaseLimit: 4h
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 256
+      typical: 1024
+      longest: 28672
+    outputTokens:
+      typical: 128
+      longest: 1024
+    targetSessions: 8

@@ -16,10 +16,10 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/hubfiles"
 )
 
-// inputs are what agent.json does not hold: the image, the checkpoint and the
-// launch's load format, compiled in (main.go).
+// inputs are what agent.json does not hold: the image, the checkpoint, the
+// launch's load format and the partition's image format, compiled in (main.go).
 type inputs struct {
-	image, imageDigest, checkpointRepo, checkpointRev, loadFormat string
+	image, imageDigest, checkpointRepo, checkpointRev, loadFormat, imageFormat string
 }
 
 // missing names the compiled-in values that are empty, by the variable a build
@@ -29,7 +29,7 @@ func (in inputs) missing() []string {
 	for _, v := range []struct{ name, value string }{
 		{"image", in.image}, {"imageDigest", in.imageDigest},
 		{"checkpointRepo", in.checkpointRepo}, {"checkpointRev", in.checkpointRev},
-		{"loadFormat", in.loadFormat},
+		{"loadFormat", in.loadFormat}, {"imageFormat", in.imageFormat},
 	} {
 		if v.value == "" {
 			out = append(out, v.name)
@@ -88,6 +88,9 @@ func stageAll(ctx context.Context, dir string, in inputs, getenv func(string) st
 	if m := in.missing(); len(m) > 0 {
 		return failed(stderr, stepConfig, fmt.Errorf("compiled-in values not set: %v", m))
 	}
+	if f := agentapi.ImageFormat(in.imageFormat); f != agentapi.ImageFormatSandbox && f != agentapi.ImageFormatSIF {
+		return failed(stderr, stepConfig, fmt.Errorf("compiled-in imageFormat is neither %q nor %q", agentapi.ImageFormatSandbox, agentapi.ImageFormatSIF))
+	}
 	job, err := agent.LoadJob(dir, getenv)
 	if err != nil {
 		return failed(stderr, stepConfig, err)
@@ -119,14 +122,14 @@ func stageAll(ctx context.Context, dir string, in inputs, getenv func(string) st
 	}
 
 	res := result{}
-	// The image, in the sandbox format: the partition under test (Athena's
-	// A100) cannot run a SIF. The build hook fires only when Image builds, on a
+	// The image, in the partition's format, compiled in: a sandbox where the partition under test cannot run a SIF (Athena's A100) and a SIF
+	// where it can (Sano's; issue #735). The build hook fires only when Image builds, on a
 	// cache miss and before Apptainer runs: it is what says a build ran, as the
 	// peak of the temporary directory is 0 when no sample succeeded.
 	var built atomic.Bool
 	buildCtx := agent.WithImageBuild(ctx, func(string) { built.Store(true) })
 	start := time.Now()
-	img, err := stager.Image(buildCtx, in.image, in.imageDigest, agentapi.ImageFormatSandbox)
+	img, err := stager.Image(buildCtx, in.image, in.imageDigest, agentapi.ImageFormat(in.imageFormat))
 	res.imageSeconds, res.imageBuilt = seconds(time.Since(start)), built.Load()
 	if err != nil {
 		return failed(stderr, stepImage, err)

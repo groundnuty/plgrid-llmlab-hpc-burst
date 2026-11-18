@@ -148,11 +148,15 @@ func stageExitWorld(t *testing.T, fault string, agent []byte, jobEnv map[string]
 
 // runStageExit runs the row's body under an exitRecorder until it ends, by a pass, a Fatal or a skip, and returns the
 // recorder, its cleanups not yet run, and the run's one tag.
-func runStageExit(t *testing.T, w *world) (*exitRecorder, string) {
+func runStageExit(t *testing.T, w *world, row ...string) (*exitRecorder, string) {
 	t.Helper()
 	rec := newExitRecorder(t)
 	w.t = rec
-	ends(func() { stageBody(rec, w, alpha.NowStageRow().Name) })
+	name := alpha.NowStageRow().Name
+	if len(row) > 0 {
+		name = row[0]
+	}
+	ends(func() { stageBody(rec, w, name) })
 	if len(w.p.tags) != 1 {
 		t.Fatalf("the run wrote down %d tags, want its one", len(w.p.tags))
 	}

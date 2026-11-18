@@ -35,6 +35,9 @@
 //	                           and ends as NOT RUN the same way
 //	HPCBURST_CONF_PENDING_MAX_SECONDS  optional: the wait in the queue of a run with no
 //	                           start wait, in seconds (30 minutes unset)
+//	HPCBURST_CONF_STAGING_ROOT optional: the Provider's own stagingDir, the root HPCBURST_CONF_STAGING is below,
+//	                           for a profile that ships none (Sano's; #735). Set, it wins over a profile's, and the
+//	                           run's directory is the Provider's own stagingDir. Account data: never logged
 //	HPCBURST_CONF_STAGING      a directory below the profile's stagingDir (for example
 //	                           $SCRATCH/<own dir>), not the root. Each run stages into
 //	                           a run-<12 hex> directory of its own below it, and removes
@@ -283,10 +286,16 @@ const allocTimeLimit = "5m"
 // and allows the one partition under test, under the account and the qos of the
 // settings. newWorld creates it, so a test of it tests the run's own Provider.
 func conformanceProvider(s settings) *v1alpha1.Provider {
-	return &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
+	p := &v1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "conformance"}, Spec: v1alpha1.ProviderSpec{
 		PlatformProfileRef: v1alpha1.ObjectReference{Name: s.profile.Name}, Account: s.account, AllowedPartitions: []string{s.partition},
 		QOS: s.qos, CredentialsRef: &v1alpha1.CredentialsReference{File: s.creds},
 	}}
+	if s.stagingRoot != "" {
+		// A profile with no stagingDir (Sano's), or a run that takes the Provider's root: the run's own directory is the Provider's stagingDir,
+		// which wins over a profile's (#757), and the profile stays as shipped.
+		p.Spec.StagingDir = s.runStaging
+	}
+	return p
 }
 
 // heldRequest is a held submission of the run, built where the Provider's

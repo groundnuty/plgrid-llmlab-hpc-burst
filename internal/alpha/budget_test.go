@@ -147,7 +147,7 @@ var liveWaits = map[string]string{
 	"successorOf: stack.BoundedDeadline(d)":                                                       "the waits that call it, listed here",
 	"nowGauges: r.waitFor(stack.WaitDeadline)":                                                    "the lease",
 	"nowEvents: stack.BoundedDeadline(stack.WaitDeadline)":                                        "term: stack.WaitDeadline, the events read last",
-	"nowEvents: time.Sleep(time.Second)":                                                          "pacing",
+	"nowEvents: time.Sleep(d)":                                                                    "pacing, the second pollNowEvents sleeps between reads",
 	// The router row (betarouter_flow_test.go): every step before the drain start is covered by the lease, as row A's are.
 	"routerFirstReady: r.waitFor(stack.WaitDeadline)":  "the lease",
 	"routerFirstReady: r.waitFor(routerJobWait)":       "the lease",
