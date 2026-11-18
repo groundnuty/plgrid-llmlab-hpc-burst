@@ -289,15 +289,10 @@ func (t *slotTable) reserveAsk(ctx context.Context, r client.Reader, q slotAsk, 
 	// by the caps check as if already expected, but for a replacement's own Allocation that an expectation already sizes.
 	var future []v1alpha1.BatchParameters
 	if q.deployment != "" {
-		for _, u := range extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, sizeOf: q.unitSize}) {
-			if !u.reserved {
-				q.alsoLeave++
-			}
-			if _, sized := t.params[q.provider][u.key]; u.role == roleOwn && sized {
-				continue
-			}
-			future = append(future, u.size)
-		}
+		var leave int
+		leave, future = unitTerms(extraUnits(rd.handovers, unitAsk{deployment: q.deployment, exclude: q.unitExclude, sizeOf: q.unitSize}),
+			func(key string) bool { _, ok := t.params[q.provider][key]; return ok })
+		q.alsoLeave += leave
 	}
 	if q.params != nil {
 		if ok, why := capsFit(q.provider, q.caps, rd, t.params[q.provider], future, *q.params); !ok {

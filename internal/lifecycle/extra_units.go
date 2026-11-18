@@ -39,8 +39,10 @@ type extraUnit struct {
 	// replacement's own), so the extra's slot check leaves none more for it; it still counts for the caps.
 	reserved bool
 	// size is what a new Allocation of that deployment on this Provider requests now, for the per-user caps; zero when the
-	// spec cannot be sized.
+	// spec cannot be sized. gpus is its GPU count, beside it: a unit carries its GPU count, so a per-QOS count can group by it
+	// (unitTerms is the one place the units are summed).
 	size v1alpha1.BatchParameters
+	gpus int32
 }
 
 // unitAsk is what the unit set needs to know of the extra that asks.
@@ -95,7 +97,9 @@ type handoverReads struct {
 // of reservedOn, which also feed its selection) and the reserved slots; it lists and gets nothing of its own.
 //
 // 6. Its callers are the extra's reservation (slotAsk.deployment set, reserveAsk): the slots its alsoLeave adds and the
-// sizes its caps check adds. The reserved slots every other ask counts, and the selection, are unchanged.
+// sizes its caps check adds, summed by unitTerms, in this file, and nowhere else. A unit carries its GPU count beside its
+// size, so a per-QOS count can group by it there. The reserved slots every other ask counts, and the selection, are
+// unchanged.
 func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 	var out []extraUnit
 	seen := map[struct {
@@ -133,7 +137,8 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 		if s.kind == slotForOwnAllocation {
 			role = roleOwn
 		}
-		add(extraUnit{uid: types.UID(s.uid), role: role, deployment: s.deployment, key: s.key, reserved: true, size: size(r.mds[s.deployment])})
+		sz := size(r.mds[s.deployment])
+		add(extraUnit{uid: types.UID(s.uid), role: role, deployment: s.deployment, key: s.key, reserved: true, size: sz, gpus: sz.GPUs})
 	}
 	// The chosen primaries that have not started, or have no Allocation yet.
 	for _, v := range r.views {
@@ -193,11 +198,27 @@ func extraUnits(r handoverReads, a unitAsk) []extraUnit {
 				if !holdsSlotOnceRunning(md, m, judged, *r.profile, time.Time{}) {
 					continue
 				}
-				add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz})
+				add(extraUnit{uid: m.UID, role: roleHandover, deployment: key, size: sz, gpus: sz.GPUs})
 			}
 		}
 	}
 	return out
+}
+
+// unitTerms sums an extra's units into its two terms: how many slots it leaves free beside itself (the units whose slot is
+// not reserved yet) and the sizes its caps check adds as if already expected (every unit's, but an in-flight replacement's
+// own Allocation that an expectation already sizes: sized says so for its key). It is the one place the units are summed.
+func unitTerms(units []extraUnit, sized func(key string) bool) (alsoLeave int, sizes []v1alpha1.BatchParameters) {
+	for _, u := range units {
+		if !u.reserved {
+			alsoLeave++
+		}
+		if u.role == roleOwn && sized(u.key) {
+			continue
+		}
+		sizes = append(sizes, u.size)
+	}
+	return alsoLeave, sizes
 }
 
 // holdsSlotOnceRunning reports whether the primary in, whose Allocation a has not started, will hold a reserved slot once
