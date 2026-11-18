@@ -237,6 +237,14 @@ type Row struct {
 	// needs (ErrGlibcTooOld): the version is the reading the row exists for. Only the Helios router row does (issue #566: its glibc is
 	// posted on any outcome); the Athena router row's NOT RUN posts nothing, as ruled on #521.
 	PostsGlibcNotRun bool
+	// InstanceCap is the served ModelDeployment's routing.instanceCap, the hand-set cap the front holds each Instance to while its tight bound is in force
+	// (HBEP-5, Load bound and cap); zero for the rows that leave it to the engine's max-num-seqs. The baseline row's is a constant computed from the
+	// model's facts (CapSano; baseline.go), and the world's deployment keeps it with its maxRequestDuration.
+	InstanceCap int32
+	// LLMLab says the row attaches LLMLab as a managed Provider and ModelDeployment, from the run's LLMLab credentials (HPCBURST_ALPHA_LLMLAB_CREDENTIALS).
+	LLMLab bool
+	// Studyload says the row runs #768's load generator by its binary (HPCBURST_ALPHA_STUDYLOAD_BIN).
+	Studyload bool
 }
 
 // DefaultDeployment is the example ModelDeployment a row with no Deployment of its own serves.
@@ -406,6 +414,8 @@ var rows = []Row{
 	// The Sano rows of issue #735 (sano.go): the handover row's shape on Sano's gpu partition under host-dialed mode, and row A's flow on it.
 	SanoHandoverRow(),
 	SanoServeRow(),
+	// The baseline row of HBEP-764's item 4 (baseline.go): Qwen3-VL-8B on Sano with LLMLab attached as HBEP-5's overflow, on today's code with no Workload.
+	BaselineRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).
