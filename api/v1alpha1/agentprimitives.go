@@ -165,23 +165,46 @@ const (
 // Operation condition types and reasons (HBEP-10, Operations, Approval and
 // execution). The lifecycle controller writes them (HBEP-11, Controllers).
 const (
-	// ConditionExecutable says whether the Operation can run now. It is false
-	// with ReasonExecutionNotBuilt in the releases that plan Operations and do
-	// not execute them yet (HBEP-10, Graduation, beta step 1, built in stages:
-	// the kinds, the guard, planning, then execution).
+	// ConditionExecutable says whether the Operation can run now: true once its plan is committed and while its targets are
+	// carried out (ReasonExecuting), false while it waits for its owner, an approval or another Operation, and once it
+	// is finished (HBEP-10, Operations, Approval and execution).
 	ConditionExecutable = "Executable"
+
+	// ConditionSpecWritten is true once the spec change a committed Operation commits to (Scale's count, End's end time
+	// or delete) has landed, or there was none to make. The lifecycle controller records it, so that a pass that resumes
+	// after a restart writes the spec once and a person's later edit is never written over: the ModelDeployment's own
+	// generation cannot say it (HBEP-10, Approval and execution).
+	ConditionSpecWritten = "SpecWritten"
 
 	// ConditionNoApprovalPolicy is true while a target that needs approval has no
 	// ApprovalPolicy that applies: with none, nothing is approvable (HBEP-10,
 	// Approval policy).
 	ConditionNoApprovalPolicy = "NoApprovalPolicy"
 
-	// ReasonExecutionNotBuilt is the reason of Executable=False in the releases
-	// that plan Operations and do not execute them.
-	ReasonExecutionNotBuilt = "ExecutionNotBuilt"
 	// ReasonNotConfirmed is the reason of Executable=False while a plan waits for its owner's confirm
 	// (phase Planned).
 	ReasonNotConfirmed = "NotConfirmed"
+
+	// ReasonExecuting is the reason of Executable=True once the plan is committed: the controller acts on the
+	// committed targets and on nothing else (phase Executing or PartlyFailed).
+	ReasonExecuting = "Executing"
+
+	// ReasonDone is the reason of Executable=False on a Done Operation: every committed target is done.
+	ReasonDone = "Done"
+
+	// ReasonAnotherOperationExecuting is the reason of Executable=False while a confirmed Operation is ready to
+	// commit but another Operation is Executing or PartlyFailed on the same ModelDeployment: one at a time, and
+	// this one's plan is checked for staleness once the other has finished (HBEP-10, Approval and execution).
+	ReasonAnotherOperationExecuting = "AnotherOperationExecuting"
+
+	// ReasonOperationPartlyFailed is the reason of the failing event regarding an Operation one of whose committed targets
+	// failed: raised when it starts, then at most once an hour while it lasts (HBEP-8, Reasons in alpha).
+	ReasonOperationPartlyFailed = "OperationPartlyFailed"
+
+	// ReasonPlanStale is the reason of Executable=False on a Stale Operation, and the reason of the degraded event
+	// regarding it: the plan, recomputed once before it was committed, was no longer the plan that was approved
+	// (HBEP-10, Approval and execution; HBEP-8, Reasons in alpha).
+	ReasonPlanStale = "PlanStale"
 
 	// ReasonAwaitingApproval is the reason of Executable=False while a confirmed plan has a target that needs
 	// approval and lacks it (phase AwaitingApproval); the message says which.

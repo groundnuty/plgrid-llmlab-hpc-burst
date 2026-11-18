@@ -41,9 +41,9 @@ func TestTheScanSawTheRecorders(t *testing.T) {
 		"cmd/hpcburst-controller.addTunnel GetEventRecorder Events",
 		"cmd/hpcburst-controller.wiring.setupBatch GetEventRecorder Events",
 		"cmd/hpcburst-controller.wiring.setupBatch GetEventRecorderFor Legacy",
-		"internal/front.NewKubeRecorder NewRecorder Events",
+		"internal/front.NewKubeRecorderWithLog NewRecorder Events",
 		"internal/lifecycle.NewManager GetEventRecorder Events",
-		"internal/managed.Setup GetEventRecorder Events",
+		"internal/managed.SetupWithLog GetEventRecorder Events",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("recorders built: %v, want %v", got, want)

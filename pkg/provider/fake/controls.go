@@ -160,6 +160,16 @@ func (b *Batch) FailNextLiftHold(err error) {
 	b.liftErrs = append(b.liftErrs, err)
 }
 
+// FailCancels makes every Cancel of a live job fail with err, until it is cleared with nil: the job stays as it was, the
+// call is logged as scancel, and its result is CancelError with err. A job that has ended (AlreadyEnded) or that the
+// scheduler does not know (ErrNotFound) answers as before. It lets a test play a scheduler that cannot cancel, so that an
+// Allocation's deletion is held by its finalizer, as a real Provider's would be (#589, PR 5).
+func (b *Batch) FailCancels(err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cancelErr = err
+}
+
 // SetTimeLimit is an administrator changing a held, pending or running job's
 // time limit, typically raising it. A running job's HardEnd is its start plus
 // the new limit at the next read, and its phase follows: a limit below the time

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventlog/node/nodetest"
 	"golang.org/x/sys/unix"
 )
 
@@ -71,6 +72,7 @@ func TestMain(m *testing.M) {
 	}
 	code := m.Run()
 	removeFakeController()
+	nodetest.Cleanup() // the controller binary the event TTL's log row built, unless HPCBURST_CONTROLLER_BIN named one
 	os.Exit(code)
 }
 

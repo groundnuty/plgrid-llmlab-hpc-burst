@@ -11,7 +11,7 @@ import (
 // emitter it is, with HeartbeatMissed (it judges the Providers', the agents'
 // and the front's heartbeats), ObservationGap (at its start) and
 // TunnelOrphaned (cmd/hpcburst-controller's tunnel-state reader raises it
-// through this controller's recorder). Each of its series is created at 0
+// through this controller's recorder) and EventsNotLogged (the publisher's). Each of its series is created at 0
 // (HBEP-8, Raised events); the drift guard checks this list against the emit
 // sites.
 var raisedByLifecycle = map[string][]string{
@@ -20,7 +20,10 @@ var raisedByLifecycle = map[string][]string{
 	eventDegraded: {
 		v1alpha1.ReasonReplacementLate, v1alpha1.ReasonRestartLoop, v1alpha1.ReasonIdentityUnresolved,
 		v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonCapacityDropped, v1alpha1.EventReasonTunnelOrphaned,
-		reasonObservationGap, v1alpha1.ReasonReferenceSuspect,
+		reasonObservationGap, v1alpha1.ReasonPlanStale, v1alpha1.ReasonReferenceSuspect,
+		// EventsNotLogged, raised through this controller's recorder by the durable log's publisher
+		// (internal/eventcount) when it has one (beta; HBEP-8, The durable log, When it is down).
+		eventcount.ReasonEventsNotLogged,
 	},
 	eventFailing: {
 		v1alpha1.ReasonWorkerRestart, v1alpha1.ReasonInstanceRestart, v1alpha1.ReasonRestartLoop,
@@ -30,7 +33,7 @@ var raisedByLifecycle = map[string][]string{
 		v1alpha1.ReasonQualificationFailed, v1alpha1.ReasonVerificationFailed, v1alpha1.ReasonAllocationFailed,
 		v1alpha1.ReasonAllocationLost, v1alpha1.ReasonAllocationRefused, v1alpha1.ReasonRequeued,
 		string(v1alpha1.ConditionSubmittedAsOther), string(v1alpha1.ConditionRelayEndedForGood),
-		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed,
+		v1alpha1.ReasonAllocationEndedEarly, reasonHeartbeatMissed, v1alpha1.ReasonOperationPartlyFailed,
 	},
 	eventReplaced:   {v1alpha1.EventReasonHandedOver, v1alpha1.ReasonHedgeLost, v1alpha1.ReasonRankedOut},
 	eventEndingSoon: {v1alpha1.EventReasonNoReplacementReady},

@@ -138,13 +138,13 @@ func hedgeTimeOf(now time.Time, submit *time.Time, waits []v1alpha1.QueueWait, d
 
 // hedgeFrozen reports whether an executing Operation holds the hedge, so no member is added to it (HBEP-7, Hedging
 // (beta), Operations: "While an Operation is Executing, no member is added to a hedge among its committed
-// targets"). It is false until #589's execution reads the committed targets; Reconciler.hedgeFrozen, when set,
-// answers instead (the hook #589 PR 5 fills, and tests set).
+// targets"). The pass answers from its own Operations (frozenByOperation: p.ops is read by the Operations step before
+// step 7, and a failed read fails the pass); Reconciler.hedgeFrozen, when set, answers instead, the seam tests use.
 func (p *pass) hedgeFrozen(g hedgeGroup) bool {
 	if p.r.hedgeFrozen != nil {
 		return p.r.hedgeFrozen(g)
 	}
-	return false
+	return frozenByOperation(g.members, p.ops)
 }
 
 // growHedges adds, to each hedge with no winner whose members have all reached their hedge times, its next member
