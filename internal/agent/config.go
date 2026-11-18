@@ -3,10 +3,12 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -46,14 +48,18 @@ func LoadJob(allocDir string, getenv func(string) string) (Job, error) {
 	if !filepath.IsAbs(allocDir) {
 		errs = append(errs, fmt.Errorf("allocation directory %q is not an absolute path", allocDir))
 	}
-	b, err := os.ReadFile(filepath.Join(allocDir, agentapi.ConfigFileName))
+	// The Allocation's directory is under the staging directory, which is account data (HBEP-4, Provider settings; #757): the
+	// errors below name no path, and the agent logs them on its standard error, which reaches job.err.
+	configPath := filepath.Join(allocDir, agentapi.ConfigFileName)
+	b, err := os.ReadFile(configPath)
 	if err != nil {
-		errs = append(errs, fmt.Errorf("agent.json: %w", err))
+		errs = append(errs, pathless(err, "the agent's configuration file", "its Allocation directory", configPath))
 	} else if j.Config, err = agentapi.DecodeAgentConfig(b); err != nil {
 		errs = append(errs, err)
 	}
-	if j.Credential, err = agentapi.ReadKeyFile(filepath.Join(allocDir, CredentialFileName)); err != nil {
-		errs = append(errs, fmt.Errorf("the Allocation's credential: %w", err))
+	credPath := filepath.Join(allocDir, CredentialFileName)
+	if j.Credential, err = agentapi.ReadKeyFile(credPath); err != nil {
+		errs = append(errs, pathless(err, "the Allocation's credential", "its Allocation directory", credPath))
 	}
 	j.JobID = strings.TrimSpace(getenv("SLURM_JOB_ID"))
 	if j.JobID == "" {
@@ -96,3 +102,26 @@ func MakeRunDir(tmp string) (string, error) {
 
 // StagingPath returns a path under the staging directory from agent.json.
 func (j Job) StagingPath(rel string) string { return filepath.Join(j.Config.StagingDir, rel) }
+
+// pathlessError is an error whose text names no path. It stays reachable by errors.Is and errors.As.
+type pathlessError struct {
+	msg string
+	err error
+}
+
+func (e *pathlessError) Error() string { return e.msg }
+func (e *pathlessError) Unwrap() error { return e.err }
+
+// pathless says why reading the named file failed, without its path: a fixed message when the file is missing, and otherwise the
+// operating system's own words for the failure (an errno's text) after a fixed one; and any other error with the file's path
+// written <file>.
+func pathless(err error, what, where, path string) error {
+	var en syscall.Errno
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return &pathlessError{msg: what + " is missing in " + where, err: err}
+	case errors.As(err, &en):
+		return &pathlessError{msg: what + " cannot be read: " + en.Error(), err: err}
+	}
+	return &pathlessError{msg: what + " cannot be used: " + strings.ReplaceAll(err.Error(), path, "<file>"), err: err}
+}

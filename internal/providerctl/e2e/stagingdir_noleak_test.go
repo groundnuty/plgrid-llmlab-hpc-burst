@@ -41,9 +41,20 @@ const (
 	leakDotDir = "/invented-stage/zq7f3akx/../home/someone"
 )
 
-// leakedIn says whether text holds the path or its unique segment.
-func leakedIn(text string) bool {
-	return strings.Contains(text, leakDir) || strings.Contains(text, leakSegment)
+// leakNeedles are what the rows look for: the whole path and its unique segment.
+var leakNeedles = []string{leakDir, leakSegment}
+
+// leakedIn says whether text holds any needle: the whole path or a part of it that no other string holds.
+func leakedIn(text string, needles ...string) bool {
+	if len(needles) == 0 {
+		needles = leakNeedles
+	}
+	for _, n := range needles {
+		if strings.Contains(text, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // The scan's own controls: it finds the whole path, the segment alone, and a joined form, and passes a clean text.
@@ -190,14 +201,19 @@ func (r *evRig) surfaces(sink *logSink, allocs ...string) map[string]string {
 }
 
 func (r *evRig) requireNoLeak(sink *logSink, allocs ...string) {
+	r.requireNoNeedle(sink, leakNeedles, allocs...)
+}
+
+// requireNoNeedle is requireNoLeak for a path other than leakDir: the needles are its whole and its parts.
+func (r *evRig) requireNoNeedle(sink *logSink, needles []string, allocs ...string) {
 	r.t.Helper()
 	for name, text := range r.surfaces(sink, allocs...) {
-		if !leakedIn(text) {
+		if !leakedIn(text, needles...) {
 			continue
 		}
 		var hits []string
 		for _, line := range strings.Split(text, "\n") {
-			if leakedIn(line) && len(hits) < 3 {
+			if leakedIn(line, needles...) && len(hits) < 3 {
 				hits = append(hits, line[:min(len(line), 300)])
 			}
 		}
@@ -306,4 +322,26 @@ func TestTheRefusalOfAStagingDirNeverEchoesIt(t *testing.T) {
 	}
 	r.waitEvents(a, want{"failing", "AllocationRefused"})
 	r.requireNoLeak(sink, "a")
+}
+
+// A staging directory with a colon (the pattern allows ":", "=" and ","), under a submission Slurm refuses with a text that
+// echoes the output path: the status holds no part of the path, neither before the colon nor after it (#762, Astra's review).
+// The text reaches the lifecycle controller's SubmissionRejected event from this status, so the Allocation's status is the
+// source the row checks, with the events the API holds about the Allocation and the Provider.
+func TestAStagingDirWithAColonNeverLeaksThroughSlurmText(t *testing.T) {
+	const colonDir = "/invented-stage/zq7f3akx:alicexw8m4/run"
+	needles := []string{colonDir, "zq7f3akx", "alicexw8m4"}
+	r := newEvRig(t, rigOpts{})
+	r.withStagingDir(colonDir)
+	sink, echo := r.capturing()
+	echo.armed.Store(true)
+	r.newAlloc("b", "3h")
+	b := r.until("b", "a refusal in the status", 12, func(a *v1alpha1.Allocation) bool {
+		return strings.Contains(a.Status.AtProvider.Reason, "Batch job submission failed")
+	})
+	// Slurm's text named the output path, and the status holds it redacted: the injected text reached the code that must keep it out.
+	if reason := b.Status.AtProvider.Reason; !strings.Contains(reason, "Unable to open file '<path>'") {
+		t.Fatalf("status.atProvider.reason %q is not Slurm's refusal with its path redacted: the injected text did not reach the code, and the scan would prove nothing", reason)
+	}
+	r.requireNoNeedle(sink, needles, "b")
 }
