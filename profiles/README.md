@@ -72,7 +72,7 @@ A fact that nothing states is absent, not false (HBEP-4, Platform profile schema
 - The typed QOS limits come back from the API server as written (`TestShippedProfilesKeepTheirTypedQOS`), and the provider refuses a request above each of them, with a control that is accepted at the cap (`TestShippedProfilesTypeTheirQOS`). The expected numbers are written out from the HBEP, not read from the manifest.
 - The same file shows that the provider refuses a GPU request on Helios `plgrid` and accepts it on `plgrid-gpu-gh200`.
 - None compares a typed value with the fact it was copied from: that would prove only the copy. The checks that matter are admission, the provider's own checks, and the conformance runs that read these profiles.
-- **Open:** the conformance harness (`internal/providerctl/conformance`) reads these manifests whole (`TestShippedProfilesLoadForTheHarness` lists the partitions it can run on), and the 56-character name round trip has run on Helios `plgrid` (31 Oct 2026) and Athena `plgrid-now` (1 Nov 2026). `plgrid-gpu-gh200` and `plgrid-gpu-a100` have not run it; their `jobName` stands on the platform-level ruling (option (b)), with the read-back as the safety net.
+- **Open:** the conformance harness (`internal/providerctl/conformance`) reads these manifests whole (`TestShippedProfilesLoadForTheHarness` lists the partitions it can run on), and the 56-character name round trip has run on Helios `plgrid` (31 Oct 2026), Helios `plgrid-gpu-gh200` and Athena `plgrid-now` (1 Nov 2026), as `profiles/helios.yaml`'s `jobName` comment records. `plgrid-gpu-a100` has not run it; its `jobName` stands on the platform-level ruling (option (b)), with the read-back as the safety net.
 
 ## Content rules
 
