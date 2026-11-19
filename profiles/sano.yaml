@@ -12,7 +12,7 @@
 #   - "derived": a division of such facts, with the numbers shown.
 #   - "the science agent's #735 comment": the values the science agent gave for this profile on
 #     18 Nov 2026 (#735, comment of 02:42Z), from the probes.
-#   - "the science agent's #735 decision of 19 Nov 2026": cpusPerGpu 4 and memPerGpu 64 GiB, in place of the maximum shares of the comment above (see cpusPerGpu).
+#   - "the science agent's #735 decision of 19 Nov 2026" (https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6996960589): cpusPerGpu 4 and memPerGpu 64 GiB, in place of the maximum shares of the comment above (see cpusPerGpu).
 #   - "framework default (HBEP-n, section)": no fact exists; the design's value.
 # Slurm's "MB" and "G" are 2^20 and 2^30 bytes (the Slurm provider sends --mem=<MiB>M), so memory is in Mi.
 #
@@ -34,7 +34,7 @@ spec:
       maxTime: 168h # facts.partitions[name=gpu].max_time, "7-00:00:00"
       gpusPerNode: 8 # facts.partitions[name=gpu].node_classes: the larger node has 8 GPUs, the other 4. The field is the node's hardware, and qosByGpus ends at 8
       # cpusPerGpu and memPerGpu are what an Allocation asks for per GPU: 4 CPUs and 64 GiB, chosen so a request fits beside other users' jobs on a
-      # node (the science agent's #735 decision of 19 Nov 2026). HBEP-4 (Submission, GPU sizing, "Never above one GPU's share",
+      # node (the science agent's #735 decision of 19 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6996960589). HBEP-4 (Submission, GPU sizing, "Never above one GPU's share",
       # hbep/0004-provider-interface/README.md:340) forbids a share above the node's per-GPU share and does not ask for the maximum. The maximum
       # shares stay as that cap, 11 CPUs and 135904Mi, derived below. The reason for the change: a 4-GPU Allocation at 11 CPUs per GPU asked for
       # 44 CPUs, every effective CPU of the 4-GPU node, and it pended with reason Resources for an estimated 25 h while the node's 4 GPUs were free,
