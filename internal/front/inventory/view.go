@@ -92,7 +92,18 @@ type Workload struct {
 	// spec.managedSessions, 0 when it is unset. Both are as the Workload had them when this view was built (HBEP-5, Workloads, Route order).
 	ManagedFirst    bool
 	ManagedSessions int
+	// Sticky is spec.sessionAffinity Route; PinTTL and MaxPins are spec.pinTTL and spec.maxPins, at their schema defaults (12 h, 100,000) when the object
+	// carries none, as one built without the API server may not (HBEP-5, Workloads, Sticky routes).
+	Sticky  bool
+	PinTTL  time.Duration
+	MaxPins int
 }
+
+// The defaults of a Workload's pinTTL and maxPins, the schema's (HBEP-11, Workload).
+const (
+	DefaultPinTTL  = 12 * time.Hour
+	DefaultMaxPins = 100000
+)
 
 // ManagedSource is a managed-source ModelDeployment that attaches a model.
 type ManagedSource struct {
@@ -139,6 +150,9 @@ type Deployment struct {
 	// Workload of its model in its namespace (Serves).
 	Workloads []string
 	Members   []*Instance // routable, sorted by Key
+	// CurrentIDs are the full deployment IDs in the ModelDeployment's status.currentIDs, one per accelerator class: the IDs a pinned conversation's
+	// target may still have (HBEP-5, Sticky routes, A target that's gone).
+	CurrentIDs []string
 }
 
 // Instance is one routable Instance.
@@ -181,8 +195,9 @@ func (i *Instance) TokenBudget() (perWorker int64, workers int, ok bool) {
 
 // ManagedTarget is one attached managed catalog entry under one Provider.
 type ManagedTarget struct {
-	Key                string // namespace/name@provider
-	Deployment         string // the managed-source ModelDeployment's namespace/name
+	Key                string    // namespace/name@provider
+	Deployment         string    // the managed-source ModelDeployment's namespace/name
+	UID                types.UID // the managed-source ModelDeployment's UID: a sticky pin names its source by it (HBEP-5, Sticky routes)
 	Namespace          string
 	Name               string
 	Provider           string

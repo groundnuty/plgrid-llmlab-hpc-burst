@@ -34,6 +34,9 @@ type Name struct {
 	// request's whole naming travels in one value to every place that chooses a
 	// target, including a retry's (HBEP-5, Workloads, Naming it).
 	HeaderWorkload string
+	// KeyFromHeader says the request's conversation key is its session header's, not an opening hash or a fresh key. Parse never sets it: the front does,
+	// with the Workload header, since a Workload with sessionAffinity Route refuses a request without it (HBEP-5, Workloads, Sticky routes).
+	KeyFromHeader bool
 }
 
 // ErrGrammar is a name that breaks the grammar: an empty part, a malformed

@@ -20,10 +20,13 @@ import (
 // rule or the schema refused first.
 
 const (
-	workloadNameMessage = "a Workload name must be a DNS-1123 label"
-	modelHashMessage    = "a model name never contains '#'"
-	workloadsOnceMsg    = "spec.workloads lists each Workload once"
-	managedFirstMsg     = "routeOrder ManagedFirst needs managedSessions"
+	workloadNameMessage  = "a Workload name must be a DNS-1123 label"
+	modelHashMessage     = "a model name never contains '#'"
+	workloadsOnceMsg     = "spec.workloads lists each Workload once"
+	managedFirstMsg      = "routeOrder ManagedFirst needs managedSessions"
+	pinTTLMessage        = "pinTTL must be from 1h to 7 days (168h)"
+	modelImmutableMsg    = "a Workload's model is immutable"
+	affinityImmutableMsg = "a Workload's sessionAffinity is immutable"
 )
 
 // newWorkload returns a Workload that admission accepts: its required fields only.
@@ -420,5 +423,137 @@ func TestInstanceKVCacheTokensRoundTripsAndIsAtLeastOne(t *testing.T) {
 	must(t, c.Get(bg(), objKey(in), again), "get")
 	if again.Status.KVCacheTokens != nil {
 		t.Errorf("kvCacheTokens after the unset is %d, want none", *again.Status.KVCacheTokens)
+	}
+}
+
+// Sticky routes (HBEP-5, Workloads, Sticky routes; HBEP-11, the Workload row; HBEP-764, R9). Typed literals: the Go durations and counts below are
+// the HBEP's own bounds, not read from the types.
+
+// sessionAffinity is Route or absent: Route is admitted, anything else, a wrong-cased Route included, is refused by the schema's enum.
+func TestWorkloadSessionAffinityAdmitsRouteAndRefusesOtherValues(t *testing.T) {
+	affinity := func(a v1alpha1.SessionAffinity) func(*v1alpha1.Workload) {
+		return func(w *v1alpha1.Workload) { w.Spec.SessionAffinity = a }
+	}
+	runWorkloadCases(t, []workloadCase{
+		{"None", affinity("None"), "Unsupported value: \"None\""},
+		{"a lowercase route", affinity("route"), "Unsupported value: \"route\""},
+		{"ClientIP", affinity("ClientIP"), "Unsupported value: \"ClientIP\""},
+	}, []workloadCase{
+		{"Route", affinity(v1alpha1.SessionAffinityRoute), ""},
+		{"no sessionAffinity", func(*v1alpha1.Workload) {}, ""},
+	})
+}
+
+// pinTTL is from 1h to 7 days, written 168h since CEL's duration has no day unit. This is the rule workloads:$.spec.pinTTL#0, whose mutant admits
+// every value that the schema's pattern admits: 59m and 169h are refused by the rule alone.
+func TestWorkloadPinTTLIsBetween1hAnd7Days(t *testing.T) {
+	ttl := func(d v1alpha1.Duration) func(*v1alpha1.Workload) {
+		return func(w *v1alpha1.Workload) { w.Spec.PinTTL = &d }
+	}
+	runWorkloadCases(t, []workloadCase{
+		{"59m", ttl("59m"), pinTTLMessage},
+		{"59m59s", ttl("59m59s"), pinTTLMessage},
+		{"169h", ttl("169h"), pinTTLMessage},
+		{"168h1s", ttl("168h1s"), pinTTLMessage},
+		{"1ns", ttl("1ns"), pinTTLMessage},
+	}, []workloadCase{
+		{"1h", ttl("1h"), ""},
+		{"60m", ttl("60m"), ""},
+		{"12h", ttl("12h"), ""},
+		{"168h", ttl("168h"), ""},
+	})
+}
+
+// maxPins is from 1 to 1,000,000: the schema's bounds.
+func TestWorkloadMaxPinsIsBetween1And1000000(t *testing.T) {
+	pins := func(n int32) func(*v1alpha1.Workload) {
+		return func(w *v1alpha1.Workload) { w.Spec.MaxPins = ptr.To(n) }
+	}
+	runWorkloadCases(t, []workloadCase{
+		{"0 pins", pins(0), "spec.maxPins"},
+		{"-1 pins", pins(-1), "spec.maxPins"},
+		{"1000001 pins", pins(1000001), "spec.maxPins"},
+	}, []workloadCase{
+		{"1 pin", pins(1), ""},
+		{"1000000 pins", pins(1000000), ""},
+	})
+}
+
+// The defaults are read back from the API server, never from a Go struct (envtest applies the CRD's defaults): pinTTL 12h and maxPins 100000 on
+// every Workload, with or without sessionAffinity, which has no default.
+func TestWorkloadReadsBackItsStickyDefaults(t *testing.T) {
+	ns := newNamespace(t)
+	for _, affinity := range []v1alpha1.SessionAffinity{"", v1alpha1.SessionAffinityRoute} {
+		w := newWorkload(ns, uniq("study"))
+		w.Spec.SessionAffinity = affinity
+		if w.Spec.PinTTL != nil || w.Spec.MaxPins != nil {
+			t.Fatalf("the fixture sets pinTTL %v and maxPins %v: the test needs both absent", w.Spec.PinTTL, w.Spec.MaxPins)
+		}
+		must(t, c.Create(bg(), w), "create a Workload without pinTTL and maxPins")
+		got := &v1alpha1.Workload{}
+		must(t, c.Get(bg(), objKey(w), got), "get")
+		if got.Spec.PinTTL == nil || *got.Spec.PinTTL != "12h" {
+			t.Errorf("sessionAffinity %q: pinTTL read back as %v, want the default 12h", affinity, got.Spec.PinTTL)
+		}
+		if got.Spec.MaxPins == nil || *got.Spec.MaxPins != 100000 {
+			t.Errorf("sessionAffinity %q: maxPins read back as %v, want the default 100000", affinity, got.Spec.MaxPins)
+		}
+		if got.Spec.SessionAffinity != affinity {
+			t.Errorf("sessionAffinity read back as %q, want %q: it has no default", got.Spec.SessionAffinity, affinity)
+		}
+	}
+}
+
+// A Workload's model is immutable (HBEP-11, Workload). This is the rule workloads:$.spec.model#1. The new model is a plain name, so the '#' rule
+// is not what refuses it; pinTTL, shape and the other fields of the same object still update.
+func TestWorkloadModelIsImmutable(t *testing.T) {
+	ns := newNamespace(t)
+	w := newWorkload(ns, uniq("study"))
+	w.Spec.SessionAffinity = v1alpha1.SessionAffinityRoute
+	must(t, c.Create(bg(), w), "create")
+	got := &v1alpha1.Workload{}
+	must(t, c.Get(bg(), objKey(w), got), "get")
+	got.Spec.Model = "example-13b"
+	requireRefused(t, c.Update(bg(), got), modelImmutableMsg)
+
+	must(t, c.Get(bg(), objKey(w), got), "get")
+	got.Spec.PinTTL = ptr.To(v1alpha1.Duration("24h"))
+	got.Spec.Shape.ContextTokens.Typical = 4096
+	must(t, c.Update(bg(), got), "update pinTTL and shape with the model unchanged")
+	must(t, c.Get(bg(), objKey(w), got), "get")
+	if got.Spec.PinTTL == nil || *got.Spec.PinTTL != "24h" || got.Spec.Shape.ContextTokens.Typical != 4096 || got.Spec.Model != "example-27b" {
+		t.Errorf("after the update: pinTTL %v, typical context %d, model %q; want 24h, 4096, example-27b", got.Spec.PinTTL, got.Spec.Shape.ContextTokens.Typical, got.Spec.Model)
+	}
+}
+
+// sessionAffinity is immutable, set or absent, from the Workload's creation (HBEP-11, Workload): adding Route to a Workload created without it is
+// refused, and so is removing it from one created with it. A field-level rule on an optional field would miss both, which is why the rule is the
+// spec's (workloads:$.spec#1). Each Workload's pinTTL and shape still update while it is in place.
+func TestWorkloadSessionAffinityIsImmutable(t *testing.T) {
+	ns := newNamespace(t)
+	bare := newWorkload(ns, uniq("study"))
+	must(t, c.Create(bg(), bare), "create a Workload without sessionAffinity")
+	pinned := newWorkload(ns, uniq("study"))
+	pinned.Spec.SessionAffinity = v1alpha1.SessionAffinityRoute
+	must(t, c.Create(bg(), pinned), "create a Workload with sessionAffinity Route")
+
+	got := &v1alpha1.Workload{}
+	must(t, c.Get(bg(), objKey(bare), got), "get")
+	got.Spec.SessionAffinity = v1alpha1.SessionAffinityRoute
+	requireRefused(t, c.Update(bg(), got), affinityImmutableMsg)
+
+	must(t, c.Get(bg(), objKey(pinned), got), "get")
+	got.Spec.SessionAffinity = ""
+	requireRefused(t, c.Update(bg(), got), affinityImmutableMsg)
+
+	for _, w := range []*v1alpha1.Workload{bare, pinned} {
+		must(t, c.Get(bg(), objKey(w), got), "get")
+		got.Spec.PinTTL = ptr.To(v1alpha1.Duration("48h"))
+		got.Spec.Shape.OutputTokens.Typical = 2048
+		must(t, c.Update(bg(), got), "update pinTTL and shape with sessionAffinity unchanged")
+		must(t, c.Get(bg(), objKey(w), got), "get")
+		if got.Spec.SessionAffinity != w.Spec.SessionAffinity || got.Spec.PinTTL == nil || *got.Spec.PinTTL != "48h" || got.Spec.Shape.OutputTokens.Typical != 2048 {
+			t.Errorf("after the update: sessionAffinity %q, pinTTL %v, typical output %d; want %q, 48h, 2048", got.Spec.SessionAffinity, got.Spec.PinTTL, got.Spec.Shape.OutputTokens.Typical, w.Spec.SessionAffinity)
+		}
 	}
 }
