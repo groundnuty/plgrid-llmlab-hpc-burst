@@ -449,6 +449,7 @@ func TestTheLoaderRefusesWhatTheGeneratorWouldNotHaveWritten(t *testing.T) {
 var shippedDumpDigests = map[string]string{
 	"0.32.0": testPinnedDigest,
 	"0.26.0": "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
+	"0.15.0": "sha256:7764931211e5b408a10d6e289ab9eca8d6ecd105e9239cb2d528c2c4d0ad67b0",
 }
 
 // TestEveryShippedDumpIsItsImageAndSaysHowItWasMade: each file holds the digest
