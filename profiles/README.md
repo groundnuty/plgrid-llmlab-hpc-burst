@@ -1,12 +1,13 @@
 # Platform profiles
 
-`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8), `athena-now.yaml` is a second Athena profile for short test deployments on `plgrid-now`, and `llmlab.yaml` is the managed one of LLMLab. A Provider names one in `spec.platformProfileRef`. Sano is not shipped here; it follows in fallback mode.
+`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8), `athena-now.yaml` is a second Athena profile for short test deployments on `plgrid-now`, `sano.yaml` is the beta profile of Sano's `gpu` partition (issue #735), and `llmlab.yaml` is the managed one of LLMLab. A Provider names one in `spec.platformProfileRef`.
 
 | File | Object name | Partitions in the typed list |
 |---|---|---|
 | `helios.yaml` | `helios` | `plgrid` (CPU), `plgrid-gpu-gh200` |
 | `athena.yaml` | `athena` | `plgrid-gpu-a100`, `plgrid-now` (conformance runs and short checks only) |
 | `athena-now.yaml` | `athena-now` | `plgrid-now` only, with margins scaled to its hour: for short TEST deployments, not real serving |
+| `sano.yaml` | `sano` | `gpu` (beta), whose QOS the profile chooses by the Allocation's GPU count (`qosByGpus`), so a Provider on it sets no `qos` |
 | `llmlab.yaml` | `llmlab` | none: a managed profile has no batch fields (HBEP-4, "A managed profile"); the gateway's address and key are in the Provider's credentials file |
 
 Only a partition on which `holdRelease` was verified is in the typed list (HBEP-4, Platform profile schema). Every other partition is in the untyped block only.
@@ -71,7 +72,7 @@ A fact that nothing states is absent, not false (HBEP-4, Platform profile schema
 - The typed QOS limits come back from the API server as written (`TestShippedProfilesKeepTheirTypedQOS`), and the provider refuses a request above each of them, with a control that is accepted at the cap (`TestShippedProfilesTypeTheirQOS`). The expected numbers are written out from the HBEP, not read from the manifest.
 - The same file shows that the provider refuses a GPU request on Helios `plgrid` and accepts it on `plgrid-gpu-gh200`.
 - None compares a typed value with the fact it was copied from: that would prove only the copy. The checks that matter are admission, the provider's own checks, and the conformance runs that read these profiles.
-- **Open:** the conformance harness (`internal/providerctl/conformance`) reads these manifests whole (`TestShippedProfilesLoadForTheHarness` lists the partitions it can run on), and the 56-character name round trip has run on Helios `plgrid` (31 Oct 2026) and Athena `plgrid-now` (1 Nov 2026). `plgrid-gpu-gh200` and `plgrid-gpu-a100` have not run it; their `jobName` stands on the platform-level ruling (option (b)), with the read-back as the safety net.
+- **Open:** the conformance harness (`internal/providerctl/conformance`) reads these manifests whole (`TestShippedProfilesLoadForTheHarness` lists the partitions it can run on), and the 56-character name round trip has run on Helios `plgrid` (31 Oct 2026), Helios `plgrid-gpu-gh200` and Athena `plgrid-now` (1 Nov 2026), as `profiles/helios.yaml`'s `jobName` comment records. `plgrid-gpu-a100` has not run it; its `jobName` stands on the platform-level ruling (option (b)), with the read-back as the safety net.
 
 ## Content rules
 
