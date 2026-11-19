@@ -26,7 +26,7 @@ type Workload struct {
 
 // WorkloadSpec is what a Workload declares (HBEP-5, Workloads).
 //
-// +kubebuilder:validation:XValidation:rule="!has(self.managedSessions)",message="managedSessions takes effect with routeOrder ManagedFirst, which the front does not route yet; it is refused until then (HBEP-764, merging in steps, @hpc-burst-science-agent's ruling Q12, 18 Nov 2026)"
+// +kubebuilder:validation:XValidation:rule="!has(self.routeOrder) || self.routeOrder != 'ManagedFirst' || has(self.managedSessions)",message="routeOrder ManagedFirst needs managedSessions: the front can't see a managed provider's capacity, so the Workload's own bound on its requests there is required (HBEP-5, Workloads, Route order)"
 type WorkloadSpec struct {
 	// Model is the model name the Workload's requests name, as a ModelDeployment's
 	// spec.model is. It never contains '#', which separates a Workload in a request's
@@ -51,16 +51,17 @@ type WorkloadSpec struct {
 	Sessions *int32 `json:"sessions,omitempty"`
 
 	// RouteOrder is which route takes the Workload's requests first. OwnFirst, the
-	// default, is HBEP-5's order: LLMLab takes overflow only. ManagedFirst comes with
-	// its routing (HBEP-764, merging in steps).
+	// default, is HBEP-5's order: LLMLab takes overflow only. ManagedFirst sends a
+	// request to an eligible managed target that serves the Workload first, while the
+	// Workload's requests in flight on managed targets are fewer than managedSessions.
 	//
 	// +optional
 	// +kubebuilder:default=OwnFirst
-	// +kubebuilder:validation:Enum=OwnFirst
+	// +kubebuilder:validation:Enum=OwnFirst;ManagedFirst
 	RouteOrder RouteOrder `json:"routeOrder,omitempty"`
 
-	// ManagedSessions bounds the Workload's requests in flight on managed targets. It
-	// is required with ManagedFirst, and refused until the front routes it.
+	// ManagedSessions bounds the Workload's requests in flight on managed targets: required
+	// with ManagedFirst, and with OwnFirst it bounds the overflow (HBEP-5, Workloads, Route order).
 	//
 	// +optional
 	// +kubebuilder:validation:Minimum=1
@@ -81,8 +82,7 @@ type WorkloadShape struct {
 // RouteOrder is a Workload's route order (HBEP-5, Workloads).
 type RouteOrder string
 
-// The route orders. RouteManagedFirst is declared for the front's code to name, but
-// the schema admits it only once the front routes it (HBEP-764, merging in steps).
+// The route orders.
 const (
 	RouteOwnFirst     RouteOrder = "OwnFirst"
 	RouteManagedFirst RouteOrder = "ManagedFirst"

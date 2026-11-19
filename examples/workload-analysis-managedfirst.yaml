@@ -1,0 +1,29 @@
+# A Workload that sets ManagedFirst (beta; HBEP-5 Workloads, Route order; HBEP-764). Its requests
+# go first to an eligible managed target that serves it (a managed ModelDeployment of the same model,
+# such as modeldeployment-llmlab.yaml's shape, listing this Workload in spec.workloads or listing
+# none), while the Workload has fewer than managedSessions requests in flight on managed targets.
+# Past that bound, or with no eligible managed target, they take our own Instances, as for any
+# Workload. The front can't see LLMLab's capacity, so managedSessions, the study's own bound on it,
+# is required with ManagedFirst: admission refuses ManagedFirst without it. With the default
+# OwnFirst the same field bounds LLMLab's overflow instead.
+#
+# It is the same model and namespace as workload-labelling.yaml, and
+# modeldeployment-qwen25-labelling.yaml lists both. A request names it as
+# Qwen/Qwen2.5-1.5B-Instruct#analysis, or by the header x-hpcburst-workload: analysis.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Workload
+metadata:
+  name: analysis
+  namespace: default
+spec:
+  model: Qwen/Qwen2.5-1.5B-Instruct
+  shape:
+    contextTokens:
+      typical: 2048
+      longest: 3072
+    outputTokens:
+      typical: 256
+      longest: 512
+  sessions: 4
+  routeOrder: ManagedFirst
+  managedSessions: 4

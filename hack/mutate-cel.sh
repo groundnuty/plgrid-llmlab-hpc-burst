@@ -173,7 +173,7 @@ providers:$#0|^TestProviderNamesAreDNS1123Labels$
 providers:$.spec.credentialsRef#0|^TestProviderCredentialsReferenceNamesExactlyOneSource$
 providers:$.spec.stagingDir#0|^TestProviderStagingDirRefusesDotDotSegments$
 workloads:$#0|^TestWorkloadNameIsADNS1123Label$
-workloads:$.spec#0|^TestWorkloadRefusesManagedSessionsUntilTheFrontRoutesIt$
+workloads:$.spec#0|^TestWorkloadManagedFirstNeedsManagedSessions$
 workloads:$.spec.model#0|^TestWorkloadModelNeverContainsAHash$
 workloads:$.spec.shape.contextTokens#0|^TestWorkloadShapeTypicalContextIsAtMostLongest$
 TABLE

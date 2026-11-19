@@ -33,6 +33,9 @@ type Router struct {
 	metrics *Metrics // nil: none
 	lease   *leaseRef
 
+	// mu guards the view and everything below it up to the Workloads' state. LOCK ORDER (the science agent's ruling Q6 on #764): passMu, then a
+	// Workload's mutex, then mu, then a group's mutex; see workload_route.go. So nothing that holds mu takes a Workload's mutex or passMu or waits for
+	// one: a rebuild, which holds mu and calls Group.Update, hands its wake off (wakeAsync).
 	mu        sync.Mutex
 	snap      inventory.Snapshot
 	view      *inventory.View
@@ -59,6 +62,40 @@ type Router struct {
 	// beforePick, when set, runs between reading the view and picking from
 	// the live groups: a seam for tests that force a join in between.
 	beforePick func()
+
+	// The Workloads' state (workload_route.go). wls holds one state per Workload that has had a request, under wlMu, a leaf lock; wlN is its size, wlSeq
+	// numbers the arrivals in the FIFOs, and wlActive counts the requests that are deciding or waiting, so that a wake pass skips only when none is. passMu
+	// serialises the wake passes. wlKnown is the namespace/name of each Workload in the view, replaced by every rebuild under mu.
+	wlMu     sync.Mutex
+	wls      map[string]*wlState
+	wlN      atomic.Int64
+	wlSeq    atomic.Uint64
+	wlActive atomic.Int64
+	passMu   sync.Mutex
+	wlKnown  map[string]bool
+	// wlOrphan says some Workload state is of a Workload that has left the view, so that a completion or a waiter that gives up runs a wake pass, which
+	// drops the state once it is empty (pruneWorkloads). It is set by a rebuild and cleared by a pass, both under mu (recomputeOrphanLocked).
+	wlOrphan atomic.Bool
+	// wakeGen counts the wake requests, whether or not a pass ran for them (chooseNamed).
+	wakeGen   atomic.Uint64
+	wakeAgain atomic.Bool
+	// wakeRunning says a goroutine of wakeAsync runs.
+	wakeRunning atomic.Bool
+
+	// Seams of the tests of the Workloads' FIFO and counts. beforeWake runs at the start of a wake pass, before it takes any lock. holdAttempt runs under
+	// a Workload's mutex at the start of an attempt to place one of its requests. afterManagedCheck runs under it between the check of the managed
+	// bound and the reservation. onWlContended runs in a caller that finds a Workload's mutex held, before it waits.
+	beforeWake        func()
+	holdAttempt       func()
+	afterManagedCheck func()
+	onWlContended     func()
+	// beforeEnqueue runs under a Workload's mutex just before a request that no route could take is put in its FIFO.
+	beforeEnqueue func()
+	// afterSort runs in a wake pass after it has ordered the Workloads' FIFOs and before it serves the first. arrivalClock replaces time.Now as the time a
+	// request's queue deadline counts from, and onQueueDeadline is told the deadline a request waits against.
+	afterSort       func()
+	arrivalClock    func() time.Time
+	onQueueDeadline func(time.Time)
 
 	// The coalesced rebuilds of a burst of registration changes (#417). dirty
 	// says a registration changed since the last rebuild began; running, that a
@@ -97,7 +134,7 @@ type epochs interface {
 func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log *slog.Logger, metrics *Metrics) *Router {
 	r := &Router{
 		cfg: cfg, clk: clk, trans: trans, rec: rec, log: log, metrics: metrics, lease: &leaseRef{},
-		groups: map[string]*balancer.Group{}, rings: map[string]*balancer.Ring{}, pauses: map[string]*pause{},
+		groups: map[string]*balancer.Group{}, rings: map[string]*balancer.Ring{}, pauses: map[string]*pause{}, wls: map[string]*wlState{},
 		reported: map[string]string{}, problems: map[string]bool{}, leaseEnds: map[types.UID]time.Time{},
 	}
 	// The Transports calls this on every registration change, the Tunnel's
@@ -105,6 +142,7 @@ func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log 
 	// at once, so a burst of N changes costs a rebuild or two, never N in a row
 	// under the lock that routing needs (#417).
 	trans.Subscribe(r.markDirty)
+	metrics.attach(r)
 	return r
 }
 
@@ -269,12 +307,24 @@ func (r *Router) rebuildLocked() {
 	r.reportShortLocked(v.ShortProfiles)
 	r.logProblemsLocked(v.Problems)
 	r.scheduleLocked(v.NextChange, now)
+	// The view has changed: a join, an Instance eligible again, the cap going off or a managed target that is eligible may have freed a route of a
+	// Workload that waits, and a Workload may have left the view. The wake is handed off: a Workload's mutex comes before this one.
+	r.wakeAsync()
 }
 
 func (r *Router) indexLocked() {
 	// From the snapshot, not the view: a failure can be reported for an
 	// Instance the view does not hold as a member at that moment (one that has
 	// not joined, with no transport yet), and its pause must still record it.
+	r.wlKnown = map[string]bool{}
+	for _, byName := range r.view.Workloads {
+		for _, ws := range byName {
+			for _, w := range ws {
+				r.wlKnown[wlKey(w.Namespace, w.Name, w.UID)] = true
+			}
+		}
+	}
+	r.recomputeOrphanLocked()
 	r.keyUID = map[string]types.UID{}
 	for i := range r.snap.Instances {
 		in := &r.snap.Instances[i]
@@ -307,6 +357,17 @@ func (r *Router) applyLocked(d *inventory.Deployment, prev *inventory.View, now 
 		ref := &v1alpha1.ModelDeployment{}
 		ref.Namespace, ref.Name, ref.UID = d.Namespace, d.Name, d.UID
 		g.OnDrift = func(total, members, open int64) { r.drift(ref, total, members, open) }
+		g.OnFree, g.OnChange = r.wakeNow, r.wakeAsync
+		if r.metrics != nil {
+			key := d.Key
+			g.OnCount = func(a balancer.Attrs, ch balancer.Charge, delta int) {
+				r.metrics.inFlightAdd(ch.Workload, a.Provider, key, a.UID, delta)
+			}
+			g.OnLeave = func(a balancer.Attrs) { r.metrics.inFlightGone(a.UID) }
+			g.OnStale = func(a balancer.Attrs, ch balancer.Charge) {
+				r.metrics.inFlightDropIfEmpty(ch.Workload, a.Provider, key, a.UID)
+			}
+		}
 		r.groups[d.Key] = g
 	}
 	st, ready := r.stateLocked(d, now)
@@ -337,7 +398,7 @@ func (r *Router) stateLocked(d *inventory.Deployment, now time.Time) (balancer.S
 	ready := 0
 	for _, i := range d.Members {
 		st.Members = append(st.Members, i.Key)
-		st.Attrs[i.Key] = balancer.Attrs{Provider: i.Provider, DisplayID: i.DisplayID}
+		st.Attrs[i.Key] = balancer.Attrs{Provider: i.Provider, DisplayID: i.DisplayID, UID: string(i.UID)}
 		// The cap's value and the token budget are pushed at every membership, the count cap's presence not: below full membership a Workload request's
 		// token condition stays in force with the cap at the value it has when in force (HBEP-5, Workloads, The count in tokens). A member with no
 		// budget known has none in the state, so it meets the count rule alone.
@@ -606,7 +667,7 @@ type Status struct {
 func (r *Router) Status() Status {
 	r.lockFresh()
 	defer r.mu.Unlock()
-	s := Status{BuiltAt: r.builtAt, Deployments: map[string]int{}, Instances: len(r.snap.Instances), LeaseEnds: len(r.leaseEnds)}
+	s := Status{BuiltAt: r.builtAt, Deployments: map[string]int{}, Instances: len(r.snap.Instances), LeaseEnds: len(r.leaseEnds), Waiting: r.wlWaitingTotal()}
 	if r.view == nil {
 		return s
 	}

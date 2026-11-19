@@ -82,10 +82,16 @@ type Workload struct {
 	Namespace string
 	Name      string
 	Model     string // spec.model
+	// UID is the Workload object's, so that a Workload deleted and created again under the same name is another Workload to the front's state.
+	UID types.UID
 	// Charge is c, what one request of the Workload is charged against an Instance's token budget (HBEP-5, Workloads,
 	// The count in tokens): shape.contextTokens.typical plus shape.outputTokens.typical, as the Workload had it when
 	// this view was built.
 	Charge int64
+	// ManagedFirst is spec.routeOrder ManagedFirst, false for OwnFirst, the default and the value of a Workload that sets none; ManagedSessions is
+	// spec.managedSessions, 0 when it is unset. Both are as the Workload had them when this view was built (HBEP-5, Workloads, Route order).
+	ManagedFirst    bool
+	ManagedSessions int
 }
 
 // ManagedSource is a managed-source ModelDeployment that attaches a model.
