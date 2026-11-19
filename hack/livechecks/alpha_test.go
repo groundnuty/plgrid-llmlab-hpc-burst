@@ -66,11 +66,11 @@ var alphaShapes = []alphaShape{
 	// Row B on plgrid-now (issue #376): the same size, two jobs of 21 minutes in turn (athena-now.yaml's lead of 20 and a
 	// minute), each with its start wait of 10.
 	// The Sano rows' stack rows (issue #735): one A100 under gpu1 (chosen by the profile; the script's estimate sends it in the extra column),
-	// 11 CPUs and 135904Mi (cpusPerGpu and memPerGpu), the shortest lease of the profile's default clock, no slot and no start wait.
-	{"alpha-sano-handover", "TestAlphaSanoHandover", "sano", "partition gpu, 1 GPU, 11 CPU, 135904Mi, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "", "SEEDACCT-sano", true},
-	{"alpha-sano-serve", "TestAlphaSanoServe", "sano", "partition gpu, 1 GPU, 11 CPU, 135904Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
+	// 4 CPUs and 65536Mi (cpusPerGpu and memPerGpu since 19 Nov 2026), the shortest lease of the profile's default clock, no slot and no start wait.
+	{"alpha-sano-handover", "TestAlphaSanoHandover", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, at most 2 jobs at once, each of this shape, no requeue", "", "SEEDACCT-sano", true},
+	{"alpha-sano-serve", "TestAlphaSanoServe", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
 	// The baseline row (issue #764): the serve row's shape on Sano, with LLMLab attached and the generator run beside it.
-	{"beta-sano-llmlab-baseline", "TestBetaSanoLLMLabBaseline", "sano", "partition gpu, 1 GPU, 11 CPU, 135904Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
+	{"beta-sano-llmlab-baseline", "TestBetaSanoLLMLabBaseline", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 }
 

@@ -12,6 +12,7 @@
 #   - "derived": a division of such facts, with the numbers shown.
 #   - "the science agent's #735 comment": the values the science agent gave for this profile on
 #     18 Nov 2026 (#735, comment of 02:42Z), from the probes.
+#   - "the science agent's #735 decision of 19 Nov 2026" (https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6996960589): cpusPerGpu 4 and memPerGpu 64 GiB, in place of the maximum shares of the comment above (see cpusPerGpu).
 #   - "framework default (HBEP-n, section)": no fact exists; the design's value.
 # Slurm's "MB" and "G" are 2^20 and 2^30 bytes (the Slurm provider sends --mem=<MiB>M), so memory is in Mi.
 #
@@ -32,9 +33,14 @@ spec:
       # an Allocation gets (the time limit is the smallest of the two and the leaseLimit; HBEP-4, QOS limits).
       maxTime: 168h # facts.partitions[name=gpu].max_time, "7-00:00:00"
       gpusPerNode: 8 # facts.partitions[name=gpu].node_classes: the larger node has 8 GPUs, the other 4. The field is the node's hardware, and qosByGpus ends at 8
-      # cpusPerGpu and memPerGpu are sized so both node classes fit an Allocation of the same GPU count:
-      cpusPerGpu: 11 # derived: facts.partitions[name=gpu].node_classes, the smaller node's 44 allocatable CPUs over its 4 GPUs (the larger node's 92 over 8 is 11.5). The science agent's #735 comment
-      memPerGpu: 135904Mi # derived: (560,000 MB - 16,384 MB reserved for the system) / 4 GPUs and (1,120,000 - 32,768) / 8 GPUs are both 135,904 (facts.partitions[name=gpu].node_classes). 8 x 135,904 MiB = 1,087,232 MiB, exactly gpu8's cap (facts.slurm.qos_per_job_caps). The science agent's #735 comment
+      # cpusPerGpu and memPerGpu are what an Allocation asks for per GPU: 4 CPUs and 64 GiB, chosen so a request fits beside other users' jobs on a
+      # node (the science agent's #735 decision of 19 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6996960589). HBEP-4 (Submission, GPU sizing, "Never above one GPU's share",
+      # hbep/0004-provider-interface/README.md:340) forbids a share above the node's per-GPU share and does not ask for the maximum. The maximum
+      # shares stay as that cap, 11 CPUs and 135904Mi, derived below. The reason for the change: a 4-GPU Allocation at 11 CPUs per GPU asked for
+      # 44 CPUs, every effective CPU of the 4-GPU node, and it pended with reason Resources for an estimated 25 h while the node's 4 GPUs were free,
+      # because another user's job held 8 of its CPUs (19 Nov 2026).
+      cpusPerGpu: 4 # the science agent's #735 decision of 19 Nov 2026. The cap is 11 (derived: facts.partitions[name=gpu].node_classes, the smaller node's 44 allocatable CPUs over its 4 GPUs; the larger node's 92 over 8 is 11.5)
+      memPerGpu: 65536Mi # the same decision, 64 GiB. The cap is 135904Mi (derived: (560,000 MB - 16,384 MB reserved for the system) / 4 GPUs and (1,120,000 - 32,768) / 8 GPUs are both 135,904, facts.partitions[name=gpu].node_classes; 8 x 135,904 MiB = 1,087,232 MiB, exactly gpu8's cap, facts.slurm.qos_per_job_caps)
       # The QOS an Allocation runs under, by its GPU count: the first entry whose gpus is at least the
       # count; a count above 8 is refused before any call (HBEP-4, The Slurm dialect, The QOS by GPU count; #745).
       # A Provider on this partition sets no qos of its own: ReadProfile refuses both.
@@ -44,7 +50,7 @@ spec:
         - {gpus: 4, qos: gpu4}
         - {gpus: 8, qos: gpu8}
       imageFormat: sif # facts.containers.apptainer_compute_nodes (probe 5): a SIF was pulled to the job's scratch and run on both node classes
-      dialHomeModes: [host-dialed] # HBEP-4 (the platform profile schema): "Sano never lists ssh: its compute nodes have no home directories", where ssh mode's agent reads the dial-home key; facts.slurm.srun_chdir and facts.reachability.dial_home (probe 1 of 18 Nov 2026): host-dialed carries bytes both ways and the compute nodes have no home. direct is plausible and untested, and is no profile value
+      dialHomeModes: [host-dialed] # HBEP-4 (the platform profile schema): "Sano never lists ssh: its compute nodes have no home directories", where ssh mode's agent reads the dial-home key; facts.slurm.srun_chdir and facts.reachability.dial_home (probe 1 of 18 Nov 2026): host-dialed carries bytes both ways and the compute nodes have no home. direct is no profile value (the CRD's enum and HBEP-4: it rests on the control-plane host's address, not on the platform), so it is not listed here; probe P-D1 (#735, 18-19 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6995025741) verified its dial-home path from both node classes (facts.reachability.dial_home), and a served Instance in direct mode has not run yet
       # Not set on this partition: billingUnit (no fact: facts.slurm.priority says billing counts CPUs only,
       # and no billing weight was read), tmpDir and tmpDirFeature (no measured node-local variable).
       # computeGlibc is 2.39 (facts.compute_node.glibc, probe 2) but the field is not in the schema yet:
@@ -76,7 +82,7 @@ spec:
       maxGpusPerJob: 8
       maxCpusPerJob: 92 # 92 accepted, 96 refused
       # 1061.75 GiB written as MiB, exactly: 1061.75 x 1024 = 1,087,232 (1061 x 1024 = 1,086,464, and 0.75 x 1024 = 768).
-      # It is also 8 x memPerGpu above, and sacctmgr's mem=1087232M (facts.slurm.qos). 1120 GiB was refused.
+      # It is also 8 x 135,904, memPerGpu's cap above (not memPerGpu itself, which is 64 GiB), and sacctmgr's mem=1087232M (facts.slurm.qos). 1120 GiB was refused.
       maxMemPerJob: 1087232Mi
 
   # The throughput gate's references (beta; HBEP-4, Expected performance), one per serving spec, from reference runs apart from serving (#735's record, the
@@ -94,7 +100,7 @@ spec:
       outputTokens: 128 # the example's outputTokens.typical
       timePerOutputToken: 12.326323ms
       timeToFirstToken: 399.394255ms
-      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026. Measured at 11 CPUs and 135904Mi per GPU. Expected to hold at 4 CPUs and 64 GiB, since decode is GPU-bound and the gate's default tolerance allows 2x; pending one confirming run at the new shape"
       source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
       date: "2026-11-18"
     # examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml: Qwen/Qwen3-VL-8B-Instruct at 0c351dd01ed8, max-model-len 32768, the default max-num-seqs of 256.
@@ -106,7 +112,7 @@ spec:
       outputTokens: 128
       timePerOutputToken: 13.679505ms
       timeToFirstToken: 429.065029ms
-      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026. Measured at 11 CPUs and 135904Mi per GPU. Expected to hold at 4 CPUs and 64 GiB, since decode is GPU-bound and the gate's default tolerance allows 2x; pending one confirming run at the new shape"
       source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
       date: "2026-11-18"
 
@@ -553,11 +559,11 @@ spec:
           value:
             ssh: "reaches this host's own sshd (TCP, host key equal)"
             host_dialed: "carries bytes both ways"
-            direct: "plausible, untested at its own port"
+            direct: "the dial-home path reached from a node of each class at its own port (probe P-D1); no served Instance has run in it yet"
           method: measured
-          source: "TCP opens from a node of each class to this host's sshd and to a second listener; a listener on a node's ephemeral port accepted the login node's connect; a relay-form srun step returned its input unchanged (#735, probe 1 of 18 Nov 2026)"
-          date: "2026-11-18"
-          note: "An ssh -N -L login with the restricted key was not run (no key goes on the cluster), binary safety and throughput were not measured, and no listener was started for direct mode."
+          source: "TCP opens from a node of each class to this host's sshd and to a second listener; a listener on a node's ephemeral port accepted the login node's connect; a relay-form srun step returned its input unchanged (#735, probe 1 of 18 Nov 2026). For direct: from a CPU job on each node class, TCP to the front's dial-home listener opened and a closed port beside it was refused; the presented certificate's SHA-256 equalled the launcher's agent-endpoint certificate; GET /agent/v1/desired with no credential got the agent endpoint's own 401 through the front's passthrough; a WebSocket upgrade on /~!frp got 101 from frps (#735, probe P-D1 of 18-19 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6995025741)"
+          date: "2026-11-19"
+          note: "An ssh -N -L login with the restricted key was not run (no key goes on the cluster), and binary safety and throughput were not measured. Probe P-D1 ran a direct-mode launcher with the front's listener and two CPU jobs, but no served Instance: the judged proof of direct mode is alpha-sano-serve in that mode, still to run. direct is no profile value (HBEP-4), so dialHomeModes does not list it."
         compute_node_names_on_login:
           value:
             resolve: false

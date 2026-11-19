@@ -19,7 +19,7 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
 
-// Step 2's release archive path (marked "once v0.1.0-alpha.1 is published") is checked by running
+// Step 2's release archive path (under the heading "Release archive (v0.1.0-alpha.1)") is checked by running
 // its lines, for real, on an archive that has the layout the release scripts document. Nothing
 // here claims the published archive works: that is the release rehearsal's to show. What the page
 // can get wrong is its own lines, and they are run:
@@ -302,9 +302,9 @@ func TestArchiveNamesAreTheReleaseWorkflowsAndTheTagIsOne(t *testing.T) {
 	if !strings.Contains(workflow, "SHA256SUMS") || !strings.Contains(archiveBlock(t).text, " SHA256SUMS") {
 		t.Errorf("the release workflow and the page must both name SHA256SUMS")
 	}
-	h := regexp.MustCompile(`(?m)^### Release archive \(once (v[0-9]\S*) is published\)$`).FindStringSubmatch(readRepoFile(t, "docs/quickstart.md"))
+	h := regexp.MustCompile(`(?m)^### Release archive \((v[0-9][^\s)]*)\)$`).FindStringSubmatch(readRepoFile(t, "docs/quickstart.md"))
 	if h == nil {
-		t.Fatal("docs/quickstart.md has no heading 'Release archive (once <tag> is published)'")
+		t.Fatal("docs/quickstart.md has no heading 'Release archive (<tag>)'")
 	}
 	if want := "hpcburst-" + h[1] + "-linux-amd64.tar.gz"; name != want {
 		t.Errorf("the heading says %s is the release, so the archive is %s; the page unpacks %s", h[1], want, name)

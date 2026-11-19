@@ -207,7 +207,7 @@ const (
 	OverCapTolerance = 100 * time.Millisecond
 )
 
-// BaselineRow is Row 1: one job of one A100 on Sano's gpu partition under host-dialed mode, the 106-minute lease, posting to #764, with the cap, the
+// BaselineRow is Row 1: one job of one A100 on Sano's gpu partition in host-dialed or direct mode (the first study's; ssh is refused, ConfigFromEnv), the 106-minute lease, posting to #764, with the cap, the
 // managed LLMLab leg and the generator.
 func BaselineRow() Row {
 	return Row{Name: BetaBaselineName, Cluster: "sano", Partition: "gpu", GPUs: 1, Lease: MinLease(), Budget: 150 * time.Minute, MostJobs: 1,

@@ -44,14 +44,6 @@ func intFlag(s *v1alpha1.ServingSpec, name string, def int32) (int32, error) {
 // sets one is refused rather than overridden.
 var frameworkFlags = []string{"model", "revision", "chat-template", "uds", "host", "port", "served-model-name"}
 
-// booleanFlags are HBEP-3's boolean flags, given under their positive name
-// with "true" or "false" (the API's EngineFlag rules list the same).
-var booleanFlags = map[string]bool{
-	"trust-remote-code": true, "enforce-eager": true, "enable-expert-parallel": true,
-	"enable-auto-tool-choice": true, "enable-prefix-caching": true, "enable-chunked-prefill": true,
-	"enable-log-requests": true,
-}
-
 // shapes are a workload's request shapes with the defaults applied. longest
 // is nil when the spec leaves it to verification (HBEP-7: the resolved
 // context limit minus the typical output minus the template overhead).
@@ -82,6 +74,12 @@ func refuse(format string, a ...any) error { return &unsupported{msg: fmt.Sprint
 
 // checkServed checks a served spec before provisioning (HBEP-7, Provisioning
 // and What the controller reads). Every error it returns is *unsupported.
+//
+// Admission (the API's EngineFlag rules) checks seven boolean flags, those of
+// HBEP-3's table, for the value "true" or "false". The controller checks every
+// boolean of the engine image's own list (enginebooleans.go): admission refuses
+// a bad value on the seven first, so this refusal is what is left for the
+// rest, and for a repeated name and a "false" the image's list cannot place.
 func checkServed(md *v1alpha1.ModelDeployment) (servedPlan, error) {
 	s := md.Spec.Source.Served
 	if s == nil {
@@ -93,6 +91,13 @@ func checkServed(md *v1alpha1.ModelDeployment) (servedPlan, error) {
 				return servedPlan{}, refuse("engine flag %s is set by the framework's launch and cannot be given in the serving spec", f.Name)
 			}
 		}
+	}
+	// The boolean flags of the engine image's own parser (HBEP-3, What admission
+	// checks; amended 2026-11-18, #788): a value other than "true" or "false",
+	// a boolean named twice, and "false" for an image with no dump file are
+	// refused here, before anything is provisioned.
+	if err := refuseBooleans(s.Flags, engineBooleanDumps.forImage(s.Engine.ImageDigest)); err != nil {
+		return servedPlan{}, err
 	}
 	if err := checkGenerationConfig(s); err != nil {
 		return servedPlan{}, err
@@ -255,8 +260,16 @@ func (sh shapes) resolved(limit, overhead int32) (agentapi.Shapes, error) {
 // What the controller reads; The allocation agent, What it runs). The command
 // is vLLM's server on the checkpoint bound at ContainerModelDir, listening on
 // worker-0's Unix socket, serving the deployment's model name, then the spec's
-// flags in order, each as one --name=value argument (a boolean flag is --name
-// or --no-name), then --max-num-seqs=<n>: the spec's value, else the default.
+// flags in order, each as one --name=value argument, then --max-num-seqs=<n>:
+// the spec's value, else the default.
+//
+// A boolean flag (one the engine image's parser dump lists; HBEP-3, What
+// admission checks, amended 2026-11-18, #788) is never --name=value, which
+// vLLM's argparse refuses: "true" is the bare --name, and "false" is
+// --no-name for an optional boolean and no argument for a store_true or a
+// store_false (checkServed has refused any other value, a repeated boolean,
+// and "false" for an image with no dump). A name the list does not classify as
+// a boolean renders as --name=value, a "false" value included.
 func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch {
 	s := md.Spec.Source.Served
 	cmd := []string{"vllm", "serve", agentapi.ContainerModelDir,
@@ -265,21 +278,7 @@ func renderLaunch(md *v1alpha1.ModelDeployment, plan servedPlan) v1alpha1.Launch
 	if s.ChatTemplate != nil {
 		cmd = append(cmd, "--chat-template", agentapi.ContainerChatTemplate)
 	}
-	for _, f := range s.Flags {
-		name := flagName(f.Name)
-		if name == "max-num-seqs" {
-			continue // passed once, below, as --max-num-seqs=<n> (the Launch's CEL rule)
-		}
-		if booleanFlags[name] {
-			if f.Value == "false" {
-				cmd = append(cmd, "--no-"+name)
-			} else {
-				cmd = append(cmd, "--"+name)
-			}
-			continue
-		}
-		cmd = append(cmd, "--"+name+"="+f.Value) // one argument, so a value that starts with "-" is not read as a flag
-	}
+	cmd = append(cmd, renderServedFlags(s.Flags, engineBooleanDumps.forImage(s.Engine.ImageDigest))...)
 	cmd = append(cmd, "--max-num-seqs="+strconv.Itoa(int(plan.maxNumSeqs)))
 	var env []v1alpha1.LaunchEnvVar
 	for _, e := range s.Env {
