@@ -516,6 +516,10 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
   'hack/live-checks.sh@@      if [ "${mode:-}" = ssh ]; then@@      if [ "$host_dialed" != 1 ]; then'
   'hack/live-checks.sh@@      if [ "${mode:-}" = ssh ]; then@@      if false; then'
   'hack/live-checks.sh@@    alpha-sano-*|beta-sano-*)@@    alpha-sano-*)'
+  # PR 792's review: a Sano row in direct mode needs the front's listen address as well as the address, refused at the settings, before any cluster call, in the config and in the
+  # script. The requirement removed lets a direct run with no listener through to liveWorld, after Slurm was contacted and the binaries were built.
+  'config.go@@	if row.Cluster == "sano" && cfg.DialHomeMode == "direct" && cfg.DialHomeListen == "" {@@	if false {'
+  'hack/live-checks.sh@@      if [ "${mode:-}" = direct ] && [ -z "${S[LIVE_DIALHOME_LISTEN]:-}" ]; then@@      if false; then'
   'hack/live-checks.sh@@  [ "$CLEAN_LEFT" -eq 0 ] || verdict=1@@  [ "$CLEAN_LEFT" -eq 0 ] || [ "$NOT_RUN" = 1 ] || verdict=1'
   'hack/live-checks.sh@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=3@@  [ "$verdict" -ne 0 ] || [ "$NOT_RUN" != 1 ] || verdict=1'
   'hack/live-checks.sh@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-|30@@conformance-helios|helios|helios|plgrid|-|-|ACCOUNT_HELIOS_CPU|0|1|1Gi|00:05:00|97|-'
