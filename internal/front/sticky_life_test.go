@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,39 +104,64 @@ func TestStickyPinDoesNotExpireInFlightAndExpiresFromTheEndOfItsLastRequest(t *t
 	f.at(s, "ns/a-0", "61 min after the last request ended")
 }
 
-// Each request extends the pin, and the extension is journalled at most once a minute; one that can't be written fails its request (Lifetime). Requests at
-// 10, 20 and 50 s after the pin write nothing. One at 61 s writes one extension, whose expiry is that time plus the TTL; one at 90 s writes none; one at
-// 122 s writes the second. With the journal unwritable, a request after another minute is 503 pins_unavailable and reaches no engine, and once the journal is
-// writable the conversation is on its pin. Two more conversations hold pins, so that the journal, at 5 records, is not past twice its live size, 6, and is not
-// compacted: compaction would take the extensions out of the count.
-func TestStickyExtensionIsJournalledAtMostOnceAMinuteAndAFailedOneFailsItsRequest(t *testing.T) {
+// A pin is marked in flight before a request of it is dispatched, and its expiry is journalled when its last request ends, at most once a minute (Lifetime); a
+// failed in-flight mark fails its request. Every record written is counted through the store's seam, so the journal's own compaction does not take any out of
+// the count. The pin's first request ends at once and journals the first expiry. A request 10 s later marks the idle pin in flight again and ends too soon to
+// journal another; 20 and 50 s write nothing. One at 61 s ends a minute after the first expiry and journals the second, 12 h after that time. One at 90 s marks
+// the pin in flight again, and 122 s journals the third. No two expiries are less than a minute apart. With the pin idle and the journal unwritable, a request
+// is 503 pins_unavailable and reaches no engine, and once the journal is writable the conversation is on its pin.
+func TestStickyInFlightMarkIsJournalledBeforeDispatchAndExpiryAtMostOnceAMinute(t *testing.T) {
 	f := newSkFix(t, skOpts{})
+	var mu sync.Mutex
+	var written []pinRecord
+	f.router.pins.appended = func(r pinRecord) { mu.Lock(); written = append(written, r); mu.Unlock() }
 	s := f.session("ns/a-0", 0)
-	f.at(f.session("ns/b-0", 0), "ns/b-0", "a second conversation")
-	f.at(f.session("ns/b-0", 1), "ns/b-0", "a third conversation")
+	count := func(op string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, r := range written {
+			if r.Op == op && r.Key == keyHashByHand(s) {
+				n++
+			}
+		}
+		return n
+	}
+	counts := func(when string, pins, busy, ext int) {
+		t.Helper()
+		if p, b, e := count("pin"), count("busy"), count("ext"); p != pins || b != busy || e != ext {
+			t.Fatalf("%s: %d pin, %d busy and %d ext records were written, want %d, %d and %d", when, p, b, e, pins, busy, ext)
+		}
+	}
 	f.at(s, "ns/a-0", "the first request")
-	exts := func() int { return len(f.journalOf("ext", s)) }
-	for _, at := range []time.Duration{10 * time.Second, 10 * time.Second, 30 * time.Second} {
-		f.advance(at)
-		f.at(s, "ns/a-0", "inside the first minute")
-	}
-	if n := exts(); n != 0 {
-		t.Fatalf("%d extensions were journalled inside the first minute, want none", n)
-	}
+	counts("after the first request", 1, 0, 1)
+	f.advance(10 * time.Second)
+	f.at(s, "ns/a-0", "at 10 s")
+	counts("at 10 s, the idle pin is marked in flight again", 1, 1, 1)
+	f.advance(10 * time.Second)
+	f.at(s, "ns/a-0", "at 20 s")
+	f.advance(30 * time.Second)
+	f.at(s, "ns/a-0", "at 50 s")
+	counts("at 50 s: nothing more", 1, 1, 1)
 	f.advance(11 * time.Second) // 61 s
 	f.at(s, "ns/a-0", "at 61 s")
-	if got := f.journalOf("ext", s); len(got) != 1 || !got[0].Expiry.Equal(f.start0().Add(61*time.Second+12*time.Hour)) {
-		t.Fatalf("at 61 s the journal's extensions are %+v, want one that expires 12 h after 61 s", got)
-	}
+	counts("at 61 s: the second expiry", 1, 1, 2)
 	f.advance(29 * time.Second) // 90 s
 	f.at(s, "ns/a-0", "at 90 s")
-	if n := exts(); n != 1 {
-		t.Fatalf("at 90 s there are %d extensions, want still 1", n)
-	}
+	counts("at 90 s: marked in flight again", 1, 2, 2)
 	f.advance(32 * time.Second) // 122 s
 	f.at(s, "ns/a-0", "at 122 s")
-	if n := exts(); n != 2 {
-		t.Fatalf("at 122 s there are %d extensions, want 2", n)
+	counts("at 122 s: the third expiry", 1, 2, 3)
+	mu.Lock()
+	var exts []pinRecord
+	for _, r := range written {
+		if r.Op == "ext" && r.Key == keyHashByHand(s) {
+			exts = append(exts, r)
+		}
+	}
+	mu.Unlock()
+	if !exts[1].Expiry.Equal(f.start0().Add(61*time.Second+12*time.Hour)) || exts[2].Expiry.Sub(exts[1].Expiry) < time.Minute || exts[1].Expiry.Sub(exts[0].Expiry) < time.Minute {
+		t.Errorf("the expiries journalled are %v, want the second 12 h after 61 s and none less than a minute after another", []time.Time{exts[0].Expiry, exts[1].Expiry, exts[2].Expiry})
 	}
 
 	f.advance(time.Minute)
@@ -144,10 +170,67 @@ func TestStickyExtensionIsJournalledAtMostOnceAMinuteAndAFailedOneFailsItsReques
 	resp := f.errPost(scChat, errChatBody(f.alpha(), false, "hello there"), "x-session-id", s)
 	checkError(t, resp, readAll(t, resp), wantError{status: 503, code: "capacity", detail: "pins_unavailable", retryAfter: "10"})
 	if n := f.totalSaw(); n != before {
-		t.Errorf("the engines saw %d requests after one whose extension could not be written, want none more", n-before)
+		t.Errorf("the engines saw %d requests after one whose in-flight mark could not be written, want none more", n-before)
 	}
 	f.setFailWrites(nil)
 	f.at(s, "ns/a-0", "after the journal is writable again")
+}
+
+// stream puts a request of the pinned conversation in flight on b-0 and holds it there, which the journal records before it is dispatched. The returned
+// release lets it go.
+func (f *skFix) stream(s string) (release func()) {
+	f.t.Helper()
+	release = f.hold("ns/b-0")
+	_, _ = f.start(s)
+	errWaitFor(f.t, "the stream to reach b-0", func() bool { return f.engines["ns/b-0"].Open() == 1 })
+	return release
+}
+
+// A pin that a stream outlives is still the conversation's after a crash (Lifetime). The pin's TTL is 1 h. A stream is in flight on its target for 70 min, and a
+// new front over the same journal then serves the conversation: the journal showed the pin in flight, so the reload keeps it, and the conversation goes to its
+// target and not to its home. A journal that recorded the expiry at the stream's arrival, 1 h after it, would have dropped it.
+func TestStickyPinOfAStreamLongerThanItsTTLSurvivesACrash(t *testing.T) {
+	f := newSkFix(t, skOpts{pinTTL: "1h", edit: func(c *Config) {
+		c.MaxRequestDuration, c.IdleTimeout = Duration(100*time.Hour), Duration(100*time.Hour)
+	}})
+	s := f.session("ns/a-0", 0)
+	f.pinAway(s)
+	release := f.stream(s)
+	f.advance(70 * time.Minute)
+	f.restart() // the stream dies with the old front
+	release()
+	f.at(s, "ns/b-0", "70 min into a stream of a 1 h pin, after a crash")
+}
+
+// A pin that a reload finds in flight is converted (Lifetime): live for one TTL from the reload, and that is journalled, so another restart does not extend it
+// again. The pin's TTL is 1 h and its stream died with the front. With no request in between, it is on its pin 59 min after the restart and gone 61 min after
+// it; and a second restart half an hour after the first does not extend it again. A reload that kept it in flight with no expiry would never end it.
+func TestStickyPinFoundInFlightAtAReloadExpiresOneTTLAfterIt(t *testing.T) {
+	long := func(c *Config) {
+		c.MaxRequestDuration, c.IdleTimeout = Duration(100*time.Hour), Duration(100*time.Hour)
+	}
+	t.Run("live 59 minutes after the restart", func(t *testing.T) {
+		f := newSkFix(t, skOpts{pinTTL: "1h", edit: long})
+		s := f.session("ns/a-0", 0)
+		f.pinAway(s)
+		release := f.stream(s)
+		f.restart()
+		release()
+		f.advance(59 * time.Minute)
+		f.at(s, "ns/b-0", "59 min after the restart")
+	})
+	t.Run("gone 61 minutes after the restart, and a second restart does not extend it", func(t *testing.T) {
+		f := newSkFix(t, skOpts{pinTTL: "1h", edit: long})
+		s := f.session("ns/a-0", 0)
+		f.pinAway(s)
+		release := f.stream(s)
+		f.restart()
+		release()
+		f.advance(30 * time.Minute)
+		f.restart() // the conversion was journalled: a restart 30 min later finds the pin idle
+		f.advance(31 * time.Minute)
+		f.at(s, "ns/a-0", "61 min after the first restart, with no request since: the pin has expired")
+	})
 }
 
 // The journal is reloaded before a request of a sticky Workload is served, so a restart changes no conversation's target (Sticky routes, The journal). The

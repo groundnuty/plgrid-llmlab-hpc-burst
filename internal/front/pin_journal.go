@@ -13,10 +13,12 @@ import (
 )
 
 // The pin journal's file I/O (pins.go has the format and the store): reading it at the first sticky request, rewriting it compacted, and appending a record
-// and syncing it.
+// and syncing it. The store's memory is the authority once the journal has been read: a failed write never makes the store read the journal again, it makes
+// the request that needed the write fail, until a write succeeds.
 
 // loadLocked reads the journal into memory, drops a last line that a crash cut short (its request was never sent: a pin is dispatched only after its
-// line is synced), and compacts it when that drops anything. Any other line it can't read is an error: a pin it can't see is a conversation it could move.
+// line is synced), converts every pin the journal shows in flight (live for one TTL from now) and compacts the journal when that, or anything else, changes
+// it. A record it can't read is an error: a pin it can't see is a conversation it could move.
 func (s *pinStore) loadLocked() error {
 	if s.path == "" {
 		return errors.New("no usage directory")
@@ -37,34 +39,18 @@ func (s *pinStore) loadLocked() error {
 		}
 	}
 	now := s.now()
-	byW := map[types.UID]map[string]*pin{}
-	lines := 0
-	for i, line := range bytes.Split(raw, []byte{'\n'}) {
-		if len(line) == 0 {
-			continue
-		}
-		var rec pinRecord
-		if err := json.Unmarshal(line, &rec); err != nil || rec.Workload == "" || rec.Key == "" || (rec.Op != "pin" && rec.Op != "ext") {
-			return fmt.Errorf("line %d is not a pin record", i+1)
-		}
-		lines++
-		if byW[rec.Workload] == nil {
-			byW[rec.Workload] = map[string]*pin{}
-		}
-		switch p := byW[rec.Workload][rec.Key]; {
-		case rec.Op == "pin":
-			ttl := rec.TTL.D()
-			if ttl <= 0 || (rec.MD == "" && rec.ManagedID == "") {
-				return fmt.Errorf("line %d is not a pin record", i+1)
-			}
-			byW[rec.Workload][rec.Key] = &pin{target: rec.pinTarget, ttl: ttl, lastEnd: rec.Expiry.Add(-ttl), journalled: rec.Expiry.Add(-ttl)}
-		case p != nil:
-			p.lastEnd, p.journalled = rec.Expiry.Add(-p.ttl), rec.Expiry.Add(-p.ttl)
-		}
+	byW, lines, err := replayPinRecords(raw)
+	if err != nil {
+		return err
 	}
-	live := 0
+	converted, live := 0, 0
 	for w, keys := range byW {
 		for k, p := range keys {
+			if p.busy {
+				// The request that marked it died with the front at the latest: the pin expires one TTL from now, and that is journalled below.
+				p.lastEnd, p.busy = now, false
+				converted++
+			}
 			if !p.live(now) {
 				delete(keys, k)
 				continue
@@ -76,10 +62,10 @@ func (s *pinStore) loadLocked() error {
 		}
 	}
 	s.byW, s.lines, s.swept = byW, lines, now
-	if created || lines > live {
+	if created || converted > 0 || lines > live {
 		if err := s.compactLocked(now); err != nil {
-			if created {
-				return err
+			if created || converted > 0 {
+				return err // the journal does not show what the front serves by: no request is served on it
 			}
 			// The old journal is whole and still serves: a failed compaction costs only its size.
 			s.log.Warn("the pin journal could not be compacted at start", "error", err.Error())
@@ -91,6 +77,54 @@ func (s *pinStore) loadLocked() error {
 		}
 	}
 	return nil
+}
+
+// replayPinRecords reads the journal's records in order into pins, and how many it read. A pin record makes the pin, in flight when it has no expiry; a busy
+// record marks it in flight; an ext record sets its expiry, and one without an expiry is not a record.
+func replayPinRecords(raw []byte) (map[types.UID]map[string]*pin, int, error) {
+	byW := map[types.UID]map[string]*pin{}
+	lines := 0
+	for i, line := range bytes.Split(raw, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		bad := fmt.Errorf("line %d is not a pin record", i+1)
+		var rec pinRecord
+		if err := json.Unmarshal(line, &rec); err != nil || rec.Workload == "" || rec.Key == "" {
+			return nil, 0, bad
+		}
+		lines++
+		if byW[rec.Workload] == nil {
+			byW[rec.Workload] = map[string]*pin{}
+		}
+		p := byW[rec.Workload][rec.Key]
+		switch rec.Op {
+		case "pin":
+			ttl := rec.TTL.D()
+			if ttl <= 0 || rec.MD == "" || (rec.ID == "" && rec.ManagedID == "") {
+				return nil, 0, bad
+			}
+			p = &pin{target: rec.pinTarget, ttl: ttl, busy: rec.Expiry.IsZero()}
+			if !p.busy {
+				p.lastEnd, p.extended = rec.Expiry.Add(-ttl), rec.Expiry.Add(-ttl)
+			}
+			byW[rec.Workload][rec.Key] = p
+		case "busy":
+			if p != nil {
+				p.busy = true
+			}
+		case "ext":
+			if rec.Expiry.IsZero() {
+				return nil, 0, bad
+			}
+			if p != nil {
+				p.lastEnd, p.extended, p.busy = rec.Expiry.Add(-p.ttl), rec.Expiry.Add(-p.ttl), false
+			}
+		default:
+			return nil, 0, bad
+		}
+	}
+	return byW, lines, nil
 }
 
 // openLocked opens the journal for appending and learns its size.
@@ -109,7 +143,9 @@ func (s *pinStore) openLocked() error {
 }
 
 // compactLocked writes the live pins, one record each, to a new file and renames it over the journal, so the journal is never half-written: a crash
-// leaves the old file or the new. It then syncs the directory, so the rename is on disk.
+// leaves the old file or the new. A pin with a request in flight is written in flight, an idle one with its expiry. What the pins record as journalled is
+// set only once the rename has made the new file the journal. The directory is then synced, so the rename is on disk; when that fails the store appends
+// nothing until it succeeds (appendLocked), since a crash could bring back the old journal without the records that came after.
 func (s *pinStore) compactLocked(now time.Time) error {
 	dir := filepath.Dir(s.path)
 	tmp, err := os.CreateTemp(dir, ".sticky-pins.tmp*")
@@ -117,7 +153,7 @@ func (s *pinStore) compactLocked(now time.Time) error {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
-	lines := 0
+	var written []*pin
 	var buf bytes.Buffer
 	for w, keys := range s.byW {
 		for k, p := range keys {
@@ -125,15 +161,18 @@ func (s *pinStore) compactLocked(now time.Time) error {
 				delete(keys, k)
 				continue
 			}
-			line, err := json.Marshal(pinRecord{Op: "pin", Workload: w, Key: k, pinTarget: p.target, TTL: Duration(p.ttl), Expiry: p.expiry(now)})
+			rec := pinRecord{Op: "pin", Workload: w, Key: k, pinTarget: p.target, TTL: Duration(p.ttl)}
+			if p.inflight == 0 {
+				rec.Expiry = p.lastEnd.Add(p.ttl)
+			}
+			line, err := json.Marshal(rec)
 			if err != nil {
 				_ = tmp.Close()
 				return err
 			}
 			buf.Write(line)
 			buf.WriteByte('\n')
-			lines++
-			p.journalled = now
+			written = append(written, p)
 		}
 		if len(keys) == 0 {
 			delete(s.byW, w)
@@ -157,15 +196,22 @@ func (s *pinStore) compactLocked(now time.Time) error {
 	if err := os.Rename(tmp.Name(), s.path); err != nil {
 		return err
 	}
+	for _, p := range written {
+		if p.busy = p.inflight > 0; !p.busy {
+			p.extended = now
+		}
+	}
 	if s.f != nil {
 		_ = s.f.Close()
 		s.f = nil
 	}
-	s.lines = lines
+	s.lines, s.broken = len(written), false
 	openErr := s.openLocked()
-	if syncErr := syncDir(dir); openErr == nil {
+	if syncErr := s.syncDirFn(dir); syncErr != nil {
+		s.dirDirty = true
 		return syncErr
 	}
+	s.dirDirty = false
 	return openErr
 }
 
@@ -178,8 +224,9 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
-// appendLocked writes one record and syncs it. A failed write is taken back, so a torn line never sits in the middle of the journal; when it can't be,
-// the store reads the journal again before it serves the next request.
+// appendLocked writes one record and syncs it. It first makes the journal fit for it: a directory that a compaction could not sync is synced again, and a
+// journal that a failed write could not be cut back is cut back, and when either fails the append fails. A write that fails is taken back, so a torn line
+// never sits in the middle of the journal.
 func (s *pinStore) appendLocked(rec pinRecord) error {
 	if s.failWrites != nil {
 		return s.failWrites
@@ -188,9 +235,16 @@ func (s *pinStore) appendLocked(rec pinRecord) error {
 	if err != nil {
 		return err
 	}
-	if s.f == nil {
-		s.loaded = false // read again, which opens it
-		return errors.New("the pin journal is not open")
+	if s.dirDirty {
+		if err := s.syncDirFn(filepath.Dir(s.path)); err != nil {
+			return fmt.Errorf("the pin journal's directory is not synced: %w", err)
+		}
+		s.dirDirty = false
+	}
+	if s.f == nil || s.broken {
+		if err := s.reopenLocked(); err != nil {
+			return err
+		}
 	}
 	_, err = s.f.Write(append(line, '\n'))
 	if err == nil {
@@ -198,11 +252,41 @@ func (s *pinStore) appendLocked(rec pinRecord) error {
 	}
 	if err != nil {
 		if terr := s.f.Truncate(s.size); terr != nil {
-			s.loaded = false
+			s.broken = true
 		}
 		return err
 	}
 	s.size += int64(len(line)) + 1
 	s.lines++
+	if s.appended != nil {
+		s.appended(rec)
+	}
+	return nil
+}
+
+// reopenLocked opens the journal again, and when a failed append could not be taken back cuts it back to its size at the last whole record.
+func (s *pinStore) reopenLocked() error {
+	good, broken := s.size, s.broken
+	if s.f != nil {
+		_ = s.f.Close()
+		s.f = nil
+	}
+	if err := s.openLocked(); err != nil {
+		return err
+	}
+	if !broken {
+		return nil
+	}
+	cur := s.size
+	s.size = good // the last whole record's end, whatever the file holds now
+	if cur < good {
+		return errors.New("the pin journal is shorter than its last whole record")
+	}
+	if cur > good {
+		if err := s.f.Truncate(good); err != nil {
+			return err
+		}
+	}
+	s.broken = false
 	return nil
 }

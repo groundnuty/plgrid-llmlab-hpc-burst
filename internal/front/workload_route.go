@@ -108,6 +108,20 @@ func (ws *wlState) popAtLocked(i int) {
 	ws.r.wlActive.Add(-1)
 }
 
+// pinnedWaitingLocked is the targets that hold a pinned waiter of the Workload.
+func (ws *wlState) pinnedWaitingLocked() map[pinTarget]bool {
+	var m map[pinTarget]bool
+	for _, w := range ws.queue {
+		if w.res.pin != nil {
+			if m == nil {
+				m = map[pinTarget]bool{}
+			}
+			m[*w.res.pin] = true
+		}
+	}
+	return m
+}
+
 // competesLocked reports whether a request arriving now must queue behind a waiter instead of trying a route: the FIFO is strict, so a request behind a
 // waiter that may take the same route queues. A waiter that holds no pin may take any route, so it competes with every request. A waiter that holds one
 // may take only its pinned target, so it competes with a request that holds the same pin, and a pinned head that can't be placed blocks no other
@@ -212,10 +226,14 @@ func (r *Router) lockWorkload(res *Resolution) *wlState {
 // request is tried and queued in one critical section. A request of a conversation with a sticky pin has one route, its target (Resolution.pin). A wake pass lists only the Workloads whose FIFO holds a
 // request, so a wake that comes between the try and the enqueue finds none for this Workload and skips it; the arrival counts the wake requests that came
 // meanwhile (wakeGen) and, when there were any, runs a pass of its own once it is queued (found by the tests of the wakes: the lost wake).
-func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
+func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool, arrival time.Time) (*target, *routeError) {
 	// The queue's deadline is taken here, at arrival, before the request is queued and before any wake pass it runs: a pass that waits for the pass lock
-	// must not spend the request's queueTimeout before it starts.
-	qctx, cancel := context.WithDeadline(ctx, r.arrivalNow().Add(r.cfg.QueueTimeout.D()))
+	// must not spend the request's queueTimeout before it starts. A request that waited for its conversation's key lock first carries the time it arrived at
+	// (arrival), so the wait for the lock is part of its queueTimeout and not before it.
+	if arrival.IsZero() {
+		arrival = r.arrivalNow()
+	}
+	qctx, cancel := context.WithDeadline(ctx, arrival.Add(r.cfg.QueueTimeout.D()))
 	defer cancel()
 	// An arrival counts as active before it reads the view, so no wake pass skips on seeing none: a rebuild whose wake finds nothing active has changed the
 	// view before this request reads it (wakeNow, wakeAsync).
@@ -297,6 +315,13 @@ func (r *Router) tryNamedLocked(ws *wlState, p *plan) (tg *target, canWait bool)
 		h()
 	}
 	res := p.res
+	avoided := false
+	if res.sticky && res.pin == nil {
+		// A first request of a sticky Workload leaves the targets that hold a pinned waiter to those waiters.
+		if p.avoid = ws.pinnedWaitingLocked(); len(p.avoid) > 0 {
+			avoided = p.avoidsATarget()
+		}
+	}
 	if res.managedFirst {
 		if tg = r.takeManagedLocked(ws, p); tg != nil {
 			return tg, false
@@ -312,7 +337,7 @@ func (r *Router) tryNamedLocked(ws *wlState, p *plan) (tg *target, canWait bool)
 			return tg, false
 		}
 	}
-	return nil, wait != nil || len(p.managed) > 0 || p.pinWait
+	return nil, wait != nil || len(p.managed) > 0 || p.pinWait || avoided
 }
 
 // takeManagedLocked reserves the Workload's count and returns a managed target when one is eligible and the Workload is below its managedSessions (no
@@ -476,6 +501,11 @@ func (r *Router) tryHead(ws *wlState, seq uint64) headResult {
 	var blocked []pinTarget
 	for i := 0; i < len(ws.queue); i++ {
 		w := ws.queue[i]
+		if i > 0 && r.olderHeadElsewhere(ws, w.seq) {
+			// Behind a pinned head that can't be placed, a waiter takes a slot only when no other Workload's FIFO has an older head: the order across Workloads,
+			// by the age of each head, is #786's, and a sticky Workload's scan past its blocked head does not change it.
+			break
+		}
 		if w.res.pin != nil && slices.Contains(blocked, *w.res.pin) {
 			continue
 		}
@@ -505,6 +535,19 @@ func (r *Router) tryHead(ws *wlState, seq uint64) headResult {
 		blocked = append(blocked, *w.res.pin)
 	}
 	return headNone
+}
+
+// olderHeadElsewhere reports whether the FIFO of another Workload holds a head older than the arrival number seq. It takes the registry's leaf lock under the
+// Workload's mutex, as pruneWorkloads does.
+func (r *Router) olderHeadElsewhere(ws *wlState, seq uint64) bool {
+	r.wlMu.Lock()
+	defer r.wlMu.Unlock()
+	for _, o := range r.wls {
+		if h := o.headSeq.Load(); o != ws && h != 0 && h < seq {
+			return true
+		}
+	}
+	return false
 }
 
 // headResult is what tryHead did with a FIFO's head.

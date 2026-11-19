@@ -69,6 +69,24 @@ func TestStickyTargetThatIsGoneRefusesAndOneThatIsOnlyAbsentWaits(t *testing.T) 
 		f.apply()
 		ask(f, s, wantError{status: 503, code: "capacity", retryAfter: "10"})
 	})
+	t.Run("the ModelDeployment's status lists no current ID, and the pinned Instance is full", func(t *testing.T) {
+		// Gone needs positive evidence (the science agent's ruling of 19 Nov 2026 on #795): an empty list waits, here for a full Instance, and is 503 capacity
+		// after queueTimeout, never pinned_target_gone.
+		f := newSkFix(t, skOpts{edit: wait})
+		s := f.session("ns/b-0", 0)
+		f.at(s, "ns/b-0", "the first request")
+		f.md("md-b").Status.CurrentIDs = nil
+		f.apply()
+		release := f.hold("ns/b-0")
+		held, _ := f.start(s)
+		errWaitFor(t, "the held request to reach b-0", func() bool { return f.engines["ns/b-0"].Open() == 1 })
+		ask(f, s, wantError{status: 503, code: "capacity", retryAfter: "10"})
+		release()
+		if resp, body := held.wait(t); resp.StatusCode != 200 {
+			t.Errorf("the held request: %d %s", resp.StatusCode, body)
+		}
+		f.at(s, "ns/b-0", "with b-0 free again, still on its pin")
+	})
 	t.Run("the Instance is verifying", func(t *testing.T) {
 		f := newSkFix(t, skOpts{edit: wait})
 		s := f.session("ns/b-0", 0)
@@ -185,8 +203,8 @@ func TestStickyManagedPinCountsManagedSessionsAndNeverMovesToAnInstance(t *testi
 	first, _ := f.start(s)
 	errWaitFor(t, "the first request to reach the LLMLab double", func() bool { return f.llm.Arrived("POST", scChat) == 1 })
 	pins := f.journalOf("pin", s)
-	if len(pins) != 1 || pins[0].MD != "" || pins[0].Provider != "llm-a" || pins[0].ManagedID != strings.Repeat("0", 58)+"abc000" {
-		t.Fatalf("the pin of the first request is %+v, want the managed target: Provider llm-a and the catalog entry's managed ID", pins)
+	if len(pins) != 1 || pins[0].MD != f.mdUID("md-llm") || pins[0].Provider != "llm-a" || pins[0].ManagedID != strings.Repeat("0", 58)+"abc000" {
+		t.Fatalf("the pin of the first request is %+v, want the managed target: its source md-llm, Provider llm-a and the catalog entry's managed ID", pins)
 	}
 	f.at(fresh, "ns/a-0", "a new conversation, with the managed bound reached")
 	second, _ := f.start(s)

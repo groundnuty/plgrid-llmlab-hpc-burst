@@ -79,15 +79,15 @@ func TestStickyPinIsJournalledBeforeTheRequestIsDispatched(t *testing.T) {
 		t.Fatalf("the first request: %d from %q, want 200 from ns/a-0: %s", resp.StatusCode, scInstanceOf(resp), body)
 	}
 	pins := f.journalOf("pin", s)
-	if len(pins) != 1 || len(f.journal()) != 2 {
-		t.Fatalf("the journal holds %d records, %d of them this key's pin, want its one beside the second conversation's", len(f.journal()), len(pins))
+	if n := len(f.journalOf("pin", other)); len(pins) != 1 || n != 1 {
+		t.Fatalf("the journal holds %d pins of the released conversation and %d of the second, want 1 and 1", len(pins), n)
 	}
 	p := pins[0]
 	if p.Workload != f.alphaUID() || p.MD != f.mdUID("md-a") || p.ID != f.idOf("ns/a-0") || p.Provider != "" || p.ManagedID != "" || p.TTL.D() != 12*time.Hour {
 		t.Errorf("the pin is %+v, want workload %s, ModelDeployment %s, deployment ID %s, TTL 12h and no managed target", p, f.alphaUID(), f.mdUID("md-a"), f.idOf("ns/a-0"))
 	}
-	if want := f.start0().Add(12 * time.Hour); !p.Expiry.Equal(want) {
-		t.Errorf("the pin expires at %v, want %v: 12 h after the first request", p.Expiry, want)
+	if !p.Expiry.IsZero() {
+		t.Errorf("the pin of a request in flight carries the expiry %v, want none: it is in flight, and its expiry is journalled when its request ends", p.Expiry)
 	}
 }
 

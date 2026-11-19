@@ -195,8 +195,9 @@ func (i *Instance) TokenBudget() (perWorker int64, workers int, ok bool) {
 
 // ManagedTarget is one attached managed catalog entry under one Provider.
 type ManagedTarget struct {
-	Key                string // namespace/name@provider
-	Deployment         string // the managed-source ModelDeployment's namespace/name
+	Key                string    // namespace/name@provider
+	Deployment         string    // the managed-source ModelDeployment's namespace/name
+	UID                types.UID // the managed-source ModelDeployment's UID: a sticky pin names its source by it (HBEP-5, Sticky routes)
 	Namespace          string
 	Name               string
 	Provider           string

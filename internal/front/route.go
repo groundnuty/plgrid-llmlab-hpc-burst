@@ -213,7 +213,7 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution
 		}
 		res = p.res
 	}
-	return r.chooseNamed(ctx, n, res, key, exclude, withManaged)
+	return r.chooseNamed(ctx, n, res, key, exclude, withManaged, time.Time{})
 }
 
 // plan is what one attempt to place a request reads from the view: the Resolution of its Workload (nil when it names none), the ModelDeployments that
@@ -236,30 +236,55 @@ type plan struct {
 	// pinned target exists and may take the request later: paused, verifying, unreachable, or in a handover's gap, it is waited for, never given up on.
 	pinID   string
 	pinWait bool
+	// avoid are the targets that hold a pinned waiter: a first request of a sticky Workload is not placed on one, so that a slot a pinned waiter is waiting for
+	// is not taken by a new conversation between its release and the wake pass that places the waiter (tryNamedLocked).
+	avoid map[pinTarget]bool
 }
 
-// match is the filter on a deployment's members for this attempt: its level and exclusions, and for a conversation pinned to a ModelDeployment, the pinned
-// deployment ID. The ID is read from the view's own Instances, so a member that joined since is judged by its display form.
+// match is the filter on a deployment's members for this attempt: its level and exclusions; for a conversation pinned to a ModelDeployment, the pinned
+// FULL deployment ID, read from the view's own Instances (a member that joined since is not judged by its 12-character display form: it is left for the next
+// attempt, which the join wakes); and for a first request of a sticky Workload, not a target that holds a pinned waiter (avoid).
 func (p *plan) match() balancer.Match {
 	base := levelMatch(p.n, p.exclude)
-	if p.pinID == "" {
+	if p.pinID == "" && len(p.avoid) == 0 {
 		return base
 	}
 	ids := map[string]string{}
+	mds := map[string]types.UID{}
 	for _, d := range p.serving {
 		for _, i := range d.Members {
-			ids[i.Key] = i.DeploymentID
+			ids[i.Key], mds[i.Key] = i.DeploymentID, d.UID
 		}
 	}
 	return func(member string, a balancer.Attrs) bool {
 		if !base(member, a) {
 			return false
 		}
-		if full, ok := ids[member]; ok {
-			return full == p.pinID
+		full, known := ids[member]
+		if p.pinID != "" {
+			return known && full == p.pinID
 		}
-		return len(p.pinID) >= len(a.DisplayID) && a.DisplayID != "" && p.pinID[:len(a.DisplayID)] == a.DisplayID
+		return !known || !p.avoid[pinTarget{MD: mds[member], ID: full}]
 	}
+}
+
+// avoidsATarget drops from the plan's managed targets those it avoids, and says whether the plan avoids any target that could have taken the request: such a
+// request has a route that may free, so it waits instead of being answered that nothing is eligible.
+func (p *plan) avoidsATarget() bool {
+	found := false
+	p.managed = slices.DeleteFunc(slices.Clone(p.managed), func(t *inventory.ManagedTarget) bool {
+		hit := p.avoid[pinTarget{MD: t.UID, Provider: t.Provider, ManagedID: t.ManagedID}]
+		found = found || hit
+		return hit
+	})
+	for _, d := range p.serving {
+		for _, i := range d.Members {
+			if p.avoid[pinTarget{MD: d.UID, ID: i.DeploymentID}] && levelMatches(p.n, i.Provider, i.DisplayID) && !slices.Contains(p.exclude, i.Key) {
+				found = true
+			}
+		}
+	}
+	return found
 }
 
 // plan reads the view for one attempt. A request waits for one rebuild, two at most under a barging reader (#417; lockFresh). The view it routes on
@@ -355,7 +380,8 @@ func (r *Router) plan(n naming.Name, res *Resolution, key string, exclude []stri
 // edit of spec.workloads moves nothing (HBEP-5, Sticky routes). It is called with Router.mu held and releases it. A target that's gone is the ModelDeployment
 // deleted, a managed target with no entry listed or no managed-source ModelDeployment, or no current deployment ID of the ModelDeployment equal to the
 // pinned one, as after a finished rollout. A ModelDeployment whose status lists no current ID yet is not read as gone: nothing says it no longer is current.
-// Paused, verifying, unreachable, full or in a no-overlap handover's gap, the target is waited for (plan.pinWait).
+// Paused, verifying, unreachable, full or in a no-overlap handover's gap, the target is waited for (plan.pinWait). Gone needs positive evidence (the science
+// agent's ruling of 19 Nov 2026 on #795): the ModelDeployment deleted, or a non-empty status.currentIDs with no ID equal to the pinned one; an empty one waits.
 func (r *Router) planPinned(m *inventory.Model, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*plan, *routeError) {
 	pn := res.pin
 	p := &plan{n: n, key: key, exclude: exclude, withManaged: withManaged, res: res, wname: res.Name}
@@ -364,8 +390,8 @@ func (r *Router) planPinned(m *inventory.Model, n naming.Name, res *Resolution, 
 		now := r.clk.Now()
 		if m != nil {
 			for _, t := range m.Managed {
-				if t.Provider != pn.Provider || t.ManagedID != pn.ManagedID {
-					continue
+				if t.UID != pn.MD || t.Provider != pn.Provider || t.ManagedID != pn.ManagedID {
+					continue // another source that lists the same entry is not the pinned target: the pin follows its own ModelDeployment
 				}
 				listed = true
 				if withManaged && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) {

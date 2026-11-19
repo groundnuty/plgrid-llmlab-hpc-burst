@@ -3,6 +3,7 @@ package front
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/front/naming"
@@ -23,7 +24,8 @@ func (r *Router) chooseSticky(ctx context.Context, n naming.Name, res *Resolutio
 	hash := keyHash(key)
 	// The lock is taken by the request's own context, bounded by the queue deadline from its arrival, so a second request of a key whose first is waiting for a
 	// target gives up as that one would.
-	lctx, cancel := context.WithDeadline(ctx, r.arrivalNow().Add(r.cfg.QueueTimeout.D()))
+	arrival := r.arrivalNow()
+	lctx, cancel := context.WithDeadline(ctx, arrival.Add(r.cfg.QueueTimeout.D()))
 	defer cancel()
 	unlock, err := st.lockKey(lctx, res.uid, hash)
 	if err != nil {
@@ -40,7 +42,7 @@ func (r *Router) chooseSticky(ctx context.Context, n naming.Name, res *Resolutio
 		ref := &pinRef{s: st, w: res.uid, hash: hash, p: pn}
 		at := pn.target // the Resolution holds its own copy: the pin never changes, and a wake pass reads it
 		res.pin = &at
-		tg, rerr := r.chooseNamed(ctx, n, res, key, exclude, withManaged)
+		tg, rerr := r.chooseNamed(ctx, n, res, key, exclude, withManaged, arrival)
 		if rerr != nil {
 			ref.done()
 			return nil, rerr
@@ -55,7 +57,7 @@ func (r *Router) chooseSticky(ctx context.Context, n naming.Name, res *Resolutio
 	if st.full(res.uid, res.maxPins) {
 		return nil, errPinsFull(res.Name)
 	}
-	tg, rerr := r.chooseNamed(ctx, n, res, key, exclude, withManaged)
+	tg, rerr := r.chooseNamed(ctx, n, res, key, exclude, withManaged, arrival)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -78,20 +80,30 @@ func (r *Router) chooseSticky(ctx context.Context, n naming.Name, res *Resolutio
 // or the managed target by Provider and managed ID.
 func pinTargetOf(tg *target) pinTarget {
 	if tg.managed != nil {
-		return pinTarget{Provider: tg.managed.Provider, ManagedID: tg.managed.ManagedID}
+		return pinTarget{MD: tg.managed.UID, Provider: tg.managed.Provider, ManagedID: tg.managed.ManagedID}
 	}
 	return pinTarget{MD: tg.dep.UID, ID: tg.inst.DeploymentID}
 }
 
-// newPins opens the router's pin store over the pin journal in the usage directory. The journal is read at the first request of a sticky Workload
-// (pinStore.ensure), not here, so a front with none never touches it.
+// newPins opens the router's pin store over the pin journal in the usage directory. A journal that does not exist is made at the first request of a sticky
+// Workload (pinStore.ensure), so a front with none never makes one.
 func newPins(r *Router) *pinStore {
 	dir := r.cfg.UsageDir
 	path := ""
 	if dir != "" {
 		path = filepath.Join(dir, pinJournalFile)
 	}
-	return newPinStore(path, r.clk.Now, r.log)
+	st := newPinStore(path, r.clk.Now, r.log)
+	// A journal that exists is read at start: a pin it shows in flight is converted at the time of the restart, and the journal is compacted (HBEP-5, Sticky
+	// routes, The journal). One that can't be read now is read again at the first request of a sticky Workload, which is refused until it can be.
+	if path != "" {
+		if _, err := os.Stat(path); err == nil {
+			if err := st.ensure(); err != nil {
+				st.log.Warn("the pin journal could not be read at start", "error", err.Error())
+			}
+		}
+	}
+	return st
 }
 
 // closePins closes the pin journal, at the front's stop.
