@@ -1,0 +1,70 @@
+# A served ModelDeployment: Qwen3-VL-8B-Instruct on one A100 40 GB of Athena's plgrid-now (HBEP-3,
+# HBEP-7; issue #764, beta). It is examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml with the
+# Athena Provider in place of the Sano one, and it is the deployment the baseline's Athena row
+# serves (beta-athena-now-llmlab-baseline). Clients ask the front for it by its plain name,
+# spec.model. Run it under profiles/athena-now.yaml, the test profile of that partition: the
+# partition's one hour is too short for an Instance under profiles/athena.yaml, and the test profile
+# gives an Instance 12 minutes to be ready, which only a staged image and checkpoint can meet. Stage
+# both first (alpha-athena-now-stage-qwen3-vl; docs/alpha-runbook.md).
+#
+# The checkpoint is pinned by a full commit ID and the engine by an image digest, because they
+# make up the deployment ID (HBEP-3, Deployment ID). The checkpoint, the engine and the flags are
+# the Sano example's, so is the deployment ID: it is computed from the serving spec and the
+# accelerator's class, and both partitions' profiles give the class "A100" on x86_64 (HBEP-4 fixes
+# that string; the card's memory is no input). The engine is the vLLM v0.32.0 multi-architecture
+# index that examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml uses, with the engine's own
+# defaults, including vLLM v0.32.0's --gpu-memory-utilization of 0.92, and max-model-len 32768 as
+# shipped. Sano's profile holds an expected-performance entry for this same ID, but the throughput
+# gate reads the profile of the Instance's own Provider (internal/lifecycle/gate_act.go:73-81) and
+# profiles/athena-now.yaml holds none, so on this partition the gate records only.
+#
+# overAllocation is 0: one Allocation serves it, and no extra one is qualified beside it.
+# routing.instanceCap is 3, the cap the baseline fixes for this card before the run, from the
+# model's facts: floor(0.95 x KV / 32768) with the KV cache derived for 40 GB (internal/alpha,
+# baseline.go, CapAthena; the science agent's ruling H3 on #764). The workload block is the
+# Sano example's, targetSessions 8 included, so that the throughput gate's key shape is Sano's:
+# nothing ties targetSessions to the cap (the warm-up sends that many requests of the typical
+# shape straight to the engine, internal/agent/engine/warmup.go:33 and :68, and routing.instanceCap
+# is read by the front alone, internal/front/inventory/build.go:226 and :349), and 8 requests of
+# 1,152 tokens fit the 40 GB card's KV cache many times over.
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: athena-now-qwen3-vl-8b-instruct
+  namespace: default
+spec:
+  model: Qwen/Qwen3-VL-8B-Instruct
+  source:
+    served:
+      checkpoint:
+        repository: Qwen/Qwen3-VL-8B-Instruct
+        revision: 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b
+      engine:
+        name: vllm
+        version: 0.32.0
+        image: docker.io/vllm/vllm-openai
+        imageDigest: sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
+      flags:
+        - name: max-model-len
+          value: "32768"
+  instances: 1
+  overAllocation: 0
+  providers:
+    names:
+      - athena-a100
+  routing:
+    instanceCap: 3
+  # Release the Allocation when it has hosted no Instance for this long. The default, Keep,
+  # holds it until its hard end, which on a shared grant is rarely what a first trial wants.
+  retentionPolicy:
+    mode: ReleaseWhenIdle
+    idleLimit: 30m
+  workload:
+    contextTokens:
+      short: 256
+      typical: 1024
+      longest: 28672
+    outputTokens:
+      typical: 128
+      longest: 1024
+    targetSessions: 8
