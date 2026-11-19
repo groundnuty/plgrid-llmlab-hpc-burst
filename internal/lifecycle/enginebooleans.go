@@ -55,17 +55,21 @@ type booleanRow struct {
 
 // booleanDump is one engine image's parser dump.
 type booleanDump struct {
-	Format       string       `json:"format"`
-	Engine       string       `json:"engine"`
-	Version      string       `json:"version"`
-	Image        string       `json:"image"`
-	ImageDigest  string       `json:"imageDigest"`
-	SourceCommit string       `json:"sourceCommit"`
-	Provenance   string       `json:"provenance"`
-	Note         string       `json:"note"`
-	Python       string       `json:"python"`
-	Generator    string       `json:"generator"`
-	Flags        []booleanRow `json:"flags"`
+	Format       string `json:"format"`
+	Engine       string `json:"engine"`
+	Version      string `json:"version"`
+	Image        string `json:"image"`
+	ImageDigest  string `json:"imageDigest"`
+	SourceCommit string `json:"sourceCommit"`
+	Provenance   string `json:"provenance"`
+	Note         string `json:"note"`
+	// ParserPlatform says which platform the parser was built on: the CPU one,
+	// forced, on a node with no GPU, after a per-image check that the platform
+	// cannot change the boolean set.
+	ParserPlatform string       `json:"parserPlatform"`
+	Python         string       `json:"python"`
+	Generator      string       `json:"generator"`
+	Flags          []booleanRow `json:"flags"`
 
 	kinds map[string]booleanKind
 }
@@ -146,8 +150,8 @@ func (f *booleanDump) validate() error {
 	if f.Engine != "vllm" {
 		return fmt.Errorf("engine %q, want vllm", f.Engine)
 	}
-	if f.Version == "" || f.Image == "" || f.Provenance == "" || f.Generator == "" {
-		return fmt.Errorf("version, image, provenance and generator are all required")
+	if f.Version == "" || f.Image == "" || f.Provenance == "" || f.ParserPlatform == "" || f.Generator == "" {
+		return fmt.Errorf("version, image, provenance, parserPlatform and generator are all required")
 	}
 	if !dumpDigestRE.MatchString(f.ImageDigest) {
 		return fmt.Errorf("imageDigest %q is not sha256:<64 hex>", f.ImageDigest)

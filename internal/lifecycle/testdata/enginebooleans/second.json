@@ -5,6 +5,7 @@
   "image": "docker.io/vllm/vllm-openai",
   "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
   "provenance": "a test fixture, not a dump",
+  "parserPlatform": "cpu",
   "python": "3.12.0",
   "generator": "hack/vllm-flags/generate.sh",
   "flags": [

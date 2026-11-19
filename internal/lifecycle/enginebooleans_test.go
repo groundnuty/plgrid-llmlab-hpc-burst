@@ -317,6 +317,9 @@ func TestThePinnedDumpIsTheV0320ParserDump(t *testing.T) {
 	if !strings.HasPrefix(d.Python, "3.") || d.Provenance == "" {
 		t.Errorf("python %q, provenance %q", d.Python, d.Provenance)
 	}
+	if want := "cpu, forced on a GPU-less node; the boolean set does not depend on it (checked per image)"; d.ParserPlatform != want {
+		t.Errorf("parserPlatform %q, want %q", d.ParserPlatform, want)
+	}
 	if strings.Contains(d.Provenance+d.Note+d.Generator, "/home") || strings.Contains(d.Provenance, "scratch") {
 		t.Errorf("a path in the provenance fields: %q %q", d.Provenance, d.Note)
 	}
@@ -389,7 +392,7 @@ func TestTheGateReadsCapacityBooleansBackExactly(t *testing.T) {
 // dumpJSON is a minimal valid dump with the given flag rows (JSON text) and digest.
 func dumpJSON(digest, rows string) string {
 	return `{"format": "hpcburst-engine-booleans/1", "engine": "vllm", "version": "1.2.3", "image": "docker.io/vllm/vllm-openai",
- "imageDigest": "` + digest + `", "provenance": "test", "python": "3.12.0", "generator": "hack/vllm-flags/generate.sh", "flags": [` + rows + `]}`
+ "imageDigest": "` + digest + `", "provenance": "test", "parserPlatform": "cpu", "python": "3.12.0", "generator": "hack/vllm-flags/generate.sh", "flags": [` + rows + `]}`
 }
 
 // TestTheLoaderRefusesWhatTheGeneratorWouldNotHaveWritten: static data is
@@ -464,6 +467,9 @@ func TestEveryShippedDumpIsItsImageAndSaysHowItWasMade(t *testing.T) {
 		}
 		if d.Version != version || d.ImageDigest != digest || d.Image != "docker.io/vllm/vllm-openai" {
 			t.Errorf("the file for %s holds version %q, digest %q, image %q", version, d.Version, d.ImageDigest, d.Image)
+		}
+		if want := "cpu, forced on a GPU-less node; the boolean set does not depend on it (checked per image)"; d.ParserPlatform != want {
+			t.Errorf("vLLM %s: parserPlatform %q, want %q", version, d.ParserPlatform, want)
 		}
 		if digest == testPinnedDigest {
 			continue

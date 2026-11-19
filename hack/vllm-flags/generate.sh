@@ -32,6 +32,11 @@
 #      The file is hashed and refused on a mismatch. The data file then says so
 #      in its "provenance" field.
 #
+# The data file records that the parser was built on vLLM's CPU platform (the
+# node has no GPU). The run then prints dump.py --platform-hits, every place the
+# installed vLLM's source lets the platform reach the parser, so that someone
+# reads it and decides that none changes a boolean's registration or kind.
+#
 # It runs the dump as `apptainer exec --cleanenv --no-home` with dump.py bound
 # read-only, in a private work directory (under TMPDIR) that is removed at the
 # end. The node needs no GPU: the parser is built without one. A failure to
@@ -137,6 +142,10 @@ finish "$rc" "the dump"
 rc=0
 run --check /hbout/data.json || rc=$?
 finish "$rc" "the check of the result"
+# The parser is built on the CPU platform: print every use of the platform that can reach it, for a person to read.
+rc=0
+run --platform-hits || rc=$?
+finish "$rc" "the platform-hits report"
 cp -- "$work/data.json" "$OUT.tmp"
 mv -f -- "$OUT.tmp" "$OUT"
 echo "generate.sh: wrote the data file (vLLM $VERSION)"

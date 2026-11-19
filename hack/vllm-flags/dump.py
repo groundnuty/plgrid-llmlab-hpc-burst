@@ -45,11 +45,20 @@ Any surprise fails the run.
   python3 -I dump.py --expect-version V --probe-argv FILE --out FILE \\
       [--probe-dests a,b] [--probe-expect JSON]
   python3 -I dump.py --check FILE
+  python3 -I dump.py --platform-hits
 
 --probe-argv takes a JSON array of argument lists (what follows `vllm serve`),
 parses each, and writes, for each, whether it parsed and the values of the
 named dests, to --out. --probe-expect is a JSON object of dest values that
-every parse must show. --check validates a data file without importing vllm.
+every parse must show. --check validates a data file without importing vllm. --platform-hits reads the
+installed vllm's SOURCE, without importing it, and prints every use of
+current_platform that can reach the parser: inside add_cli_args and the
+functions that build its kwargs (vllm/engine/arg_utils.py and every
+entrypoints/**/cli_args.py), at class or module level in vllm/config (where a
+field's type could be chosen), and which platform classes define
+pre_register_and_update (the hook that may add arguments). A person reads the
+hits and decides whether any changes a boolean's registration or kind: that is
+the check behind PARSER_PLATFORM.
 
 The parser is built on vLLM's CPU platform (VLLM_TARGET_DEVICE=cpu, set here,
 and ensure_a_platform for a version that ignores it): building it runs
@@ -62,6 +71,7 @@ probe below checks the result against the same parser it was built from.
 vLLM logs to stdout, so results go to --out and never to stdout.
 """
 import argparse
+import ast
 import contextlib
 import io
 import json
@@ -73,6 +83,9 @@ import sys
 FORMAT = "hpcburst-engine-booleans/1"
 KINDS = ("BooleanOptionalAction", "store_false", "store_true")
 GENERATOR = "hack/vllm-flags/generate.sh"
+# Recorded in every data file: the parser is built on vLLM's CPU platform, and
+# --platform-hits is the per-image check that this cannot change the boolean set.
+PARSER_PLATFORM = "cpu, forced on a GPU-less node; the boolean set does not depend on it (checked per image)"
 OPTIONAL_VALUE_OK = frozenset({"hf-token"})  # a credential: refused by the API anyway
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -291,7 +304,7 @@ def probe_argv(top, path, dests, expect):
 
 def validate(doc):
     """Check a data file's shape; raises Failure. Stdlib only."""
-    want = ["format", "engine", "version", "image", "imageDigest", "provenance", "python", "generator", "flags"]
+    want = ["format", "engine", "version", "image", "imageDigest", "provenance", "parserPlatform", "python", "generator", "flags"]
     allowed = set(want) | {"sourceCommit", "note"}
     if not isinstance(doc, dict):
         raise Failure("the data file is not an object")
@@ -307,7 +320,7 @@ def validate(doc):
         raise Failure("version %r is not x.y.z" % (doc["version"],))
     if not DIGEST_RE.match(str(doc["imageDigest"])):
         raise Failure("imageDigest %r is not sha256:<64 hex>" % (doc["imageDigest"],))
-    for k in ("image", "provenance", "python", "generator"):
+    for k in ("image", "provenance", "parserPlatform", "python", "generator"):
         if not isinstance(doc[k], str) or not doc[k]:
             raise Failure("%s is empty" % k)
     flags = doc["flags"]
@@ -341,6 +354,7 @@ def render(meta, rows):
     head.append(("provenance", meta["provenance"]))
     if meta.get("note"):
         head.append(("note", meta["note"]))
+    head.append(("parserPlatform", PARSER_PLATFORM))
     head += [("python", platform.python_version()), ("generator", GENERATOR)]
     out = ["{"]
     for k, v in head:
@@ -351,6 +365,86 @@ def render(meta, rows):
         out.append("    %s%s" % (row, "," if i < len(rows) - 1 else ""))
     out += ["  ]", "}", ""]
     return "\n".join(out)
+
+
+
+PARSER_FUNCS = frozenset({"add_cli_args", "make_arg_parser", "get_kwargs", "_compute_kwargs"})
+
+
+def _uses(tree):
+    """(line, enclosing function names outermost first, enclosing class names) of each current_platform reference."""
+    out = []
+
+    def visit(node, funcs, classes):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs = funcs + [node.name]
+        elif isinstance(node, ast.ClassDef):
+            classes = classes + [node.name]
+        if isinstance(node, ast.Name) and node.id == "current_platform":
+            out.append((node.lineno, funcs, classes))
+        for child in ast.iter_child_nodes(node):
+            visit(child, funcs, classes)
+
+    visit(tree, [], [])
+    return out
+
+
+def platform_hits():
+    """Print where the installed vllm's parser could depend on the platform; raises Failure."""
+    import glob
+    import importlib.util
+
+    spec = importlib.util.find_spec("vllm")
+    if spec is None or not spec.submodule_search_locations:
+        raise Failure("vllm is not installed")
+    root = list(spec.submodule_search_locations)[0]
+
+    def read(rel):
+        path = os.path.join(root, rel)
+        try:
+            with open(path, encoding="utf-8") as f:
+                src = f.read()
+        except OSError as e:
+            raise Failure("cannot read vllm/%s: %s" % (rel, e.strerror))
+        return src.splitlines(), ast.parse(src)
+
+    parser_files = ["engine/arg_utils.py"] + sorted(
+        os.path.relpath(p, root) for p in glob.glob(os.path.join(root, "entrypoints", "**", "cli_args.py"), recursive=True)
+    )
+    for rel in parser_files:
+        lines, tree = read(rel)
+        uses = _uses(tree)
+        inside = [u for u in uses if PARSER_FUNCS & set(u[1])]
+        print("== vllm/%s: %d uses of current_platform, %d inside %s" % (rel, len(uses), len(inside), sorted(PARSER_FUNCS)))
+        for line, funcs, _ in inside:
+            print("  vllm/%s:%d [%s] %s" % (rel, line, funcs[-1], lines[line - 1].strip()))
+    cfg = sorted(os.path.relpath(p, root) for p in glob.glob(os.path.join(root, "config", "*.py")))
+    print("== class- or module-level uses of current_platform in vllm/config (outside any function):")
+    n = 0
+    for rel in cfg:
+        lines, tree = read(rel)
+        for line, funcs, classes in _uses(tree):
+            if not funcs:
+                n += 1
+                print("  vllm/%s:%d [%s] %s" % (rel, line, ".".join(classes) or "module", lines[line - 1].strip()))
+    print("  (%d)" % n)
+    print("== platform classes that define pre_register_and_update:")
+    definers = []
+    for path in sorted(glob.glob(os.path.join(root, "platforms", "*.py"))):
+        rel = os.path.relpath(path, root)
+        _, tree = read(rel)
+        for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+            for fn in cls.body:
+                if isinstance(fn, ast.FunctionDef) and fn.name == "pre_register_and_update":
+                    definers.append((rel, cls.name, fn.lineno))
+                    print("  vllm/%s:%d class %s" % (rel, fn.lineno, cls.name))
+    _, cuda_tree = read(os.path.join("platforms", "cuda.py"))
+    cuda_classes = [n.name for n in ast.walk(cuda_tree) if isinstance(n, ast.ClassDef)]
+    if not cuda_classes:
+        raise Failure("vllm/platforms/cuda.py defines no class: the CUDA platform is not where this check looks")
+    cuda = [d for d in definers if d[0] == os.path.join("platforms", "cuda.py")]
+    print("== the classes of vllm/platforms/cuda.py: %s" % ", ".join(cuda_classes))
+    print("== CudaPlatform overrides pre_register_and_update: %s" % ("YES" if cuda else "no"))
 
 
 def main():
@@ -366,8 +460,12 @@ def main():
     ap.add_argument("--probe-dests", default="")
     ap.add_argument("--probe-expect", default="{}")
     ap.add_argument("--check")
+    ap.add_argument("--platform-hits", action="store_true")
     a = ap.parse_args()
     try:
+        if a.platform_hits:
+            platform_hits()
+            return 0
         if a.check:
             with open(a.check, encoding="utf-8") as f:
                 validate(json.load(f))

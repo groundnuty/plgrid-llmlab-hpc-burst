@@ -6,6 +6,7 @@
   "imageDigest": "sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34",
   "sourceCommit": "5df63a72",
   "provenance": "staged SIF; sidecar hpcburst-sif/1 checked (image digest, size and SHA-256)",
+  "parserPlatform": "cpu, forced on a GPU-less node; the boolean set does not depend on it (checked per image)",
   "python": "3.12.3",
   "generator": "hack/vllm-flags/generate.sh",
   "flags": [

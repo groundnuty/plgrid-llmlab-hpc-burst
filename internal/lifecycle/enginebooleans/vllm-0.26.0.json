@@ -6,6 +6,7 @@
   "imageDigest": "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52",
   "provenance": "apptainer pull by digest; file sha256 checked against the puller's record",
   "note": "Docker Hub's v0.26.0 index digest, not confirmed as Cyfronet's pin",
+  "parserPlatform": "cpu, forced on a GPU-less node; the boolean set does not depend on it (checked per image)",
   "python": "3.12.13",
   "generator": "hack/vllm-flags/generate.sh",
   "flags": [
