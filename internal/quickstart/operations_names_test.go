@@ -56,8 +56,9 @@ var guideNames = map[string]string{
 	"ReplacementLate":       v1alpha1.ReasonReplacementLate,
 	"CapacityDropped":       v1alpha1.ReasonCapacityDropped,
 	"ShapesFit":             v1alpha1.EventReasonShapesFit,
-	"OwnFirst":              string(v1alpha1.RouteOwnFirst),     // a Workload's route orders, which the guide names
-	"ManagedFirst":          string(v1alpha1.RouteManagedFirst), // (HBEP-5, Workloads, Route order)
+	"OwnFirst":              string(v1alpha1.RouteOwnFirst),        // a Workload's route orders, which the guide names
+	"ManagedFirst":          string(v1alpha1.RouteManagedFirst),    // (HBEP-5, Workloads, Route order)
+	"Route":                 string(v1alpha1.SessionAffinityRoute), // and its session affinity (HBEP-5, Workloads, Sticky routes)
 
 	// Instance conditions, their reasons and its end reasons (HBEP-7, Instance start, Health and
 	// restarts; HBEP-6, Path state).

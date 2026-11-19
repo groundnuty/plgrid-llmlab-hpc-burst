@@ -192,6 +192,7 @@ func Run(ctx context.Context, o Options) error {
 	metrics := NewMetrics(sink, cfg.UsageDir, o.FreeBytes, raisedEvents(o.Recorder))
 	metrics.enableUsageLog(fwd)
 	router := NewRouter(cfg, o.Clock, o.Transports, o.Recorder, o.Log, metrics)
+	defer router.closePins()
 	watch, err := startWatch(ctx, o, router)
 	if err != nil {
 		return err

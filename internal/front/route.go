@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -29,6 +30,9 @@ type target struct {
 	workload string
 	// wres is that resolution, which the request's later choices reuse (Resolution); nil when it named none.
 	wres *Resolution
+	// pin is the request's hold on its conversation's pin, set on the target of the first choice of a request of a Workload with sessionAffinity Route and
+	// ended once, when the request ends (Proxy.forward); nil for every other target.
+	pin *pinRef
 }
 
 // Resolution is what a request's first choice resolved its Workload to: the Workload's namespace and name, and the ModelDeployments, by namespace and
@@ -52,6 +56,13 @@ type Resolution struct {
 	// is no bound on the overflow.
 	managedFirst bool
 	managedMax   int
+	// sticky is sessionAffinity Route; pinTTL and maxPins are as the Workload had them when the request resolved. pin is the conversation's pin, set once
+	// by the request's first choice (pins.go, Router.chooseSticky) before any later choice and never changed: every attempt of the request then routes to
+	// its target alone, the first request's retries and resends included.
+	sticky  bool
+	pinTTL  time.Duration
+	maxPins int
+	pin     *pinTarget
 }
 
 // load is the charge a choice reserves for a request with this resolution: the Workload's c, named, or the zero value for a request that named none.
@@ -123,6 +134,28 @@ func errWorkloadConflict(header, bySuffix, byHeader string) *routeError {
 		message: "the model name's #" + echoedName(bySuffix) + " and the " + echoedName(header) + " header name different Workloads: " + echoedName(byHeader)}
 }
 
+// The rows of a sticky Workload (HBEP-5, Errors; Workloads, Sticky routes). A pin is never moved, so a request that can't be placed under its pin is
+// refused, never sent elsewhere.
+func errSessionHeaderRequired(workload string) *routeError {
+	return (&routeError{status: http.StatusBadRequest, code: codeInvalidRequest, detail: "session_header_required",
+		message: "the Workload " + echoedName(workload) + " pins each conversation to one target, so its requests must carry the session header"}).forWorkload(workload)
+}
+
+func errPinsUnavailable(workload string) *routeError {
+	return (&routeError{status: http.StatusServiceUnavailable, code: codeCapacity, detail: "pins_unavailable", retryAfter: "10",
+		message: "the pin journal can't be read or written, so the request is not sent: a pinned conversation is never moved"}).forWorkload(workload)
+}
+
+func errPinsFull(workload string) *routeError {
+	return (&routeError{status: http.StatusServiceUnavailable, code: codeCapacity, detail: "pins_full", retryAfter: "10",
+		message: "the Workload " + echoedName(workload) + " holds its maxPins live pins: a new conversation is not pinned until one expires"}).forWorkload(workload)
+}
+
+func errPinnedGone(model, workload string) *routeError {
+	return (&routeError{status: http.StatusServiceUnavailable, code: codeModelInactive, detail: "pinned_target_gone",
+		message: "the conversation's pinned target of the model " + echoedName(model) + " is gone, and a pinned conversation is never moved: it takes a target again when its pin expires"}).forWorkload(workload)
+}
+
 func errNotAttached(model string) *routeError {
 	return &routeError{status: http.StatusServiceUnavailable, code: codeModelInactive, detail: "not_attached", retryAfter: "30",
 		message: "the model " + echoedName(model) + " is not active: no provider is attached to it"}
@@ -175,9 +208,12 @@ func (r *Router) chooseAmong(ctx context.Context, n naming.Name, res *Resolution
 			}
 			return r.chooseUnnamed(ctx, p)
 		}
+		if p.res.sticky {
+			return r.chooseSticky(ctx, n, p.res, key, exclude, withManaged, p.noServing)
+		}
 		res = p.res
 	}
-	return r.chooseNamed(ctx, n, res, key, exclude, withManaged)
+	return r.chooseNamed(ctx, n, res, key, exclude, withManaged, time.Time{})
 }
 
 // plan is what one attempt to place a request reads from the view: the Resolution of its Workload (nil when it names none), the ModelDeployments that
@@ -193,6 +229,62 @@ type plan struct {
 	groups      map[string]*balancer.Group
 	managed     []*inventory.ManagedTarget
 	wname       string
+	// noServing is the first choice of a request of a sticky Workload that no deployment serves now: not an answer yet, since the conversation may hold a
+	// pin, and a pin is not moved by an edit of spec.workloads (HBEP-5, Sticky routes). chooseSticky answers not_attached when it has none.
+	noServing bool
+	// pinID is the full deployment ID that a pinned conversation's Instances must have, "" when it is not pinned to a ModelDeployment. pinWait says the
+	// pinned target exists and may take the request later: paused, verifying, unreachable, or in a handover's gap, it is waited for, never given up on.
+	pinID   string
+	pinWait bool
+	// avoid are the targets that hold a pinned waiter: a first request of a sticky Workload is not placed on one, so that a slot a pinned waiter is waiting for
+	// is not taken by a new conversation between its release and the wake pass that places the waiter (tryNamedLocked).
+	avoid map[pinTarget]bool
+}
+
+// match is the filter on a deployment's members for this attempt: its level and exclusions; for a conversation pinned to a ModelDeployment, the pinned
+// FULL deployment ID, read from the view's own Instances (a member that joined since is not judged by its 12-character display form: it is left for the next
+// attempt, which the join wakes); and for a first request of a sticky Workload, not a target that holds a pinned waiter (avoid).
+func (p *plan) match() balancer.Match {
+	base := levelMatch(p.n, p.exclude)
+	if p.pinID == "" && len(p.avoid) == 0 {
+		return base
+	}
+	ids := map[string]string{}
+	mds := map[string]types.UID{}
+	for _, d := range p.serving {
+		for _, i := range d.Members {
+			ids[i.Key], mds[i.Key] = i.DeploymentID, d.UID
+		}
+	}
+	return func(member string, a balancer.Attrs) bool {
+		if !base(member, a) {
+			return false
+		}
+		full, known := ids[member]
+		if p.pinID != "" {
+			return known && full == p.pinID
+		}
+		return !known || !p.avoid[pinTarget{MD: mds[member], ID: full}]
+	}
+}
+
+// avoidsATarget drops from the plan's managed targets those it avoids, and says whether the plan avoids any target that could have taken the request: such a
+// request has a route that may free, so it waits instead of being answered that nothing is eligible.
+func (p *plan) avoidsATarget() bool {
+	found := false
+	p.managed = slices.DeleteFunc(slices.Clone(p.managed), func(t *inventory.ManagedTarget) bool {
+		hit := p.avoid[pinTarget{MD: t.UID, Provider: t.Provider, ManagedID: t.ManagedID}]
+		found = found || hit
+		return hit
+	})
+	for _, d := range p.serving {
+		for _, i := range d.Members {
+			if p.avoid[pinTarget{MD: d.UID, ID: i.DeploymentID}] && levelMatches(p.n, i.Provider, i.DisplayID) && !slices.Contains(p.exclude, i.Key) {
+				found = true
+			}
+		}
+	}
+	return found
 }
 
 // plan reads the view for one attempt. A request waits for one rebuild, two at most under a barging reader (#417; lockFresh). The view it routes on
@@ -222,9 +314,17 @@ func (r *Router) plan(n naming.Name, res *Resolution, key string, exclude []stri
 			r.mu.Unlock()
 			return nil, rerr
 		}
+		if wl.Sticky && !n.KeyFromHeader {
+			// A Workload that pins each conversation needs a key that holds still: the opening hash can change within a run (HBEP-5, Sticky routes).
+			r.mu.Unlock()
+			return nil, errSessionHeaderRequired(wl.Name)
+		}
 		fresh = true
 	}
 	m := v.Models[n.Model]
+	if res != nil && res.pin != nil {
+		return r.planPinned(m, n, res, key, exclude, withManaged)
+	}
 	var serving []*inventory.Deployment
 	var sources []*inventory.ManagedSource
 	switch {
@@ -247,6 +347,10 @@ func (r *Router) plan(n naming.Name, res *Resolution, key string, exclude []stri
 	case m == nil && res == nil:
 		r.mu.Unlock()
 		return nil, errNotAttached(n.Model)
+	case fresh && empty && res.sticky:
+		// Not an answer yet: the conversation may hold a pin, and an edit of spec.workloads moves none (chooseSticky answers it).
+		r.mu.Unlock()
+		return &plan{n: n, key: key, exclude: exclude, withManaged: withManaged, res: res, wname: wname, noServing: true}, nil
 	case fresh && empty:
 		// The Workload resolved, and no deployment serves it (or its model has none): not_attached, as HBEP-5's Errors table says.
 		r.mu.Unlock()
@@ -272,10 +376,70 @@ func (r *Router) plan(n naming.Name, res *Resolution, key string, exclude []stri
 	return &plan{n: n, key: key, exclude: exclude, withManaged: withManaged, res: res, serving: serving, ring: ring, groups: groups, managed: managed, wname: wname}, nil
 }
 
+// planPinned is plan for a request whose conversation holds a pin: the pinned target alone, looked up in the model's whole list of ModelDeployments, so an
+// edit of spec.workloads moves nothing (HBEP-5, Sticky routes). It is called with Router.mu held and releases it. A target that's gone is the ModelDeployment
+// deleted, a managed target with no entry listed or no managed-source ModelDeployment, or no current deployment ID of the ModelDeployment equal to the
+// pinned one, as after a finished rollout. A ModelDeployment whose status lists no current ID yet is not read as gone: nothing says it no longer is current.
+// Paused, verifying, unreachable, full or in a no-overlap handover's gap, the target is waited for (plan.pinWait). Gone needs positive evidence (the science
+// agent's ruling of 19 Nov 2026 on #795): the ModelDeployment deleted, or a non-empty status.currentIDs with no ID equal to the pinned one; an empty one waits.
+func (r *Router) planPinned(m *inventory.Model, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*plan, *routeError) {
+	pn := res.pin
+	p := &plan{n: n, key: key, exclude: exclude, withManaged: withManaged, res: res, wname: res.Name}
+	if pn.managed() {
+		listed := false
+		now := r.clk.Now()
+		if m != nil {
+			for _, t := range m.Managed {
+				if t.UID != pn.MD || t.Provider != pn.Provider || t.ManagedID != pn.ManagedID {
+					continue // another source that lists the same entry is not the pinned target: the pin follows its own ModelDeployment
+				}
+				listed = true
+				if withManaged && levelMatches(n, t.Provider, t.DisplayID) && !slices.Contains(exclude, t.Key) {
+					p.pinWait = true // the target exists and may take the request: paused or not
+					if !r.pausedLocked(t.Key, now) {
+						p.managed = append(p.managed, t)
+					}
+				}
+			}
+		}
+		r.mu.Unlock()
+		if !listed {
+			return nil, errPinnedGone(n.Model, res.Name)
+		}
+		return p, nil
+	}
+	var d *inventory.Deployment
+	if m != nil {
+		for _, c := range m.Served {
+			if c.UID == pn.MD && (len(c.CurrentIDs) == 0 || slices.Contains(c.CurrentIDs, pn.ID)) {
+				d = c
+			}
+		}
+	}
+	if d == nil {
+		r.mu.Unlock()
+		return nil, errPinnedGone(n.Model, res.Name)
+	}
+	any := false
+	for _, i := range d.Members {
+		if i.DeploymentID != pn.ID {
+			continue
+		}
+		any = true
+		if levelMatches(n, i.Provider, i.DisplayID) && !slices.Contains(exclude, i.Key) {
+			p.pinWait = true
+		}
+	}
+	p.pinWait = p.pinWait || !any // no Instance of the ID at all: a handover's gap
+	p.pinID, p.serving, p.ring, p.groups = pn.ID, []*inventory.Deployment{d}, r.rings[m.Name], map[string]*balancer.Group{d.Key: r.groups[d.Key]}
+	r.mu.Unlock()
+	return p, nil
+}
+
 // chooseUnnamed places a request that names no Workload: our own ModelDeployments, then an eligible managed target, then the group queue of the
 // first deployment on the walk that has an eligible Instance (HBEP-5, Request path step 5). It is unchanged by the Workload build.
 func (r *Router) chooseUnnamed(ctx context.Context, p *plan) (*target, *routeError) {
-	tg, wait := r.chooseServed(p.serving, p.ring, p.groups, p.n, p.key, p.exclude, balancer.Charge{})
+	tg, wait := r.chooseServed(p.serving, p.ring, p.groups, p.key, levelMatch(p.n, p.exclude), balancer.Charge{})
 	if tg != nil {
 		return tg, nil
 	}
@@ -314,7 +478,8 @@ func servingSet(m *inventory.Model, wl *inventory.Workload) ([]*inventory.Deploy
 // newResolution records the serving set a Workload resolved to.
 func newResolution(wl *inventory.Workload, served []*inventory.Deployment, sources []*inventory.ManagedSource) *Resolution {
 	res := &Resolution{Namespace: wl.Namespace, Name: wl.Name, uid: wl.UID, serving: map[string]bool{}, charge: wl.Charge,
-		managedFirst: wl.ManagedFirst && wl.ManagedSessions > 0, managedMax: wl.ManagedSessions}
+		managedFirst: wl.ManagedFirst && wl.ManagedSessions > 0, managedMax: wl.ManagedSessions,
+		sticky: wl.Sticky, pinTTL: wl.PinTTL, maxPins: wl.MaxPins}
 	for _, d := range served {
 		res.serving[d.Key] = true
 	}
@@ -397,7 +562,7 @@ func resolveWorkload(v *inventory.View, n naming.Name, header string) (*inventor
 // where they sit whatever else is on the ring (HBEP-5, Workloads, Pinning; the
 // science agent's ruling on #764, Q7; the fork's own ring is the oracle in
 // pin_workload_test.go).
-func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ring, groups map[string]*balancer.Group, n naming.Name, key string, exclude []string, ch balancer.Charge) (*target, *inventory.Deployment) {
+func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ring, groups map[string]*balancer.Group, key string, match balancer.Match, ch balancer.Charge) (*target, *inventory.Deployment) {
 	if ring == nil || len(serving) == 0 {
 		return nil, nil
 	}
@@ -409,7 +574,6 @@ func (r *Router) chooseServed(serving []*inventory.Deployment, ring *balancer.Ri
 			byInst[i.Key] = i
 		}
 	}
-	match := levelMatch(n, exclude)
 	var wait *inventory.Deployment
 	tried := map[string]bool{}
 	for _, ik := range ring.Walk(key) {

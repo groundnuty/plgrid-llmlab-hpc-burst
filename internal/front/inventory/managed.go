@@ -54,7 +54,7 @@ func (v *View) addManaged(md *v1alpha1.ModelDeployment, providers map[string]*v1
 			continue
 		}
 		t := &ManagedTarget{
-			Key: key + "@" + name, Deployment: key, Namespace: md.Namespace, Name: md.Name, Provider: name,
+			Key: key + "@" + name, Deployment: key, UID: md.UID, Namespace: md.Namespace, Name: md.Name, Provider: name,
 			CatalogName: src.CatalogName, ManagedID: string(entry.ManagedID), DisplayID: entry.ManagedID.Display(),
 			MaxRequestDuration: mrd, Workloads: slices.Clone(md.Spec.Workloads),
 		}

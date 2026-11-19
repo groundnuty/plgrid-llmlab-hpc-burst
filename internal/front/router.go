@@ -59,6 +59,9 @@ type Router struct {
 	usageNote    string
 	usageEventAt time.Time
 
+	// pins holds the live pins of the Workloads with sessionAffinity Route and their journal (pins.go).
+	pins *pinStore
+
 	// beforePick, when set, runs between reading the view and picking from
 	// the live groups: a seam for tests that force a join in between.
 	beforePick func()
@@ -143,6 +146,7 @@ func NewRouter(cfg Config, clk clock.Clock, trans Transports, rec Recorder, log 
 	// under the lock that routing needs (#417).
 	trans.Subscribe(r.markDirty)
 	metrics.attach(r)
+	r.pins = newPins(r)
 	return r
 }
 

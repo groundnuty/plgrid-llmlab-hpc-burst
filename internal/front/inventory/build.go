@@ -52,6 +52,15 @@ func Build(s Snapshot, in Inputs) *View {
 		if o.Spec.ManagedSessions != nil {
 			w.ManagedSessions = int(*o.Spec.ManagedSessions)
 		}
+		w.Sticky, w.PinTTL, w.MaxPins = o.Spec.SessionAffinity == v1alpha1.SessionAffinityRoute, DefaultPinTTL, DefaultMaxPins
+		if o.Spec.PinTTL != nil {
+			if d, err := o.Spec.PinTTL.AsDuration(); err == nil && d > 0 {
+				w.PinTTL = d
+			}
+		}
+		if o.Spec.MaxPins != nil && *o.Spec.MaxPins > 0 {
+			w.MaxPins = int(*o.Spec.MaxPins)
+		}
 		if v.Workloads[w.Model] == nil {
 			v.Workloads[w.Model] = map[string][]*Workload{}
 		}
@@ -117,6 +126,9 @@ func (v *View) addServed(md *v1alpha1.ModelDeployment, insts []*v1alpha1.Instanc
 		Key: md.Namespace + "/" + md.Name, Namespace: md.Namespace, Name: md.Name, UID: md.UID,
 		ServedName: md.Spec.Model, Desired: int(md.Spec.Instances),
 		MaxRequestDuration: in.MaxRequestDuration, Workloads: slices.Clone(md.Spec.Workloads),
+	}
+	for _, c := range md.Status.CurrentIDs {
+		d.CurrentIDs = append(d.CurrentIDs, string(c.ID))
 	}
 	var err error
 	if d.TightPercent, d.LoosePercent, err = bounds(md.Spec.Routing); err != nil {
