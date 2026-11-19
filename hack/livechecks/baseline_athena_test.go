@@ -121,3 +121,38 @@ func TestTheAthenaBaselineRowsSettings(t *testing.T) {
 		t.Errorf("the settings as the row takes them: exit %d, want 4 (no --yes):\n%s", res.code, res.out)
 	}
 }
+
+// A failed LLMLab P0 ends the run INVALID before any job is submitted (PR 809's review, point 6): the script's line, the marker it reads and the text to post say
+// that no job was submitted and no slot was spent, on Row 1 and on the Athena twin alike, and never that a job started and ran. The real test runs in dry mode through the
+// script; the control, an INVALID run that did run, keeps its words.
+func TestAFailedLLMLabP0ReportsNoSubmissionThroughTheScript(t *testing.T) {
+	real := realTestBinary(t, "HPCBURST_LIVECHECKS_ALPHA_TEST", alphaPkg)
+	realDir := filepath.Join(repoRoot(t), alphaPkg)
+	for _, row := range []string{"beta-sano-llmlab-baseline", athenaBaseline} {
+		for _, c := range []struct {
+			fault string
+			noJob bool
+		}{{"p0-llmlab-fails", true}, {"p0-empty-200", true}, {"cap-never-binds", false}} {
+			t.Run(row+"/"+c.fault, func(t *testing.T) {
+				w := newAlphaWorld(t)
+				w.installDry(dryWrapper, real, realDir)
+				res := w.run([]string{"STUB_DRY_FAULT=" + c.fault}, "--run", row, "--yes")
+				if res.code != 3 {
+					t.Fatalf("exit %d, want 3:\n%s", res.code, res.out)
+				}
+				post := w.postsOf(row)
+				if c.noJob {
+					w.contains(res, row+": INVALID (not a NOT RUN: P0 ended the run before any job was submitted, so no job started and no slot was spent")
+					if strings.Contains(res.out, "the job started and ran") || strings.Contains(post, "started, ran and spent the slot") || !strings.Contains(post, "no job was submitted") {
+						t.Errorf("a run that submitted nothing says a job ran:\n%s\n%s", res.out, post)
+					}
+					return
+				}
+				w.contains(res, row+": INVALID (not a NOT RUN: the job started and ran")
+				if strings.Contains(res.out, "before any job was submitted") || !strings.Contains(post, "started, ran and spent the slot") {
+					t.Errorf("a run that ran lost its words:\n%s\n%s", res.out, post)
+				}
+			})
+		}
+	}
+}

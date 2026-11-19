@@ -63,7 +63,11 @@ func runRow(t *testing.T, family string, rows ...string) {
 	if BaselineInvalidRun(cfg.Row, err) {
 		// The baseline row's INVALID (ErrBaselineInvalid) by the same protocol, its own words in the marker: the run was judged, recorded and posted,
 		// nothing failed, and its reading measures nothing. hack/live-checks.sh reads it as INVALID on that row alone.
-		if merr := rec.SaveText(NotRunFile, BaselineInvalidNote(cfg.Row)); merr != nil {
+		invalidNote := BaselineInvalidNote(cfg.Row)
+		if BaselineInvalidNoJob(err) {
+			invalidNote = BaselineInvalidNoJobNote(cfg.Row) // a failed LLMLab P0: no job was submitted, and the marker says so
+		}
+		if merr := rec.SaveText(NotRunFile, invalidNote); merr != nil {
 			t.Fatalf("%s: the reading measures nothing, but the marker could not be written: %v", cfg.Row.Name, merr)
 		}
 		t.Skipf("INVALID: %v", err)

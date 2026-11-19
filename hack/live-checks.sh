@@ -1337,6 +1337,9 @@ invalid_marker() { grep -q "the run has no saturation witness, so its reading me
 # failed request LLMLab answered, a cap that never bound, a 503 in the detach phase, an engine whose KV is below the cap's need. An INVALID, not a NOT RUN, which
 # not_run_verdict holds to that row and judge prints as INVALID.
 baseline_invalid_marker() { grep -q "the baseline run's reading is invalid, so it measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# baseline_nojob_marker: the same marker says P0 ended the run before any job was submitted (internal/alpha, BaselineInvalidNoJobNote; the review of PR 809, point 6): no job
+# started and no slot was spent, so the console says so and never that a job ran.
+baseline_nojob_marker() { grep -q "P0 ended it before any job was submitted, so no job started and no slot was spent" "$REC_DIR/not-run.txt" 2>/dev/null; }
 # finding_marker: the bulk row's FINDING marker beside its passing test (internal/alpha, ErrFinding and FindingNote; #584): a regular file, not a
 # link, in this run's record directory, in its fixed words. finding_present is any file of that name, which judge holds to the bulk row alone.
 finding_present() { [ -n "$REC_DIR" ] && { [ -e "$REC_DIR/finding.txt" ] || [ -L "$REC_DIR/finding.txt" ]; }; }
@@ -1452,6 +1455,9 @@ judge() {
     if invalid_marker; then
       # Exit 3 like a NOT RUN, its own word: the run happened and measured nothing (NOT_RUN=1 carries the exit code).
       say "$n: INVALID (not a NOT RUN: the job started, ran and spent the slot, and the run was put to the test; but it has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
+    elif baseline_invalid_marker && baseline_nojob_marker; then
+      # A failed LLMLab P0: INVALID before any GPU submission, with no job and no slot spent (NOT_RUN=1 carries the exit code).
+      say "$n: INVALID (not a NOT RUN: P0 ended the run before any job was submitted, so no job started and no slot was spent, and the managed leg's reading measures nothing; the text to post says why; not a failure, not a pass)"
     elif baseline_invalid_marker; then
       # Exit 3 like a NOT RUN, its own word: the run happened, nothing failed, and its reading measures nothing (NOT_RUN=1 carries the exit code).
       say "$n: INVALID (not a NOT RUN: the job started and ran, and the run was put to the test; but its reading measures nothing, whether LLMLab failed a request, the cap never bound, P3 answered a 503 or the engine's KV is below the cap's need; the text to post says which; the run's other checks passed; not a failure, not a pass)"

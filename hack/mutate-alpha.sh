@@ -1264,6 +1264,9 @@ beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_
   'baselineflow.go@@recorded as DidNotFit (point 5 of PR 809'"'"'s review).
 			if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {@@recorded as DidNotFit (point 5 of PR 809'"'"'s review).
 			if false {'
+  # PR 809's review (#764), point 6: a failed P0 says its job ran (the marker's flag here, and the script's line).
+  'run.go@@baselineInvalid = &BaselineInvalidError{Why: why, NoJob: !o.ServedCreated}@@baselineInvalid = &BaselineInvalidError{Why: why}'
+  'hack/live-checks.sh@@    elif baseline_invalid_marker && baseline_nojob_marker; then@@    elif false; then'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'

@@ -911,6 +911,9 @@ func baselineVerdictWord(failures, invalid []string) string {
 	return "PASS"
 }
 
+// invalidNoJobWords tell an INVALID run that submitted no job from a NOT RUN, in its text to post: P0 ended it before the served ModelDeployment was created.
+const invalidNoJobWords = "this is not a NOT RUN: P0 ended the run before the served ModelDeployment was created, so no job was submitted, no job started and no slot was spent; the managed leg's reading measures nothing it can be judged by; neither a pass nor a failure, so run it again"
+
 // phaseSummaryLine is a phase's shape, in the post's words.
 func phaseSummaryLine(p Phase) string {
 	return fmt.Sprintf("N = %d, %d turns, context %d, turn %d, output %d words, think %s, stagger %s", p.Sessions, p.Turns, p.Context, p.Turn, p.Output, p.Think, p.Stagger)
@@ -925,7 +928,11 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 	case "FAIL":
 		fmt.Fprintf(&b, "%s: FAIL (posts to %s)\n- failed checks: %s\n", row.Name, row.PostsTo, Summary(failures))
 	case "INVALID":
-		fmt.Fprintf(&b, "%s: INVALID (posts to %s)\n- the reading is invalid: %s\n- %s\n", row.Name, row.PostsTo, Summary(invalid), invalidNotNotRunWords)
+		words := invalidNotNotRunWords
+		if !o.ServedCreated {
+			words = invalidNoJobWords // a failed LLMLab P0 ends the run before any job is submitted: no slot was spent
+		}
+		fmt.Fprintf(&b, "%s: INVALID (posts to %s)\n- the reading is invalid: %s\n- %s\n", row.Name, row.PostsTo, Summary(invalid), words)
 	default:
 		fmt.Fprintf(&b, "%s: PASS (posts to %s)\n", row.Name, row.PostsTo)
 	}
