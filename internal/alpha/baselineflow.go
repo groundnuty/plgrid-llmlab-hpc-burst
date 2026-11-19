@@ -210,6 +210,12 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 			}
 			o.Detached = waitUntil(ctx, w, s.DetachWait, s.DetachEvery, w.ManagedDetached)
 			s.logf("%s: the managed ModelDeployment is deleted; the front dropped its target: %t", ph.Name, o.Detached)
+			// The wait above (up to DetachWait) comes after the fit was checked, and a slow detach can eat the margin: the fit is checked again IMMEDIATELY
+			// before the phase is launched, and a phase that no longer fits is not started, recorded as DidNotFit (point 5 of PR 809's review).
+			if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {
+				o.DidNotFit = ph.Name
+				break
+			}
 		}
 		po, perr := runPhase(ctx, w, s, ph)
 		o.Phases = append(o.Phases, po)

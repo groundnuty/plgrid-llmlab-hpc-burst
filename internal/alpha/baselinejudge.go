@@ -426,6 +426,19 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 			}
 		}
 	}
+	// A run with no measurement phase NEVER passes (point 3 of PR 809's review): a ratio probe that answered as its time bound fired ends the run before any
+	// phase (StoppedBefore), and the loop above takes every missing phase for that stop's mark. With no failure and no other reason, the run measured nothing, and
+	// says so, naming the step it ended at: INVALID, never a pass with four phases absent.
+	if len(o.Phases) == 0 && len(fail) == 0 && len(invalid) == 0 {
+		why := "no phase was started"
+		if o.StoppedBefore != "" {
+			why = "the run ended at " + o.StoppedBefore + " before any phase"
+			if o.Ratio.Stopped != "" {
+				why += fmt.Sprintf(" (the ratio probe's generator was stopped: %s)", o.Ratio.Stopped)
+			}
+		}
+		inv("no measurement phase was run (%s), so the run measures nothing", why)
+	}
 	return dedupe(fail), dedupe(invalid)
 }
 
@@ -558,6 +571,46 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 			inv("a request LLMLab answered failed (status %d)", j.Front.Status)
 		default:
 			f("a request failed (status %d, emitter %q)", j.Front.Status, j.Front.Emitter)
+		}
+	}
+	// Every session ran ALL its configured turns, from the front's usage records (the generator's records only join a request to its session and turn)
+	// (point 4 of PR 809's review): a client-side stream error stops a session, the generator's exit status 1 is accepted, and a request the front recorded as 200
+	// can hide it. A session with a failed request is the failed request's finding, and a stopped phase has its own mark; a session of fewer turns than the phase
+	// configured, with none failed, FAILS the phase, or makes it INVALID when LLMLab answered any of its requests (a client error on LLMLab's leg says nothing
+	// of the framework).
+	if po.Stopped == "" {
+		type sessionTurns struct {
+			turns          map[int]bool
+			failed, viaLLM bool
+		}
+		by := map[string]*sessionTurns{}
+		for _, j := range joined {
+			s := by[j.Gen.Session]
+			if s == nil {
+				s = &sessionTurns{turns: map[int]bool{}}
+				by[j.Gen.Session] = s
+			}
+			if j.Gen.Turn >= 1 && j.Gen.Turn <= ph.Turns {
+				s.turns[j.Gen.Turn] = true
+			}
+			s.failed = s.failed || j.failed()
+			s.viaLLM = s.viaLLM || j.route(managed) == RouteLLMLab
+		}
+		shortOnInstance, shortViaLLM := 0, 0
+		for _, s := range by {
+			switch {
+			case s.failed || len(s.turns) >= ph.Turns:
+			case s.viaLLM:
+				shortViaLLM++
+			default:
+				shortOnInstance++
+			}
+		}
+		if shortOnInstance > 0 {
+			f("%d session(s) ran fewer than the %d turns the phase configured, by the front's usage records, though no request of theirs failed there: a client-side error ended them, and the phase did not measure what it was configured to", shortOnInstance, ph.Turns)
+		}
+		if shortViaLLM > 0 {
+			inv("%d session(s) that LLMLab answered ran fewer than the %d turns the phase configured, by the front's usage records, though no request of theirs failed there: a client-side error ended them", shortViaLLM, ph.Turns)
 		}
 	}
 	invalid = dedupe(invalid)

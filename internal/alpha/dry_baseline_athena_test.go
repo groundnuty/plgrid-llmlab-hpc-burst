@@ -32,6 +32,7 @@ var athenaBaselineCases = []dryCase{
 	{"engine-preempts", "the engine preempted"},
 	{"over-the-cap-in-flight", "the Instance had more than its cap of 3 requests in flight"},
 	{"session-moves", "a session did not stay on its Instance"},
+	{"session-ends-early", "1 session(s) ran fewer than the 24 turns the phase configured, by the front's usage records"},
 	{"instance-fails", "a request failed (status 500, emitter \"instance\")"},
 	{"no-gate", "the gate was not sent"},
 	{"gate-503", "the gate's request at model@<provider> was not answered by the served Instance (status 503"},
@@ -66,6 +67,9 @@ var athenaBaselineInvalidCases = []struct{ fault, why string }{
 	{"dial-failure-p2", "P2: 1 request(s) of the phase were resent after a failed dial of the Instance"},
 	{"llmlab-spill-below-the-cap", "LLMLab request(s) arrived while the front's records showed fewer than the cap's 3 requests in flight on the Instance"},
 	{"long-no-read-in-window", "no distinct engine read was taken inside the stretch with the cap's 3 requests in flight"},
+	{"ratio-probe-bound", "no measurement phase was run (the run ended at the ratio probe before any phase (the ratio probe's generator was stopped: bound)), so the run measures nothing"},
+	{"llmlab-session-ends-early", "1 session(s) that LLMLab answered ran fewer than the 24 turns the phase configured"},
+	{"p3-detach-eats-the-fit", "P3 did not fit before the Instance's drain start"},
 }
 
 func init() { dryCases[BetaAthenaBaselineName] = athenaBaselineCases }

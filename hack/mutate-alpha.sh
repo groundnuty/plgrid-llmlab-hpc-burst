@@ -1258,6 +1258,12 @@ beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_
   'hack/live-checks.sh@@  stop_run_stack || verdict=1@@  true'
   'hack/live-checks.sh@@CLEAN_WINDOW_SECONDS=${LIVE_CLEAN_WINDOW_SECONDS:-330}@@CLEAN_WINDOW_SECONDS=${LIVE_CLEAN_WINDOW_SECONDS:-30}'
   'hack/live-checks.sh@@  if [ "$stopped" = 1 ] || [ -n "$unres" ]; then window=$CLEAN_WINDOW_SECONDS; fi@@  if false; then window=$CLEAN_WINDOW_SECONDS; fi'
+  # PR 809's review (#764), points 3 to 5: a run with no measurement phase passes; a session that lost turns passes; P3's fit is not checked again before it is launched.
+  'baselinejudge.go@@	if len(o.Phases) == 0 && len(fail) == 0 && len(invalid) == 0 {@@	if false && len(o.Phases) == 0 && len(fail) == 0 && len(invalid) == 0 {'
+  'baselinejudge.go@@			case s.failed || len(s.turns) >= ph.Turns:@@			case true:'
+  'baselineflow.go@@recorded as DidNotFit (point 5 of PR 809'"'"'s review).
+			if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {@@recorded as DidNotFit (point 5 of PR 809'"'"'s review).
+			if false {'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
