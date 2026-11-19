@@ -160,9 +160,22 @@ func TestTheSanoStageRowBuildsItsHelperFromTheSevenBAndASIFAndGivesTheTestItsRoo
 	}
 }
 
-// The staging directory is a setting of the Sano rows: missing, malformed, or beside direct mode, the run is refused (exit 3) before anything is
-// built or called, naming the setting and never its value.
+// The staging directory is a setting of the Sano rows: missing, malformed, or beside ssh mode (the compute nodes have no home directory for its
+// key; direct mode is taken, below, with its address and its listen address both set), the run is refused (exit 3) before anything is built or
+// called, naming the setting and never its value.
 func TestTheSanoStagingDirectoryAndModeAreRefusedBeforeAnythingRuns(t *testing.T) {
+	// ssh mode as the settings write it: a mode-600 key (the fixture's) and an address, so that the mode is the one refusal.
+	sshMode := func(m map[string]string) {
+		m["LIVE_DIALHOME_MODE"], m["LIVE_DIALHOME_ADDR"] = "ssh", "gateway-seed.example:29999"
+		m["LIVE_DIALHOME_KEY"] = filepath.Join(filepath.Dir(m["LIVE_BIN_DIR"]), "dialhome-key")
+	}
+	// direct mode as the first study sets it, less the one setting named: either alone is refused at the settings (PR 792's review).
+	directWith := func(drop string) func(m map[string]string) {
+		return func(m map[string]string) {
+			m["LIVE_DIALHOME_MODE"], m["LIVE_DIALHOME_ADDR"], m["LIVE_DIALHOME_LISTEN"] = "direct", "gateway-seed.example:29707", "127.0.0.1:29707"
+			delete(m, drop)
+		}
+	}
 	for _, c := range []struct {
 		name, row string
 		mutate    func(m map[string]string)
@@ -176,7 +189,14 @@ func TestTheSanoStagingDirectoryAndModeAreRefusedBeforeAnythingRuns(t *testing.T
 		{"a staging directory with a colon", "alpha-sano-serve", func(m map[string]string) { m["LIVE_SANO_STAGING_DIR"] = "/SEEDSTAGE/a:b" }, "LIVE_SANO_STAGING_DIR has a ':', '=' or ',' in it"},
 		{"a staging directory with an equals sign", "alpha-sano-handover", func(m map[string]string) { m["LIVE_SANO_STAGING_DIR"] = "/SEEDSTAGE/a=b" }, "LIVE_SANO_STAGING_DIR has a ':', '=' or ',' in it"},
 		{"a staging directory with a comma", "alpha-sano-stage", func(m map[string]string) { m["LIVE_SANO_STAGING_DIR"] = "/SEEDSTAGE/a,b" }, "LIVE_SANO_STAGING_DIR has a ':', '=' or ',' in it"},
-		{"direct mode", "alpha-sano-serve", func(m map[string]string) { m["LIVE_DIALHOME_MODE"] = "direct" }, "runs in host-dialed mode alone"},
+		{"ssh mode", "alpha-sano-serve", sshMode, "does not run in ssh mode"},
+		{"ssh mode on the handover row", "alpha-sano-handover", sshMode, "does not run in ssh mode"},
+		{"ssh mode on the baseline row", "beta-sano-llmlab-baseline", sshMode, "does not run in ssh mode"},
+		{"direct mode with an address and no listen address", "alpha-sano-serve", directWith("LIVE_DIALHOME_LISTEN"), "alpha-sano-serve in direct mode needs LIVE_DIALHOME_LISTEN"},
+		{"direct mode with an address and no listen address on the handover row", "alpha-sano-handover", directWith("LIVE_DIALHOME_LISTEN"), "alpha-sano-handover in direct mode needs LIVE_DIALHOME_LISTEN"},
+		{"direct mode with an address and no listen address on the baseline row", "beta-sano-llmlab-baseline", directWith("LIVE_DIALHOME_LISTEN"), "beta-sano-llmlab-baseline in direct mode needs LIVE_DIALHOME_LISTEN"},
+		{"direct mode with a listen address and no address", "alpha-sano-serve", directWith("LIVE_DIALHOME_ADDR"), "setting LIVE_DIALHOME_ADDR is missing"},
+		{"direct mode with a listen address and no address on the baseline row", "beta-sano-llmlab-baseline", directWith("LIVE_DIALHOME_ADDR"), "setting LIVE_DIALHOME_ADDR is missing"},
 		{"the account the shape needs", "alpha-sano-handover", func(m map[string]string) { delete(m, "ACCOUNT_SANO_GPU") }, "setting ACCOUNT_SANO_GPU is missing"},
 		{"the provider's credentials", "alpha-sano-stage", func(m map[string]string) { delete(m, "LIVE_CONF_CREDENTIALS_SANO") }, "setting LIVE_CONF_CREDENTIALS_SANO is missing"},
 	} {
@@ -184,12 +204,8 @@ func TestTheSanoStagingDirectoryAndModeAreRefusedBeforeAnythingRuns(t *testing.T
 			w := newAlphaWorld(t)
 			w.exactMode = true // the mode as written: the harness gives no host-dialed mode here
 			w.alphaSettings(func(m map[string]string) {
-				if c.name == "direct mode" {
-					m["LIVE_DIALHOME_MODE"], m["LIVE_DIALHOME_ADDR"] = "direct", "gateway-seed.example:29999"
-				} else {
-					m["LIVE_DIALHOME_MODE"] = "host-dialed"
-					delete(m, "LIVE_DIALHOME_ADDR")
-				}
+				m["LIVE_DIALHOME_MODE"] = "host-dialed"
+				delete(m, "LIVE_DIALHOME_ADDR")
 				c.mutate(m)
 			})
 			res := w.run(nil, "--run", c.row, "--yes")
@@ -200,8 +216,41 @@ func TestTheSanoStagingDirectoryAndModeAreRefusedBeforeAnythingRuns(t *testing.T
 			if strings.Contains(res.out, "SEEDSTAGE") {
 				t.Errorf("a refusal names the staging directory:\n%s", res.out)
 			}
-			if g := w.stateFile("go-argv"); g != "" || w.stateFile("sbatch-argv") != "" {
-				t.Errorf("a refused run built or called the cluster: %s %s", g, w.stateFile("sbatch-argv"))
+			if g := w.stateFile("go-argv"); g != "" || w.stateFile("sbatch-argv") != "" || w.stateFile("ssh-argv") != "" {
+				t.Errorf("a refused run built or called the cluster: %s %s %s", g, w.stateFile("sbatch-argv"), w.stateFile("ssh-argv"))
+			}
+		})
+	}
+}
+
+// A Sano row runs in direct mode (issue #735): the first study dials Sano that way, and only ssh mode is refused (the table above). The script takes
+// the mode with its address and the front's listen address, and gives both to the row's test; a row that refused it, or that dropped the listen
+// address, would stop the live check of direct mode before it began. It holds for every Sano row, the baseline row (Row 1) included. The row runs in
+// the mode as written, not in the host-dialed mode the harness gives the Sano rows by default.
+func TestASanoRowRunsInDirectModeAndGivesTheTestItsAddressAndListenAddress(t *testing.T) {
+	for _, r := range []struct{ row, test string }{{"alpha-sano-serve", "TestAlphaSanoServe"}, {"alpha-sano-handover", "TestAlphaSanoHandover"},
+		{"beta-sano-llmlab-baseline", "TestBetaSanoLLMLabBaseline"}} {
+		t.Run(r.row, func(t *testing.T) {
+			w := newAlphaWorld(t)
+			w.exactMode = true
+			w.alphaSettings(func(m map[string]string) {
+				m["LIVE_DIALHOME_MODE"] = "direct"
+				m["LIVE_DIALHOME_ADDR"] = "gateway-seed.example:29707"
+				m["LIVE_DIALHOME_LISTEN"] = "127.0.0.1:29707"
+			})
+			res := w.run(nil, "--run", r.row, "--yes")
+			if res.code != 0 {
+				t.Fatalf("exit %d, want 0:\n%s", res.code, res.out)
+			}
+			w.contains(res, r.row+": PASS")
+			env := w.stateFile("test-env-" + r.test)
+			for _, want := range []string{"HPCBURST_ALPHA_DIALHOME_MODE=direct", "HPCBURST_ALPHA_DIALHOME_ADDR=gateway-seed.example:29707", "HPCBURST_ALPHA_DIALHOME_LISTEN=127.0.0.1:29707"} {
+				if !strings.Contains(env, want) {
+					t.Errorf("the test did not get %s:\n%s", want, env)
+				}
+			}
+			if strings.Contains(env, "HPCBURST_ALPHA_DIALHOME_KEY") {
+				t.Errorf("a key reached a direct-mode row's test:\n%s", env)
 			}
 		})
 	}
