@@ -195,6 +195,7 @@ func TestStickyPinOfAStreamLongerThanItsTTLSurvivesACrash(t *testing.T) {
 	}})
 	s := f.session("ns/a-0", 0)
 	f.pinAway(s)
+	f.restart() // reads the journal and rewrites it, an idle pin to a record: the stream's in-flight mark below is then not compacted away
 	release := f.stream(s)
 	f.advance(70 * time.Minute)
 	f.restart() // the stream dies with the old front
