@@ -65,6 +65,15 @@ spec:
                 maximum: 1024
                 minimum: 1
                 type: integer
+              maxPins:
+                default: 100000
+                description: |-
+                  MaxPins bounds the Workload's live pins. Past it, a conversation's first request is refused, and the
+                  live pins are kept (HBEP-5, Sticky routes).
+                format: int32
+                maximum: 1000000
+                minimum: 1
+                type: integer
               model:
                 description: |-
                   Model is the model name the Workload's requests name, as a ModelDeployment's
@@ -77,6 +86,20 @@ spec:
                 - message: 'a model name never contains ''#'': a request''s model
                     name splits a Workload off at its only ''#'' (HBEP-3, Grammar)'
                   rule: '!self.contains(''#'')'
+                - message: 'a Workload''s model is immutable: its pins and its serving
+                    set are keyed on it (HBEP-11, Workload; HBEP-5, Sticky routes)'
+                  rule: self == oldSelf
+              pinTTL:
+                default: 12h
+                description: |-
+                  PinTTL is how long a pin lives after its conversation's last request, at the value in force when the
+                  pin was made. A study sets it above its longest gap between requests (HBEP-5, Sticky routes).
+                maxLength: 63
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                type: string
+                x-kubernetes-validations:
+                - message: pinTTL must be from 1h to 7 days (168h) (HBEP-11, Workload)
+                  rule: duration(self) >= duration('1h') && duration(self) <= duration('168h')
               routeOrder:
                 default: OwnFirst
                 description: |-
@@ -87,6 +110,15 @@ spec:
                 enum:
                 - OwnFirst
                 - ManagedFirst
+                type: string
+              sessionAffinity:
+                description: |-
+                  SessionAffinity, when Route, pins each conversation of this Workload to one target, one of our
+                  ModelDeployments at its deployment ID or a managed target, on its first request, and never moves it
+                  (HBEP-5, Workloads, Sticky routes). Its requests must then carry the session header. Absent, a
+                  conversation is routed as before.
+                enum:
+                - Route
                 type: string
               sessions:
                 description: |-
@@ -164,6 +196,11 @@ spec:
                 its requests there is required (HBEP-5, Workloads, Route order)'
               rule: '!has(self.routeOrder) || self.routeOrder != ''ManagedFirst''
                 || has(self.managedSessions)'
+            - message: 'a Workload''s sessionAffinity is immutable, set or absent,
+                from its creation: recreate the Workload to change it (HBEP-11, Workload;
+                HBEP-5, Sticky routes)'
+              rule: has(self.sessionAffinity) == has(oldSelf.sessionAffinity) && (!has(self.sessionAffinity)
+                || self.sessionAffinity == oldSelf.sessionAffinity)
         required:
         - spec
         type: object

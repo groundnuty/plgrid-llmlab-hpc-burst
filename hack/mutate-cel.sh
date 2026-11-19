@@ -174,7 +174,10 @@ providers:$.spec.credentialsRef#0|^TestProviderCredentialsReferenceNamesExactlyO
 providers:$.spec.stagingDir#0|^TestProviderStagingDirRefusesDotDotSegments$
 workloads:$#0|^TestWorkloadNameIsADNS1123Label$
 workloads:$.spec#0|^TestWorkloadManagedFirstNeedsManagedSessions$
+workloads:$.spec#1|^TestWorkloadSessionAffinityIsImmutable$
 workloads:$.spec.model#0|^TestWorkloadModelNeverContainsAHash$
+workloads:$.spec.model#1|^TestWorkloadModelIsImmutable$
+workloads:$.spec.pinTTL#0|^TestWorkloadPinTTLIsBetween1hAnd7Days$
 workloads:$.spec.shape.contextTokens#0|^TestWorkloadShapeTypicalContextIsAtMostLongest$
 TABLE
 )
