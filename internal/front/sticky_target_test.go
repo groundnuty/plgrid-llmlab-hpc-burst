@@ -83,7 +83,9 @@ func TestStickyTargetThatIsGoneRefusesAndOneThatIsOnlyAbsentWaits(t *testing.T) 
 }
 
 // An edit of a ModelDeployment's spec.workloads moves no pin (Sticky routes; Edits). The conversation is pinned to a-0, its home. md-a then lists only another
-// Workload, so alpha no longer names it among those that serve it: the conversation is still on a-0, and a new conversation with the same home is not.
+// Workload, so alpha no longer names it among those that serve it: the conversation is still on a-0, and a new conversation with the same home is not: it goes
+// to b-0. When md-b stops serving alpha too, no ModelDeployment serves it: the pinned conversation is still on a-0, and a new conversation is 503 model_inactive
+// with detail not_attached, as for any request of a Workload that no deployment serves.
 func TestStickySpecWorkloadsEditMovesNoPin(t *testing.T) {
 	f := newSkFix(t, skOpts{})
 	s, fresh := f.session("ns/a-0", 0), f.session("ns/a-0", 1)
@@ -92,6 +94,11 @@ func TestStickySpecWorkloadsEditMovesNoPin(t *testing.T) {
 	f.apply()
 	f.at(s, "ns/a-0", "after md-a stopped listing alpha")
 	f.at(fresh, "ns/b-0", "a new conversation, which md-a no longer serves")
+	f.md("md-b").Spec.Workloads = []string{"beta"}
+	f.apply()
+	f.at(s, "ns/a-0", "after no ModelDeployment lists alpha")
+	resp := f.errPost(scChat, errChatBody(f.alpha(), false, "hello there"), "x-session-id", f.session("ns/b-0", 5))
+	checkError(t, resp, readAll(t, resp), wantError{status: 503, code: "model_inactive", detail: "not_attached", retryAfter: "30"})
 }
 
 // Recreating the Workload clears its pins, since they key on its UID (Lifetime). The conversation is pinned to b-0 by a spill. The Workload is deleted and

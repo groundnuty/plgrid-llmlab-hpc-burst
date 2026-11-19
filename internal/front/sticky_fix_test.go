@@ -38,11 +38,13 @@ type skOpts struct {
 	managed         bool   // md-llm, a managed-source ModelDeployment behind an LLMLab double, with alpha ManagedFirst and managedSessions 1
 	stallManaged    bool   // the LLMLab double holds every request until unstall
 	managedSessions int32  // with managed: alpha's managedSessions; default 1
+	splitIDs        bool   // the Instances of a ModelDeployment have one deployment ID each, all current, as the classes of a ModelDeployment do
 }
 
 type skFix struct {
 	*pwFix
-	llm *llmlabtest.Server
+	llm      *llmlabtest.Server
+	splitIDs bool
 }
 
 const skAlphaKey = "llmlab-upstream-key-for-sticky-route-tests-8d12"
@@ -52,7 +54,7 @@ func newSkFix(t *testing.T, o skOpts) *skFix {
 	if len(o.deps) == 0 {
 		o.deps = []pwDep{{name: "md-a", instances: []string{"a-0"}, cap: 1}, {name: "md-b", instances: []string{"b-0"}, cap: 1}}
 	}
-	f := &skFix{pwFix: newPwFixOn(t, o.edit, o.deps...)}
+	f := &skFix{pwFix: newPwFixOn(t, o.edit, o.deps...), splitIDs: o.splitIDs}
 	if o.managed {
 		f.llm = llmlabtest.Start(t, llmlabtest.Options{PortLo: testPortLo, PortHi: testPortHi, Keys: []string{skAlphaKey}, Models: []llmlabtest.Model{{ID: wrCatalog}}})
 		f.profile("llmlab", v1alpha1.PlatformManaged, "", "")
@@ -89,14 +91,21 @@ func newSkFix(t *testing.T, o skOpts) *skFix {
 // setCurrentIDs gives every Instance of a served ModelDeployment the one deployment ID of that ModelDeployment, as its Instances have, and writes the
 // ModelDeployment's status.currentIDs from it, as the lifecycle controller does.
 func (f *skFix) setCurrentIDs() {
+	n := 0
 	for i := range f.snap.Deployments {
 		md := &f.snap.Deployments[i]
 		md.Status.CurrentIDs = nil
 		id := v1alpha1.FullDeploymentID(fmt.Sprintf("%064x", 0xa0000+i))
 		for j := range f.snap.Instances {
 			if in := &f.snap.Instances[j]; len(in.OwnerReferences) == 1 && in.OwnerReferences[0].UID == md.UID {
+				if f.splitIDs {
+					n++
+					id = v1alpha1.FullDeploymentID(fmt.Sprintf("%064x", 0xb0000+n))
+					md.Status.CurrentIDs = append(md.Status.CurrentIDs, v1alpha1.ClassDeploymentID{ID: id})
+				} else {
+					md.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{ID: id}}
+				}
 				in.Spec.DeploymentID = id
-				md.Status.CurrentIDs = []v1alpha1.ClassDeploymentID{{ID: id}}
 			}
 		}
 	}

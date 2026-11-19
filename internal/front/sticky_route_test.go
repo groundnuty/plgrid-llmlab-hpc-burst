@@ -3,6 +3,7 @@ package front
 import (
 	"errors"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,11 +119,17 @@ func TestStickyTwoFirstRequestsOfOneKeyAreDecidedOnce(t *testing.T) {
 		}
 	}
 	s := f.session("ns/a-0", 0)
+	var open sync.Once
+	t.Cleanup(func() { open.Do(func() { close(gate) }) }) // a failed row must not leave the first request held
 	one, _ := f.start(s)
-	<-entered // the first request holds a-0 and the key's lock, and waits for its pin
+	select {
+	case <-entered: // the first request holds a-0 and the key's lock, and waits for its pin
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first request never reached its pin")
+	}
 	two, _ := f.start(s)
 	errWaitFor(t, "the second request to reach the key's lock", func() bool { return f.keyLockRefs(s) == 2 })
-	close(gate)
+	open.Do(func() { close(gate) })
 	for i, c := range []*scCall{one, two} {
 		resp, body := c.wait(t)
 		if resp.StatusCode != 200 || scInstanceOf(resp) != "ns/a-0" {
@@ -223,4 +230,32 @@ func TestWorkloadWithoutSessionAffinityRoutesAsBefore(t *testing.T) {
 	if _, err := os.Stat(f.journalPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a Workload with no sessionAffinity made a pin journal (stat: %v)", err)
 	}
+}
+
+// A pin holds the deployment ID of the Instance that took the first request (Sticky routes, The pin). md-a's two Instances have an ID each, both current, as
+// the classes of one ModelDeployment do. The conversation is pinned through a-0, which is then full, while a-1, of the same ModelDeployment, and b-0 are idle:
+// its next request waits for a-0 and is then 503 capacity, and neither a-1 nor b-0 sees it. The control, a conversation whose home is a-1, is served by a-1,
+// so a-1 does take requests of this ModelDeployment.
+func TestStickyPinHoldsTheDeploymentIDOfTheInstanceThatTookTheFirstRequest(t *testing.T) {
+	f := newSkFix(t, skOpts{splitIDs: true, deps: []pwDep{{name: "md-a", instances: []string{"a-0", "a-1"}, cap: 1}, {name: "md-b", instances: []string{"b-0"}, cap: 1}},
+		edit: func(c *Config) { c.QueueTimeout = Duration(300 * time.Millisecond) }})
+	s, control := f.session("ns/a-0", 0), f.session("ns/a-1", 0)
+	if f.idOf("ns/a-0") == f.idOf("ns/a-1") {
+		t.Fatal("a-0 and a-1 have one deployment ID: the row needs two")
+	}
+	f.at(s, "ns/a-0", "the first request")
+	if p := f.journalOf("pin", s); len(p) != 1 || p[0].ID != f.idOf("ns/a-0") {
+		t.Fatalf("the pin is %+v, want the deployment ID of a-0, %s", p, f.idOf("ns/a-0"))
+	}
+	release := f.hold("ns/a-0")
+	held, _ := f.start(s)
+	errWaitFor(t, "the held request to reach a-0", func() bool { return f.engines["ns/a-0"].Open() == 1 })
+	resp := f.errPost(scChat, errChatBody(f.alpha(), false, "hello there"), "x-session-id", s)
+	checkError(t, resp, readAll(t, resp), wantError{status: 503, code: "capacity", retryAfter: "10"})
+	if a, b := f.engineSaw("ns/a-1"), f.engineSaw("ns/b-0"); a != 0 || b != 0 {
+		t.Errorf("a-1 saw %d requests and b-0 saw %d of a conversation pinned to a-0's deployment ID, want none", a, b)
+	}
+	f.at(control, "ns/a-1", "the control, a conversation whose home is a-1")
+	release()
+	held.wait(t)
 }
