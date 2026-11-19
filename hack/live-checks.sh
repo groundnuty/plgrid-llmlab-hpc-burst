@@ -335,10 +335,10 @@ tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-
 alpha-athena-now-serve|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:30:00|60|-|10
-alpha-sano-stage|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|00:30:00|60|--qos=gpu1 -J hb-estimate
-alpha-sano-serve|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
-alpha-sano-handover|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
-beta-sano-llmlab-baseline|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|11|135904Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
+alpha-sano-stage|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|00:30:00|60|--qos=gpu1 -J hb-estimate
+alpha-sano-serve|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
+alpha-sano-handover|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
+beta-sano-llmlab-baseline|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
 alpha-athena-now-nooverlap|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:21:00|115|-|10
 beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10

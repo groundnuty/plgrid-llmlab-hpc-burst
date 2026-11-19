@@ -12,6 +12,7 @@
 #   - "derived": a division of such facts, with the numbers shown.
 #   - "the science agent's #735 comment": the values the science agent gave for this profile on
 #     18 Nov 2026 (#735, comment of 02:42Z), from the probes.
+#   - "the science agent's #735 decision of 19 Nov 2026": cpusPerGpu 4 and memPerGpu 64 GiB, in place of the maximum shares of the comment above (see cpusPerGpu).
 #   - "framework default (HBEP-n, section)": no fact exists; the design's value.
 # Slurm's "MB" and "G" are 2^20 and 2^30 bytes (the Slurm provider sends --mem=<MiB>M), so memory is in Mi.
 #
@@ -32,9 +33,14 @@ spec:
       # an Allocation gets (the time limit is the smallest of the two and the leaseLimit; HBEP-4, QOS limits).
       maxTime: 168h # facts.partitions[name=gpu].max_time, "7-00:00:00"
       gpusPerNode: 8 # facts.partitions[name=gpu].node_classes: the larger node has 8 GPUs, the other 4. The field is the node's hardware, and qosByGpus ends at 8
-      # cpusPerGpu and memPerGpu are sized so both node classes fit an Allocation of the same GPU count:
-      cpusPerGpu: 11 # derived: facts.partitions[name=gpu].node_classes, the smaller node's 44 allocatable CPUs over its 4 GPUs (the larger node's 92 over 8 is 11.5). The science agent's #735 comment
-      memPerGpu: 135904Mi # derived: (560,000 MB - 16,384 MB reserved for the system) / 4 GPUs and (1,120,000 - 32,768) / 8 GPUs are both 135,904 (facts.partitions[name=gpu].node_classes). 8 x 135,904 MiB = 1,087,232 MiB, exactly gpu8's cap (facts.slurm.qos_per_job_caps). The science agent's #735 comment
+      # cpusPerGpu and memPerGpu are what an Allocation asks for per GPU: 4 CPUs and 64 GiB, chosen so a request fits beside other users' jobs on a
+      # node (the science agent's #735 decision of 19 Nov 2026). HBEP-4 (Submission, GPU sizing, "Never above one GPU's share",
+      # hbep/0004-provider-interface/README.md:340) forbids a share above the node's per-GPU share and does not ask for the maximum. The maximum
+      # shares stay as that cap, 11 CPUs and 135904Mi, derived below. The reason for the change: a 4-GPU Allocation at 11 CPUs per GPU asked for
+      # 44 CPUs, every effective CPU of the 4-GPU node, and it pended with reason Resources for an estimated 25 h while the node's 4 GPUs were free,
+      # because another user's job held 8 of its CPUs (19 Nov 2026).
+      cpusPerGpu: 4 # the science agent's #735 decision of 19 Nov 2026. The cap is 11 (derived: facts.partitions[name=gpu].node_classes, the smaller node's 44 allocatable CPUs over its 4 GPUs; the larger node's 92 over 8 is 11.5)
+      memPerGpu: 65536Mi # the same decision, 64 GiB. The cap is 135904Mi (derived: (560,000 MB - 16,384 MB reserved for the system) / 4 GPUs and (1,120,000 - 32,768) / 8 GPUs are both 135,904, facts.partitions[name=gpu].node_classes; 8 x 135,904 MiB = 1,087,232 MiB, exactly gpu8's cap, facts.slurm.qos_per_job_caps)
       # The QOS an Allocation runs under, by its GPU count: the first entry whose gpus is at least the
       # count; a count above 8 is refused before any call (HBEP-4, The Slurm dialect, The QOS by GPU count; #745).
       # A Provider on this partition sets no qos of its own: ReadProfile refuses both.
@@ -76,7 +82,7 @@ spec:
       maxGpusPerJob: 8
       maxCpusPerJob: 92 # 92 accepted, 96 refused
       # 1061.75 GiB written as MiB, exactly: 1061.75 x 1024 = 1,087,232 (1061 x 1024 = 1,086,464, and 0.75 x 1024 = 768).
-      # It is also 8 x memPerGpu above, and sacctmgr's mem=1087232M (facts.slurm.qos). 1120 GiB was refused.
+      # It is also 8 x 135,904, memPerGpu's cap above (not memPerGpu itself, which is 64 GiB), and sacctmgr's mem=1087232M (facts.slurm.qos). 1120 GiB was refused.
       maxMemPerJob: 1087232Mi
 
   # The throughput gate's references (beta; HBEP-4, Expected performance), one per serving spec, from reference runs apart from serving (#735's record, the
@@ -94,7 +100,7 @@ spec:
       outputTokens: 128 # the example's outputTokens.typical
       timePerOutputToken: 12.326323ms
       timeToFirstToken: 399.394255ms
-      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026. Measured at 11 CPUs and 135904Mi per GPU. Expected to hold at 4 CPUs and 64 GiB, since decode is GPU-bound and the gate's default tolerance allows 2x; pending one confirming run at the new shape"
       source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
       date: "2026-11-18"
     # examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml: Qwen/Qwen3-VL-8B-Instruct at 0c351dd01ed8, max-model-len 32768, the default max-num-seqs of 256.
@@ -106,7 +112,7 @@ spec:
       outputTokens: 128
       timePerOutputToken: 13.679505ms
       timeToFirstToken: 429.065029ms
-      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+      method: "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026. Measured at 11 CPUs and 135904Mi per GPU. Expected to hold at 4 CPUs and 64 GiB, since decode is GPU-bound and the gate's default tolerance allows 2x; pending one confirming run at the new shape"
       source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
       date: "2026-11-18"
 

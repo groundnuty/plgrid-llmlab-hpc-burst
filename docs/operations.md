@@ -499,7 +499,7 @@ Sano's `gpu` partition has two nodes, one with 4 and one with 8 NVIDIA A100 80GB
    hbk apply -f profiles/sano.yaml
    ```
 
-   It is the only profile that chooses the QOS by the Allocation's GPU count: 1 GPU runs under `gpu1`, 2 under `gpu2`, 3 or 4 under `gpu4` and 5 to 8 under `gpu8`, and a count above 8 is refused before any call. Each of the four has a 3-day wall. An Allocation asks for 11 CPUs and 135904Mi of memory per GPU, which fits both node classes. A Provider on this profile sets no `qos` of its own, and one that does is refused.
+   It is the only profile that chooses the QOS by the Allocation's GPU count: 1 GPU runs under `gpu1`, 2 under `gpu2`, 3 or 4 under `gpu4` and 5 to 8 under `gpu8`, and a count above 8 is refused before any call. Each of the four has a 3-day wall. An Allocation asks for 4 CPUs and 65536Mi (64 GiB) of memory per GPU, which leaves room beside other users' jobs on both node classes; the node's maximum shares, 11 CPUs and 135904Mi per GPU, stay as the cap. A Provider on this profile sets no `qos` of its own, and one that does is refused.
 2. **Create the Provider** from a copy of `examples/provider-sano-a100.yaml` with every placeholder replaced, and apply the copy.
    - **`spec.stagingDir` is required on Sano.** Give an absolute path, with no `..` segment, in a directory of your own on the shared Ceph file system that the login node and the compute nodes both mount. The profile names none, since no variable on the cluster names one and a literal path carries a user name.
    - **The dial-home mode is `host-dialed`.** The controller reaches each job through the login node, with an `srun` step that overlaps the job's own steps and starts in the Allocation's directory.
