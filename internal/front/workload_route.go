@@ -207,8 +207,9 @@ func (r *Router) lockWorkload(res *Resolution) *wlState {
 }
 
 // chooseNamed places a request that names a Workload, the attempt of its first choice or of a retry (res is its Resolution): the Workload's route order
-// over our ModelDeployments and the managed targets, and else the Workload's own FIFO. While that FIFO holds a request, a new one queues behind it
-// without trying a route (strict), and a request is tried and queued in one critical section. A wake pass lists only the Workloads whose FIFO holds a
+// over our ModelDeployments and the managed targets, and else the Workload's own FIFO. While that FIFO holds a request that may take the route the new one
+// would (competesLocked), a new one queues behind it without trying a route (strict: every waiter of a Workload with no sticky pin is such a request), and a
+// request is tried and queued in one critical section. A request of a conversation with a sticky pin has one route, its target (Resolution.pin). A wake pass lists only the Workloads whose FIFO holds a
 // request, so a wake that comes between the try and the enqueue finds none for this Workload and skips it; the arrival counts the wake requests that came
 // meanwhile (wakeGen) and, when there were any, runs a pass of its own once it is queued (found by the tests of the wakes: the lost wake).
 func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution, key string, exclude []string, withManaged bool) (*target, *routeError) {
@@ -350,8 +351,9 @@ func (r *Router) waitNamed(ctx, qctx context.Context, ws *wlState, w *wlWaiter) 
 		// Answered just as it gave up: hand a reservation back.
 		(<-w.ch).tg.release()
 	}
-	if wasHead {
-		// The waiter behind it is the head now, and may fit a route that was free all along.
+	if wasHead || (w.res.sticky && w.res.pin == nil) {
+		// The waiter behind it is the head now, and may fit a route that was free all along. For a sticky Workload a waiter that holds no pin, which holds
+		// back every waiter behind it, may have been the one that did, wherever it queued (tryHead).
 		r.wakeNow()
 	}
 	name := w.res.Name
