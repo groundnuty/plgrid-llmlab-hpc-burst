@@ -1,0 +1,16 @@
+{
+  "format": "hpcburst-engine-booleans/1",
+  "engine": "vllm",
+  "version": "9.9.9",
+  "image": "docker.io/vllm/vllm-openai",
+  "imageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "provenance": "a test fixture, not a dump",
+  "parserPlatform": "cpu",
+  "python": "3.12.0",
+  "generator": "hack/vllm-flags/generate.sh",
+  "flags": [
+    {"name": "disable-log-stats", "kind": "store_true", "default": false},
+    {"name": "enable-prefix-caching", "kind": "store_true", "default": false},
+    {"name": "special-flag", "kind": "BooleanOptionalAction", "default": true}
+  ]
+}
