@@ -7,8 +7,9 @@
 # spec.model is the ModelDeployment's spec.model, and the name is a DNS label of at most 63
 # characters, since it follows a "#" in a model name. The shape is the typical and longest
 # context and output of the study's requests, in tokens. routeOrder is left out: OwnFirst, our
-# Instances first and LLMLab for overflow only, is the default and the only order the front
-# routes yet. managedSessions is left out too: it is refused until the front routes it.
+# Instances first and LLMLab for overflow only, is the default. managedSessions is left out
+# too: with OwnFirst it would bound that overflow, and with none set LLMLab takes it unbounded.
+# workload-analysis-managedfirst.yaml is the same model's Workload that sets ManagedFirst.
 apiVersion: hpcburst.groundnuty.github.io/v1alpha1
 kind: Workload
 metadata:

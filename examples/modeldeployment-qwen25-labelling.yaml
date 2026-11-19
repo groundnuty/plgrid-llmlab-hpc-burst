@@ -1,8 +1,8 @@
 # The same served ModelDeployment as modeldeployment-qwen25-instruct.yaml, under another name,
-# listing the Workload workload-labelling.yaml in spec.workloads (beta; HBEP-7, HBEP-5
-# Workloads). Apply it INSTEAD of that file, not beside it: both ask for an Instance on the
-# same Provider. Its name is new, and its checkpoint and engine are the same pins, so it is the
-# same deployment ID.
+# listing the Workloads workload-labelling.yaml and workload-analysis-managedfirst.yaml in
+# spec.workloads (beta; HBEP-7, HBEP-5 Workloads). Apply it INSTEAD of that file, not beside
+# it: both ask for an Instance on the same Provider. Its name is new, and its checkpoint and
+# engine are the same pins, so it is the same deployment ID.
 #
 # A Workload is served only by the ModelDeployments of its own namespace that list it here, or
 # list none. A request that names the Workload, Qwen/Qwen2.5-1.5B-Instruct#labelling, goes to
@@ -30,6 +30,7 @@ spec:
   instances: 1
   workloads:
     - labelling
+    - analysis
   providers:
     names:
       - helios-gh200

@@ -170,7 +170,8 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 | `provider-llmlab.yaml` | a managed Provider: LLMLab itself, read-only ([optional](#optional-attach-llmlab)) |
 | `modeldeployment-llmlab.yaml` | a model LLMLab already serves, attached to a plain name ([optional](#optional-attach-llmlab)) |
 | `workload-labelling.yaml` | a Workload of the Helios example's model: one class of a study's requests, named by a header or a `#labelling` suffix (beta; [the operations guide](operations.md#workloads-beta)) |
-| `modeldeployment-qwen25-labelling.yaml` | the Helios deployment under another name, listing that Workload; apply it instead of `modeldeployment-qwen25-instruct.yaml` (beta) |
+| `workload-analysis-managedfirst.yaml` | a second Workload of that model that sets `routeOrder: ManagedFirst` with its required `managedSessions`: LLMLab takes its requests first, up to that bound ([the operations guide](operations.md#workloads-beta)) (beta) |
+| `modeldeployment-qwen25-labelling.yaml` | the Helios deployment under another name, listing both Workloads; apply it instead of `modeldeployment-qwen25-instruct.yaml` (beta) |
 
 The profile ([`profiles/README.md`](../profiles/README.md)) holds what is true for everyone on a platform. A Provider holds what is yours. The rules for a ModelDeployment, such as the pinned checkpoint revision and engine digest, are in [HBEP-3](../hbep/0003-resource-model-and-naming/README.md) and [HBEP-7](../hbep/0007-lifecycle-controller/README.md). Admission refuses a value that breaks one and says which.
 
