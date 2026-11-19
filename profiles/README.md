@@ -1,12 +1,13 @@
 # Platform profiles
 
-`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8), `athena-now.yaml` is a second Athena profile for short test deployments on `plgrid-now`, and `llmlab.yaml` is the managed one of LLMLab. A Provider names one in `spec.platformProfileRef`. Sano is not shipped here; it follows in fallback mode.
+`helios.yaml` and `athena.yaml` are the alpha `PlatformProfile` objects of Helios and Athena (HBEP-4, open questions 3, 7 and 8), `athena-now.yaml` is a second Athena profile for short test deployments on `plgrid-now`, `sano.yaml` is the beta profile of Sano's `gpu` partition (issue #735), and `llmlab.yaml` is the managed one of LLMLab. A Provider names one in `spec.platformProfileRef`.
 
 | File | Object name | Partitions in the typed list |
 |---|---|---|
 | `helios.yaml` | `helios` | `plgrid` (CPU), `plgrid-gpu-gh200` |
 | `athena.yaml` | `athena` | `plgrid-gpu-a100`, `plgrid-now` (conformance runs and short checks only) |
 | `athena-now.yaml` | `athena-now` | `plgrid-now` only, with margins scaled to its hour: for short TEST deployments, not real serving |
+| `sano.yaml` | `sano` | `gpu` (beta), whose QOS the profile chooses by the Allocation's GPU count (`qosByGpus`), so a Provider on it sets no `qos` |
 | `llmlab.yaml` | `llmlab` | none: a managed profile has no batch fields (HBEP-4, "A managed profile"); the gateway's address and key are in the Provider's credentials file |
 
 Only a partition on which `holdRelease` was verified is in the typed list (HBEP-4, Platform profile schema). Every other partition is in the untyped block only.
