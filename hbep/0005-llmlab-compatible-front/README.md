@@ -329,7 +329,7 @@ Amended 2026-11-18 from HBEP-764, a single study with several workloads, and the
     - after `queueTimeout`, it gets 503 `capacity` with `Retry-After`.
 
     It's never sent to another target. A pinned head that can't be placed doesn't block the requests behind it (Waiting).
-  - **A target that's gone:** its ModelDeployment deleted; no current deployment ID of it equal to the pinned one, as after a finished rollout; or, for a managed target, its entry unlisted or its managed-source ModelDeployment deleted. That gets 503 `model_inactive` with detail `pinned_target_gone` until the pin expires. A change to `spec.workloads` doesn't move a pin.
+  - **A target that's gone:** its ModelDeployment deleted; its `currentIDs` non-empty with no ID equal to the pinned one, as once a rollout to a new ID has started (an empty list means wait); or, for a managed target, its entry unlisted or its managed-source ModelDeployment deleted. That gets 503 `model_inactive` with detail `pinned_target_gone` until the pin expires. A change to `spec.workloads` doesn't move a pin.
   - **Lifetime.** A pin never expires while a request of it is in flight. It expires `pinTTL` after its last request ends, at the TTL in force when the pin was made. Each request extends it, and the extension is journalled at most once a minute. An extension that can't be written fails its request, 503 `capacity` with detail `pins_unavailable`, so the journal never trails by more than a minute. `sessionAffinity` and `model` can't change once a Workload exists. Recreating it clears its pins, since they key on its UID.
   - **The journal.** The front reloads it before serving any of these Workloads' requests. If it can't be read, those requests get 503 `capacity` with detail `pins_unavailable`. It's compacted, dropping expired pins and superseded extensions, at start and whenever it grows past twice its live size.
   - **Bound.** At most `maxPins` live pins per Workload (default 100,000). Past it, a first request gets 503 `capacity` with detail `pins_full`, and live pins are kept.
@@ -751,6 +751,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764, for #783): at partial membership only a Workload request's budget inequality stays in force; its count clause is off, as the count cap is for every request.
 - 2026-11-18: erratum (the science agent's ruling Q5 of 18 Nov 2026 on #764, for PR 5): when one freed slot could take either, a ModelDeployment's own waiters are placed before the Workloads' FIFOs, which follow in the order of their oldest requests.
 - 2026-11-19: amendment from HBEP-764: sticky routes, a Workload's `sessionAffinity: Route`, pinning each conversation to one target and never moving it, with the pins journalled before dispatch and reloaded at a restart.
+- 2026-11-19: erratum (the science agent's ruling on #795, comment 6997271351): an empty `currentIDs` means wait, and gone begins once a rollout to a new ID has started.
 
 ## Amendments
 
