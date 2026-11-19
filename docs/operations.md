@@ -518,6 +518,14 @@ Sano's `gpu` partition has two nodes, one with 4 and one with 8 NVIDIA A100 80GB
 
 **A handover** ([HBEP-7](../hbep/0007-lifecycle-controller/README.md), Handover) moves the Instance to its successor before the job's time limit. The handover row on Sano ran one: 2 of 2 streams in flight at the drain start finished, and none was cut.
 
+**Tensor parallelism (`tensor-parallel-size` above 1) on Sano** needs one engine variable, `NCCL_P2P_DISABLE=1`, on every deployment that uses it. Without it, an Instance with TP above 1 on the 4-GPU node class stays in the `starting` phase: NCCL's first collective never completes (NCCL 2.30.7, under the pinned engine), and `nvidia-smi topo -p2p` there reports peer-to-peer as OK, which is misleading. The same Instance does not hang on the 8-GPU node class. The project's runs measured this on 19 Nov 2026.
+- **The cure:** set `NCCL_P2P_DISABLE=1` in the ModelDeployment's engine environment, `spec.source.served.env`. With it, the first collective completed within 1 second on the 4-GPU node class.
+- **Set it on every deployment with TP above 1,** since no setting picks the node class and a job may land on either. It is one deployment ID either way: an engine variable that the deployment-ID table does not list is an input ([HBEP-3](../hbep/0003-resource-model-and-naming/README.md), open question 3), so setting it gives the deployment a new ID, the same on both classes.
+- **The cause is likely specific to the 4-GPU class, not its PCIe topology.** Both classes are PCIe-only, with no NVLink and the same pairing among four GPUs: two pairs share a PCIe switch, and the cross pairs go through the host bridge, on one NUMA node. Yet TP above 1 with peer-to-peer on hangs only on the 4-GPU class, so the cause is likely that class's IOMMU or ACS setup. This is not confirmed.
+- **Its cost on the 8-GPU node class is unmeasured,** and likely small. The variable is harmless there but gives up direct PCIe peer copies, and the cross pairs already go through the host bridge.
+- **Without it,** a hung Instance holds its GPUs until `health.startTimeout` (1 hour on Sano), counted from its start instruction. On a first start the Instance is then failed and its Allocation released, with no restart, and a replacement may land on the same node class.
+- **TP=1 is unaffected,** since it runs no collective.
+
 **If something fails,** see [`ProviderUnavailable`](#providerunavailable) and [Host-dialed relays](#host-dialed-relays) above. On Sano in particular:
 - an `srun` step that fails with "couldn't chdir" could not enter the Allocation's directory on the compute node, so check that `stagingDir` is on the shared file system;
 - Sano's submit plugin refuses a job with no QOS, no memory request, no CPU count or a generic job name. The framework sends all four, so report a refusal that names one.

@@ -205,6 +205,7 @@ var notCodeNames = map[string]string{
 	"MISMATCH":                  "a build state hpcburst status prints",
 	"KiB":                       "a unit hpcburst status prints",
 	"MiB":                       "a unit hpcburst status prints",
+	"P2P":                       "a word of NCCL's variable NCCL_P2P_DISABLE, which the guide gives for tensor parallelism on Sano; NCCL defines it, not the framework",
 }
 
 // degradedRanking is HBEP-7's ranking of the Degraded reasons (Events and conditions, The ranking),
