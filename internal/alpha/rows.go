@@ -416,6 +416,8 @@ var rows = []Row{
 	SanoServeRow(),
 	// The baseline row of HBEP-764's item 4 (baseline.go): Qwen3-VL-8B on Sano with LLMLab attached as HBEP-5's overflow, on today's code with no Workload.
 	BaselineRow(),
+	// Its Athena twin (baseline.go): the same flow on plgrid-now under profiles/athena-now.yaml, at the Athena cap.
+	AthenaBaselineRow(),
 }
 
 // The settings of the owner's go (Row.OwnerGo).
@@ -465,7 +467,7 @@ var hostDialedRows = []Row{
 
 // stageRows are the pre-staging rows (issue #376; nowserve.go), which run in internal/providerctl/conformance: one job
 // whose agent build stages the image and the checkpoint where the agent stages, with no stack and no Instance.
-var stageRows = []Row{NowStageRow(), SanoStageRow()}
+var stageRows = []Row{NowStageRow(), NowStageQwen3VLRow(), SanoStageRow()}
 
 // IsStageRow says whether name is a pre-staging row (StageRows): the Athena row of issue #376 or the Sano row of issue #735.
 func IsStageRow(name string) bool {

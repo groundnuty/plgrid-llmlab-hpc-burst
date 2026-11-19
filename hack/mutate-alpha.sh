@@ -1250,6 +1250,27 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 	if o.P0, err = w.Probe(ctx); err != nil {'
   'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
   'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # The baseline's Athena twin (beta-athena-now-llmlab-baseline, #764): its row of the owner-go table removed, so that the script would run it on plgrid-now's slot with no go of the owner's.
+  'hack/live-checks.sh@@beta-athena-now-llmlab-baseline|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60'
+  # PR 809's review (#764), points 1 and 2: the run's own stack is stopped before its jobs are cancelled (the call removed); the stopped run's cleanup window, the
+  # submission window, shortened, and dropped.
+  'hack/live-checks.sh@@  stop_run_stack || verdict=1@@  true'
+  'hack/live-checks.sh@@CLEAN_WINDOW_SECONDS=${LIVE_CLEAN_WINDOW_SECONDS:-330}@@CLEAN_WINDOW_SECONDS=${LIVE_CLEAN_WINDOW_SECONDS:-30}'
+  'hack/live-checks.sh@@  if [ "$stopped" = 1 ] || [ -n "$unres" ]; then window=$CLEAN_WINDOW_SECONDS; fi@@  if false; then window=$CLEAN_WINDOW_SECONDS; fi'
+  # PR 809's review (#764), points 3 to 5: a run with no measurement phase passes; a session that lost turns passes; P3's fit is not checked again before it is launched.
+  'baselinejudge.go@@	if len(o.Phases) == 0 && len(fail) == 0 && len(invalid) == 0 {@@	if false && len(o.Phases) == 0 && len(fail) == 0 && len(invalid) == 0 {'
+  'baselinejudge.go@@			case s.failed || len(s.turns) >= ph.Turns:@@			case true:'
+  'baselineflow.go@@recorded as DidNotFit (point 5 of PR 809'"'"'s review).
+			if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {@@recorded as DidNotFit (point 5 of PR 809'"'"'s review).
+			if false {'
+  # PR 809's review (#764), point 6: a failed P0 says its job ran (the marker's flag here, and the script's line).
+  'run.go@@baselineInvalid = &BaselineInvalidError{Why: why, NoJob: !o.ServedCreated}@@baselineInvalid = &BaselineInvalidError{Why: why}'
+  'hack/live-checks.sh@@    elif baseline_invalid_marker && baseline_nojob_marker; then@@    elif false; then'
+  # PR 809's review (#764), point 7: the example names plgrid-gpu-a100's Provider.
+  'examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml@@    names:
+      - athena-now@@    names:
+      - athena-a100'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
@@ -1331,7 +1352,7 @@ compile_of() {
 # parent-death SIGKILL, which it asks for.
 rehearsal_tests='ExitedSSHD|ZeroRowSignalsNothing|BelowWalksNothing|Guard2Alone|SignalProcs|RefusalIsTheErrorOfClose|WithRelayEnvSelectsNothing|ReportLeaks|CloseReturnsWhen|BeforeItsParent|LeftTheTree|StillAliveAtItsDeadline|StillOutsideTheTree|RelayGuard|ForcedCommandDies|ForcedCommandExecs|GuardFailureIsLogged'
 # The tests of the script's kind.
-script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow|InvalidMarkerOnAnotherRow|TheKeeperRowsNotRunsThroughTheScript|TheKeeperMarkerOnAnotherRow|TheRouterRowsNotRunsThroughTheScript|TheHeliosRouterRowsNotRunsThroughTheScriptPostTheGlibc|TheGlibcMarkerOnAnotherRow|TheBulkRowsFourVerdictsThroughTheScript|TheFindingMarkerIsTheBulkRowsAlone|TheSanoStagingDirectoryAndModeAreRefused|ASanoRowRunsInDirectMode'
+script_tests='AccountingRow|TimeoutIs|AccountingRowsGet|ScriptsShapes|EveryAlphaRowRuns|GH200|Conformance|LateJobOnEvery|OwnersGo|ReadAgain|SlotHold|MostJobs|TunnelLease|LeaseBounds|BuildsBefore|PendingBound|PendingPastTheBound|CanBeNotRun|Reach|RealEngineJobPending|RealEngineNotRun|EveryRowInAOneJobSlot|RunsJobsByItsPrefix|NotRunAtItsFirstEnd|DiesMidWait|FrontLabel|FrontRan|LabelReaches|FrontRoles|ATableThat|NeverStarted|EveryRowCanBeNotRun|OnlyAMarkedCleanSkip|AMarkerAnEarlierRow|TimeoutReaches|AnAccountingRowWithNoSlot|HostDialedMode|HandoverRowsLead|LeadMarkersReason|LeadMarkerOnARow|EveryStackRow|TheRowsThatStartNoStack|TunnelRowsLongStream|LongMarkersReason|LongMarkerOnARow|InvalidMarkerOnAnotherRow|TheKeeperRowsNotRunsThroughTheScript|TheKeeperMarkerOnAnotherRow|TheRouterRowsNotRunsThroughTheScript|TheHeliosRouterRowsNotRunsThroughTheScriptPostTheGlibc|TheGlibcMarkerOnAnotherRow|TheBulkRowsFourVerdictsThroughTheScript|TheFindingMarkerIsTheBulkRowsAlone|TheSanoStagingDirectoryAndModeAreRefused|ASanoRowRunsInDirectMode|TheRunsOwnStackIsStoppedBeforeItsJobsAreCancelled|TheStackIsStoppedOnlyAsTheRunNamedIt|AStoppedRunsCleanupReadsForTheSubmissionWindow|TheStoppedCleanupWindowCoversTheProfilesSubmissionWindow|AFailedLLMLabP0ReportsNoSubmissionThroughTheScript|TheAthenaBaseline'
 # tests_of <path> [control|<names>]: the command that judges a mutant of path, in the array tests. With control, the same command with
 # no mutant: from the binaries kept at the baseline, the tree being as it was. With names (a regexp), that, for those tests alone, to
 # the end. The
@@ -1414,7 +1435,7 @@ baseline() {
     internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
     internal/rehearsal/*) cp "$tmp/reh.test" "$tmp/base-reh.test" ;;
     pkg/agentapi/*) cp "$tmp/api.test" "$tmp/base-api.test" ;;
-    *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+    *.go|examples/*) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
   esac
   tests_of "$1"
   bounded "$tmp/baseline.log"

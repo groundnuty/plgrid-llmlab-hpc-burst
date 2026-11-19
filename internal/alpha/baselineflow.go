@@ -93,6 +93,8 @@ type BaselineWorld interface {
 type BaselineSettings struct {
 	Phases []Phase
 	Cap    int
+	// Row is the row's name (BetaBaselineName or BetaAthenaBaselineName): the observation carries it, and the judge names the row's facts by it.
+	Row string
 	// OmitMinTokens is the run-wide min_tokens switch, recorded in the observation.
 	OmitMinTokens bool
 	// Poll, FitMargin, DetachWait and DetachEvery are BaselinePoll, BaselineFitMargin, BaselineDetachWait and BaselineDetachEvery unless a test sets them.
@@ -153,7 +155,7 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 		s.WaitingPoll = BaselineWaitingPoll
 	}
 	s.lastRead = new(time.Time)
-	o := BaselineObs{Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
+	o := BaselineObs{Row: s.Row, Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
 	var err error
 	if o.Managed, err = w.AttachManaged(ctx); err != nil {
 		return o, err
@@ -208,6 +210,12 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 			}
 			o.Detached = waitUntil(ctx, w, s.DetachWait, s.DetachEvery, w.ManagedDetached)
 			s.logf("%s: the managed ModelDeployment is deleted; the front dropped its target: %t", ph.Name, o.Detached)
+			// The wait above (up to DetachWait) comes after the fit was checked, and a slow detach can eat the margin: the fit is checked again IMMEDIATELY
+			// before the phase is launched, and a phase that no longer fits is not started, recorded as DidNotFit (point 5 of PR 809's review).
+			if w.Now().Add(ph.Bound + s.FitMargin).After(o.DrainStart) {
+				o.DidNotFit = ph.Name
+				break
+			}
 		}
 		po, perr := runPhase(ctx, w, s, ph)
 		o.Phases = append(o.Phases, po)

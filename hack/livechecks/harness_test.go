@@ -251,7 +251,7 @@ func (w *world) env(extra []string) []string {
 		env = append(env, e)
 	}
 	env = append(env, "PATH="+w.bin+":"+os.Getenv("PATH"), "HPCBURST_LIVE_SETTINGS="+w.settings, "STUB_STATE="+w.state,
-		"LIVE_POLL_SECONDS=0", "LIVE_CLEAN_POLL_SECONDS=0", "TMPDIR="+w.tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"LIVE_POLL_SECONDS=0", "LIVE_CLEAN_POLL_SECONDS=0", "LIVE_CLEAN_WINDOW_SECONDS=0", "TMPDIR="+w.tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
 		// The script's today is the world's day, not the real clock's (see world.day). A test's own entry
 		// below wins: the last of two for one name is the one the script gets.
 		"LIVE_FAKE_DATE_FILE="+w.dayFile())
@@ -548,9 +548,10 @@ func lines(s string) []string {
 }
 
 // hostDialedOnly names the rows the harness runs in host-dialed mode: the keeper row, whose relay keeper runs that mode's relays, and the bulk row, which
-// reads the bulk path's buffer on the relays' ssh (issue #521), both of which the script refuses in another mode; and the Sano rows, which it gives that mode
+// reads the bulk path's buffer on the relays' ssh (issue #521), both of which the script refuses in another mode; the baseline's Athena twin, whose profile
+// lists host-dialed alone (issue #764), which the script refuses in another mode too; and the Sano rows, which it gives that mode
 // by default (the one that has run there; their profile lists it alone, issue #735). The script takes direct mode for the Sano rows too, and sano_test.go
 // runs them in it with exactMode.
 func hostDialedOnly(row string) bool {
-	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover" || row == "beta-sano-llmlab-baseline"
+	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover" || row == "beta-sano-llmlab-baseline" || row == "beta-athena-now-llmlab-baseline"
 }

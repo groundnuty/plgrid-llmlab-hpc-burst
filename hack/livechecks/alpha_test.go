@@ -71,6 +71,8 @@ var alphaShapes = []alphaShape{
 	{"alpha-sano-serve", "TestAlphaSanoServe", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
 	// The baseline row (issue #764): the serve row's shape on Sano, with LLMLab attached and the generator run beside it.
 	{"beta-sano-llmlab-baseline", "TestBetaSanoLLMLabBaseline", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
+	// The baseline's Athena twin (issue #764): row A's shape and slot on plgrid-now, with LLMLab attached and the generator run beside it.
+	{"beta-athena-now-llmlab-baseline", "TestBetaAthenaNowLLMLabBaseline", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 }
 
@@ -84,7 +86,15 @@ case "$1" in
   build) case " $* " in
            # The bulk row's test shim (build_test_shims): one file at -o, the digest it is built with in its argv (go-argv).
            *enginedouble/shim*) mkdir -p "$(dirname "$out")" && echo shim > "$out" ;;
-           *) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done ;;
+           # The host binaries: hpcburst records a down (the run's own stack stopped before its jobs are cancelled, stackstop_test.go).
+           *) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do cat > "$out/$b" <<'STUB'
+#!/bin/bash
+[ "$1" = down ] || exit 0
+echo "hpcburst down" >> "$STUB_STATE/events"
+printf '%s\n' "$*" >> "$STUB_STATE/down-argv"
+[ -z "${STUB_DOWN_FAIL:-}" ] || exit 1
+STUB
+chmod +x "$out/$b"; done ;;
          esac
          [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out"
@@ -160,6 +170,20 @@ case $mode in
   not-run-long-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-long-fit-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at 300 tokens/s with max-model-len 32768 the stream that fits is owner-private-host, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # A stopped run whose stack is up (internal/alpha, StackStateFile): the run's own stack named in the record directory as the test writes it, before anything else,
+  # a job left, and then a hang (to be signalled), a panic or a timeout. STUB_STACK_STATE names another line than the stub's own directory.
+  stack-sleep|stack-die|stack-timeout)
+    st=${STUB_STACK_STATE:-state=$STUB_STATE/stack/st}
+    mkdir -p "$STUB_STATE/stack/st"
+    printf '%s\n' "$st" > "$HPCBURST_ALPHA_OUT/stack-state-dir"; chmod 600 "$HPCBURST_ALPHA_OUT/stack-state-dir"
+    leave
+    case $mode in
+      stack-sleep) touch "$STUB_STATE/started"; exec sleep 3600 ;;
+      stack-die) echo "=== RUN   $t"; echo "panic: the step died"; exit 2 ;;
+      stack-timeout) echo "=== RUN   $t"; exit 124 ;;
+    esac ;;
+  # A job of the run's own tag that the queue shows only after STUB_HIDE_READS reads, in a run that then dies: a submission that lands after the cleanup's first looks.
+  late-hidden-die) touch "$STUB_STATE/ran"; echo "hb-late-bbbbbbbbbbbb" >> "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "=== RUN   $t"; echo "panic: the step died"; exit 2 ;;
   # The bulk row's staging of its shipped agent, then a stop before its own removal (internal/alpha, TestAgentDirFile): the directory, and the file
   # naming its exact path (STUB_TEST_AGENT_PATH, or the stub's own staging), as the test writes it; then it waits to be signalled.
   stage-and-sleep)
@@ -711,7 +735,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router", "alpha-sano-serve", "alpha-sano-handover", "beta-sano-llmlab-baseline"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router", "alpha-sano-serve", "alpha-sano-handover", "beta-sano-llmlab-baseline", "beta-athena-now-llmlab-baseline"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -724,7 +748,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"the Sano example the Sano rows apply", "examples/provider-sano-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-sano-handover", "alpha-sano-serve", "alpha-sano-stage", "beta-sano-llmlab-baseline"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage", "alpha-sano-stage"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage", "alpha-athena-now-stage-qwen3-vl", "alpha-sano-stage"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1002,6 +1026,10 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
 		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
+		// The baseline's pre-staging row (issue #764) is the stage row's shape: 10 + 30 + 2 = 42 minutes, rounded up to ten.
+		{"alpha-athena-now-stage-qwen3-vl", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
+		// The baseline's Athena twin (issue #764) holds the slot as row A does: 10 + 48 + 2.
+		{"beta-athena-now-llmlab-baseline", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The accounting row on plgrid-now (issue #145): its start wait of 10, a job of 5 minutes and a minute for the end, 16
 		// minutes, rounded up to ten: 20.
 		{"gpu-accounting-athena-now", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 20 min; the owner's go is needed (the development rule on #145)"},

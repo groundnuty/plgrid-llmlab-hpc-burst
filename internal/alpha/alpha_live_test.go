@@ -63,7 +63,11 @@ func runRow(t *testing.T, family string, rows ...string) {
 	if BaselineInvalidRun(cfg.Row, err) {
 		// The baseline row's INVALID (ErrBaselineInvalid) by the same protocol, its own words in the marker: the run was judged, recorded and posted,
 		// nothing failed, and its reading measures nothing. hack/live-checks.sh reads it as INVALID on that row alone.
-		if merr := rec.SaveText(NotRunFile, BaselineInvalidNote(cfg.Row)); merr != nil {
+		invalidNote := BaselineInvalidNote(cfg.Row)
+		if BaselineInvalidNoJob(err) {
+			invalidNote = BaselineInvalidNoJobNote(cfg.Row) // a failed LLMLab P0: no job was submitted, and the marker says so
+		}
+		if merr := rec.SaveText(NotRunFile, invalidNote); merr != nil {
 			t.Fatalf("%s: the reading measures nothing, but the marker could not be written: %v", cfg.Row.Name, merr)
 		}
 		t.Skipf("INVALID: %v", err)
@@ -200,4 +204,14 @@ func TestAlphaSanoServe(t *testing.T) {
 //livecheck:beta-sano-llmlab-baseline
 func TestBetaSanoLLMLabBaseline(t *testing.T) {
 	runRow(t, "baseline", BetaBaselineName)
+}
+
+// TestBetaAthenaNowLLMLabBaseline is the Athena twin of that row (issue #764, the science agent's ruling of 19 Nov 2026): the same flow, phases and verdicts,
+// run by the same code, on one A100 40 GB of Athena's plgrid-now under profiles/athena-now.yaml in host-dialed mode, at the Athena cap of 3 (P1 and P1-long with
+// N = 3, P2 and P3 with N = 5), on the plgrid-now rows' own lease (48 minutes), start wait, slot guard and owner's go. It starts warm only from the checkpoint that
+// alpha-athena-now-stage-qwen3-vl staged beforehand: the Instance's staging runs inside athena-now.yaml's start timeout of 12 minutes.
+//
+//livecheck:beta-athena-now-llmlab-baseline
+func TestBetaAthenaNowLLMLabBaseline(t *testing.T) {
+	runRow(t, "baseline", BetaAthenaBaselineName)
 }

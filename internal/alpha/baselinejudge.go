@@ -365,8 +365,8 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	if o.K != LLMLabK {
 		f("the row's k is not %d", LLMLabK)
 	}
-	if o.Served.DeploymentID != BaselineDeploymentID {
-		f("the served Instance's deployment ID is not the one the shipped example derives (%s), or was not read", BaselineDeploymentID)
+	if want := baselineFactsOf(o.Row).DeploymentID; o.Served.DeploymentID != want {
+		f("the served Instance's deployment ID is not the one the shipped example derives (%s), or was not read", want)
 	}
 
 	// The logged KV is a CHECK, never an input of the cap. Below the cap's need, nothing after it was run.
@@ -425,6 +425,19 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 				f("%s was not run", ph.Name)
 			}
 		}
+	}
+	// A run with no measurement phase NEVER passes (point 3 of PR 809's review): a ratio probe that answered as its time bound fired ends the run before any
+	// phase (StoppedBefore), and the loop above takes every missing phase for that stop's mark. With no failure and no other reason, the run measured nothing, and
+	// says so, naming the step it ended at: INVALID, never a pass with four phases absent.
+	if len(o.Phases) == 0 && len(fail) == 0 && len(invalid) == 0 {
+		why := "no phase was started"
+		if o.StoppedBefore != "" {
+			why = "the run ended at " + o.StoppedBefore + " before any phase"
+			if o.Ratio.Stopped != "" {
+				why += fmt.Sprintf(" (the ratio probe's generator was stopped: %s)", o.Ratio.Stopped)
+			}
+		}
+		inv("no measurement phase was run (%s), so the run measures nothing", why)
 	}
 	return dedupe(fail), dedupe(invalid)
 }
@@ -558,6 +571,46 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 			inv("a request LLMLab answered failed (status %d)", j.Front.Status)
 		default:
 			f("a request failed (status %d, emitter %q)", j.Front.Status, j.Front.Emitter)
+		}
+	}
+	// Every session ran ALL its configured turns, from the front's usage records (the generator's records only join a request to its session and turn)
+	// (point 4 of PR 809's review): a client-side stream error stops a session, the generator's exit status 1 is accepted, and a request the front recorded as 200
+	// can hide it. A session with a failed request is the failed request's finding, and a stopped phase has its own mark; a session of fewer turns than the phase
+	// configured, with none failed, FAILS the phase, or makes it INVALID when LLMLab answered any of its requests (a client error on LLMLab's leg says nothing
+	// of the framework).
+	if po.Stopped == "" {
+		type sessionTurns struct {
+			turns          map[int]bool
+			failed, viaLLM bool
+		}
+		by := map[string]*sessionTurns{}
+		for _, j := range joined {
+			s := by[j.Gen.Session]
+			if s == nil {
+				s = &sessionTurns{turns: map[int]bool{}}
+				by[j.Gen.Session] = s
+			}
+			if j.Gen.Turn >= 1 && j.Gen.Turn <= ph.Turns {
+				s.turns[j.Gen.Turn] = true
+			}
+			s.failed = s.failed || j.failed()
+			s.viaLLM = s.viaLLM || j.route(managed) == RouteLLMLab
+		}
+		shortOnInstance, shortViaLLM := 0, 0
+		for _, s := range by {
+			switch {
+			case s.failed || len(s.turns) >= ph.Turns:
+			case s.viaLLM:
+				shortViaLLM++
+			default:
+				shortOnInstance++
+			}
+		}
+		if shortOnInstance > 0 {
+			f("%d session(s) ran fewer than the %d turns the phase configured, by the front's usage records, though no request of theirs failed there: a client-side error ended them, and the phase did not measure what it was configured to", shortOnInstance, ph.Turns)
+		}
+		if shortViaLLM > 0 {
+			inv("%d session(s) that LLMLab answered ran fewer than the %d turns the phase configured, by the front's usage records, though no request of theirs failed there: a client-side error ended them", shortViaLLM, ph.Turns)
 		}
 	}
 	invalid = dedupe(invalid)
@@ -741,8 +794,8 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		}
 		if ph.Kind != KindLong {
 			if run := longestWaitingRun(po.Engine); run >= EngineWaitingSustain {
-				f("the engine had requests waiting in %d consecutive distinct reads, past the %d that a burst of first prefills explains (%s to %s apart at Sano's probe interval of %s)",
-					run, EngineWaitingSustain-1, time.Duration(run-1)*EngineProbeInterval, time.Duration(run)*EngineProbeInterval, EngineProbeInterval)
+				f("the engine had requests waiting in %d consecutive distinct reads, past the %d that a burst of first prefills explains (%s to %s apart at %s's probe interval of %s)",
+					run, EngineWaitingSustain-1, time.Duration(run-1)*EngineProbeInterval, time.Duration(run)*EngineProbeInterval, baselineFactsOf(o.Row).Cluster, EngineProbeInterval)
 			}
 			if d := po.Engine[len(po.Engine)-1].Preemptions - po.Engine[0].Preemptions; d != 0 {
 				f("the engine preempted %.0f request(s) during the phase", d)
@@ -858,6 +911,9 @@ func baselineVerdictWord(failures, invalid []string) string {
 	return "PASS"
 }
 
+// invalidNoJobWords tell an INVALID run that submitted no job from a NOT RUN, in its text to post: P0 ended it before the served ModelDeployment was created.
+const invalidNoJobWords = "this is not a NOT RUN: P0 ended the run before the served ModelDeployment was created, so no job was submitted, no job started and no slot was spent; the managed leg's reading measures nothing it can be judged by; neither a pass nor a failure, so run it again"
+
 // phaseSummaryLine is a phase's shape, in the post's words.
 func phaseSummaryLine(p Phase) string {
 	return fmt.Sprintf("N = %d, %d turns, context %d, turn %d, output %d words, think %s, stagger %s", p.Sessions, p.Turns, p.Context, p.Turn, p.Output, p.Think, p.Stagger)
@@ -872,14 +928,19 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 	case "FAIL":
 		fmt.Fprintf(&b, "%s: FAIL (posts to %s)\n- failed checks: %s\n", row.Name, row.PostsTo, Summary(failures))
 	case "INVALID":
-		fmt.Fprintf(&b, "%s: INVALID (posts to %s)\n- the reading is invalid: %s\n- %s\n", row.Name, row.PostsTo, Summary(invalid), invalidNotNotRunWords)
+		words := invalidNotNotRunWords
+		if !o.ServedCreated {
+			words = invalidNoJobWords // a failed LLMLab P0 ends the run before any job is submitted: no slot was spent
+		}
+		fmt.Fprintf(&b, "%s: INVALID (posts to %s)\n- the reading is invalid: %s\n- %s\n", row.Name, row.PostsTo, Summary(invalid), words)
 	default:
 		fmt.Fprintf(&b, "%s: PASS (posts to %s)\n", row.Name, row.PostsTo)
 	}
+	facts := baselineFactsOf(o.Row)
 	fmt.Fprintf(&b, "%s\n", deploymentLine(o.Deployment))
-	fmt.Fprintf(&b, "- the model: %s at the pinned revision, as shipped, max-model-len %d; one Instance on Sano and LLMLab attached by a managed Provider; no Workload (today's code)\n", BaselineModel, MaxModelLen)
-	fmt.Fprintf(&b, "- the cap is %d, a constant fixed before the run: floor(0.95 x %d / %d) from the engine's KV as shipped; the engine's logged KV after ready was %d tokens (a check, never an input)\n", o.Cap, KVSano, MaxModelLen, o.LoggedKV)
-	fmt.Fprintf(&b, "- R4's declared charge for comparison: the typical shape's 1,152 tokens against KV %d is %d sessions, capped at max-num-seqs 256, where the baseline's cap is %d\n", KVSano, KVSano/1152, o.Cap)
+	fmt.Fprintf(&b, "- the model: %s at the pinned revision, as shipped, max-model-len %d; one Instance on %s and LLMLab attached by a managed Provider; no Workload (today's code)\n", BaselineModel, MaxModelLen, facts.Cluster)
+	fmt.Fprintf(&b, "- the cap is %d, a constant fixed before the run: floor(0.95 x %d / %d) from %s; the engine's logged KV after ready was %d tokens (a check, never an input)\n", o.Cap, facts.KV, MaxModelLen, facts.KVBasis, o.LoggedKV)
+	fmt.Fprintf(&b, "- R4's declared charge for comparison: the typical shape's 1,152 tokens against KV %d is %d sessions, capped at max-num-seqs 256, where the baseline's cap is %d\n", facts.KV, facts.KV/1152, o.Cap)
 	fmt.Fprintf(&b, "- min_tokens: %s\n", map[bool]string{true: "left out of every request (the probe's verdict)", false: "sent on every request"}[o.OmitMinTokens])
 	if o.Ratio.Needed {
 		if o.Ratio.LongWords > 0 {
@@ -907,7 +968,7 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 				continue
 			}
 			fmt.Fprintf(&b, "  - %s: %d requests, %d sessions (distinct), %d at most in flight; spills in %d, out %d; errors %d; time to first token p50 %.0f ms, p95 %.0f ms; speed per session p50 %.1f and minimum %.1f tokens/s; tokens %d prompt, %d completion\n",
-				rr.Route, rr.Requests, rr.Sessions, rr.MostInFlight, rr.SpillsIn, rr.SpillsOut, rr.Errors, rr.TTFTp50, rr.TTFTp95, rr.SpeedP50, rr.SpeedMin, rr.PromptTokens, rr.CompletionTokens)
+				facts.routeWord(rr.Route), rr.Requests, rr.Sessions, rr.MostInFlight, rr.SpillsIn, rr.SpillsOut, rr.Errors, rr.TTFTp50, rr.TTFTp95, rr.SpeedP50, rr.SpeedMin, rr.PromptTokens, rr.CompletionTokens)
 		}
 		b.WriteString(waitsLine(o, po, joined))
 		if po.DialLogRead {
