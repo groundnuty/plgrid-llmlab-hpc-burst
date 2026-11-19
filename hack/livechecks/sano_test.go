@@ -90,7 +90,7 @@ func TestTheScriptsSanoShapesArePackagesRows(t *testing.T) {
 }
 
 // The estimate is the one sbatch call before --yes, and it asks what Sano's plugin requires on the gpu partition: a QOS, a memory (in MiB, which the
-// shape's "135904Mi" becomes), CPUs, and a job name that is not the generic default of --wrap. A rejected estimate stops the run, so a stub that
+// shape's "65536Mi" becomes), CPUs, and a job name that is not the generic default of --wrap. A rejected estimate stops the run, so a stub that
 // accepts anything would hide a missing one.
 func TestTheSanoEstimateAsksForWhatTheSubmitPluginRequires(t *testing.T) {
 	cpus, mem, qos := readSanoProfile(t)
@@ -135,8 +135,9 @@ func TestTheSanoStageRowBuildsItsHelperFromTheSevenBAndASIFAndGivesTheTestItsRoo
 		t.Errorf("the helper was not built before the test ran:\n%s", ev)
 	}
 	env := w.stateFile("test-env-TestSanoStage")
-	for _, want := range []string{"HPCBURST_CONFORMANCE=1", "HPCBURST_CONF_PROFILE=sano", "HPCBURST_CONF_PARTITION=gpu", "HPCBURST_CONF_GPUS=1", "HPCBURST_CONF_CPUS=11",
-		"HPCBURST_CONF_MEMORY=135904Mi", "HPCBURST_CONF_STAGING_ROOT=/SEEDSTAGE/hb-stage", "HPCBURST_CONF_STAGING=/SEEDSTAGE/hb-stage/hpc-burst-conformance",
+	cpus, mem, _ := readSanoProfile(t) // the profile's per-GPU sizes, never the script's
+	for _, want := range []string{"HPCBURST_CONFORMANCE=1", "HPCBURST_CONF_PROFILE=sano", "HPCBURST_CONF_PARTITION=gpu", "HPCBURST_CONF_GPUS=1", fmt.Sprintf("HPCBURST_CONF_CPUS=%d", cpus),
+		"HPCBURST_CONF_MEMORY=" + mem, "HPCBURST_CONF_STAGING_ROOT=/SEEDSTAGE/hb-stage", "HPCBURST_CONF_STAGING=/SEEDSTAGE/hb-stage/hpc-burst-conformance",
 		"HPCBURST_CONF_STAGE_HELPER=", "HPCBURST_CONF_PENDING_MAX_SECONDS="} {
 		if !strings.Contains(env, want) {
 			t.Errorf("the test's environment lacks %s:\n%s", want, env)

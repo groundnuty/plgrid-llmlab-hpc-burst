@@ -109,7 +109,10 @@ func TestTheSanoExpectedPerformanceEntriesAreKeyedOnTheExamplesTheyAreFor(t *tes
 	pp := readShippedSano(t)
 	part := pp.Spec.Partitions[0]
 	const source = "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6983826975"
-	const method = "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+	const recordMethod = "3 warm runs on one Sano A100 (gpu1), the slowest of each; all on 8-GPU nodes; it applies to the 4-GPU nodes (the same A100 80 GB class) within tolerancePercent; 18 Nov 2026"
+	// The assessment of 19 Nov 2026: the runs were at 11 CPUs and 135904Mi per GPU and the profile now asks for 4 and 64 GiB; the confirming run is pending. The figures and keys are the record's.
+	const shape = ". Measured at 11 CPUs and 135904Mi per GPU. Expected to hold at 4 CPUs and 64 GiB, since decode is GPU-bound and the gate's default tolerance allows 2x; pending one confirming run at the new shape"
+	const method = recordMethod + shape
 	if len(pp.Spec.ExpectedPerformance) != 2 {
 		t.Fatalf("%d entries, want the two of the reference record", len(pp.Spec.ExpectedPerformance))
 	}

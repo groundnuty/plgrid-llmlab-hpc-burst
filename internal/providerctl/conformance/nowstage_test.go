@@ -610,7 +610,7 @@ func TestTheSanoStageRowDryRunStagesASIFInTheProvidersOwnDirectory(t *testing.T)
 	if err := os.MkdirAll(out, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	w, plat := dryWorld(t, r, "", out, dryShape{cpus: "11", memory: "135904Mi"}, helper, jobEnv, dryExtra{
+	w, plat := dryWorld(t, r, "", out, dryShape{cpus: "4", memory: "65536Mi"}, helper, jobEnv, dryExtra{
 		run: func(rm *fakeslurm.RunMode) { rm.JobDir = jobs },
 		kit: func(k *worldKit) { k.keepStaging = true },
 		// Staged where the agent stages: the Provider's own root, not a run's directory below it (TestSanoStage).
