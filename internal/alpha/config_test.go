@@ -22,7 +22,7 @@ func liveSettings(row string) map[string]string {
 		m[envLease] = "137"
 	}
 	if r.ProviderStaging {
-		// The Sano rows: host-dialed alone (no address), and the Provider's own staging directory (#735).
+		// The Sano rows: host-dialed by default (no address; direct is taken too, ssh is refused), and the Provider's own staging directory (#735).
 		m[envMode], m[envStagingDir] = "host-dialed", "/path/to/shared/example-stage"
 		delete(m, envAddr)
 	}
