@@ -4,7 +4,7 @@ This page takes you from a clone of the repository, or from the release archive,
 
 The route is **Athena, in `host-dialed` mode**. Your host dials each job through the login node, so no compute node ever has to reach your machine. Sano is beta and takes the same steps with a few changes, in `host-dialed` or `direct` mode ([Sano](#sano-beta)). Helios is beta and waits for the GH200 nodes to return ([Helios](#helios-beta)).
 
-The framework is alpha. The release notes give its live runs so far: [v0.1.0-alpha.1](releases/v0.1.0-alpha.1.md)'s on Athena and [v0.1.0-alpha.2](releases/v0.1.0-alpha.2.md)'s on Sano. The criteria still open are tracked in [issue #145](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145). [Alpha's limits](#alphas-limits) at the end lists what to expect.
+The framework is alpha. The release notes give its live runs so far: [v0.1.0-alpha.1](releases/v0.1.0-alpha.1.md)'s on Athena, and [v0.1.0-alpha.2](releases/v0.1.0-alpha.2.md)'s and [v0.1.0-alpha.3](releases/v0.1.0-alpha.3.md)'s on Sano. The criteria still open are tracked in [issue #145](https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145). [Alpha's limits](#alphas-limits) at the end lists what to expect.
 
 Read [HBEP-2](../hbep/0002-scope-and-user-story/README.md) first for what the framework is for. Each rule this page relies on lives in an HBEP, and the steps link there instead of repeating it.
 
@@ -55,15 +55,15 @@ hack/build-agents.sh "$STATE/agent-builds" x86_64
 
 The controller records the agent build's sha256 with every job it submits. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine. It prints each digest with the Go version beside it.
 
-### Release archive (v0.1.0-alpha.2)
+### Release archive (v0.1.0-alpha.3)
 
-Release v0.1.0-alpha.2 is a GitHub pre-release, built from the `v0.1.0-alpha.2` tag, so you can unpack its archive instead of building. The archive is for Linux on x86_64 and replaces the two blocks above. It holds the files of that tag, Sano's profile and examples included, so what reached `main` after it is not in it (a Workload's sticky routes, for one: [the operations guide](operations.md#workloads-beta)). [Its notes](releases/v0.1.0-alpha.2.md) say what it adds and what was measured. To build that release from source instead, check out the `v0.1.0-alpha.2` tag in a clone and follow [Build from source](#build-from-source) above.
+Release v0.1.0-alpha.3 is a GitHub pre-release, built from the `v0.1.0-alpha.3` tag, so you can unpack its archive instead of building. The archive is for Linux on x86_64 and replaces the two blocks above. It holds the files of that tag, Sano's profile and examples and a Workload's sticky routes included, so what reaches `main` after it is not in it. [Its notes](releases/v0.1.0-alpha.3.md) say what it adds since [v0.1.0-alpha.2](releases/v0.1.0-alpha.2.md) and what was measured. To build that release from source instead, check out the `v0.1.0-alpha.3` tag in a clone and follow [Build from source](#build-from-source) above.
 
-You need no clone of the repository. Besides the binaries, the archive carries the `config/crd`, `profiles/` and `examples/` that the later steps read ([HBEP-15](../hbep/0015-dependencies-and-provenance/README.md), Releases). Make an empty directory, download `hpcburst-v0.1.0-alpha.2-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into it, and run the rest of this page from there. Check the archive, unpack it in place, check every file it unpacked, and put k3s, frps and the agent builds where the launcher and the controller read them:
+You need no clone of the repository. Besides the binaries, the archive carries the `config/crd`, `profiles/` and `examples/` that the later steps read ([HBEP-15](../hbep/0015-dependencies-and-provenance/README.md), Releases). Make an empty directory, download `hpcburst-v0.1.0-alpha.3-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into it, and run the rest of this page from there. Check the archive, unpack it in place, check every file it unpacked, and put k3s, frps and the agent builds where the launcher and the controller read them:
 
 ```
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf hpcburst-v0.1.0-alpha.2-linux-amd64.tar.gz
+tar -xzf hpcburst-v0.1.0-alpha.3-linux-amd64.tar.gz
 sha256sum -c --quiet SHA256SUMS
 mkdir -p "$BIN"
 cp -r bin/k3s-1.36.5 bin/frp-0.71.1 "$BIN"/
@@ -271,6 +271,6 @@ bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
 - **One user, one host.** The host is a single-user k3s on one machine ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md)). A team option is not part of alpha.
 - **One partition per Provider**, and a Provider names exactly one ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 12). A second partition is a second Provider.
 - **Helios `plgrid` hosts no model.** It is a CPU partition, in the Helios profile for conformance runs and short checks only ([`profiles/README.md`](../profiles/README.md)).
-- **Sano is beta.** Its PlatformProfile (`profiles/sano.yaml`) and examples are in the v0.1.0-alpha.2 archive and on `main`. Its rows have passed in `host-dialed` and `direct` mode ([the v0.1.0-alpha.2 notes](releases/v0.1.0-alpha.2.md); [Sano](#sano-beta)).
+- **Sano is beta.** Its PlatformProfile (`profiles/sano.yaml`) and examples are in the release archive since v0.1.0-alpha.2, and on `main`. Its rows have passed in `host-dialed` and `direct` mode ([the v0.1.0-alpha.2 notes](releases/v0.1.0-alpha.2.md); [Sano](#sano-beta)).
 - **A managed Provider only lists.** It reads LLMLab's catalog once a minute and routes to it. It starts and stops nothing ([HBEP-4](../hbep/0004-provider-interface/README.md), Managed provider in alpha).
 - **Billing is recorded, not read.** The `grant` field is kept, but nothing in alpha charges against it.
