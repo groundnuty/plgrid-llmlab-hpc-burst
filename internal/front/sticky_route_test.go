@@ -38,39 +38,49 @@ func TestStickyWorkloadRefusesARequestWithNoSessionHeader(t *testing.T) {
 	}
 }
 
-// The pin is journalled before the request is dispatched (Sticky routes, The pin). A first request is held between the choice of its target and its pin
-// (pinStore.beforeCreate): the engines have seen nothing and the journal holds no pin. Released, the request is served by the key's home, and the journal
-// holds exactly one pin record: alpha's UID, the SHA-256 of the key, the ModelDeployment's UID and the Instance's full deployment ID, and the pin's TTL.
+// The pin is journalled before the request is dispatched (Sticky routes, The pin). The first request of a conversation is held between the choice of its
+// target and its pin (pinStore.beforeCreate, which holds only the first call). No window is read: a second conversation, with its home on the other engine, then
+// makes a whole round trip through the front, which is the event that a front that dispatched first would have produced for the held request before this one
+// even began, and is the positive control that the engines show a dispatch. When it has answered, the engines have seen that one request and none for the held
+// one, and the journal holds the second conversation's pin and not the held one's. Released, the held request is served by its home, and the journal holds
+// its pin: alpha's UID, the SHA-256 of the key, the ModelDeployment's UID and the Instance's full deployment ID, and the pin's TTL.
 func TestStickyPinIsJournalledBeforeTheRequestIsDispatched(t *testing.T) {
 	f := newSkFix(t, skOpts{})
 	gate, entered := make(chan struct{}), make(chan struct{}, 4)
-	f.router.pins.beforeCreate = func() { entered <- struct{}{}; <-gate }
-	t.Cleanup(func() { close(gate) })
-	s := f.session("ns/a-0", 0)
+	var first atomic.Bool
+	f.router.pins.beforeCreate = func() {
+		entered <- struct{}{}
+		if first.CompareAndSwap(false, true) {
+			<-gate
+		}
+	}
+	var open sync.Once
+	t.Cleanup(func() { open.Do(func() { close(gate) }) }) // a failed row must not leave the first request held
+	s, other := f.session("ns/a-0", 0), f.session("ns/b-0", 0)
 	call, _ := f.start(s)
 	select {
 	case <-entered:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("the first request never reached its pin")
 	}
-	// A request that is not dispatched shows nothing, so this is the one place a window is read: a dispatch takes milliseconds, and the request is held
-	// for 300 ms with its pin unwritten. The journal, not the window, is the proof that the pin is not written yet.
-	for deadline := time.Now().Add(300 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		if n := f.totalSaw(); n != 0 {
-			t.Fatalf("the engines saw %d requests before the pin of the first request was written", n)
-		}
+	f.at(other, "ns/b-0", "the second conversation, while the first is held at its pin")
+	if a, n := f.engineSaw("ns/a-0"), f.totalSaw(); a != 0 || n != 1 {
+		t.Fatalf("a-0 saw %d requests and the engines %d in all, want 0 and 1: the held request was dispatched before its pin was written", a, n)
 	}
-	if j := len(f.journal()); j != 0 {
-		t.Fatalf("the journal holds %d records while the pin is held back, want none", j)
+	if n := len(f.journalOf("pin", s)); n != 0 {
+		t.Fatalf("the journal holds %d pins of the held conversation before its request is released, want none", n)
 	}
-	gate <- struct{}{}
+	if n := len(f.journalOf("pin", other)); n != 1 {
+		t.Fatalf("the journal holds %d pins of the second conversation, want its one", n)
+	}
+	open.Do(func() { close(gate) })
 	resp, body := call.wait(t)
 	if resp.StatusCode != 200 || scInstanceOf(resp) != "ns/a-0" {
 		t.Fatalf("the first request: %d from %q, want 200 from ns/a-0: %s", resp.StatusCode, scInstanceOf(resp), body)
 	}
 	pins := f.journalOf("pin", s)
-	if len(pins) != 1 || len(f.journal()) != 1 {
-		t.Fatalf("the journal holds %d records, %d of them this key's pin, want exactly that one", len(f.journal()), len(pins))
+	if len(pins) != 1 || len(f.journal()) != 2 {
+		t.Fatalf("the journal holds %d records, %d of them this key's pin, want its one beside the second conversation's", len(f.journal()), len(pins))
 	}
 	p := pins[0]
 	if p.Workload != f.alphaUID() || p.MD != f.mdUID("md-a") || p.ID != f.idOf("ns/a-0") || p.Provider != "" || p.ManagedID != "" || p.TTL.D() != 12*time.Hour {
