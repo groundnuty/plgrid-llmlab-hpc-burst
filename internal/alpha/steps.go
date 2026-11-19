@@ -107,6 +107,8 @@ type Steps interface {
 	// BetaRouter is the router row on plgrid-now (issue #521; betarouter.go). Beside what it saw it may return ErrGlibcTooOld,
 	// which ends the run NOT RUN.
 	BetaRouter(ctx context.Context, p Plan) (RouterObs, error)
+	// Baseline is HBEP-764's baseline row on Sano (issue #764; baseline.go). Beside what it saw it may return ErrNotStarted.
+	Baseline(ctx context.Context, p Plan) (BaselineObs, error)
 	// NowNoOverlap is row B on plgrid-now (issue #376; nownooverlap.go). Beside what it saw it may return ErrSlotTaken
 	// or ErrSecondNotStarted, which leave the predecessor's part to judge.
 	NowNoOverlap(ctx context.Context, p Plan) (NowNoOverlapObs, error)

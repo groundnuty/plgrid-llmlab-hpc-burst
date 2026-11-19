@@ -108,7 +108,7 @@ func TestTheStartupInTheWorstCaseIsTheStacksOwn(t *testing.T) {
 // sampler's and the prober's own, which no step waits on past what is listed).
 var liveWaits = map[string]string{
 	"Close: context.WithTimeout(CloseTimeout)":                                                    "term: CloseTimeout",
-	"start: r.waitFor(stack.WaitDeadline)":                                                        "startup",
+	"startStack: r.waitFor(stack.WaitDeadline)":                                                   "startup",
 	"endAt: context.WithTimeout(stack.APICallTimeout)":                                            "a call",
 	"firstJobStarted: time.Sleep(time.Second)":                                                    "pacing",
 	"firstReady: r.waitFor(stack.WaitDeadline)":                                                   "the lease",

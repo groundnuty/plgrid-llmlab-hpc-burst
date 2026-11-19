@@ -83,6 +83,32 @@ func InvalidNote(row Row) string {
 	return fmt.Sprintf("%s: %s; its job started, ran and spent the slot, so this is no NOT RUN; the run's other checks passed; the text to post says why; the run ended its deployment\n", row.Name, invalidWords)
 }
 
+// ErrBaselineInvalid ends the baseline row's run that ran and was judged with no failure, but whose reading measures nothing (baseline.go: a failed
+// request LLMLab answered, a cap that never bound, a 503 in the detach phase, an engine whose KV is below the cap's need; the plan's V4). Like ErrInvalid
+// it is neither a pass nor a failure and no NOT RUN: Run judges the rest first, writes the record (verdict "invalid") and the text to post (head INVALID,
+// with why), and returns it only when nothing failed; a failure wins. runRow writes baselineInvalidWords to the marker (NotRunFile) and skips once, and
+// hack/live-checks.sh reads it, on this row alone, as INVALID, exit 3.
+var ErrBaselineInvalid = errors.New(baselineInvalidWords)
+
+// baselineInvalidWords say what an INVALID baseline run is, in the marker, which hack/live-checks.sh reads (baseline_invalid_marker).
+const baselineInvalidWords = "the baseline run's reading is invalid, so it measures nothing"
+
+// BaselineInvalidError is ErrBaselineInvalid with why: the reasons, in their words.
+type BaselineInvalidError struct{ Why []string }
+
+func (e *BaselineInvalidError) Error() string {
+	return baselineInvalidWords + ": " + strings.Join(e.Why, "; ")
+}
+func (e *BaselineInvalidError) Unwrap() error { return ErrBaselineInvalid }
+
+// BaselineInvalidRun reports whether err ends the baseline row's run as INVALID (ErrBaselineInvalid).
+func BaselineInvalidRun(_ Row, err error) bool { return errors.Is(err, ErrBaselineInvalid) }
+
+// BaselineInvalidNote is the text of an INVALID baseline run's marker (NotRunFile): the row and the fixed words, nothing the run read.
+func BaselineInvalidNote(row Row) string {
+	return fmt.Sprintf("%s: %s; its job started and ran, so this is no NOT RUN; the run's other checks passed; the text to post says why; the run ended its deployment\n", row.Name, baselineInvalidWords)
+}
+
 // ErrFinding ends the bulk row's run that ran, was judged with no failure and has the saturation witness, but whose bulk path's gap p99 is 30
 // ms or less below the control's (BulkObs.Protects; #584, the science agent's rulings of 15 Nov 2026, comments 6892006633 and 6892102151): the
 // layout doesn't protect the streams on this path, and HBEP-6's beta criterion, as #583 amends it, is not met. It is neither a pass, which would
@@ -234,6 +260,11 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 				err = fmt.Errorf("closing the steps after a run with no saturation witness: %v (%v)", cerr, err)
 				return
 			}
+			if BaselineInvalidRun(cfg.Row, err) {
+				// And for the baseline row's INVALID.
+				err = fmt.Errorf("closing the steps after a baseline run that measured nothing: %v (%v)", cerr, err)
+				return
+			}
 			if Finding(cfg.Row, err) {
 				// And for a FINDING: a close that failed is a failure, never a FINDING.
 				err = fmt.Errorf("closing the steps after a run whose bulk path did not protect the streams: %v (%v)", cerr, err)
@@ -262,6 +293,8 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		// finding is the bulk row's FINDING (ErrFinding: the witness holds, and the bulk path is 30 ms or less below the control): with no
 		// failure and no INVALID the run is a FINDING.
 		finding error
+		// baselineInvalid is the baseline row's INVALID (ErrBaselineInvalid), judged the same way.
+		baselineInvalid error
 	)
 	switch {
 	case strings.HasPrefix(cfg.Row.Name, "alpha-athena-handover"), IsSanoHandover(cfg.Row.Name):
@@ -318,6 +351,17 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 			return VerifyNowNoOverlap(cfg.Row, o, j)
 		}
 		summary = func(f []string, j []provider.Job) string { return nowNoOverlapPost(cfg.Row, o, f, j, refused) }
+	case IsBaselineRow(cfg.Row.Name):
+		o, serr := st.Baseline(ctx, plan)
+		if serr != nil {
+			return nil, serr
+		}
+		tags, obs = o.Tags, o
+		if why := BaselineInvalid(o); len(why) > 0 {
+			baselineInvalid = &BaselineInvalidError{Why: why}
+		}
+		judge = func(j []provider.Job) []string { return VerifyBaseline(cfg.Row, o, j) }
+		summary = func(f []string, _ []provider.Job) string { return baselinePost(cfg.Row, o, f, BaselineInvalid(o)) }
 	case cfg.Row.Name == BetaBulkName:
 		o, serr := st.BetaBulk(ctx, plan)
 		if serr != nil {
@@ -393,7 +437,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		verdict = "fail"
 	case refused != nil:
 		verdict = "not run"
-	case invalid != nil:
+	case invalid != nil || baselineInvalid != nil:
 		verdict = "invalid"
 	case finding != nil:
 		verdict = "finding"
@@ -416,6 +460,9 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 	}
 	if invalid != nil && len(failures) == 0 {
 		return nil, invalid // the run measured nothing and nothing failed: INVALID, why posted
+	}
+	if baselineInvalid != nil && len(failures) == 0 {
+		return nil, baselineInvalid // the run measured nothing and nothing failed: INVALID, why posted
 	}
 	if finding != nil && len(failures) == 0 {
 		return nil, finding // the run measured, nothing failed, and the layout did not protect the streams: FINDING, its numbers posted

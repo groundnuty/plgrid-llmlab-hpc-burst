@@ -83,6 +83,9 @@ type world struct {
 	// engine double's two prefix-cache counters (obscheck.DoubleNotReported).
 	gpuModel    string
 	notReported map[string]bool
+	// managed is the baseline row's managed ModelDeployment, shaped like examples/modeldeployment-llmlab.yaml and attached to the managed Provider by
+	// name (LLMLabProviderName); nil for every other row.
+	managed *v1alpha1.ModelDeployment
 	// shim is the bulk row's test shim and the shipped agent it execs (bulkshim_live_test.go), nil for every other row: the bulk row's engine is
 	// the double, which reaches the cluster's job only as the shim in hb-agent's place (issue #521, option (A)).
 	shim *testShim
@@ -182,6 +185,17 @@ func liveWorld(cfg Config) (world, error) {
 	}
 	hostOpts := hostOptionsFor(r.Name)
 	prov := liveProvider(cfg, pp.Name)
+	objects := []client.Object{&pp, prov}
+	var managed *v1alpha1.ModelDeployment
+	if r.LLMLab {
+		// The baseline row's managed leg: the shipped LLMLab profile, a managed Provider and its managed ModelDeployment, shaped like the examples,
+		// which this builds from the files themselves so that the row follows them. The first run of a managed Provider under hpcburst up.
+		var more []client.Object
+		if more, managed, err = llmlabObjects(repo, cfg); err != nil {
+			return world{}, err
+		}
+		objects = append(objects, more...)
+	}
 	builds := filepath.Join(cfg.BuildDir, "agent-builds")
 	place := func(h *stack.Host) { copyBuilds(h, builds) }
 	matchEngine, notReported := MatchesCommand, obscheck.VLLMNotReported
@@ -213,7 +227,7 @@ func liveWorld(cfg Config) (world, error) {
 		place: place,
 		dh:    stack.DialHome{Mode: cfg.DialHomeMode, Addr: cfg.DialHomeAddr, KeyPath: cfg.DialHomeKey},
 		ports: portsFor(cfg.Row.Name, livePorts(cfg.DialHomeListen)), env: stack.CleanEnv(),
-		objects: []client.Object{&pp, prov}, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
+		objects: objects, managed: managed, provider: r.Cluster, cluster: r.Cluster, qos: r.QOS, md: &md, profile: pp.Spec,
 		controlDir: cfg.ControlDir, hostLock: cfg.HostLock, matchEngine: matchEngine, gpuModel: gpuModel, notReported: notReported,
 		hostOpts: hostOpts, cpuArch: cpuArch, shim: shim, double: double,
 	}, nil
@@ -276,9 +290,12 @@ func (f failedSteps) NowNoOverlap(context.Context, Plan) (NowNoOverlapObs, error
 func (f failedSteps) BetaRouter(context.Context, Plan) (RouterObs, error) { return RouterObs{}, f.err }
 func (f failedSteps) BetaKeeper(context.Context, Plan) (KeeperObs, error) { return KeeperObs{}, f.err }
 func (f failedSteps) BetaBulk(context.Context, Plan) (BulkObs, error)     { return BulkObs{}, f.err }
-func (f failedSteps) Ledger() Ledger                                      { return &BatchLedger{} }
-func (f failedSteps) Close(context.Context) error                         { return nil }
-func (f failedSteps) WatchResets() int                                    { return 0 }
+func (f failedSteps) Baseline(context.Context, Plan) (BaselineObs, error) {
+	return BaselineObs{}, f.err
+}
+func (f failedSteps) Ledger() Ledger              { return &BatchLedger{} }
+func (f failedSteps) Close(context.Context) error { return nil }
+func (f failedSteps) WatchResets() int            { return 0 }
 
 // liveRun is one run of the live steps in a world.
 type liveRun struct {
@@ -387,7 +404,8 @@ func newLiveRun(t *testing.T, cfg Config, w world) *liveRun {
 	md.Name = name
 	objs := make([]client.Object, 0, len(w.objects))
 	for _, o := range w.objects {
-		if p, ok := o.(*v1alpha1.Provider); ok {
+		// Only the cluster's Provider takes the run's name: a managed Provider keeps its own (the baseline row's LLMLab).
+		if p, ok := o.(*v1alpha1.Provider); ok && p.Name == w.provider {
 			p = p.DeepCopy()
 			p.Name = name
 			o = p
@@ -513,6 +531,23 @@ func (r *liveRun) WatchResets() int { return r.watch.ResetCount() }
 // its job count, every Allocation's tag written down as the watch first sees
 // it. A row of two jobs starts its guard.
 func (r *liveRun) start(p Plan) {
+	r.startStack(p)
+	if r.w.shim != nil {
+		// The bulk row's setup (issue #521, option (A)): the Provider's image staged, then the shipped agent the shim execs, before any job.
+		sctx, scancel := context.WithTimeout(context.Background(), StageAgentWait)
+		err := r.prepareShim(sctx)
+		scancel()
+		if err != nil {
+			r.beforeJob = err
+			return
+		}
+	}
+	r.createServed(p)
+}
+
+// startStack is the part of start before any deployment: the stack up, the Provider(s) created, the watch, the run's own transport, and the Provider
+// Ready. The baseline row makes its managed leg and P0 between this and createServed, before the GPU job.
+func (r *liveRun) startStack(p Plan) {
 	t := r.t
 	t.Helper()
 	r.since, r.tags = time.Now(), p.Rec
@@ -540,16 +575,13 @@ func (r *liveRun) start(p Plan) {
 		defer cancel()
 		return r.c.Get(ctx, client.ObjectKey{Name: r.w.provider}, &prov) == nil && v1alpha1.ProviderReady(&prov, time.Now())
 	})
-	if r.w.shim != nil {
-		// The bulk row's setup (issue #521, option (A)): the Provider's image staged, then the shipped agent the shim execs, before any job.
-		sctx, scancel := context.WithTimeout(context.Background(), StageAgentWait)
-		err := r.prepareShim(sctx)
-		scancel()
-		if err != nil {
-			r.beforeJob = err
-			return
-		}
-	}
+}
+
+// createServed creates the row's served deployment with the end that keeps it to its job count, and the client of the front, so that the first clock
+// starts here.
+func (r *liveRun) createServed(p Plan) {
+	t := r.t
+	t.Helper()
 	md := r.deployment(p.Row)
 	p.Logf("%s: the deployment's first end is %s after the cluster's clock read before its creation", p.Row.Name, md.Spec.EndTime.Sub(r.clusterAtCreate).Round(time.Second))
 	r.created = time.Now()
@@ -603,14 +635,7 @@ func (r *liveRun) runTags() ([]string, error) {
 func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
 	t := r.t
 	t.Helper()
-	md := r.w.md.DeepCopy()
-	plan := row.Plan()
-	md.Spec.Providers = v1alpha1.ProviderSelection{Names: []string{r.w.provider}}
-	md.Spec.LeaseLimit = minutes(plan.LeaseLimit)
-	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration)}
-	if plan.ReleaseWhenIdle {
-		md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(plan.IdleLimit)}
-	}
+	md := applyPlan(r.w.md, row, r.w.provider)
 	ctx, cancel := stack.CallCtx(t)
 	defer cancel()
 	now, err := r.clusterNow(ctx)
@@ -633,6 +658,68 @@ func (r *liveRun) deployment(row Row) *v1alpha1.ModelDeployment {
 	e := metav1.NewTime(end)
 	md.Spec.EndTime = &e
 	return md
+}
+
+// applyPlan is the world's deployment with the row's plan applied, but for the end: the row's Provider alone, its lease, its routing block with the
+// request deadline and, for a row with a hand-set cap (Row.InstanceCap, the baseline row's), the cap, one Instance and no hedge; for the no-overlap rows
+// ReleaseWhenIdle with its idle limit. It is a function of its own so that a test reads what the run would create (deployment_test.go): today's rows
+// replaced the whole routing block with the deadline alone, which would lose the cap.
+func applyPlan(base *v1alpha1.ModelDeployment, row Row, provider string) *v1alpha1.ModelDeployment {
+	md := base.DeepCopy()
+	plan := row.Plan()
+	md.Spec.Providers = v1alpha1.ProviderSelection{Names: []string{provider}}
+	md.Spec.LeaseLimit = minutes(plan.LeaseLimit)
+	md.Spec.Routing = &v1alpha1.Routing{MaxRequestDuration: dur(plan.MaxRequestDuration), InstanceCap: instanceCapOf(row)}
+	if row.InstanceCap > 0 {
+		// One Instance per served ModelDeployment, no extra Allocation (the world's overAllocation is 0) and no hedge: the cap and the tight bound apply
+		// only while ready is at least spec.instances (HBEP-5, Load bound and cap), and a hedge adds a member per Provider.
+		one := int32(1)
+		md.Spec.Instances, md.Spec.HedgeWidth = 1, &one
+	}
+	if plan.ReleaseWhenIdle {
+		md.Spec.RetentionPolicy = &v1alpha1.RetentionPolicy{Mode: v1alpha1.RetentionReleaseWhenIdle, IdleLimit: dur(plan.IdleLimit)}
+	}
+	return md
+}
+
+// instanceCapOf is the row's routing.instanceCap, nil for a row with none.
+func instanceCapOf(row Row) *int32 {
+	if row.InstanceCap <= 0 {
+		return nil
+	}
+	c := row.InstanceCap
+	return &c
+}
+
+// llmlabObjects are the baseline row's managed leg, read from the shipped files: the LLMLab PlatformProfile, the managed Provider of
+// examples/provider-llmlab.yaml with the run's credentials file, and the managed ModelDeployment of examples/modeldeployment-llmlab.yaml, whose names the
+// row's constants hold (LLMLabProviderName, LLMLabDeploymentName). The credentials path never reaches a log.
+func llmlabObjects(repo string, cfg Config) ([]client.Object, *v1alpha1.ModelDeployment, error) {
+	read := func(rel string, into any) error {
+		b, err := os.ReadFile(filepath.Join(repo, rel))
+		if err == nil {
+			err = yaml.UnmarshalStrict(b, into)
+		}
+		if err != nil {
+			return fmt.Errorf("the shipped file %s: %w", rel, err)
+		}
+		return nil
+	}
+	var pp v1alpha1.PlatformProfile
+	var prov v1alpha1.Provider
+	var md v1alpha1.ModelDeployment
+	for rel, into := range map[string]any{"profiles/llmlab.yaml": &pp, "examples/provider-llmlab.yaml": &prov, "examples/modeldeployment-llmlab.yaml": &md} {
+		if err := read(rel, into); err != nil {
+			return nil, nil, err
+		}
+	}
+	if prov.Name != LLMLabProviderName || md.Name != LLMLabDeploymentName {
+		return nil, nil, fmt.Errorf("the LLMLab examples name %q and %q, not the row's %q and %q", prov.Name, md.Name, LLMLabProviderName, LLMLabDeploymentName)
+	}
+	prov.Spec.CredentialsRef = &v1alpha1.CredentialsReference{File: cfg.LLMLabCredentials}
+	md.Namespace = "default"
+	md.Spec.Providers = v1alpha1.ProviderSelection{Names: []string{prov.Name}}
+	return []client.Object{&pp, &prov}, &md, nil
 }
 
 // controllerWindow is the drain window as the controller and the front work

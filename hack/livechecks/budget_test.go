@@ -28,7 +28,7 @@ var stackRowTests = map[string]string{"alpha-athena-handover": "TestAlphaAthenaH
 	"tunnel-hour-helios": "TestTunnelHour", "tunnel-hour-athena": "TestTunnelHour", "alpha-athena-now-serve": "TestAlphaAthenaNowServe",
 	"alpha-athena-now-nooverlap": "TestAlphaAthenaNowNoOverlap", "beta-athena-now-router": "TestBetaAthenaNowRouter", "beta-athena-now-keeper": "TestBetaAthenaNowKeeper",
 	"beta-athena-now-bulk": "TestBetaAthenaNowBulk", "beta-helios-now-router": "TestBetaHeliosNowRouter",
-	"alpha-sano-serve": "TestAlphaSanoServe", "alpha-sano-handover": "TestAlphaSanoHandover"}
+	"alpha-sano-serve": "TestAlphaSanoServe", "alpha-sano-handover": "TestAlphaSanoHandover", "beta-sano-llmlab-baseline": "TestBetaSanoLLMLabBaseline"}
 
 // B5 and B6 of the review of PR 284: a row's timeout must let its bound fire first, so a test fails when it can fire
 // before them. The sum comes from the row's own bounds and the real waits, never from a number kept beside the table.
