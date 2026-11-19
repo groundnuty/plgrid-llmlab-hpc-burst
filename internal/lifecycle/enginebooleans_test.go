@@ -517,3 +517,104 @@ func TestTheV0260DumpIsSelectedByItsDigest(t *testing.T) {
 		t.Errorf("on the pinned image: %q, want the unclassified form --calculate-kv-scales=true", got)
 	}
 }
+
+// shippedFiles is the embedded dump files as a MapFS the loader can read, for
+// a test to change.
+func shippedFiles(t *testing.T) fstest.MapFS {
+	t.Helper()
+	entries, err := embeddedBooleanDumps.ReadDir("enginebooleans")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := fstest.MapFS{}
+	for _, e := range entries {
+		raw, err := embeddedBooleanDumps.ReadFile("enginebooleans/" + e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m[e.Name()] = &fstest.MapFile{Data: raw}
+	}
+	return m
+}
+
+// TestTheShippedDumpSetIsPinned: the build starts only on the pinned set of
+// dump files, each by the SHA-256 of its bytes (expectedBooleanDumps), so a
+// dump that is missing, has the wrong imageDigest, loses a row, or is one too
+// many cannot leave an image on the pinned image's list unseen. The cases
+// change a copy of the embedded files and check what checkPinnedDumps says.
+func TestTheShippedDumpSetIsPinned(t *testing.T) {
+	const (
+		v0260   = "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
+		other   = "sha256:" + "3333333333333333333333333333333333333333333333333333333333333333"
+		second  = "sha256:" + "2222222222222222222222222222222222222222222222222222222222222222"
+		f0260   = "vllm-0.26.0.json"
+		f0320   = "vllm-0.32.0.json"
+		rowName = `"calculate-kv-scales"`
+	)
+	// The pinned table holds the three typed digests and a lowercase hex sum for each.
+	if len(expectedBooleanDumps) != len(shippedDumpDigests) {
+		t.Errorf("%d pinned dumps, %d typed in this test", len(expectedBooleanDumps), len(shippedDumpDigests))
+	}
+	for _, digest := range shippedDumpDigests {
+		sum, ok := expectedBooleanDumps[digest]
+		if !ok || len(sum) != 64 || strings.Trim(sum, "0123456789abcdef") != "" {
+			t.Errorf("%s: pinned sum %q is not 64 lowercase hex digits (or not pinned)", digest, sum)
+		}
+	}
+	second0 := func(t *testing.T) []byte {
+		raw, err := os.ReadFile("testdata/enginebooleans/second.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, m fstest.MapFS)
+		want   []string // texts the error holds; none: the set passes
+	}{
+		{"the embedded set", func(*testing.T, fstest.MapFS) {}, nil},
+		{"the 0.26.0 file dropped", func(_ *testing.T, m fstest.MapFS) { delete(m, f0260) }, []string{"pinned set", "missing", v0260}},
+		{"the 0.32.0 file dropped", func(_ *testing.T, m fstest.MapFS) { delete(m, f0320) }, []string{"missing", pinnedEngineImageDigest}},
+		{"one row removed from the 0.26.0 file", func(t *testing.T, m fstest.MapFS) {
+			var kept []string
+			for _, line := range strings.Split(string(m[f0260].Data), "\n") {
+				if !strings.Contains(line, rowName) {
+					kept = append(kept, line)
+				}
+			}
+			if len(kept) != len(strings.Split(string(m[f0260].Data), "\n"))-1 {
+				t.Fatalf("the 0.26.0 file has no single %s row to remove", rowName)
+			}
+			m[f0260] = &fstest.MapFile{Data: []byte(strings.Join(kept, "\n"))}
+		}, []string{"checksum differs", v0260}},
+		{"an extra fourth file", func(t *testing.T, m fstest.MapFS) { m["vllm-9.9.9.json"] = &fstest.MapFile{Data: second0(t)} }, []string{"not expected", second}},
+		{"the 0.26.0 file's imageDigest changed", func(_ *testing.T, m fstest.MapFS) {
+			m[f0260] = &fstest.MapFile{Data: []byte(strings.Replace(string(m[f0260].Data), v0260, other, 1))}
+		}, []string{"missing", v0260, "not expected", other}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := shippedFiles(t)
+			tc.change(t, m)
+			d, err := loadBooleanDumps(m)
+			if err != nil {
+				t.Fatalf("the changed files no longer load, so the pin is not what is tested: %v", err)
+			}
+			err = checkPinnedDumps(d, expectedBooleanDumps)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("the embedded set is refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("the changed set passes: want an error with %q", tc.want)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not hold %q", err, w)
+				}
+			}
+		})
+	}
+}

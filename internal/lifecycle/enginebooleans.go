@@ -2,11 +2,15 @@ package lifecycle
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 )
@@ -72,6 +76,8 @@ type booleanDump struct {
 	Flags          []booleanRow `json:"flags"`
 
 	kinds map[string]booleanKind
+	// sum is the SHA-256 of the file's bytes, in lowercase hex.
+	sum string
 }
 
 // booleanDumps are the dump files by image digest.
@@ -91,8 +97,21 @@ var (
 	dumpNameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 )
 
+// expectedBooleanDumps pins the dump files this build ships: each image digest
+// with the SHA-256, in lowercase hex, of its committed file's bytes (from
+// `sha256sum internal/lifecycle/enginebooleans/vllm-<version>.json`). The build
+// refuses to start on any drift: a file missing, one more, or one whose bytes
+// changed. Without this a missing or edited 0.26.0 dump would leave that image
+// on the pinned image's list, so a name only 0.26.0 has (calculate-kv-scales)
+// would render as --name=value and vLLM would refuse the launch late.
+var expectedBooleanDumps = map[string]string{
+	pinnedEngineImageDigest: "b28cfc0bf7377849edceaf8b11f600c57af7318853d9113e2d712a6d9f67dda1", // vLLM 0.32.0
+	"sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52": "a8156f8cdab52cc75434673475be1fd5ba7b2a9181e197d011ebc15016917ab2", // vLLM 0.26.0
+	"sha256:7764931211e5b408a10d6e289ab9eca8d6ecd105e9239cb2d528c2c4d0ad67b0": "bcdb680f8bc7e8b1471df7519cf69b656d35aa241c971406abd83857bd088f1d", // vLLM 0.15.0
+}
+
 // mustLoadBooleanDumps loads the dumps under dir and panics on any problem or
-// when none of them is the pinned image's.
+// when they are not the pinned set (expectedBooleanDumps).
 func mustLoadBooleanDumps(fsys fs.FS, dir string) *booleanDumps {
 	sub, err := fs.Sub(fsys, dir)
 	if err != nil {
@@ -102,10 +121,44 @@ func mustLoadBooleanDumps(fsys fs.FS, dir string) *booleanDumps {
 	if err != nil {
 		panic(fmt.Sprintf("engine boolean dumps: %v", err))
 	}
-	if d.byDigest[pinnedEngineImageDigest] == nil {
-		panic("engine boolean dumps: no file is the pinned image's (" + pinnedEngineImageDigest + ")")
+	if err := checkPinnedDumps(d, expectedBooleanDumps); err != nil {
+		panic(fmt.Sprintf("engine boolean dumps: %v", err))
 	}
 	return d
+}
+
+// checkPinnedDumps compares the loaded dumps with the pinned set (image digest
+// to the SHA-256 of the file's bytes). The error names every digest that is
+// missing, every one that is not expected, and every one whose file differs.
+func checkPinnedDumps(d *booleanDumps, expected map[string]string) error {
+	var missing, extra, differs []string
+	for digest, sum := range expected {
+		switch f := d.byDigest[digest]; {
+		case f == nil:
+			missing = append(missing, digest)
+		case f.sum != sum:
+			differs = append(differs, digest)
+		}
+	}
+	for digest := range d.byDigest {
+		if _, ok := expected[digest]; !ok {
+			extra = append(extra, digest)
+		}
+	}
+	var parts []string
+	for _, p := range []struct {
+		what    string
+		digests []string
+	}{{"missing", missing}, {"not expected", extra}, {"file checksum differs for", differs}} {
+		if len(p.digests) > 0 {
+			sort.Strings(p.digests)
+			parts = append(parts, p.what+" "+strings.Join(p.digests, ", "))
+		}
+	}
+	if len(parts) > 0 {
+		return fmt.Errorf("the dump files are not the pinned set: %s", strings.Join(parts, "; "))
+	}
+	return nil
 }
 
 // loadBooleanDumps reads every *.json file at the root of fsys as a dump. It
@@ -135,6 +188,8 @@ func loadBooleanDumps(fsys fs.FS) (*booleanDumps, error) {
 		if err := f.validate(); err != nil {
 			return nil, fmt.Errorf("%s: %w", file, err)
 		}
+		sum := sha256.Sum256(raw)
+		f.sum = hex.EncodeToString(sum[:])
 		if other := d.byDigest[f.ImageDigest]; other != nil {
 			return nil, fmt.Errorf("%s: image digest %s is also the digest of vLLM %s's file", file, f.ImageDigest, other.Version)
 		}
