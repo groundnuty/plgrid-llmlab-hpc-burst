@@ -4,7 +4,9 @@
 # profile lists host-dialed alone and the Provider runs in it: the control plane reaches each job
 # through the login node. Direct mode is no profile value (HBEP-4), so the profile does not list it;
 # issue #735's probe P-D1 verified its dial-home path from both node classes (https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6995025741),
-# and a served Instance in direct mode has not run yet.
+# and served Instances have run in it since: alpha-sano-serve (https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6998371105) and
+# beta-sano-llmlab-baseline (https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/764#issuecomment-6998612797) passed in direct mode, both at 4 CPUs and 64 GiB per GPU, and a
+# study's deployment served in it on the 8-GPU node class.
 #
 # spec.stagingDir is required here: Sano's profile names none, because the shared file system lies
 # at a cluster path that carries a user name. Give an absolute path on the shared file system that
