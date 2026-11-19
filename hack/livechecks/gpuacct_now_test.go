@@ -271,9 +271,9 @@ func TestTheRunbookStatesTheAccountingRowOnPlgridNowAsTheRowHasIt(t *testing.T) 
 	if want := fmt.Sprintf("start wait, %d min", wait); !strings.Contains(l, want) {
 		t.Errorf("the never-started table line of the row lacks %q: %s", want, l)
 	}
-	// "State of the wiring": built, on plgrid-now, behind its gates.
+	// "State of the wiring": built, on plgrid-now, behind its gates, and passed live (#145).
 	l = tableLine(section("## State of the wiring"), row)
-	for _, want := range []string{"`plgrid-now`", "gates", "never run on a cluster"} {
+	for _, want := range []string{"`plgrid-now`", "gates", "passed live"} {
 		if !strings.Contains(l, want) {
 			t.Errorf("the wiring table line of the row lacks %q: %s", want, l)
 		}

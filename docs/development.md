@@ -17,7 +17,7 @@ Code under `spikes/` and `third_party/forked/*` is not part of this module.
 | `pkg/provider/` | the provider core interface: operations, outcomes, error kinds, the capability flag, the Slurm phase table. `fake/`: an in-memory Slurm (`Batch`) and a stand-in for a Provider's controller (`Controller`) | HBEP-4 |
 | `pkg/agentapi/` | the agent protocol, standard library only: wire types, HTTP framing, `agent.json`, the shared file layout, the certificate pin, and the `Backend` seam. `fake/`: a fake agent and a fake `Backend` | HBEP-7 |
 | `internal/launcher/` | starts and supervises the single-user control-plane host (user-level k3s); the only code that starts k3s | HBEP-11 |
-| `cmd/hpcburst/` | the `hpcburst` command (`up`, `down`, `status`, `upgrade`) | HBEP-11 |
+| `cmd/hpcburst/` | the `hpcburst` command: the host's `up`, `status`, `upgrade`, `restore`, `down`, `guard`, `identity`, `accounting` and `version`, and the agent commands of [agent-cli.md](agent-cli.md) (`scale`, `end`, `release`, `confirm`, `approvals`, `approve`, `operation`, `inventory`) | HBEP-11, HBEP-10 |
 | `internal/front/` | the LLMLab-compatible front: configuration, client keys, the router, the request path, the stream judge, errors and attribution, the listeners. Subpackages: `inventory` (the routing view, by watch), `balancer` (KubeAI's CHWBL group, wrapped), `convkey`, `naming`, `usage`, `clock`, and `enginetest` (an engine double for tests) | HBEP-5 |
 | `cmd/hpcburst-front/` | the front's binary, which `hpcburst up` supervises | HBEP-5 |
 | `hack/` | scripts for generation, verification, pinned tools and the live checks (`live-checks.sh`) | |
