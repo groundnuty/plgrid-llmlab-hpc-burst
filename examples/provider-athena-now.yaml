@@ -1,0 +1,26 @@
+# A batch Provider on Athena's plgrid-now (HBEP-3, HBEP-4 Provider settings), for the short TEST deployments of
+# profiles/athena-now.yaml: the partition's one-hour limit and its one-job slot are why that profile exists, and why
+# the deployment it serves (examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml) needs its image and
+# checkpoint staged first. Replace every <placeholder>. Apply profiles/athena-now.yaml first. This is not for real
+# serving: the Provider of that is examples/provider-athena-a100.yaml on plgrid-gpu-a100. The partition's own QOS
+# applies, so none is set here, and athena-now.yaml lists host-dialed as its only dial-home mode.
+#
+# credentialsRef.file is an ssh client configuration, mode 600, with a mode-600 key file (see
+# examples/provider-helios-gh200.yaml and docs/quickstart.md).
+apiVersion: hpcburst.groundnuty.github.io/v1alpha1
+kind: Provider
+metadata:
+  name: athena-now
+  labels:
+    hpcburst.groundnuty.github.io/organization: cyfronet
+    hpcburst.groundnuty.github.io/platform: athena
+    hpcburst.groundnuty.github.io/partition: plgrid-now
+spec:
+  platformProfileRef:
+    name: athena-now
+  account: <account>
+  grant: <grant>
+  allowedPartitions:
+    - plgrid-now
+  credentialsRef:
+    file: /home/<user>/.config/hpcburst/credentials/athena-now.ssh

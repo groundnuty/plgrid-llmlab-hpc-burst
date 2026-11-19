@@ -17,7 +17,7 @@ import (
 // stackRowCount is how many rows of alphaShapes start the stack, written out: the handover, the two no-overlaps, the two tunnel
 // hours, row A, the router, keeper and bulk rows (issue #521), the Helios router row (issue #566), the Sano serve and handover rows (issue #735) and the baseline row (issue #764). A row added later must be added to
 // this check, not left out of it.
-const stackRowCount = 13
+const stackRowCount = 14
 
 func stackRows(t *testing.T) []alphaShape {
 	t.Helper()
@@ -143,7 +143,7 @@ func TestTheRowsThatStartNoStackAreNotAskedForTheBinDir(t *testing.T) {
 	noStack := []string{
 		"gpu-accounting-helios", "gpu-accounting-athena", "gpu-accounting-athena-now",
 		"conformance-helios", "conformance-helios-gh200", "conformance-athena",
-		"alpha-athena-now-stage", "alpha-sano-stage",
+		"alpha-athena-now-stage", "alpha-athena-now-stage-qwen3-vl", "alpha-sano-stage",
 		"reach-helios", "reach-athena", "reach-host-dialed-helios", "reach-host-dialed-athena",
 	}
 	b, err := os.ReadFile(scriptPath(t))

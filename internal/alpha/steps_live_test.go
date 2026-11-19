@@ -553,7 +553,13 @@ func (r *liveRun) startStack(p Plan) {
 	r.since, r.tags = time.Now(), p.Rec
 	p.Logf("%s: starting the stack (%s world)", p.Row.Name, r.w.name)
 	r.dw, r.limit = r.controllerWindow(), r.timeLimit()
-	r.h = stack.StartHost(t, r.w.bins, stack.ShortDir(t), r.w.dh, r.w.env, r.w.ports, r.w.frontTuning, r.w.hostOpts...)
+	// The stack's state directory is written down BEFORE the stack is started, so that the script's cleanup can stop this run's own stack (hpcburst down) before it
+	// cancels the run's jobs, whatever stops the test (StackStateFile).
+	dir := stack.ShortDir(t)
+	if err := p.Rec.SaveText(StackStateFile, StackStateNote(dir)); err != nil {
+		t.Fatalf("the stack's state directory could not be written down, so the cleanup could not stop the stack if the run were stopped: %v", err)
+	}
+	r.h = stack.StartHost(t, r.w.bins, dir, r.w.dh, r.w.env, r.w.ports, r.w.frontTuning, r.w.hostOpts...)
 	r.w.place(r.h)
 	r.c = stack.KubeClient(t, r.h.State)
 	if r.wrapAPI != nil {

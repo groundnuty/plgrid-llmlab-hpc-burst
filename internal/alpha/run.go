@@ -93,8 +93,13 @@ var ErrBaselineInvalid = errors.New(baselineInvalidWords)
 // baselineInvalidWords say what an INVALID baseline run is, in the marker, which hack/live-checks.sh reads (baseline_invalid_marker).
 const baselineInvalidWords = "the baseline run's reading is invalid, so it measures nothing"
 
-// BaselineInvalidError is ErrBaselineInvalid with why: the reasons, in their words.
-type BaselineInvalidError struct{ Why []string }
+// BaselineInvalidError is ErrBaselineInvalid with why: the reasons, in their words. NoJob says P0 ended the run before the served ModelDeployment was created, so
+// that no job was submitted and no slot was spent: the marker, the console and the text to post then say so, and never that a job started and ran (point 6 of
+// PR 809's review).
+type BaselineInvalidError struct {
+	Why   []string
+	NoJob bool
+}
 
 func (e *BaselineInvalidError) Error() string {
 	return baselineInvalidWords + ": " + strings.Join(e.Why, "; ")
@@ -103,6 +108,20 @@ func (e *BaselineInvalidError) Unwrap() error { return ErrBaselineInvalid }
 
 // BaselineInvalidRun reports whether err ends the baseline row's run as INVALID (ErrBaselineInvalid).
 func BaselineInvalidRun(_ Row, err error) bool { return errors.Is(err, ErrBaselineInvalid) }
+
+// baselineInvalidNoJobWords say, in the marker, that an INVALID baseline run submitted no job (hack/live-checks.sh, baseline_nojob_marker).
+const baselineInvalidNoJobWords = "P0 ended it before any job was submitted, so no job started and no slot was spent"
+
+// BaselineInvalidNoJobNote is the marker of an INVALID baseline run that submitted no job, a failed LLMLab P0: the row and the fixed words of both facts.
+func BaselineInvalidNoJobNote(row Row) string {
+	return fmt.Sprintf("%s: %s; %s, so this is no NOT RUN; the text to post says why\n", row.Name, baselineInvalidWords, baselineInvalidNoJobWords)
+}
+
+// BaselineInvalidNoJob reports whether err is an INVALID baseline run that submitted no job.
+func BaselineInvalidNoJob(err error) bool {
+	var e *BaselineInvalidError
+	return errors.As(err, &e) && e.NoJob
+}
 
 // BaselineInvalidNote is the text of an INVALID baseline run's marker (NotRunFile): the row and the fixed words, nothing the run read.
 func BaselineInvalidNote(row Row) string {
@@ -358,7 +377,7 @@ func Run(ctx context.Context, cfg Config, st Steps, rec *Recorder, logf func(str
 		}
 		tags, obs = o.Tags, o
 		if why := BaselineInvalid(o); len(why) > 0 {
-			baselineInvalid = &BaselineInvalidError{Why: why}
+			baselineInvalid = &BaselineInvalidError{Why: why, NoJob: !o.ServedCreated}
 		}
 		judge = func(j []provider.Job) []string { return VerifyBaseline(cfg.Row, o, j) }
 		summary = func(f []string, _ []provider.Job) string { return baselinePost(cfg.Row, o, f, BaselineInvalid(o)) }

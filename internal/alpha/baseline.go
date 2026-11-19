@@ -2,7 +2,9 @@ package alpha
 
 // The baseline row of HBEP-764's item 4 (issue #764, test plan "A baseline row first"): Row 1, beta-sano-llmlab-baseline. It runs today's code with no
 // Workload: the same small model, Qwen/Qwen3-VL-8B-Instruct, served on one Sano A100 and on LLMLab, with LLMLab attached as HBEP-5's overflow. It shows
-// the routing at full load before any amendment, and gives the numbers that #769's token budget is later compared against. Row 2 (Athena) is not built.
+// the routing at full load before any amendment, and gives the numbers that #769's token budget is later compared against. Its Athena twin,
+// beta-athena-now-llmlab-baseline (AthenaBaselineRow), is a straight copy of its flow, phases and verdicts on Athena's plgrid-now at the Athena cap
+// (the science agent's ruling of 19 Nov 2026 on #764): see "The Athena twin" below.
 //
 // The science agent's rulings of 18 Nov 2026 on #764 (comment after 6982178166) that bind it:
 //   - H0: the declared shape in P1 and P2, and P1-long, a long phase with no LLMLab traffic that reads the engine's KV use and preemptions at the cap;
@@ -42,6 +44,28 @@ package alpha
 //	Athena: derived (nothing has measured this model on an A100 40 GB). Sano's memory beside the KV cache is 0.92 x 80 GiB - 53.4375 GiB = 20.1625
 //	        GiB, assumed the same on the 40 GB card, so KV = 0.92 x 40 GiB - 20.1625 GiB = 16.6375 GiB, about 121,150 tokens, 3.70 sessions, and
 //	        0.95 x 3.70 = 3.51: the cap is 3.
+//
+// # The Athena twin
+//
+// beta-athena-now-llmlab-baseline runs Row 1's code unchanged: the same sequencer (RunBaseline), judge and phases, on one A100 40 GB of Athena's plgrid-now
+// under profiles/athena-now.yaml, host-dialed (that profile's only mode), with the plgrid-now rows' own margins and lease (the lease of 48 minutes of
+// alpha-athena-now-serve, NowServeLease; the start wait, the slot guard and the owner's go of every plgrid-now row). What differs is a fact of the row,
+// never a branch of the flow: the cap (CapAthena = 3, so P1 and P1-long have N = 3 and P2 and P3 N = 5), the served example
+// (examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml, the Sano example's spec with Athena's Provider, routing.instanceCap 3 and a target of 3
+// sessions), the KV figure the post names (KVAthenaDerived, a derived one) and the words of the cluster in the post (baselineFactsOf). The deployment ID is
+// Sano's: the class string of both profiles is "A100" on "x86_64" and the ID takes no more of the accelerator (internal/slurm,
+// TestTheAthenaBaselineExampleDerivesTheRowsDeploymentID). The logged-KV check holds at 3 x 32,768 = 98,304 tokens (a logged figure below it ends the run
+// INVALID before any phase, as on Sano); the derived KV is about 121,150.
+//
+// The phases keep Row 1's bounds (10, 15, 10 and 10 minutes) inside the 48-minute lease: the drain start is 7 minutes before the lease ends and the Instance's
+// deployment end a minute before that, so 40 minutes after the job starts, and a phase must fit its bound and BaselineFitMargin (4 minutes) before it
+// (RunBaseline: a phase that cannot fit ends the run INVALID, never shortened). A phase of the 10-minute bound must start by minute 26 and P1-long by minute 21,
+// against the Instance ready within athena-now.yaml's start timeout of 12 minutes and Row 1's whole run of about 9 minutes (start to end of its job).
+//
+// The checkpoint (about 16 GB) is staged BEFORE the row, by alpha-athena-now-stage-qwen3-vl, outside the row's hour: the agent's staging runs inside
+// health.startTimeout of the Instance's start instruction (hbep/0007-lifecycle-controller/README.md:437; internal/lifecycle/verify.go:172-190), which
+// athena-now.yaml:114 sets to 12 minutes "for a WARM image", and the cold time of a 16 GB checkpoint on Athena is unmeasured (Sano's: 186 s for 14 GiB and
+// 62 s to hash it, sano.go). Row 1 needed no such row: Sano's startTimeout is an hour and its checkpoint was staged by a hand load.
 //
 // The engine's readings are the agent's, from vLLM's own series: vllm:kv_cache_usage_perc (internal/agent/engine/metrics.go:44), the fraction of the KV
 // cache in use, which the controller exports as hpcburst_instance_kv_cache_usage_ratio (internal/lifecycle/metrics.go:52); vllm:num_preemptions_total
@@ -108,15 +132,22 @@ import (
 // The baseline row's name and the model it serves.
 const (
 	BetaBaselineName = "beta-sano-llmlab-baseline"
+	// BetaAthenaBaselineName is the Athena twin's name in the script (issue #764, the science agent's ruling of 19 Nov 2026).
+	BetaAthenaBaselineName = "beta-athena-now-llmlab-baseline"
 	// BaselineModel is the plain Hub ID every route answers under: the served ModelDeployment's spec.model, the managed one's, and a client's model.
 	BaselineModel = "Qwen/Qwen3-VL-8B-Instruct"
 	// BaselineDeploymentID is the display form of the deployment ID (HBEP-3) that the served example derives, 12 hex characters, as #735's rows PR fixed it
 	// with the example: the Instance's own ID must equal it, so that the row serves what the example says.
 	BaselineDeploymentID = "965fa2409193"
+	// AthenaBaselineDeploymentID is the Athena twin's: the ID its example derives on plgrid-now. It is the same string, since the ID takes the class of the
+	// accelerator (the profile's gpuModel and cpuArch, "A100" on "x86_64" in both) and not the card's memory; internal/slurm derives it from the example.
+	AthenaBaselineDeploymentID = "965fa2409193"
 	// BaselineRevision is the checkpoint the served example pins, the first load's (#764).
 	BaselineRevision = "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b"
 	// SanoQwen3VLDeployment is the example ModelDeployment the row serves (Row.Deployment).
 	SanoQwen3VLDeployment = "modeldeployment-sano-qwen3-vl-8b-instruct.yaml"
+	// AthenaQwen3VLDeployment is the Athena twin's: the Sano example's spec with Athena's Provider, instanceCap 3 and three target sessions.
+	AthenaQwen3VLDeployment = "modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml"
 	// BaselineTracker is where the row posts: #764's own work.
 	BaselineTracker = "#764"
 	// LLMLabProviderName and LLMLabDeploymentName are the managed Provider's and its ModelDeployment's names in the run's stack. The stack is the
@@ -214,8 +245,50 @@ func BaselineRow() Row {
 		PostsTo: BaselineTracker, Deployment: SanoQwen3VLDeployment, ProviderStaging: true, InstanceCap: CapSano, LLMLab: true, Studyload: true}
 }
 
-// IsBaselineRow says whether a row is the baseline row; the dispatch of Run, WorstCase and the dry steps take it.
-func IsBaselineRow(name string) bool { return name == BetaBaselineName }
+// AthenaBaselineRow is the Athena twin of Row 1 (the file's comment, "The Athena twin"): alpha-athena-now-serve's shape (Athena's plgrid-now under
+// profiles/athena-now.yaml, its margins as the clock, the lease of 48 minutes, a start wait of 10 minutes, the slot hold and the owner's go of plgrid-now,
+// the run budget of row A) with Row 1's cap, managed LLMLab leg and generator at the Athena cap. The profile has a stagingDir ($SCRATCH), so the Provider
+// gives none (ProviderStaging false).
+func AthenaBaselineRow() Row {
+	r := NowServeRow()
+	r.Name, r.PostsTo, r.Deployment = BetaAthenaBaselineName, BaselineTracker, AthenaQwen3VLDeployment
+	r.InstanceCap, r.LLMLab, r.Studyload = CapAthena, true, true
+	return r
+}
+
+// IsBaselineRow says whether a row is a baseline row, Row 1 or its Athena twin; the dispatch of Run, WorstCase and the dry steps take it.
+func IsBaselineRow(name string) bool {
+	return name == BetaBaselineName || name == BetaAthenaBaselineName
+}
+
+// baselineFacts are what the baseline's rows differ in: the facts the judge and the post name, never a step of the flow.
+type baselineFacts struct {
+	// Cluster is the cluster's word in the post ("the served Instance (Sano)").
+	Cluster string
+	// DeploymentID is the display form of the deployment ID the Instance must carry.
+	DeploymentID string
+	// KV is the engine's KV cache in tokens that the cap was fixed from, and KVBasis says how it was had, in the post's words.
+	KV      int64
+	KVBasis string
+}
+
+// baselineFactsOf are a row's facts by its name; Row 1's for an observation that names none, which is what Row 1's own observations (built before the
+// twin) do: the runs always name theirs (BaselineSettings.Row).
+func baselineFactsOf(rowName string) baselineFacts {
+	if rowName == BetaAthenaBaselineName {
+		return baselineFacts{Cluster: "Athena", DeploymentID: AthenaBaselineDeploymentID, KV: KVAthenaDerived(),
+			KVBasis: "the engine's KV derived for the 40 GB card (nothing has measured this model on it)"}
+	}
+	return baselineFacts{Cluster: "Sano", DeploymentID: BaselineDeploymentID, KV: KVSano, KVBasis: "the engine's KV as shipped"}
+}
+
+// routeWord is a route in the post's words: the served Instance's names the row's cluster.
+func (f baselineFacts) routeWord(r Route) Route {
+	if r == RouteServed {
+		return Route("the served Instance (" + f.Cluster + ")")
+	}
+	return r
+}
 
 // PhaseKind says what a phase asks of the routing.
 type PhaseKind string

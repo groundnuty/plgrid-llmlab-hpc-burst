@@ -57,6 +57,9 @@ var baselineCases = []dryCase{
 	{"front-503-in-the-control", "a request failed (status 503, emitter \"front\")"},
 	{"instance-fails", "a request failed (status 500, emitter \"instance\")"},
 	{"session-moves", "a session did not stay on its Instance"},
+	// A client-side error ends a session after the front recorded its turn as 200: every session must have run ALL the turns the phase configured, by the front's
+	// usage records (point 4 of PR 809's review).
+	{"session-ends-early", "1 session(s) ran fewer than the 24 turns the phase configured, by the front's usage records"},
 	{"detach-skipped", "request(s) after it was detached"},
 	{"generator-names-another-route", "generator record(s) name another route than the front's usage record"},
 	// The guard fails closed: a scrape that fails stops the phase, and one that fails before a phase means its generator is never started.
@@ -140,6 +143,12 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	// A KV figure is posted as at the cap only from a read taken inside the cap's stretch (#776's review, point 7).
 	{"long-no-read-in-window", "no distinct engine read was taken inside the stretch with the cap's 11 requests in flight"},
 	{"ratio-unread", "the ratio probe's usage record holds no prompt tokens"},
+	// Point 3 of PR 809's review: a ratio probe that answered as its time bound fired ends the run before any phase, which was a PASS with four phases absent.
+	{"ratio-probe-bound", "no measurement phase was run (the run ended at the ratio probe before any phase (the ratio probe's generator was stopped: bound)), so the run measures nothing"},
+	// Point 4: the same for a session that LLMLab answered, which is INVALID.
+	{"llmlab-session-ends-early", "1 session(s) that LLMLab answered ran fewer than the 24 turns the phase configured"},
+	// Point 5: the wait for LLMLab to detach can eat P3's margin, and the fit is checked again immediately before P3 is launched.
+	{"p3-detach-eats-the-fit", "P3 did not fit before the Instance's drain start"},
 }
 
 func init() {
@@ -179,7 +188,7 @@ func (d *drySteps) Baseline(ctx context.Context, p Plan) (BaselineObs, error) {
 	}
 	w := &dryBaseline{d: d, p: p, cap: cap}
 	d.baseline = w
-	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, WaitingPoll: time.Millisecond, Logf: p.Logf})
+	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, Row: p.Row.Name, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, WaitingPoll: time.Millisecond, Logf: p.Logf})
 	if err != nil {
 		return BaselineObs{}, err
 	}
@@ -199,17 +208,19 @@ type dryBaseline struct {
 	// detached says DetachManaged ran; generated counts the phases started and reads the reads of LLMLab's count since the current one started; phaseLLM
 	// is how many LLMLab requests the current phase made and cum how many the earlier ones made; running is the engine's running gauge in the phase; pre
 	// counts the preemptions the fault adds.
-	detached  bool
-	generated int
-	reads     int
-	phaseLLM  int
-	cum       float64
-	running   float64
-	kv        float64
-	pre       float64
-	samples   int
-	phase     Phase
-	gens      []*dryGenerator
+	detached   bool
+	detachSlow bool
+	generated  int
+	reads      int
+	phaseLLM   int
+	cum        float64
+	running    float64
+	kv         float64
+	pre        float64
+	samples    int
+	phase      Phase
+	drain      time.Time // the served Instance's drain start, as StartServed returned it
+	gens       []*dryGenerator
 	// calls are the world's calls in order, by name, for the tests of the sequencer's order. released says the job was released and its Allocation's directory
 	// with it; readAfterRelease says something read that directory after.
 	calls            []string
@@ -314,8 +325,9 @@ func (w *dryBaseline) StartServed(context.Context) (ServedReady, error) {
 	}
 	one, zero := int32(1), int32(0)
 	c := int32(w.cap)
+	w.drain = drain
 	sr := ServedReady{ReadyAt: ready, DrainStart: drain, Deployment: d.deployment(),
-		Served: ServedMD{Model: BaselineModel, Providers: []string{dryServedProvider}, Instances: 1, OverAllocation: &zero, HedgeWidth: &one, InstanceCap: &c, DeploymentID: BaselineDeploymentID}}
+		Served: ServedMD{Model: BaselineModel, Providers: []string{dryServedProvider}, Instances: 1, OverAllocation: &zero, HedgeWidth: &one, InstanceCap: &c, DeploymentID: baselineFactsOf(p.Row.Name).DeploymentID}}
 	switch {
 	case d.fault("no-routing-block"):
 		sr.Served.InstanceCap = nil
@@ -361,9 +373,10 @@ func (w *dryBaseline) LoggedKV(context.Context) (int64, bool) {
 	case w.d.fault("kv-unread"):
 		return 0, false
 	case w.d.fault("kv-below-the-cap"):
-		return 100000, true
+		// Below the cap's need on every row: Row 1's figure of 100,000, or half the need where that is the smaller (the Athena twin's need is 98,304).
+		return min(100000, int64(w.cap)*MaxModelLen/2), true
 	}
-	return KVSano, true
+	return baselineFactsOf(w.p.Row.Name).KV, true
 }
 
 func (w *dryBaseline) Gate(context.Context) (GateObs, error) {
@@ -683,7 +696,7 @@ func (w *dryBaseline) StartGenerator(_ context.Context, ph Phase) (Generator, er
 	if w.d.fault("engine-waiting-cached") && ph.Name == PhaseP2 {
 		g.needed = 10 // twelve scrapes: three reads, one of them with requests waiting
 	}
-	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 || w.d.fault("instance-ineligible") && ph.Name == PhaseP1Long {
+	if w.d.fault("llmlab-over-its-guard") && ph.Name == PhaseP2 || w.d.fault("instance-ineligible") && ph.Name == PhaseP1Long || w.d.fault("ratio-probe-bound") && ph.Name == PhaseRatio {
 		g.never = true // the phase ends only by the sequencer's stop
 	}
 	w.gens = append(w.gens, g)
@@ -736,9 +749,15 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 	}
 	// A turn takes two seconds, and in the long phase forty (eleven prompts of 26k tokens prefill together, so the cap's stretch is long enough to hold a read
 	// taken after the probe interval); the next turn starts after the think time.
+	// serialized runs the phase's sessions one after another, every configured turn each, so that at most one request is ever in flight: the control that
+	// proves nothing. In the long phase a turn takes twenty seconds then, to keep eleven sessions of two turns inside the phase's bound.
+	serialized := (w.d.fault("p1-serialized") && ph.Name == PhaseP1) || (w.d.fault("long-serialized") && ph.Name == PhaseP1Long)
 	turnDur := 2 * time.Second
 	if ph.Kind == KindLong {
 		turnDur = 40 * time.Second
+		if serialized {
+			turnDur = 20 * time.Second
+		}
 	}
 	step := turnDur + ph.Think
 	delay := time.Duration(0)
@@ -759,8 +778,6 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 			delay = 2 * time.Millisecond
 		}
 	}
-	// serialized runs the phase's sessions one after another, each of two turns, so that at most one request is ever in flight: the control that proves nothing.
-	serialized := (w.d.fault("p1-serialized") && ph.Name == PhaseP1) || (w.d.fault("long-serialized") && ph.Name == PhaseP1Long)
 	if w.d.fault("p1-sessions-missing") && ph.Name == PhaseP1 {
 		instanceSessions-- // one session never ran
 	}
@@ -792,12 +809,8 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		if onLLMLab && (w.d.fault("llmlab-over-its-guard") || w.d.fault("llmlab-over-final-count")) {
 			turns = 1
 		}
-		if serialized {
-			turns = 2
-			if ph.Kind == KindLong {
-				turns = 1 // forty seconds a request: one turn each keeps the phase inside its bound
-			}
-		}
+		// (The serialized phases run every configured turn, one session after another: a session that lost turns is a failed check of its own, and these
+		// faults are INVALID alone.)
 		// A turn takes two seconds, on the Instance and on LLMLab, and the next starts after the think time.
 		for t := 1; t <= turns; t++ {
 			start := t0.Add(time.Duration(t-1) * step)
@@ -844,6 +857,13 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 			add(session, t, provider, emitter, status, start, dur, promptOf(t), first)
 			if status != 200 {
 				break // a failed request ends its session
+			}
+			// A client-side error ends a session after the front has recorded its turn as 200: the usage records hold fewer turns than the phase configured.
+			if w.d.fault("session-ends-early") && ph.Name == PhaseP1 && i == 1 && t == 3 {
+				break
+			}
+			if w.d.fault("llmlab-session-ends-early") && ph.Kind == KindFull && onLLMLab && i == instanceSessions && t == 5 {
+				break
 			}
 			if w.d.fault("over-the-cap-in-flight") && ph.Name == PhaseP1 && i == 0 && t == 1 {
 				// a request the generator sent that stays open past its session's next turn: more than the cap in flight at once
@@ -918,5 +938,10 @@ func (w *dryBaseline) DetachManaged(context.Context) error {
 // sequencer's bound.
 func (w *dryBaseline) ManagedDetached(context.Context) bool {
 	w.d.tick(30 * time.Second)
+	if w.d.fault("p3-detach-eats-the-fit") && !w.detachSlow {
+		// A slow detach: the front takes the target down, but only after so long that five minutes remain before the drain start, under P3's bound and margin.
+		w.detachSlow = true
+		w.d.tick(w.drain.Sub(w.d.now()) - 5*time.Minute)
+	}
 	return w.detached && !w.d.fault("detach-not-seen")
 }

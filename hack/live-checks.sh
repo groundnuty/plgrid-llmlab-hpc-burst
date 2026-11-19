@@ -128,7 +128,7 @@
 #   LIVE_LOCK_DIR                absolute path of the directory with the hosts' lock files (cluster tests)
 #   LIVE_BUILD_LOCK              optional absolute path of the shared build lock; builds, never test runs, take it
 #   LIVE_LLMLAB_CREDENTIALS      absolute path of the managed credentials file, mode 600 (llmlab-smoke, llmlab-min-tokens, and the
-#                                baseline row beta-sano-llmlab-baseline, whose managed Provider reads it)
+#                                baseline rows beta-sano-llmlab-baseline and beta-athena-now-llmlab-baseline, whose managed Provider reads it)
 #   LIVE_STUDYLOAD_BIN           absolute path of #768's load generator binary (hack/studyload), an executable file, for the baseline row
 #                                (issue #764): the row runs it with a mode-600 config and key file in its record directory and imports none of it
 #   LIVE_STUDYLOAD_OMIT_MIN_TOKENS  optional, 1 or 0: the min_tokens probe's verdict (llmlab-min-tokens). 1 leaves min_tokens out of every
@@ -163,6 +163,7 @@
 #                                QOS now's GPU for hours (alpha-helios-nooverlap, tunnel-hour-helios, beta-helios-now-router) refuse without it
 #   LIVE_OWNER_GO_ATHENA_NOW     the same for the deployment rows on Athena's one-job partition plgrid-now under
 #                                profiles/athena-now.yaml (alpha-athena-now-serve, alpha-athena-now-stage,
+#                                alpha-athena-now-stage-qwen3-vl, beta-athena-now-llmlab-baseline,
 #                                alpha-athena-now-nooverlap and gpu-accounting-athena-now; issue #376, Q6, citing the
 #                                owner's decision of 11 Nov 2026 on #145): today's UTC date, checked as LIVE_OWNER_GO_HELIOS_NOW is. The code
 #                                agent's go posted on #145 with its UTC start and end, before each run, is the operator's to
@@ -240,10 +241,12 @@ tunnel-hour-helios|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|pr
 tunnel-hour-athena|cluster|internal/alpha|^TestTunnelHour$|HPCBURST_ALPHA_ROW|profiles/athena.yaml|host|ready
 alpha-athena-now-serve|cluster|internal/alpha|^TestAlphaAthenaNowServe$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml|host|ready
 alpha-athena-now-stage|cluster|internal/providerctl/conformance|^TestNowStage$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml,examples/modeldeployment-qwen25-instruct.yaml,hack/build-stage-helper.sh|host|ready
+alpha-athena-now-stage-qwen3-vl|cluster|internal/providerctl/conformance|^TestNowStageQwen3VL$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml,examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml,hack/build-stage-helper.sh|host|ready
 alpha-sano-stage|cluster|internal/providerctl/conformance|^TestSanoStage$|HPCBURST_CONFORMANCE|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml,hack/build-stage-helper.sh|host|ready
 alpha-sano-serve|cluster|internal/alpha|^TestAlphaSanoServe$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml|host|ready
 alpha-sano-handover|cluster|internal/alpha|^TestAlphaSanoHandover$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen25-7b-instruct.yaml|host|ready
 beta-sano-llmlab-baseline|cluster|internal/alpha|^TestBetaSanoLLMLabBaseline$|HPCBURST_ALPHA_ROW|profiles/sano.yaml,profiles/llmlab.yaml,examples/provider-sano-a100.yaml,examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml,examples/provider-llmlab.yaml,examples/modeldeployment-llmlab.yaml|host|ready
+beta-athena-now-llmlab-baseline|cluster|internal/alpha|^TestBetaAthenaNowLLMLabBaseline$|HPCBURST_ALPHA_ROW|profiles/athena-now.yaml,profiles/llmlab.yaml,examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml,examples/provider-llmlab.yaml,examples/modeldeployment-llmlab.yaml|host|ready
 gpu-accounting-helios|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/helios.yaml|host|ready
 gpu-accounting-athena|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena.yaml|host|ready
 gpu-accounting-athena-now|cluster|internal/providerctl/conformance|^TestGPUAccounting$|HPCBURST_CONFORMANCE|profiles/athena-now.yaml|host|ready
@@ -335,6 +338,7 @@ tunnel-hour-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1
 tunnel-hour-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|02:17:00|166|-
 alpha-athena-now-serve|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 alpha-athena-now-stage|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:30:00|60|-|10
+alpha-athena-now-stage-qwen3-vl|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:30:00|60|-|10
 alpha-sano-stage|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|00:30:00|60|--qos=gpu1 -J hb-estimate
 alpha-sano-serve|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
 alpha-sano-handover|sano|sano|gpu|-|-|ACCOUNT_SANO_GPU|1|4|65536Mi|01:46:00|150|--qos=gpu1 -J hb-estimate
@@ -344,6 +348,7 @@ beta-athena-now-router|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_
 beta-athena-now-keeper|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-athena-now-bulk|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 beta-helios-now-router|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|120000M|01:46:00|213|-C memfs
+beta-athena-now-llmlab-baseline|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:48:00|115|-|10
 gpu-accounting-helios|helios|helios|plgrid-gpu-gh200|now|now|ACCOUNT_HELIOS_GH200|1|72|117Gi|00:05:00|32|-|10
 gpu-accounting-athena|athena|athena|plgrid-gpu-a100|-|-|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|25|-
 gpu-accounting-athena-now|athena|athena-now|plgrid-now|-|plgrid-now|ACCOUNT_ATHENA_A100|1|16|125Gi|00:05:00|32|-|10
@@ -370,11 +375,13 @@ tunnel-hour-helios|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/h
 tunnel-hour-athena|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-stage|internal/providerctl/conformance/stagehelper
+alpha-athena-now-stage-qwen3-vl|internal/providerctl/conformance/stagehelper
 alpha-sano-stage|internal/providerctl/conformance/stagehelper
 alpha-sano-serve|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-sano-handover|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-sano-llmlab-baseline|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 alpha-athena-now-nooverlap|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
+beta-athena-now-llmlab-baseline|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-router|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-keeper|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent
 beta-athena-now-bulk|cmd/hpcburst,cmd/hpcburst-controller,cmd/hpcburst-front,cmd/hb-agent,internal/agent/enginedouble/shim
@@ -397,10 +404,12 @@ tunnel-hour-helios|1
 tunnel-hour-athena|1
 alpha-athena-now-serve|1
 alpha-athena-now-stage|1
+alpha-athena-now-stage-qwen3-vl|1
 alpha-sano-stage|1
 alpha-sano-serve|1
 alpha-sano-handover|2
 beta-sano-llmlab-baseline|1
+beta-athena-now-llmlab-baseline|1
 alpha-athena-now-nooverlap|2
 beta-athena-now-router|1
 beta-athena-now-keeper|1
@@ -429,7 +438,9 @@ alpha-helios-nooverlap|LIVE_OWNER_GO_HELIOS_NOW|160
 tunnel-hour-helios|LIVE_OWNER_GO_HELIOS_NOW|140
 alpha-athena-now-serve|LIVE_OWNER_GO_ATHENA_NOW|60
 alpha-athena-now-stage|LIVE_OWNER_GO_ATHENA_NOW|50
+alpha-athena-now-stage-qwen3-vl|LIVE_OWNER_GO_ATHENA_NOW|50
 alpha-athena-now-nooverlap|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-llmlab-baseline|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-keeper|LIVE_OWNER_GO_ATHENA_NOW|60
 beta-athena-now-bulk|LIVE_OWNER_GO_ATHENA_NOW|60
@@ -503,6 +514,7 @@ alpha-athena-now-nooverlap
 alpha-sano-serve
 alpha-sano-handover
 beta-sano-llmlab-baseline
+beta-athena-now-llmlab-baseline
 beta-athena-now-router
 beta-athena-now-keeper
 beta-athena-now-bulk
@@ -550,6 +562,11 @@ CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
 CLEAN_QUIET_POLLS=${LIVE_CLEAN_QUIET_POLLS:-5}          # polls in a row with no owned job before the queue counts as clear
 CLEAN_MAX_POLLS=${LIVE_CLEAN_MAX_POLLS:-40}             # at most this many polls in all
 CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls when the test left an unresolved submission
+# A run that was stopped (a timeout, a signal, a panic), or left an unresolved submission, may have a submission in flight: the Provider's submit-and-release can
+# still land after the cleanup's first looks, and Slurm accepts it for the profiles' inflightWindow, 5 minutes (profiles/athena-now.yaml:72, the framework's default
+# in the others), which on plgrid-now is the owner's one-job slot (the review of PR 809, point 2). The queue then counts as clear only after the run's own tags
+# have been absent for this long, 5 minutes and half a minute over, re-reading and cancelling by tag throughout; hack/livechecks holds it to the profiles' windows.
+CLEAN_WINDOW_SECONDS=${LIVE_CLEAN_WINDOW_SECONDS:-330}
 
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
@@ -699,7 +716,7 @@ check_settings() {
         fi
         case $name in
           # The pre-staging row (issue #376) is a conformance run: no stack, so no dial-home or binary setting.
-          alpha-athena-now-stage) ;;
+          alpha-athena-now-stage|alpha-athena-now-stage-qwen3-vl) ;;
           # Sano's pre-staging row (issue #735) is one too, with the Provider's own staging directory.
           alpha-sano-stage) check_sano_settings || bad=1 ;;
           alpha-*|tunnel-hour-*|beta-*) check_alpha_settings "$name" || bad=1 ;;
@@ -887,6 +904,10 @@ check_alpha_settings() {
   if [ "$name" = beta-athena-now-keeper ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the relay keeper runs the relays of that mode"; bad=1
   fi
+  # The baseline's Athena twin runs under athena-now.yaml, whose only dial-home mode is host-dialed (ssh is refused there, and direct is no profile value).
+  if [ "$name" = beta-athena-now-llmlab-baseline ] && [ "$host_dialed" != 1 ]; then
+    say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): athena-now.yaml lists host-dialed alone"; bad=1
+  fi
   # The bulk row reads the bulk path's buffer on the relays' ssh through the login node (internal/alpha, config.go): host-dialed mode alone.
   if [ "$name" = beta-athena-now-bulk ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the bulk path's buffer is read on the relays' ssh through the login node"; bad=1
@@ -907,7 +928,7 @@ check_alpha_settings() {
   esac
   # The baseline row (issue #764): LLMLab's credentials for its managed Provider, #768's generator binary, and the optional switch and phases.
   case $name in
-    beta-sano-llmlab-baseline) check_baseline_settings || bad=1 ;;
+    beta-sano-llmlab-baseline|beta-athena-now-llmlab-baseline) check_baseline_settings || bad=1 ;;
   esac
   if [ "$host_dialed" = 1 ]; then
     # No address and no key: the host dials the jobs through the login node (HBEP-6, Dial-home modes). An
@@ -1105,7 +1126,7 @@ CLEAN_TRIES=0
 TEST_STOPPED=0     # 1 when a test binary was stopped (timeout, signal, panic) instead of finishing
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need stopped
+  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need stopped window=0 quiet_since=0 began hard
   CLEAN_TRIES=$((CLEAN_TRIES+1))
   tags=$(own_tags)
   unres=$(unresolved_tags)
@@ -1117,14 +1138,19 @@ clean_cluster() {
   if { [ "$TEST_STOPPED" = 1 ] || [ -n "$INTERRUPTED" ]; } && { [ -n "$tags" ] || [ -n "$JOBID" ] || [ -n "$OWN_PREFIX" ]; }; then
     stopped=1; need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
   fi
+  # The submission window: the extended wait is also a time, not only a count of polls, so that a poll that is quick cannot shorten it.
+  if [ "$stopped" = 1 ] || [ -n "$unres" ]; then window=$CLEAN_WINDOW_SECONDS; fi
+  began=$(date +%s)
+  hard=$((window + CLEAN_MAX_POLLS * (CLEAN_POLL_SECONDS > 0 ? CLEAN_POLL_SECONDS : 1)))
   while :; do
     polls=$((polls+1))
     now=$(queue_jobs "$host") || { readable=0; break; }
     present=$(owned_present "$now" "$tags")
     if [ -z "$present" ]; then
       quiet=$((quiet+1)); left=0
+      [ "$quiet_since" -ne 0 ] || quiet_since=$(date +%s)
     else
-      quiet=0; new=""; again=""; left=0
+      quiet=0; quiet_since=0; new=""; again=""; left=0
       for id in $present; do
         left=$((left+1))
         case "$sent" in *" $id "*) again="$again $id" ;; *) new="$new $id"; sent="$sent$id " ;; esac
@@ -1135,8 +1161,10 @@ clean_cluster() {
       # shellcheck disable=SC2086
       [ -z "$again" ] || cancel_ids "$host" $again >/dev/null
     fi
-    [ "$quiet" -lt "$need" ] || break
-    [ "$polls" -lt "$CLEAN_MAX_POLLS" ] || break
+    if [ "$quiet" -ge "$need" ] && { [ "$window" -le 0 ] || [ $(($(date +%s) - quiet_since)) -ge "$window" ]; }; then break; fi
+    # Without the window the polls are bounded by their count; with it by the time, a job that is cancelled and listed again then ending it as left behind.
+    if [ "$window" -le 0 ]; then [ "$polls" -lt "$CLEAN_MAX_POLLS" ] || break
+    else [ $(($(date +%s) - began)) -lt "$hard" ] || break; fi
     sleep "$CLEAN_POLL_SECONDS"
   done
   if [ "$readable" = 0 ]; then
@@ -1163,6 +1191,38 @@ clean_abs_path() {
   case $p in */ | *//*) return 1 ;; esac
   case "$p/" in */./* | */../*) return 1 ;; esac
   printf '%s\n' "$p" | grep -q -E -x '/[A-Za-z0-9._/-]+'
+}
+
+# stop_run_stack: the run's own stack, stopped BEFORE its jobs are cancelled (the review of PR 809, point 1). The launcher detaches its supervisor, so a test that a
+# timeout or a signal stopped never ran its Go cleanup, and the run's controller is still running: it can submit another job, and reopen relays, after the cancel by
+# tag. The test wrote the stack's state directory to its record directory before it started the stack (internal/alpha, StackStateFile: "state=<dir>/st"); it is read as
+# a regular file, held to a plain absolute path ending in /st, and `hpcburst down --state-dir` of the run's own build is run on that directory alone, with a bound, and
+# waited for. A directory that is not there is a stack the test removed itself: nothing is running. The down's own output stays in the record directory. Returns 1 when
+# the stack could not be stopped, which fails the row. Idempotent.
+STACK_STOPPED=0
+STACK_DOWN_SECONDS=${LIVE_STACK_DOWN_SECONDS:-200}
+stop_run_stack() {
+  local f="${REC_DIR:+$REC_DIR/stack-state-dir}" st bin
+  [ "$STACK_STOPPED" = 0 ] || return 0
+  [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  st=$(sed -n 's/^state=//p' "$f" | head -n 1)
+  if ! clean_abs_path "$st" || [ "${st##*/}" != st ]; then
+    say "cleanup: the run's stack was named by a path that is not a plain absolute <directory>/st; nothing was stopped, so its controller may still be running: stop it by hand"
+    return 1
+  fi
+  if [ ! -e "$st" ]; then STACK_STOPPED=1; return 0; fi
+  bin=${ALPHA_BUILD_DIR:+$ALPHA_BUILD_DIR/bin/hpcburst}
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    say "cleanup: the run's stack could not be stopped: the run's hpcburst build is not there, so its controller may still be running: stop it by hand"
+    return 1
+  fi
+  if timeout --kill-after=10 "$STACK_DOWN_SECONDS" "$bin" down --state-dir "$st" >"$REC_DIR/stack-down.log" 2>&1; then
+    STACK_STOPPED=1
+    say "cleanup: the run's own stack was stopped (hpcburst down) before its jobs were cancelled"
+    return 0
+  fi
+  say "cleanup: hpcburst down could not stop the run's stack (it failed or passed its bound of ${STACK_DOWN_SECONDS}s; its output is in the record directory), so its controller may still be running and may submit a job after the cancel: stop it by hand"
+  return 1
 }
 
 # clean_test_agent: the bulk row's staged shipped agent (issue #521, option (A); the science agent's condition 2), when its test was stopped before
@@ -1204,6 +1264,7 @@ EOS
 on_signal() { INTERRUPTED=1; }
 on_exit() {
   local rc=$?
+  stop_run_stack || rc=1
   clean_test_agent || rc=1
   if [ -n "$ACTIVE_HOST" ]; then clean_cluster || rc=1; [ "$CLEAN_LEFT" -eq 0 ] || rc=1; fi
   [ -z "${CONTROL_DIR:-}" ] || rm -rf "$CONTROL_DIR"
@@ -1250,7 +1311,7 @@ not_run_verdict() {
   ! glibc_marker || case $n in beta-athena-now-router|beta-helios-now-router) true ;; *) false ;; esac || return 1
   ! keeper_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! invalid_marker || [ "$n" = beta-athena-now-bulk ] || return 1
-  ! baseline_invalid_marker || [ "$n" = beta-sano-llmlab-baseline ] || return 1
+  ! baseline_invalid_marker || case $n in beta-sano-llmlab-baseline|beta-athena-now-llmlab-baseline) true ;; *) false ;; esac || return 1
   ! staged_image_marker || [ "$n" = beta-athena-now-bulk ] || return 1
   ! keeper_ended_marker || [ "$n" = beta-athena-now-keeper ] || return 1
   ! slot_marker || [ "$n" = alpha-athena-now-nooverlap ] || return 1
@@ -1276,6 +1337,9 @@ invalid_marker() { grep -q "the run has no saturation witness, so its reading me
 # failed request LLMLab answered, a cap that never bound, a 503 in the detach phase, an engine whose KV is below the cap's need. An INVALID, not a NOT RUN, which
 # not_run_verdict holds to that row and judge prints as INVALID.
 baseline_invalid_marker() { grep -q "the baseline run's reading is invalid, so it measures nothing" "$REC_DIR/not-run.txt" 2>/dev/null; }
+# baseline_nojob_marker: the same marker says P0 ended the run before any job was submitted (internal/alpha, BaselineInvalidNoJobNote; the review of PR 809, point 6): no job
+# started and no slot was spent, so the console says so and never that a job ran.
+baseline_nojob_marker() { grep -q "P0 ended it before any job was submitted, so no job started and no slot was spent" "$REC_DIR/not-run.txt" 2>/dev/null; }
 # finding_marker: the bulk row's FINDING marker beside its passing test (internal/alpha, ErrFinding and FindingNote; #584): a regular file, not a
 # link, in this run's record directory, in its fixed words. finding_present is any file of that name, which judge holds to the bulk row alone.
 finding_present() { [ -n "$REC_DIR" ] && { [ -e "$REC_DIR/finding.txt" ] || [ -L "$REC_DIR/finding.txt" ]; }; }
@@ -1391,6 +1455,9 @@ judge() {
     if invalid_marker; then
       # Exit 3 like a NOT RUN, its own word: the run happened and measured nothing (NOT_RUN=1 carries the exit code).
       say "$n: INVALID (not a NOT RUN: the job started, ran and spent the slot, and the run was put to the test; but it has no saturation witness: a transfer's bytes, time and rate were not measured with its token streams running across the whole of it, so its reading measures nothing; the text to post says which; the run's other checks passed; not a failure, not a pass)"
+    elif baseline_invalid_marker && baseline_nojob_marker; then
+      # A failed LLMLab P0: INVALID before any GPU submission, with no job and no slot spent (NOT_RUN=1 carries the exit code).
+      say "$n: INVALID (not a NOT RUN: P0 ended the run before any job was submitted, so no job started and no slot was spent, and the managed leg's reading measures nothing; the text to post says why; not a failure, not a pass)"
     elif baseline_invalid_marker; then
       # Exit 3 like a NOT RUN, its own word: the run happened, nothing failed, and its reading measures nothing (NOT_RUN=1 carries the exit code).
       say "$n: INVALID (not a NOT RUN: the job started and ran, and the run was put to the test; but its reading measures nothing, whether LLMLab failed a request, the cap never bound, P3 answered a 503 or the engine's KV is below the cap's need; the text to post says which; the run's other checks passed; not a failure, not a pass)"
@@ -1516,7 +1583,7 @@ env_conformance() {
     # The host-dialed relay rows (issue #305) take the agent builds their job runs, and no probe setting.
     reach-host-dialed-*) export HPCBURST_CONF_AGENT_BUILDS=$HD_BUILD_DIR ;;
     # The pre-staging row (issue #376) takes its helper build, which its job runs as the Allocation's agent build.
-    alpha-athena-now-stage) export HPCBURST_CONF_STAGE_HELPER=$STAGE_HELPER ;;
+    alpha-athena-now-stage|alpha-athena-now-stage-qwen3-vl) export HPCBURST_CONF_STAGE_HELPER=$STAGE_HELPER ;;
     # Sano's pre-staging row (issue #735): the same helper, and the Provider's own staging directory as the root the run is below (the profile
     # has none) and the directory it stages in, which it keeps. The directory is read from the settings here and never printed.
     alpha-sano-stage)
@@ -1555,7 +1622,7 @@ env_alpha() {
   # min_tokens switch and the phases' override.
   unset HPCBURST_ALPHA_STUDYLOAD_BIN HPCBURST_ALPHA_LLMLAB_CREDENTIALS HPCBURST_ALPHA_OMIT_MIN_TOKENS HPCBURST_ALPHA_BASELINE_PHASES
   case $n in
-    beta-sano-llmlab-baseline)
+    beta-sano-llmlab-baseline|beta-athena-now-llmlab-baseline)
       export HPCBURST_ALPHA_STUDYLOAD_BIN=${S[LIVE_STUDYLOAD_BIN]} HPCBURST_ALPHA_LLMLAB_CREDENTIALS=${S[LIVE_LLMLAB_CREDENTIALS]}
       [ "${S[LIVE_STUDYLOAD_OMIT_MIN_TOKENS]:-0}" != 1 ] || export HPCBURST_ALPHA_OMIT_MIN_TOKENS=1
       [ -z "${S[LIVE_BASELINE_PHASES]:-}" ] || export HPCBURST_ALPHA_BASELINE_PHASES=${S[LIVE_BASELINE_PHASES]} ;;
@@ -1650,7 +1717,7 @@ check_slot() {
 prepare_cluster() {
   case $1 in
     real-engine) prepare_real_engine "$1" ;;
-    alpha-athena-now-stage|alpha-sano-stage) prepare_stage "$1" ;;
+    alpha-athena-now-stage|alpha-athena-now-stage-qwen3-vl|alpha-sano-stage) prepare_stage "$1" ;;
     alpha-*|tunnel-hour-*|beta-*) prepare_alpha "$1" ;;
     reach-host-dialed-*) prepare_host_dialed "$1" ;;
     *) build_test_binary "$1" "$OUT/$1.test" ;;
@@ -1704,6 +1771,7 @@ STAGE_HELPER=""
 stage_example() {
   case $1 in
     alpha-sano-stage) echo modeldeployment-sano-qwen25-7b-instruct.yaml ;;
+    alpha-athena-now-stage-qwen3-vl) echo modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml ;;
     *) echo modeldeployment-qwen25-instruct.yaml ;;
   esac
 }
@@ -1750,7 +1818,7 @@ execute_cluster() {
   case $n in
     real-engine) execute_real_engine "$n" ;;
     # The pre-staging row (issue #376): a conformance run with a start wait, its first clock, inside its timeout column.
-    alpha-athena-now-stage) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
+    alpha-athena-now-stage|alpha-athena-now-stage-qwen3-vl) run_binary "$n" "$OUT/$n.test" "${TMIN[$n]}" env_conformance; judge "$n" "$OUT/$n.log" "$CHILD_RC" ;;
     # Sano's pre-staging row (issue #735): a conformance run with no start wait, so the operator's wait in the queue is its first clock, on top
     # of its timeout column, as the accounting and reach rows have it.
     alpha-sano-stage)
@@ -1824,16 +1892,18 @@ run_cluster() {
   # A stack row's jobs carry the run's own prefix, set before the test can submit anything.
   RUN_ID=""; OWN_PREFIX=""
   case $n in
-    alpha-athena-now-stage|alpha-sano-stage) ;; # a conformance run: its test writes each tag down before the submit
+    alpha-athena-now-stage|alpha-athena-now-stage-qwen3-vl|alpha-sano-stage) ;; # a conformance run: its test writes each tag down before the submit
     alpha-*|tunnel-hour-*|beta-*)
       RUN_ID=$(new_run_id)
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
       OWN_PREFIX="hb-alpha-$RUN_ID-" ;;
   esac
-  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; FINDING=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; FINDING=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0; STACK_STOPPED=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || [ "$FINDING" = 1 ] || verdict=1; }
+  # The run's own stack first, then its jobs: a stack that is still running could submit another job after the cancel (stop_run_stack).
+  stop_run_stack || verdict=1
   # The bulk row's staged shipped agent, when its test was stopped before it removed it: a failure of the row if it remains.
   clean_test_agent || verdict=1
   clean_cluster || true

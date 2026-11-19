@@ -261,6 +261,10 @@ func ConfigFromEnv(getenv func(string) string, mine ...string) (cfg Config, skip
 	if row.Name == BetaKeeperName && cfg.DialHomeMode != "host-dialed" {
 		bad = append(bad, envMode+" must be host-dialed for "+BetaKeeperName+": the relay keeper runs the relays of host-dialed mode alone")
 	}
+	// The Athena twin of the baseline runs under athena-now.yaml, whose only dial-home mode is host-dialed (ssh is refused there and direct is no profile value).
+	if row.Name == BetaAthenaBaselineName && cfg.DialHomeMode != "host-dialed" {
+		bad = append(bad, envMode+" must be host-dialed for "+BetaAthenaBaselineName+": athena-now.yaml lists host-dialed alone")
+	}
 	// The bulk row reads the bulk path on the relays' ssh through the login node, the path the criterion names (HBEP-6, Graduation criteria, Beta).
 	if row.Name == BetaBulkName && cfg.DialHomeMode != "host-dialed" {
 		bad = append(bad, envMode+" must be host-dialed for "+BetaBulkName+": the bulk path's real-path buffer is read on the relays' ssh through the login node")

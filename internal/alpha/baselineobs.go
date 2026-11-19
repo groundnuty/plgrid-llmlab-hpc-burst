@@ -163,7 +163,9 @@ type BaselineObs struct {
 	Deployment DeploymentSpec `json:"deployment"`
 	Served     ServedMD       `json:"served"`
 	Managed    ManagedMD      `json:"managed"`
-	// Cap and K are the row's constants (CapSano, LLMLabK) as the run used them; the judge compares them with what the API held.
+	// Row is the baseline row's name; the judge takes the row's facts by it (baselineFactsOf: Row 1's when it is empty).
+	Row string `json:"row,omitempty"`
+	// Cap and K are the row's constants (CapSano or CapAthena, LLMLabK) as the run used them; the judge compares them with what the API held.
 	Cap int `json:"cap"`
 	K   int `json:"k"`
 	// LLMLabProvider is the managed Provider's name in the run.

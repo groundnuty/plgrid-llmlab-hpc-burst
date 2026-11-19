@@ -214,6 +214,33 @@ func TestNowStage(t *testing.T) {
 	stageBody(t, w, alpha.NowStageRow().Name)
 }
 
+// TestNowStageQwen3VL is the pre-staging row of the baseline's Athena twin (alpha.NowStageQwen3VLRow; issue #764): TestNowStage's body over the same helper
+// with the helper built for the Qwen3-VL-8B example (examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml), which stages that deployment's
+// engine image (already staged by the earlier plgrid-now rows, when it is) and its checkpoint of about 16 GB into the profile's own staging directory,
+// kept, so that the baseline's Instance starts warm inside athena-now.yaml's start timeout of 12 minutes. The staging runs in the Allocation's own job, a
+// plain job through the Provider's controller: it starts no stack and no relay (the Provider's controller is host-dialed only with a rig,
+// worldKit.hostDialed, which the reach-host-dialed rows alone give it), so it takes none of the login host's relay budget; it uses the run's ssh session
+// to the login node, as every cluster row does. A staging past the job's 30 minutes is the same FAIL that names it as TestNowStage's, and the row's post
+// carries the helper's seconds for the image and the checkpoint: the cold-start measurement of that checkpoint on Athena.
+//
+//livecheck:alpha-athena-now-stage-qwen3-vl
+func TestNowStageQwen3VL(t *testing.T) {
+	if os.Getenv("HPCBURST_ALPHA_DRY") == "1" {
+		t.Fatal("the pre-staging row has no dry run through the script; its dry run is TestTheStageRowsDryRunStagesWhereTheAgentStages")
+	}
+	row := alpha.NowStageQwen3VLRow()
+	s := withProfileStaging(t, load(t))
+	if s.profile.Name != row.ProfileName() || s.part.Name != row.Partition {
+		t.Fatalf("the baseline's pre-staging row runs under %s on %s, not %s on %s", row.ProfileName(), row.Partition, s.profile.Name, s.part.Name)
+	}
+	helper := stageHelperBinary(t, os.Getenv(stageHelperSetting), row.DeploymentFile())
+	w := buildWorld(t, s, worldKit{agent: helper, keepStaging: true, dial: func(v slurm.Validated) (slurm.Runner, io.Closer, error) {
+		ssh, err := sshrunNew(s, v)
+		return ssh, ssh, err
+	}})
+	stageBody(t, w, row.Name)
+}
+
 // TestSanoStage is the pre-staging row on Sano's gpu partition (issue #735), the same body as TestNowStage over the same helper: the stage
 // helper as the Allocation's agent build, through the Provider's controller, staging the 7B deployment's image and checkpoint in the Provider's
 // own stagingDir (HPCBURST_CONF_STAGING_ROOT; Sano's profile has none), which the run keeps. The serve and handover rows then start warm from
@@ -549,6 +576,31 @@ func TestTheStageHelpersBuildIsTheExampleDeployments(t *testing.T) {
 	want := fmt.Sprintf("-X main.image=%s -X main.imageDigest=%s -X main.checkpointRepo=%s -X main.checkpointRev=%s -X main.loadFormat=%s -X main.imageFormat=sandbox\n", image, digest, repo, rev, load)
 	if string(b) != want {
 		t.Errorf("the build's flags are %q, want %q", b, want)
+	}
+}
+
+// The script's build of the helper for the baseline's Athena example (hack/build-stage-helper.sh with STAGE_EXAMPLE, as hack/live-checks.sh's stage_example
+// names it for alpha-athena-now-stage-qwen3-vl) takes that file's values, and they are the Qwen3-VL checkpoint's and not the default example's.
+//
+//livecheck:none a dry test on this host, no cluster
+func TestTheStageHelpersBuildForTheBaselinesExampleIsThatExamples(t *testing.T) {
+	row := alpha.NowStageQwen3VLRow()
+	cmd := exec.Command("bash", filepath.Join("..", "..", "..", "hack", "build-stage-helper.sh"), "--print")
+	cmd.Env = append(os.Environ(), "STAGE_EXAMPLE="+row.DeploymentFile())
+	b, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("hack/build-stage-helper.sh --print: %v", err)
+	}
+	image, digest, repo, rev, load := stageExampleInputs(t, row.DeploymentFile())
+	if repo != "Qwen/Qwen3-VL-8B-Instruct" || rev != "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b" {
+		t.Fatalf("the baseline's example is %s at %s", repo, rev)
+	}
+	want := fmt.Sprintf("-X main.image=%s -X main.imageDigest=%s -X main.checkpointRepo=%s -X main.checkpointRev=%s -X main.loadFormat=%s -X main.imageFormat=sandbox\n", image, digest, repo, rev, load)
+	if string(b) != want {
+		t.Errorf("the build's flags are %q, want %q", b, want)
+	}
+	if def := alpha.NowStageRow(); def.DeploymentFile() == row.DeploymentFile() || def.Name == row.Name {
+		t.Errorf("the baseline's pre-staging row is alpha-athena-now-stage's own row: %s and %s", def.Name, def.DeploymentFile())
 	}
 }
 

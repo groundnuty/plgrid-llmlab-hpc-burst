@@ -50,7 +50,7 @@ type liveBaseline struct {
 
 func (r *liveRun) Baseline(ctx context.Context, p Plan) (BaselineObs, error) {
 	b := &liveBaseline{r: r, p: p}
-	o, err := RunBaseline(ctx, b, BaselineSettings{Phases: r.cfg.Phases, Cap: int(p.Row.InstanceCap), OmitMinTokens: r.cfg.OmitMinTokens, Logf: p.Logf})
+	o, err := RunBaseline(ctx, b, BaselineSettings{Phases: r.cfg.Phases, Cap: int(p.Row.InstanceCap), Row: p.Row.Name, OmitMinTokens: r.cfg.OmitMinTokens, Logf: p.Logf})
 	if err != nil {
 		return BaselineObs{}, err
 	}
