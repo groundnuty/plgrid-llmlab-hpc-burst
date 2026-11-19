@@ -891,12 +891,17 @@ check_alpha_settings() {
   if [ "$name" = beta-athena-now-bulk ] && [ "$host_dialed" != 1 ]; then
     say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): the bulk path's buffer is read on the relays' ssh through the login node"; bad=1
   fi
-  # The Sano rows (issue #735): host-dialed alone, since Sano's compute nodes have no home for ssh mode's key (profiles/sano.yaml lists no other mode;
-  # direct is untested there, and these rows run none), and the Provider's own staging directory.
+  # The Sano rows (issue #735): no ssh mode, since Sano's compute nodes have no home directory for its key (L-1.16); host-dialed and direct are taken
+  # (direct is no profile value, so ReadProfile skips it, and the first study dials Sano in it), and the Provider's own staging directory.
   case $name in
     alpha-sano-*|beta-sano-*)
-      if [ "$host_dialed" != 1 ]; then
-        say "live-checks: $name runs in host-dialed mode alone (LIVE_DIALHOME_MODE=host-dialed): Sano's profile lists no other dial-home mode"; bad=1
+      if [ "${mode:-}" = ssh ]; then
+        say "live-checks: $name does not run in ssh mode (LIVE_DIALHOME_MODE=host-dialed or direct): Sano's compute nodes have no home directory, where ssh mode's agent reads its key"; bad=1
+      fi
+      # In direct mode the front's dial-home listen address is needed as well as the address the jobs dial (the address is checked below): the row's live
+      # world refuses a direct run with no listener, but only after Slurm was contacted and the binaries were built (PR 792's review).
+      if [ "${mode:-}" = direct ] && [ -z "${S[LIVE_DIALHOME_LISTEN]:-}" ]; then
+        say "live-checks: $name in direct mode needs LIVE_DIALHOME_LISTEN, the front's dial-home listen address on this host, beside LIVE_DIALHOME_ADDR"; bad=1
       fi
       check_sano_settings || bad=1 ;;
   esac

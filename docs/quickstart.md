@@ -55,9 +55,9 @@ hack/build-agents.sh "$STATE/agent-builds" x86_64
 
 The controller records the agent build's sha256 with every job it submits. The script pins the Go toolchain, the flags and the environment, so the same source gives the same digest on any machine. It prints each digest with the Go version beside it.
 
-### Release archive (once v0.1.0-alpha.1 is published)
+### Release archive (v0.1.0-alpha.1)
 
-Once release v0.1.0-alpha.1 is published, you can unpack its archive instead of building. Until then this path does not exist, and you build from source. The archive is for Linux on x86_64 and replaces the two blocks above.
+Release v0.1.0-alpha.1 is published, as a GitHub pre-release (14 Nov 2026, from the `v0.1.0-alpha.1` tag), so you can unpack its archive instead of building. The archive is for Linux on x86_64 and replaces the two blocks above. It holds the files of that tag, so what reached `main` after it is not in it (Sano's profile and examples, for one: see [Alpha's limits](#alphas-limits)).
 
 You need no clone of the repository. Besides the binaries, the archive carries the `config/crd`, `profiles/` and `examples/` that the later steps read ([HBEP-15](../hbep/0015-dependencies-and-provenance/README.md), Releases). Make an empty directory, download `hpcburst-v0.1.0-alpha.1-linux-amd64.tar.gz` and `SHA256SUMS` from the release page into it, and run the rest of this page from there. Check the archive, unpack it in place, check every file it unpacked, and put k3s, frps and the agent builds where the launcher and the controller read them:
 
@@ -163,14 +163,15 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 | `modeldeployment-qwen3-reasoning.yaml` | a reasoning model, on the same Provider |
 | `provider-helios-gh200.yaml` | a batch Provider on Helios `plgrid-gpu-gh200` (beta) |
 | `modeldeployment-qwen25-instruct.yaml` | the same small instruct model, on the Helios Provider (beta) |
-| `provider-sano-a100.yaml` | a batch Provider on Sano `gpu` (beta), run host-dialed (its profile's only dial-home mode), with its own `stagingDir` |
+| `provider-sano-a100.yaml` | a batch Provider on Sano `gpu` (beta), run host-dialed (its profile's only dial-home mode; `direct` mode's dial-home path was verified from both node classes in #735, but no served Instance has run in it yet), with its own `stagingDir` |
 | `modeldeployment-sano-qwen25-7b-instruct.yaml` | a 7B instruct model, served on that Provider (beta) |
 | `modeldeployment-sano-qwen3-vl-8b-instruct.yaml` | Qwen3-VL-8B-Instruct, served on that Provider, with its own expected-performance entry (beta) |
 | `modeldeployment-sano-reference-qwen25-7b-instruct.yaml` | the same model under a name no client sends, with one Allocation, for the reference run behind Sano's expected-performance entry (beta) |
 | `provider-llmlab.yaml` | a managed Provider: LLMLab itself, read-only ([optional](#optional-attach-llmlab)) |
 | `modeldeployment-llmlab.yaml` | a model LLMLab already serves, attached to a plain name ([optional](#optional-attach-llmlab)) |
 | `workload-labelling.yaml` | a Workload of the Helios example's model: one class of a study's requests, named by a header or a `#labelling` suffix (beta; [the operations guide](operations.md#workloads-beta)) |
-| `modeldeployment-qwen25-labelling.yaml` | the Helios deployment under another name, listing that Workload; apply it instead of `modeldeployment-qwen25-instruct.yaml` (beta) |
+| `workload-analysis-managedfirst.yaml` | a second Workload of that model that sets `routeOrder: ManagedFirst` with its required `managedSessions`: LLMLab takes its requests first, up to that bound ([the operations guide](operations.md#workloads-beta)) (beta) |
+| `modeldeployment-qwen25-labelling.yaml` | the Helios deployment under another name, listing both Workloads; apply it instead of `modeldeployment-qwen25-instruct.yaml` (beta) |
 
 The profile ([`profiles/README.md`](../profiles/README.md)) holds what is true for everyone on a platform. A Provider holds what is yours. The rules for a ModelDeployment, such as the pinned checkpoint revision and engine digest, are in [HBEP-3](../hbep/0003-resource-model-and-naming/README.md) and [HBEP-7](../hbep/0007-lifecycle-controller/README.md). Admission refuses a value that breaks one and says which.
 
@@ -257,6 +258,6 @@ bin/hpcburst up --state-dir "$STATE" --bin-dir "$BIN" --manifests config/crd \
 - **One user, one host.** The host is a single-user k3s on one machine ([HBEP-11](../hbep/0011-kubernetes-control-plane/README.md)). A team option is not part of alpha.
 - **One partition per Provider**, and a Provider names exactly one ([HBEP-4](../hbep/0004-provider-interface/README.md), open question 12). A second partition is a second Provider.
 - **Helios `plgrid` hosts no model.** It is a CPU partition, in the Helios profile for conformance runs and short checks only ([`profiles/README.md`](../profiles/README.md)).
-- **Sano is not shipped:** no PlatformProfile for it is in `profiles/`, only its draft.
+- **Sano is shipped on `main`, not in the release archive.** Its PlatformProfile (`profiles/sano.yaml`) and examples are on `main`, and the v0.1.0-alpha.1 archive, built from that tag, carries only the draft (`profiles/sano.draft.yaml`) and none of the Sano examples. Build from a clone of `main` to use them.
 - **A managed Provider only lists.** It reads LLMLab's catalog once a minute and routes to it. It starts and stops nothing ([HBEP-4](../hbep/0004-provider-interface/README.md), Managed provider in alpha).
 - **Billing is recorded, not read.** The `grant` field is kept, but nothing in alpha charges against it.

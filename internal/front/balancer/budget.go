@@ -17,6 +17,9 @@ type Charge struct {
 	// Tokens is the request's charge c, its Workload's typical context plus typical output; 0 for a request that names
 	// none.
 	Tokens int64
+	// Workload is the Workload's name, for the in-flight series' workload label; "" for a request that names none. It takes no part in
+	// the budget.
+	Workload string
 }
 
 // Budget is a member's token budget B (HBEP-5, The count in tokens), held as the two factors it is the product of:
