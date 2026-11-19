@@ -52,8 +52,15 @@ func TestStickyPinIsJournalledBeforeTheRequestIsDispatched(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first request never reached its pin")
 	}
-	if n, j := f.totalSaw(), len(f.journal()); n != 0 || j != 0 {
-		t.Fatalf("before its pin was written the engines saw %d requests and the journal holds %d records, want none of either", n, j)
+	// A request that is not dispatched shows nothing, so this is the one place a window is read: a dispatch takes milliseconds, and the request is held
+	// for 300 ms with its pin unwritten. The journal, not the window, is the proof that the pin is not written yet.
+	for deadline := time.Now().Add(300 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if n := f.totalSaw(); n != 0 {
+			t.Fatalf("the engines saw %d requests before the pin of the first request was written", n)
+		}
+	}
+	if j := len(f.journal()); j != 0 {
+		t.Fatalf("the journal holds %d records while the pin is held back, want none", j)
 	}
 	gate <- struct{}{}
 	resp, body := call.wait(t)
