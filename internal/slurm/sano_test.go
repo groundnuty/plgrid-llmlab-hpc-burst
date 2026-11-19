@@ -2,8 +2,8 @@ package slurm_test
 
 // Sano as a Provider (#735; HBEP-4 as amended by #745): the QOS chosen by the GPU count, the per-job caps,
 // the QOS's wall limit, and Sano's job_submit rules, over the fake Slurm in Sano's shape (fakeslurm.SanoConfig).
-// The expectations are worked out by hand from the probes of 18 Nov 2026 and the science agent's #735 comment: 11 CPUs and
-// 135,904 MiB per GPU, the QOS caps of probe 3, a 3-day wall. None is read back through the code under test, and the
+// The expectations are worked out by hand from the probes of 18 Nov 2026 and the science agent's #735 comment: the node's maximum of 11 CPUs and
+// 135,904 MiB per GPU (the edge each QOS's caps are tested at; the shipped profile asks for 4 CPUs and 64 GiB since 19 Nov 2026), the QOS caps of probe 3, a 3-day wall. None is read back through the code under test, and the
 // fixture's caps are its own literals, never read from profiles/sano.yaml, so an agreement between them is a finding.
 
 import (
@@ -91,9 +91,11 @@ func wordsWithPrefix(t *testing.T, plat *fakeslurm.Platform, prefix string) []st
 	return got
 }
 
-// The QOS is the first entry whose gpus is at least the count, and the request is at the partition's per-GPU shares:
-// 11 CPUs and 135,904 MiB per GPU (#735, the science agent's comment of 18 Nov 2026). Every row is accepted by the
-// fixture's job_submit rules, which hold the request to the QOS's caps, so each shows Sano accepts what the plugin sends.
+// The QOS is the first entry whose gpus is at least the count, and the request is at the node's maximum per-GPU shares:
+// 11 CPUs and 135,904 MiB per GPU (#735, the science agent's comment of 18 Nov 2026), or at the shipped profile's own, 4 CPUs and
+// 64 GiB per GPU (the science agent's decision of 19 Nov 2026). The request carries its own sizes, which the Batch does not read
+// from the profile, so the maximum rows stay as the edge of each QOS's caps. Every row is accepted by the fixture's job_submit
+// rules, which hold the request to the QOS's caps, so each shows Sano accepts what the plugin sends.
 func TestSanoSubmitsUnderTheQOSOfItsGPUCount(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -102,6 +104,8 @@ func TestSanoSubmitsUnderTheQOSOfItsGPUCount(t *testing.T) {
 		qos, memWord string
 	}{
 		{"1 GPU", 1, 11, "135904Mi", "gpu1", "--mem=135904M"},
+		{"1 GPU at the shipped profile's shares", 1, 4, "65536Mi", "gpu1", "--mem=65536M"},
+		{"4 GPUs at the shipped profile's shares", 4, 16, "262144Mi", "gpu4", "--mem=262144M"},
 		{"2 GPUs", 2, 22, "271808Mi", "gpu2", "--mem=271808M"},
 		{"3 GPUs take the next QOS up", 3, 33, "407712Mi", "gpu4", "--mem=407712M"},
 		{"4 GPUs", 4, 44, "543616Mi", "gpu4", "--mem=543616M"},

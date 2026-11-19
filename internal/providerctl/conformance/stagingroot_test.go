@@ -32,7 +32,7 @@ const (
 func sanoFull() map[string]string {
 	m := full()
 	m["HPCBURST_CONF_PROFILE"], m["HPCBURST_CONF_PARTITION"] = "sano", "gpu"
-	m["HPCBURST_CONF_GPUS"], m["HPCBURST_CONF_CPUS"], m["HPCBURST_CONF_MEMORY"] = "1", "11", "135904Mi"
+	m["HPCBURST_CONF_GPUS"], m["HPCBURST_CONF_CPUS"], m["HPCBURST_CONF_MEMORY"] = "1", "4", "65536Mi"
 	m["HPCBURST_CONF_STAGING_ROOT"], m["HPCBURST_CONF_STAGING"] = exampleRoot, exampleRoot+"/hpc-burst-conformance"
 	return m
 }

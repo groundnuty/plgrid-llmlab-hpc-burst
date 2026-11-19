@@ -32,7 +32,8 @@ func sanoQOS() []v1alpha1.QOSProfile {
 	}
 }
 
-// sanoPartition makes the rig's partition Sano's gpu partition: 8 GPUs a node, 11 CPUs and 135,904 MiB a GPU, 7 days.
+// sanoPartition makes the rig's partition Sano's gpu partition: 8 GPUs a node, 7 days, and the node's MAXIMUM shares of 11 CPUs and 135,904 MiB a GPU, not
+// the shipped profile's 4 CPUs and 64 GiB (19 Nov 2026): the caps tests below cap a share at a QOS limit (maxCpusPerJob 8, maxMemPerJob 100Gi), which a share of 4 CPUs and 64 GiB would never reach.
 func sanoPartition(pp *v1alpha1.PartitionProfile) {
 	pp.GPUsPerNode, pp.CPUsPerGPU, pp.MemPerGPU = i32(8), i32(11), memQ("135904Mi")
 	pp.MaxTime = dur(168 * time.Hour)

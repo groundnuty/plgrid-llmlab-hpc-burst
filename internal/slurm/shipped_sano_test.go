@@ -46,9 +46,9 @@ func TestShippedSanoProfile(t *testing.T) {
 	if part.Name != "gpu" || part.GPUModel != "A100" || part.CPUArch != "x86_64" {
 		t.Errorf("partition %q of %q on %q, want gpu of A100 on x86_64", part.Name, part.GPUModel, part.CPUArch)
 	}
-	if part.GPUsPerNode == nil || *part.GPUsPerNode != 8 || part.CPUsPerGPU == nil || *part.CPUsPerGPU != 11 ||
-		part.MemPerGPU == nil || part.MemPerGPU.Cmp(*qty("135904Mi")) != 0 {
-		t.Errorf("gpusPerNode %v, cpusPerGpu %v, memPerGpu %v; want 8, 11, 135904Mi", part.GPUsPerNode, part.CPUsPerGPU, part.MemPerGPU)
+	if part.GPUsPerNode == nil || *part.GPUsPerNode != 8 || part.CPUsPerGPU == nil || *part.CPUsPerGPU != 4 ||
+		part.MemPerGPU == nil || part.MemPerGPU.Cmp(*qty("65536Mi")) != 0 {
+		t.Errorf("gpusPerNode %v, cpusPerGpu %v, memPerGpu %v; want 8, 4, 65536Mi (the science agent's #735 decision of 19 Nov 2026)", part.GPUsPerNode, part.CPUsPerGPU, part.MemPerGPU)
 	}
 	if part.MaxTime == nil || *part.MaxTime != "168h" || part.ImageFormat != v1alpha1.ImageFormatSIF || part.QOS != "" {
 		t.Errorf("maxTime %v, imageFormat %q, partition qos %q; want 168h, sif and none", part.MaxTime, part.ImageFormat, part.QOS)
@@ -96,7 +96,11 @@ func TestShippedSanoProfile(t *testing.T) {
 			t.Errorf("qos %s types a per-user limit, which no fact gave", w.name)
 		}
 	}
-	// The per-GPU shares fit the QOS they select, at every count the list names: 11 CPUs and 135,904 MiB times the count.
+	// The per-GPU shares are at most Sano's maximum (HBEP-4, "Never above one GPU's share": 11 CPUs and 135,904 MiB, a cap, not a value to
+	// equal), and they fit the QOS they select at every count the list names, times the count.
+	if *part.CPUsPerGPU > 11 || part.MemPerGPU.Cmp(*qty("135904Mi")) > 0 {
+		t.Errorf("cpusPerGpu %d and memPerGpu %s are above the node's per-GPU share of 11 and 135904Mi", *part.CPUsPerGPU, part.MemPerGPU.String())
+	}
 	for _, n := range []int32{1, 2, 3, 4, 5, 8} {
 		q, err := v1alpha1.QOSForGPUs(part, "", n)
 		if err != nil {
