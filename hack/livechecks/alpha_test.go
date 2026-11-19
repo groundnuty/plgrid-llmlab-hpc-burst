@@ -71,6 +71,8 @@ var alphaShapes = []alphaShape{
 	{"alpha-sano-serve", "TestAlphaSanoServe", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
 	// The baseline row (issue #764): the serve row's shape on Sano, with LLMLab attached and the generator run beside it.
 	{"beta-sano-llmlab-baseline", "TestBetaSanoLLMLabBaseline", "sano", "partition gpu, 1 GPU, 4 CPU, 65536Mi, time limit 01:46:00, one job, no requeue", "", "SEEDACCT-sano", true},
+	// The baseline's Athena twin (issue #764): row A's shape and slot on plgrid-now, with LLMLab attached and the generator run beside it.
+	{"beta-athena-now-llmlab-baseline", "TestBetaAthenaNowLLMLabBaseline", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:48:00, one job, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 	{"alpha-athena-now-nooverlap", "TestAlphaAthenaNowNoOverlap", "athena", "partition plgrid-now, 1 GPU, 16 CPU, 125Gi, time limit 00:21:00, at most 2 jobs at once, each of this shape, no requeue, each job to start within 10 min", "plgrid-now", "SEEDACCT-a100", true},
 }
 
@@ -711,7 +713,7 @@ func TestASignalDuringAnAlphaRunRunsTheCleanup(t *testing.T) {
 }
 
 func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
-	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router", "alpha-sano-serve", "alpha-sano-handover", "beta-sano-llmlab-baseline"}
+	alphaRows := []string{"alpha-athena-handover", "alpha-helios-nooverlap", "tunnel-hour-athena", "tunnel-hour-helios", "alpha-athena-now-serve", "alpha-athena-now-nooverlap", "beta-athena-now-router", "beta-athena-now-keeper", "beta-athena-now-bulk", "beta-helios-now-router", "alpha-sano-serve", "alpha-sano-handover", "beta-sano-llmlab-baseline", "beta-athena-now-llmlab-baseline"}
 	// The rehearsal row (issue #193) builds and runs the same stack, on this host: it is a local row.
 	stackRows := append(append([]string{}, alphaRows...), "rehearsal-part3")
 	cases := []struct {
@@ -724,7 +726,7 @@ func TestPlanNamesTheAlphaRowsWhenTheStackChanges(t *testing.T) {
 		{"the example the rows apply", "examples/provider-athena-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-athena-handover"}},
 		{"the Sano example the Sano rows apply", "examples/provider-sano-a100.yaml", "kind: Provider\nx: 1\n", []string{"alpha-sano-handover", "alpha-sano-serve", "alpha-sano-stage", "beta-sano-llmlab-baseline"}},
 		{"a package the accounting rows and conformance run, not the stack", "internal/providerctl/providerctl.go", "package providerctl\n\nimport _ \"example.test/fx/internal/slurm\"\n\nvar X = 1\n",
-			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage", "alpha-sano-stage"}},
+			[]string{"conformance-athena", "conformance-helios", "conformance-helios-gh200", "gpu-accounting-athena", "gpu-accounting-athena-now", "gpu-accounting-helios", "reach-athena", "reach-helios", "reach-host-dialed-athena", "reach-host-dialed-helios", "alpha-athena-now-stage", "alpha-athena-now-stage-qwen3-vl", "alpha-sano-stage"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1002,6 +1004,10 @@ func TestTheRowsThatHoldTheOwnersSlotForHoursNeedTheOwnersGo(t *testing.T) {
 		{"alpha-athena-now-nooverlap", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The pre-staging row (issue #376): its start wait, then 10 + 30 + 2 = 42 minutes, rounded up to ten.
 		{"alpha-athena-now-stage", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
+		// The baseline's pre-staging row (issue #764) is the stage row's shape: 10 + 30 + 2 = 42 minutes, rounded up to ten.
+		{"alpha-athena-now-stage-qwen3-vl", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 50 min; the owner's go is needed (the development rule on #145)"},
+		// The baseline's Athena twin (issue #764) holds the slot as row A does: 10 + 48 + 2.
+		{"beta-athena-now-llmlab-baseline", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 1 h 00 min; the owner's go is needed (the development rule on #145)"},
 		// The accounting row on plgrid-now (issue #145): its start wait of 10, a job of 5 minutes and a minute for the end, 16
 		// minutes, rounded up to ten: 20.
 		{"gpu-accounting-athena-now", "LIVE_OWNER_GO_ATHENA_NOW", "may wait up to 10 min to start (then it is cancelled by its tag and the run is NOT RUN), then holds the plgrid-now slot for about 0 h 20 min; the owner's go is needed (the development rule on #145)"},

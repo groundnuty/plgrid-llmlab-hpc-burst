@@ -1250,6 +1250,9 @@ gpu-accounting-athena-now@@gpu-accounting-athena-now'
 	if o.P0, err = w.Probe(ctx); err != nil {'
   'baselineflow.go@@	if f, i := p0Problems(o); len(f)+len(i) > 0 {@@	if f, i := p0Problems(o); len(f)+len(i) > 0 && false {'
   'baseline.go@@	ratio := float64(promptTokens) / float64(probeWords)@@	ratio := 1.0'
+  # The baseline's Athena twin (beta-athena-now-llmlab-baseline, #764): its row of the owner-go table removed, so that the script would run it on plgrid-now's slot with no go of the owner's.
+  'hack/live-checks.sh@@beta-athena-now-llmlab-baseline|LIVE_OWNER_GO_ATHENA_NOW|60
+beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'

@@ -548,9 +548,10 @@ func lines(s string) []string {
 }
 
 // hostDialedOnly names the rows the harness runs in host-dialed mode: the keeper row, whose relay keeper runs that mode's relays, and the bulk row, which
-// reads the bulk path's buffer on the relays' ssh (issue #521), both of which the script refuses in another mode; and the Sano rows, which it gives that mode
+// reads the bulk path's buffer on the relays' ssh (issue #521), both of which the script refuses in another mode; the baseline's Athena twin, whose profile
+// lists host-dialed alone (issue #764), which the script refuses in another mode too; and the Sano rows, which it gives that mode
 // by default (the one that has run there; their profile lists it alone, issue #735). The script takes direct mode for the Sano rows too, and sano_test.go
 // runs them in it with exactMode.
 func hostDialedOnly(row string) bool {
-	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover" || row == "beta-sano-llmlab-baseline"
+	return row == "beta-athena-now-keeper" || row == "beta-athena-now-bulk" || row == "alpha-sano-serve" || row == "alpha-sano-handover" || row == "beta-sano-llmlab-baseline" || row == "beta-athena-now-llmlab-baseline"
 }

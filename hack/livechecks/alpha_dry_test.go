@@ -181,6 +181,16 @@ var baselineFaults = []string{"llmlab-in-the-control", "llmlab-one-too-many-firs
 	"p0-not-sent", "p0-answered-by-an-instance", "p0-front-fails", "kv-unread", "no-routing-block", "two-instances", "hedged", "over-allocated", "managed-not-attached", "untagged",
 	"wrong-partition", "default-lease", "short-lease", "duplicate-tag", "extra-allocation"}
 
+// athenaBaselineFaults and athenaBaselineInvalidFaults are the baseline's Athena twin's (issue #764): the short lists of internal/alpha's
+// dry_baseline_athena_test.go, whose words carry the row's own numbers (the cap of 3, N = 5, the KV need of 98,304). The Athena twin's FAILs end exit 1
+// and its INVALIDs exit 3 (baseline_athena_test.go).
+var athenaBaselineFaults = []string{"llmlab-in-the-control", "llmlab-one-too-many-first-turns", "llmlab-over-its-guard", "llmlab-after-the-detach", "detach-session-missing",
+	"waiting-not-returning", "engine-over-the-cap", "engine-waiting", "engine-preempts", "over-the-cap-in-flight", "session-moves", "instance-fails", "no-gate", "gate-503",
+	"p0-answered-by-an-instance", "p0-front-fails", "metric-unread", "front-log-unread", "kv-unread", "no-routing-block", "two-instances", "wrong-deployment-id", "untagged",
+	"wrong-partition", "default-lease", "short-lease", "extra-allocation"}
+var athenaBaselineInvalidFaults = []string{"cap-never-binds", "detach-503", "waiting-never-two", "kv-below-the-cap", "llmlab-fails", "p0-llmlab-fails", "p1-serialized",
+	"long-serialized", "phases-do-not-fit", "ratio-impossible", "dial-failure-p2", "llmlab-spill-below-the-cap", "long-no-read-in-window"}
+
 // baselineInvalidFaults are the baseline row's faults that make its reading measure nothing: INVALID, exit 3.
 var baselineInvalidFaults = []string{"cap-never-binds", "detach-503", "detach-no-wait", "kv-below-the-cap", "llmlab-fails", "p0-llmlab-fails", "min-tokens-ignored", "long-contexts-short", "phases-do-not-fit", "ratio-impossible", "ratio-unread", "long-no-read-in-window", "p1-serialized", "p1-sessions-missing", "long-serialized", "long-staggered-short-later-turns", "waiting-never-two", "llmlab-spill-below-the-cap", "llmlab-spill-50ms-before-the-cap", "llmlab-spill-2ms-before-the-cap", "dial-failure-p1", "dial-failure-p1long", "dial-failure-p2", "dial-failure-p3", "front-log-empty", "front-log-malformed-only", "p0-empty-200", "p0-no-finish", "p0-zero-tokens", "p0-counts-null-no-events", "p0-cut-200"}
 
@@ -226,6 +236,8 @@ var dryRows = []dryRow{
 	{"alpha-sano-serve", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", nowServeFaults, []string{"rehash-cold", "rehash-unread", "warm-foreign-first", "warm-foreign-three"}, nil},
 	// The baseline row (issue #764): its failing faults; its INVALID faults end the run with exit 3 (baseline_test.go).
 	{"beta-sano-llmlab-baseline", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", baselineFaults, []string{"long-engine-readings", "engine-waiting-twice", "engine-waiting-blip", "engine-waiting-split", "ratio-wide", "p0-counts-null-events", "engine-waiting-cached", "llmlab-spill-1ms-before-the-cap", "dial-failure-other-target", "dial-failure-wrong-level", "dial-failure-in-error-field", "dial-failure-malformed"}, nil},
+	// The baseline's Athena twin (issue #764): row A's shape and slot on plgrid-now, host-dialed alone, with the baseline's flow at the cap of 3.
+	{"beta-athena-now-llmlab-baseline", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", athenaBaselineFaults, nil, nil},
 	// The router row on Helios's GH200 (issue #566): the same faults, on the Helios shape and slot.
 	{"beta-helios-now-router", alphaPkg, "HPCBURST_LIVECHECKS_ALPHA_TEST", betaRouterFaults, []string{"glibc-at-the-minimum", "control-both-refuse", "control-ended-alike"}, nil},
 }

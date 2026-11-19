@@ -365,8 +365,8 @@ func judgeBaseline(o BaselineObs) (fail, invalid []string) {
 	if o.K != LLMLabK {
 		f("the row's k is not %d", LLMLabK)
 	}
-	if o.Served.DeploymentID != BaselineDeploymentID {
-		f("the served Instance's deployment ID is not the one the shipped example derives (%s), or was not read", BaselineDeploymentID)
+	if want := baselineFactsOf(o.Row).DeploymentID; o.Served.DeploymentID != want {
+		f("the served Instance's deployment ID is not the one the shipped example derives (%s), or was not read", want)
 	}
 
 	// The logged KV is a CHECK, never an input of the cap. Below the cap's need, nothing after it was run.
@@ -741,8 +741,8 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 		}
 		if ph.Kind != KindLong {
 			if run := longestWaitingRun(po.Engine); run >= EngineWaitingSustain {
-				f("the engine had requests waiting in %d consecutive distinct reads, past the %d that a burst of first prefills explains (%s to %s apart at Sano's probe interval of %s)",
-					run, EngineWaitingSustain-1, time.Duration(run-1)*EngineProbeInterval, time.Duration(run)*EngineProbeInterval, EngineProbeInterval)
+				f("the engine had requests waiting in %d consecutive distinct reads, past the %d that a burst of first prefills explains (%s to %s apart at %s's probe interval of %s)",
+					run, EngineWaitingSustain-1, time.Duration(run-1)*EngineProbeInterval, time.Duration(run)*EngineProbeInterval, baselineFactsOf(o.Row).Cluster, EngineProbeInterval)
 			}
 			if d := po.Engine[len(po.Engine)-1].Preemptions - po.Engine[0].Preemptions; d != 0 {
 				f("the engine preempted %.0f request(s) during the phase", d)
@@ -876,10 +876,11 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 	default:
 		fmt.Fprintf(&b, "%s: PASS (posts to %s)\n", row.Name, row.PostsTo)
 	}
+	facts := baselineFactsOf(o.Row)
 	fmt.Fprintf(&b, "%s\n", deploymentLine(o.Deployment))
-	fmt.Fprintf(&b, "- the model: %s at the pinned revision, as shipped, max-model-len %d; one Instance on Sano and LLMLab attached by a managed Provider; no Workload (today's code)\n", BaselineModel, MaxModelLen)
-	fmt.Fprintf(&b, "- the cap is %d, a constant fixed before the run: floor(0.95 x %d / %d) from the engine's KV as shipped; the engine's logged KV after ready was %d tokens (a check, never an input)\n", o.Cap, KVSano, MaxModelLen, o.LoggedKV)
-	fmt.Fprintf(&b, "- R4's declared charge for comparison: the typical shape's 1,152 tokens against KV %d is %d sessions, capped at max-num-seqs 256, where the baseline's cap is %d\n", KVSano, KVSano/1152, o.Cap)
+	fmt.Fprintf(&b, "- the model: %s at the pinned revision, as shipped, max-model-len %d; one Instance on %s and LLMLab attached by a managed Provider; no Workload (today's code)\n", BaselineModel, MaxModelLen, facts.Cluster)
+	fmt.Fprintf(&b, "- the cap is %d, a constant fixed before the run: floor(0.95 x %d / %d) from %s; the engine's logged KV after ready was %d tokens (a check, never an input)\n", o.Cap, facts.KV, MaxModelLen, facts.KVBasis, o.LoggedKV)
+	fmt.Fprintf(&b, "- R4's declared charge for comparison: the typical shape's 1,152 tokens against KV %d is %d sessions, capped at max-num-seqs 256, where the baseline's cap is %d\n", facts.KV, facts.KV/1152, o.Cap)
 	fmt.Fprintf(&b, "- min_tokens: %s\n", map[bool]string{true: "left out of every request (the probe's verdict)", false: "sent on every request"}[o.OmitMinTokens])
 	if o.Ratio.Needed {
 		if o.Ratio.LongWords > 0 {
@@ -907,7 +908,7 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 				continue
 			}
 			fmt.Fprintf(&b, "  - %s: %d requests, %d sessions (distinct), %d at most in flight; spills in %d, out %d; errors %d; time to first token p50 %.0f ms, p95 %.0f ms; speed per session p50 %.1f and minimum %.1f tokens/s; tokens %d prompt, %d completion\n",
-				rr.Route, rr.Requests, rr.Sessions, rr.MostInFlight, rr.SpillsIn, rr.SpillsOut, rr.Errors, rr.TTFTp50, rr.TTFTp95, rr.SpeedP50, rr.SpeedMin, rr.PromptTokens, rr.CompletionTokens)
+				facts.routeWord(rr.Route), rr.Requests, rr.Sessions, rr.MostInFlight, rr.SpillsIn, rr.SpillsOut, rr.Errors, rr.TTFTp50, rr.TTFTp95, rr.SpeedP50, rr.SpeedMin, rr.PromptTokens, rr.CompletionTokens)
 		}
 		b.WriteString(waitsLine(o, po, joined))
 		if po.DialLogRead {

@@ -532,8 +532,8 @@ func neverStartedErrors() map[string]error {
 func stackRows(t *testing.T) []Row {
 	t.Helper()
 	out := Rows()
-	if len(out) != 13 {
-		t.Fatalf("the package runs %d stack rows, the table below was written for 13 (rows A and B on plgrid-now added, #376, the router, keeper and bulk rows, #521, the Helios router row, #566, the Sano serve and handover rows, #735, and the baseline row, #764): add the new row's cases", len(out))
+	if len(out) != 14 {
+		t.Fatalf("the package runs %d stack rows, the table below was written for 14 (rows A and B on plgrid-now added, #376, the router, keeper and bulk rows, #521, the Helios router row, #566, the Sano serve and handover rows, #735, and the baseline row, #764, and its Athena twin, #764): add the new row's cases", len(out))
 	}
 	return out
 }
@@ -542,8 +542,8 @@ func stackRows(t *testing.T) []Row {
 func allRows(t *testing.T) []Row {
 	t.Helper()
 	out := append(append(Rows(), AccountingRows()...), ReachRows()...)
-	if len(out) != 18 {
-		t.Fatalf("there are %d rows, the table below was written for 18 (rows A and B on plgrid-now added, #376, the accounting row on plgrid-now, #145, the router, keeper and bulk rows, #521, the Helios router row, #566, the Sano serve and handover rows, #735, and the baseline row, #764): add the new row's cases", len(out))
+	if len(out) != 19 {
+		t.Fatalf("there are %d rows, the table below was written for 19 (rows A and B on plgrid-now added, #376, the accounting row on plgrid-now, #145, the router, keeper and bulk rows, #521, the Helios router row, #566, the Sano serve and handover rows, #735, and the baseline row, #764, and its Athena twin, #764): add the new row's cases", len(out))
 	}
 	return out
 }

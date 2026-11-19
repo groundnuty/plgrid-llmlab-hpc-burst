@@ -93,6 +93,8 @@ type BaselineWorld interface {
 type BaselineSettings struct {
 	Phases []Phase
 	Cap    int
+	// Row is the row's name (BetaBaselineName or BetaAthenaBaselineName): the observation carries it, and the judge names the row's facts by it.
+	Row string
 	// OmitMinTokens is the run-wide min_tokens switch, recorded in the observation.
 	OmitMinTokens bool
 	// Poll, FitMargin, DetachWait and DetachEvery are BaselinePoll, BaselineFitMargin, BaselineDetachWait and BaselineDetachEvery unless a test sets them.
@@ -153,7 +155,7 @@ func runBaselineSteps(ctx context.Context, w BaselineWorld, s BaselineSettings) 
 		s.WaitingPoll = BaselineWaitingPoll
 	}
 	s.lastRead = new(time.Time)
-	o := BaselineObs{Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
+	o := BaselineObs{Row: s.Row, Cap: s.Cap, K: LLMLabK, LLMLabProvider: LLMLabProviderName, OmitMinTokens: s.OmitMinTokens, Plan: append([]Phase(nil), s.Phases...)}
 	var err error
 	if o.Managed, err = w.AttachManaged(ctx); err != nil {
 		return o, err

@@ -100,7 +100,7 @@ func (r Row) WorstCase(pendingMax time.Duration) time.Duration {
 		return StartupWait + StageAgentWait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
 	case "alpha-athena-now-serve", SanoServeName:
 		return StartupWait + first + (r.Lease - dw) + stack.WaitDeadline + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout
-	case BetaBaselineName:
+	case BetaBaselineName, BetaAthenaBaselineName:
 		// Row A's sum on a one-job row, with what comes before the GPU job: the managed leg's catalog wait and P0 (BaselineP0Wait). The phases are
 		// within the lease before the drain start: each is bounded and checked to fit before it starts (RunBaseline).
 		return StartupWait + BaselineP0Wait + first + (r.Lease - dw) + dw + EndMargin + 2*stack.CatchUpWorstCase + CloseTimeout

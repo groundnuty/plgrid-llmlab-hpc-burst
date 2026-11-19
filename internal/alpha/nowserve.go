@@ -95,6 +95,23 @@ func NowStageRow() Row {
 		PostsTo: "#145 and #376", Timing: AthenaNowTiming(), OwnerGo: OwnerGoAthenaNow}
 }
 
+// NowStageQwen3VLName is the name of the pre-staging row of the baseline's Athena twin (baseline.go, AthenaBaselineRow).
+const NowStageQwen3VLName = "alpha-athena-now-stage-qwen3-vl"
+
+// NowStageQwen3VLRow is alpha-athena-now-stage over the Athena baseline's example (AthenaQwen3VLDeployment, Qwen3-VL-8B-Instruct, about 16 GB of
+// checkpoint): the same row in every other respect (plgrid-now under athena-now.yaml, a start wait of 10 minutes, a lease of 30 and two minutes for the end, a
+// hold of 42 minutes in its own hour, the owner's go of plgrid-now), staging that deployment's image and checkpoint where the agent stages, in the profile's
+// own staging directory, which the run keeps. It exists because the baseline's Instance stages INSIDE athena-now.yaml's health.startTimeout of 12 minutes
+// (hbep/0007-lifecycle-controller/README.md:437; internal/lifecycle/verify.go:172-190), which is derived for a WARM image: a cold checkpoint of that size on
+// Athena is unmeasured, so the baseline's own Allocation is not asked to stage it. Its Deployment is the only difference from alpha-athena-now-stage's row, which
+// is unchanged. It starts no stack and holds no relay: the conformance world's Provider controller is host-dialed only when the test hands it a rig
+// (internal/providerctl/conformance, worldKit.hostDialed), which the reach-host-dialed rows alone do.
+func NowStageQwen3VLRow() Row {
+	r := NowStageRow()
+	r.Name, r.Deployment = NowStageQwen3VLName, AthenaQwen3VLDeployment
+	return r
+}
+
 // HBEP-7's ending-soon event (Events and conditions, hbep/0007-lifecycle-controller/README.md:797): raised "when a ready Instance's drain start is less
 // than an hour away and no replacement is ready". Row A's steps expect it, and whether a run must have seen it depends on the lease: on Athena's plgrid-now
 // (a 48-minute lease, the drain start under an hour away from the Instance's ready on) it must; on Sano's 106-minute lease the drain start is over an hour

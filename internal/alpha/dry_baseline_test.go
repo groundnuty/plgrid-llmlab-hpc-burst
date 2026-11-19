@@ -179,7 +179,7 @@ func (d *drySteps) Baseline(ctx context.Context, p Plan) (BaselineObs, error) {
 	}
 	w := &dryBaseline{d: d, p: p, cap: cap}
 	d.baseline = w
-	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, WaitingPoll: time.Millisecond, Logf: p.Logf})
+	o, err := RunBaseline(ctx, w, BaselineSettings{Phases: phases, Cap: cap, Row: p.Row.Name, OmitMinTokens: d.cfg.OmitMinTokens || strings.HasPrefix(d.cfg.DryFault, "p0-"), Poll: time.Millisecond, DetachEvery: time.Millisecond, WaitingPoll: time.Millisecond, Logf: p.Logf})
 	if err != nil {
 		return BaselineObs{}, err
 	}
@@ -315,7 +315,7 @@ func (w *dryBaseline) StartServed(context.Context) (ServedReady, error) {
 	one, zero := int32(1), int32(0)
 	c := int32(w.cap)
 	sr := ServedReady{ReadyAt: ready, DrainStart: drain, Deployment: d.deployment(),
-		Served: ServedMD{Model: BaselineModel, Providers: []string{dryServedProvider}, Instances: 1, OverAllocation: &zero, HedgeWidth: &one, InstanceCap: &c, DeploymentID: BaselineDeploymentID}}
+		Served: ServedMD{Model: BaselineModel, Providers: []string{dryServedProvider}, Instances: 1, OverAllocation: &zero, HedgeWidth: &one, InstanceCap: &c, DeploymentID: baselineFactsOf(p.Row.Name).DeploymentID}}
 	switch {
 	case d.fault("no-routing-block"):
 		sr.Served.InstanceCap = nil
@@ -361,9 +361,10 @@ func (w *dryBaseline) LoggedKV(context.Context) (int64, bool) {
 	case w.d.fault("kv-unread"):
 		return 0, false
 	case w.d.fault("kv-below-the-cap"):
-		return 100000, true
+		// Below the cap's need on every row: Row 1's figure of 100,000, or half the need where that is the smaller (the Athena twin's need is 98,304).
+		return min(100000, int64(w.cap)*MaxModelLen/2), true
 	}
-	return KVSano, true
+	return baselineFactsOf(w.p.Row.Name).KV, true
 }
 
 func (w *dryBaseline) Gate(context.Context) (GateObs, error) {
