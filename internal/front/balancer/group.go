@@ -22,6 +22,15 @@ type State struct {
 	Percent int
 	// Caps is each member's cap in force. Absent or 0: no cap.
 	Caps map[string]int
+	// CapValues is each member's cap value now, whether or not the count cap is in force: below full membership Caps
+	// is absent, and a Workload request's token condition still reads the cap at the value it has when in force
+	// (HBEP-5, Workloads, The count in tokens). Absent or 0: no cap value, so no token condition for a Workload
+	// request. It never turns the count cap on: Caps alone says that.
+	CapValues map[string]int
+	// Budgets is each member's token budget B, as its two factors, kvCacheTokens and the workers its cap counts (Budget). A
+	// member absent from it, or with a factor below 1, has no B known, and its requests meet the count rule alone, as before
+	// the budget existed.
+	Budgets map[string]Budget
 	// Attrs are each member's attributes, which a request's Match reads, so
 	// a waiting request can be placed on a member that joined after it.
 	Attrs map[string]Attrs
@@ -74,6 +83,12 @@ type Group struct {
 	open    map[string]map[*Reservation]struct{}
 	queue   []*waiter
 
+	// charged is each member's N, the tokens charged to its Workload requests in flight, and unnamed its u, its
+	// requests in flight that name no Workload (HBEP-5, Workloads, The count in tokens). Both change only with a
+	// reservation, in registerLocked and releaseLocked.
+	charged map[string]int64
+	unnamed map[string]int64
+
 	// OnDrift, when set, is called under the group's lock after a placement
 	// whose counts disagree: KubeAI's total, the sum of its members' counts,
 	// and the wrapper's open reservations (HBEP-5, Operational readiness 3).
@@ -83,6 +98,11 @@ type Group struct {
 	// onContended, set by tests only, runs in a caller that finds the lock
 	// held, before it waits.
 	onContended func()
+
+	// beforeRegister, set by tests only, runs under the lock once a pick has chosen its member, passed the member's
+	// conditions and reserved with the fork, and before the reservation is registered and its charge counted: the
+	// gap between a check and its effect that the lock must keep closed.
+	beforeRegister func()
 }
 
 // Reservation is one request counted on one member.
@@ -93,6 +113,7 @@ type Reservation struct {
 	g        *Group
 	release  func() // upstream's
 	released bool
+	charge   Charge // counted on Member until released
 }
 
 // Release ends the reservation. Only the first call counts; a reservation a
@@ -115,6 +136,8 @@ func New() *Group {
 		kg:      loadbalancer.NewGroup(Replication),
 		members: map[string]bool{},
 		open:    map[string]map[*Reservation]struct{}{},
+		charged: map[string]int64{},
+		unnamed: map[string]int64{},
 	}
 }
 
@@ -150,6 +173,11 @@ func (g *Group) Update(s State) int {
 					released++
 				}
 				delete(g.open, m)
+				// The departed member's counts go with it, after its reservations are released above: a key per Instance
+				// that ever served would otherwise stay for the life of the group. A completion that comes later finds
+				// its reservation released already, and changes nothing (releaseLocked).
+				delete(g.charged, m)
+				delete(g.unnamed, m)
 			}
 		}
 		g.members, g.ring, g.pins = next, nil, nil
@@ -158,20 +186,29 @@ func (g *Group) Update(s State) int {
 	for k, v := range s.Attrs {
 		attrs[k] = v
 	}
-	g.state = State{Members: keys(next), Eligible: copyBools(s.Eligible), Percent: s.Percent, Caps: copyInts(s.Caps), Attrs: attrs}
+	g.state = State{Members: keys(next), Eligible: copyBools(s.Eligible), Percent: s.Percent, Caps: copyInts(s.Caps),
+		CapValues: copyInts(s.CapValues), Budgets: copyBudgets(s.Budgets), Attrs: attrs}
 	g.placeWaitersLocked()
 	return released
 }
 
 // TryPick chooses and reserves a member for key among the eligible members
-// that match (nil matches all), without waiting.
+// that match (nil matches all), without waiting, for a request that names no
+// Workload.
 func (g *Group) TryPick(key string, match Match) (*Reservation, error) {
-	g.lock()
-	defer g.mu.Unlock()
-	return g.pickLocked(key, match)
+	return g.TryPickFor(key, match, Charge{})
 }
 
-func (g *Group) pickLocked(key string, match Match) (*Reservation, error) {
+// TryPickFor is TryPick for a request with charge ch: a member that does not
+// admit it (its cap reached, or its token condition failing) holds its cap, and
+// the walk goes on to the next.
+func (g *Group) TryPickFor(key string, match Match, ch Charge) (*Reservation, error) {
+	g.lock()
+	defer g.mu.Unlock()
+	return g.pickLocked(key, match, ch)
+}
+
+func (g *Group) pickLocked(key string, match Match, ch Charge) (*Reservation, error) {
 	ok := func(m string) bool {
 		return g.members[m] && g.state.Eligible[m] && (match == nil || match(m, g.state.Attrs[m]))
 	}
@@ -196,12 +233,12 @@ func (g *Group) pickLocked(key string, match Match) (*Reservation, error) {
 	if reserved {
 		load-- // the count includes the request just reserved
 	}
-	if c := g.state.Caps[choice]; c > 0 && load >= int64(c) {
+	if !g.admitsLocked(choice, load, ch) {
 		if reserved {
 			done()
 			reserved = false
 		}
-		if choice = g.spillTargetLocked(key, choice, ok); choice == "" {
+		if choice = g.spillTargetLocked(key, choice, ok, ch); choice == "" {
 			return nil, ErrAllAtCap
 		}
 		spilled = true
@@ -211,7 +248,10 @@ func (g *Group) pickLocked(key string, match Match) (*Reservation, error) {
 			return nil, err
 		}
 	}
-	return g.registerLocked(choice, done, spilled), nil
+	if g.beforeRegister != nil {
+		g.beforeRegister()
+	}
+	return g.registerLocked(choice, done, spilled, ch), nil
 }
 
 func (g *Group) anyLocked(ok func(string) bool) bool {
@@ -247,8 +287,9 @@ func (g *Group) filteredChoiceLocked(key string, ok func(string) bool) string {
 }
 
 // spillTargetLocked is the next member on the ring after choice, wrapping,
-// that ok admits and that holds less than its cap; "" when there is none.
-func (g *Group) spillTargetLocked(key, choice string, ok func(string) bool) string {
+// that ok admits and that admits the request (admitsLocked: below its cap, and
+// its token condition met); "" when there is none.
+func (g *Group) spillTargetLocked(key, choice string, ok func(string) bool, ch Charge) string {
 	walk := g.ringLocked().Walk(key)
 	start := -1
 	for i, m := range walk {
@@ -265,7 +306,7 @@ func (g *Group) spillTargetLocked(key, choice string, ok func(string) bool) stri
 		if !ok(m) {
 			continue
 		}
-		if c := g.state.Caps[m]; c <= 0 || g.inFlightLocked(m) < int64(c) {
+		if g.admitsLocked(m, g.inFlightLocked(m), ch) {
 			return m
 		}
 	}
@@ -332,8 +373,9 @@ func (g *Group) pinLocked(target string) (string, error) {
 	return "", fmt.Errorf("balancer: no pin key found for %s", target)
 }
 
-func (g *Group) registerLocked(m string, done func(), spilled bool) *Reservation {
-	r := &Reservation{Member: m, Spilled: spilled, g: g, release: done}
+func (g *Group) registerLocked(m string, done func(), spilled bool, ch Charge) *Reservation {
+	r := &Reservation{Member: m, Spilled: spilled, g: g, release: done, charge: ch}
+	g.countLocked(m, ch)
 	if g.open[m] == nil {
 		g.open[m] = map[*Reservation]struct{}{}
 	}
@@ -353,6 +395,7 @@ func (g *Group) releaseLocked(r *Reservation) bool {
 	}
 	r.released = true
 	r.release()
+	g.uncountLocked(r.Member, r.charge)
 	delete(g.open[r.Member], r)
 	return true
 }
