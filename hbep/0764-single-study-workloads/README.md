@@ -87,6 +87,7 @@ These are for the amendments. Each names the HBEP expected to own it, and each i
 | R6 | **Planning for pre-staging:** the Instances a workload needs on a cluster, from that cluster's measured cache for the model and GPU and from the workload's shape. | HBEP-4, HBEP-7 |
 | R7 | **Signals per workload and per route:** sessions in flight and waiting, time to first token, speed per session. | HBEP-8 |
 | R8 | **Later, awareness of speed:** a route counts as full once its speed per session falls below what the workload needs, starting with LLMLab, whose capacity we can't see. | HBEP-5, HBEP-8 |
+| R9 | **Sticky routes:** a Workload may require that every request of one conversation reach the target its first request reached, one of our deployments or LLMLab, and never move, waiting or failing instead (the first study's requirement, 19 Nov 2026). | HBEP-5, HBEP-11 |
 
 ### Risks and mitigations
 
@@ -193,6 +194,7 @@ The operator reads each workload's signals per route (R7) to see whether its dec
 
 - 2026-11-18: proposed, from the owner's discussion with the science agent on 18 Nov 2026 (issue #764).
 - 2026-11-18: the owner chose a new resource kind, Workload (open question 1). R1 to R5 and R7 are amended into HBEP-3, HBEP-5, HBEP-7, HBEP-8 and HBEP-11; R6, planning for pre-staging, and R8, awareness of speed, come later.
+- 2026-11-19: R9, sticky routes, from the first study's requirement; amended into HBEP-5 and HBEP-11.
 
 ## Amendments
 
