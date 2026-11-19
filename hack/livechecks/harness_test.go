@@ -251,7 +251,7 @@ func (w *world) env(extra []string) []string {
 		env = append(env, e)
 	}
 	env = append(env, "PATH="+w.bin+":"+os.Getenv("PATH"), "HPCBURST_LIVE_SETTINGS="+w.settings, "STUB_STATE="+w.state,
-		"LIVE_POLL_SECONDS=0", "LIVE_CLEAN_POLL_SECONDS=0", "TMPDIR="+w.tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"LIVE_POLL_SECONDS=0", "LIVE_CLEAN_POLL_SECONDS=0", "LIVE_CLEAN_WINDOW_SECONDS=0", "TMPDIR="+w.tmp, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
 		// The script's today is the world's day, not the real clock's (see world.day). A test's own entry
 		// below wins: the last of two for one name is the one the script gets.
 		"LIVE_FAKE_DATE_FILE="+w.dayFile())

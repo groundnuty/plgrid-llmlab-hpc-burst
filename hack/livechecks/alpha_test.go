@@ -86,7 +86,15 @@ case "$1" in
   build) case " $* " in
            # The bulk row's test shim (build_test_shims): one file at -o, the digest it is built with in its argv (go-argv).
            *enginedouble/shim*) mkdir -p "$(dirname "$out")" && echo shim > "$out" ;;
-           *) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do echo binary > "$out/$b"; done ;;
+           # The host binaries: hpcburst records a down (the run's own stack stopped before its jobs are cancelled, stackstop_test.go).
+           *) mkdir -p "$out" && for b in hpcburst hpcburst-controller hpcburst-front; do cat > "$out/$b" <<'STUB'
+#!/bin/bash
+[ "$1" = down ] || exit 0
+echo "hpcburst down" >> "$STUB_STATE/events"
+printf '%s\n' "$*" >> "$STUB_STATE/down-argv"
+[ -z "${STUB_DOWN_FAIL:-}" ] || exit 1
+STUB
+chmod +x "$out/$b"; done ;;
          esac
          [ -z "${STUB_ROLL_AT_BUILD:-}" ] || echo "$STUB_NEXT_DATE" > "$LIVE_FAKE_DATE_FILE" ;;
   test) mkdir -p "$(dirname "$out")"; cp "$STUB_STATE/testbin.sh" "$out"; chmod +x "$out"
@@ -162,6 +170,20 @@ case $mode in
   not-run-long-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at owner-private-host tokens/s with max-model-len 32768 the stream that fits is 1m47s, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   not-run-long-fit-words) echo "$HPCBURST_ALPHA_ROW: the deployment's max-model-len does not hold a long stream of the length the hour needs at the engine's measured rate (at 300 tokens/s with max-model-len 32768 the stream that fits is owner-private-host, under the floor of 2m15s); the hour was not started; this run's jobs were cancelled by tag" > "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/not-run.txt"; echo "--- SKIP: $t (0.00s)"; echo PASS ;;
   sleep) leave; touch "$STUB_STATE/started"; exec sleep 3600 ;;
+  # A stopped run whose stack is up (internal/alpha, StackStateFile): the run's own stack named in the record directory as the test writes it, before anything else,
+  # a job left, and then a hang (to be signalled), a panic or a timeout. STUB_STACK_STATE names another line than the stub's own directory.
+  stack-sleep|stack-die|stack-timeout)
+    st=${STUB_STACK_STATE:-state=$STUB_STATE/stack/st}
+    mkdir -p "$STUB_STATE/stack/st"
+    printf '%s\n' "$st" > "$HPCBURST_ALPHA_OUT/stack-state-dir"; chmod 600 "$HPCBURST_ALPHA_OUT/stack-state-dir"
+    leave
+    case $mode in
+      stack-sleep) touch "$STUB_STATE/started"; exec sleep 3600 ;;
+      stack-die) echo "=== RUN   $t"; echo "panic: the step died"; exit 2 ;;
+      stack-timeout) echo "=== RUN   $t"; exit 124 ;;
+    esac ;;
+  # A job of the run's own tag that the queue shows only after STUB_HIDE_READS reads, in a run that then dies: a submission that lands after the cleanup's first looks.
+  late-hidden-die) touch "$STUB_STATE/ran"; echo "hb-late-bbbbbbbbbbbb" >> "${HPCBURST_ALPHA_OUT:-${HPCBURST_CONF_OUT:-/dev/null}}/job-tags.txt"; echo "9003|hb-late-bbbbbbbbbbbb|normal|plgrid|PENDING" >> "$STUB_STATE/queue"; echo "=== RUN   $t"; echo "panic: the step died"; exit 2 ;;
   # The bulk row's staging of its shipped agent, then a stop before its own removal (internal/alpha, TestAgentDirFile): the directory, and the file
   # naming its exact path (STUB_TEST_AGENT_PATH, or the stub's own staging), as the test writes it; then it waits to be signalled.
   stage-and-sleep)

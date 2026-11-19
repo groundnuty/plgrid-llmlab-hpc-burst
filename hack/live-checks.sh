@@ -562,6 +562,11 @@ CLEAN_POLL_SECONDS=${LIVE_CLEAN_POLL_SECONDS:-3}
 CLEAN_QUIET_POLLS=${LIVE_CLEAN_QUIET_POLLS:-5}          # polls in a row with no owned job before the queue counts as clear
 CLEAN_MAX_POLLS=${LIVE_CLEAN_MAX_POLLS:-40}             # at most this many polls in all
 CLEAN_UNRESOLVED_POLLS=${LIVE_CLEAN_UNRESOLVED_POLLS:-20} # more quiet polls when the test left an unresolved submission
+# A run that was stopped (a timeout, a signal, a panic), or left an unresolved submission, may have a submission in flight: the Provider's submit-and-release can
+# still land after the cleanup's first looks, and Slurm accepts it for the profiles' inflightWindow, 5 minutes (profiles/athena-now.yaml:72, the framework's default
+# in the others), which on plgrid-now is the owner's one-job slot (the review of PR 809, point 2). The queue then counts as clear only after the run's own tags
+# have been absent for this long, 5 minutes and half a minute over, re-reading and cancelling by tag throughout; hack/livechecks holds it to the profiles' windows.
+CLEAN_WINDOW_SECONDS=${LIVE_CLEAN_WINDOW_SECONDS:-330}
 
 declare -a NAMES=()
 declare -A KIND PKG TEST GATES INPUTS CONTEXTS STATUS
@@ -1121,7 +1126,7 @@ CLEAN_TRIES=0
 TEST_STOPPED=0     # 1 when a test binary was stopped (timeout, signal, panic) instead of finishing
 clean_cluster() {
   [ -n "$ACTIVE_HOST" ] || return 0
-  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need stopped
+  local host=$ACTIVE_HOST now="" tags present id new again cancelled=0 left=0 readable=1 quiet=0 polls=0 sent=" " unres need stopped window=0 quiet_since=0 began hard
   CLEAN_TRIES=$((CLEAN_TRIES+1))
   tags=$(own_tags)
   unres=$(unresolved_tags)
@@ -1133,14 +1138,19 @@ clean_cluster() {
   if { [ "$TEST_STOPPED" = 1 ] || [ -n "$INTERRUPTED" ]; } && { [ -n "$tags" ] || [ -n "$JOBID" ] || [ -n "$OWN_PREFIX" ]; }; then
     stopped=1; need=$((CLEAN_QUIET_POLLS+CLEAN_UNRESOLVED_POLLS))
   fi
+  # The submission window: the extended wait is also a time, not only a count of polls, so that a poll that is quick cannot shorten it.
+  if [ "$stopped" = 1 ] || [ -n "$unres" ]; then window=$CLEAN_WINDOW_SECONDS; fi
+  began=$(date +%s)
+  hard=$((window + CLEAN_MAX_POLLS * (CLEAN_POLL_SECONDS > 0 ? CLEAN_POLL_SECONDS : 1)))
   while :; do
     polls=$((polls+1))
     now=$(queue_jobs "$host") || { readable=0; break; }
     present=$(owned_present "$now" "$tags")
     if [ -z "$present" ]; then
       quiet=$((quiet+1)); left=0
+      [ "$quiet_since" -ne 0 ] || quiet_since=$(date +%s)
     else
-      quiet=0; new=""; again=""; left=0
+      quiet=0; quiet_since=0; new=""; again=""; left=0
       for id in $present; do
         left=$((left+1))
         case "$sent" in *" $id "*) again="$again $id" ;; *) new="$new $id"; sent="$sent$id " ;; esac
@@ -1151,8 +1161,10 @@ clean_cluster() {
       # shellcheck disable=SC2086
       [ -z "$again" ] || cancel_ids "$host" $again >/dev/null
     fi
-    [ "$quiet" -lt "$need" ] || break
-    [ "$polls" -lt "$CLEAN_MAX_POLLS" ] || break
+    if [ "$quiet" -ge "$need" ] && { [ "$window" -le 0 ] || [ $(($(date +%s) - quiet_since)) -ge "$window" ]; }; then break; fi
+    # Without the window the polls are bounded by their count; with it by the time, a job that is cancelled and listed again then ending it as left behind.
+    if [ "$window" -le 0 ]; then [ "$polls" -lt "$CLEAN_MAX_POLLS" ] || break
+    else [ $(($(date +%s) - began)) -lt "$hard" ] || break; fi
     sleep "$CLEAN_POLL_SECONDS"
   done
   if [ "$readable" = 0 ]; then
@@ -1179,6 +1191,38 @@ clean_abs_path() {
   case $p in */ | *//*) return 1 ;; esac
   case "$p/" in */./* | */../*) return 1 ;; esac
   printf '%s\n' "$p" | grep -q -E -x '/[A-Za-z0-9._/-]+'
+}
+
+# stop_run_stack: the run's own stack, stopped BEFORE its jobs are cancelled (the review of PR 809, point 1). The launcher detaches its supervisor, so a test that a
+# timeout or a signal stopped never ran its Go cleanup, and the run's controller is still running: it can submit another job, and reopen relays, after the cancel by
+# tag. The test wrote the stack's state directory to its record directory before it started the stack (internal/alpha, StackStateFile: "state=<dir>/st"); it is read as
+# a regular file, held to a plain absolute path ending in /st, and `hpcburst down --state-dir` of the run's own build is run on that directory alone, with a bound, and
+# waited for. A directory that is not there is a stack the test removed itself: nothing is running. The down's own output stays in the record directory. Returns 1 when
+# the stack could not be stopped, which fails the row. Idempotent.
+STACK_STOPPED=0
+STACK_DOWN_SECONDS=${LIVE_STACK_DOWN_SECONDS:-200}
+stop_run_stack() {
+  local f="${REC_DIR:+$REC_DIR/stack-state-dir}" st bin
+  [ "$STACK_STOPPED" = 0 ] || return 0
+  [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  st=$(sed -n 's/^state=//p' "$f" | head -n 1)
+  if ! clean_abs_path "$st" || [ "${st##*/}" != st ]; then
+    say "cleanup: the run's stack was named by a path that is not a plain absolute <directory>/st; nothing was stopped, so its controller may still be running: stop it by hand"
+    return 1
+  fi
+  if [ ! -e "$st" ]; then STACK_STOPPED=1; return 0; fi
+  bin=${ALPHA_BUILD_DIR:+$ALPHA_BUILD_DIR/bin/hpcburst}
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    say "cleanup: the run's stack could not be stopped: the run's hpcburst build is not there, so its controller may still be running: stop it by hand"
+    return 1
+  fi
+  if timeout --kill-after=10 "$STACK_DOWN_SECONDS" "$bin" down --state-dir "$st" >"$REC_DIR/stack-down.log" 2>&1; then
+    STACK_STOPPED=1
+    say "cleanup: the run's own stack was stopped (hpcburst down) before its jobs were cancelled"
+    return 0
+  fi
+  say "cleanup: hpcburst down could not stop the run's stack (it failed or passed its bound of ${STACK_DOWN_SECONDS}s; its output is in the record directory), so its controller may still be running and may submit a job after the cancel: stop it by hand"
+  return 1
 }
 
 # clean_test_agent: the bulk row's staged shipped agent (issue #521, option (A); the science agent's condition 2), when its test was stopped before
@@ -1220,6 +1264,7 @@ EOS
 on_signal() { INTERRUPTED=1; }
 on_exit() {
   local rc=$?
+  stop_run_stack || rc=1
   clean_test_agent || rc=1
   if [ -n "$ACTIVE_HOST" ]; then clean_cluster || rc=1; [ "$CLEAN_LEFT" -eq 0 ] || rc=1; fi
   [ -z "${CONTROL_DIR:-}" ] || rm -rf "$CONTROL_DIR"
@@ -1847,10 +1892,12 @@ run_cluster() {
       [[ $RUN_ID =~ ^[0-9a-f]{10}$ ]] || { release_run_lock; say "$n: FAIL (no run ID could be drawn)"; return 1; }
       OWN_PREFIX="hb-alpha-$RUN_ID-" ;;
   esac
-  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; FINDING=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0
+  JOBID=""; CLEAN_TRIES=0; NOT_RUN=0; FINDING=0; TEST_STOPPED=0; RE_PENDING_JOB=""; RE_PENDING_BOUND=0; STACK_STOPPED=0
   ACTIVE_HOST=$host
   t0=$(date +%s)
   execute_cluster "$n" || { [ "$NOT_RUN" = 1 ] || [ "$FINDING" = 1 ] || verdict=1; }
+  # The run's own stack first, then its jobs: a stack that is still running could submit another job after the cancel (stop_run_stack).
+  stop_run_stack || verdict=1
   # The bulk row's staged shipped agent, when its test was stopped before it removed it: a failure of the row if it remains.
   clean_test_agent || verdict=1
   clean_cluster || true
