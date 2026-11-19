@@ -143,17 +143,41 @@ func TestASanoRowRefusesSSHAndTakesDirectAndHostDialed(t *testing.T) {
 				t.Errorf("host-dialed: %v", err)
 			}
 			m = liveSettings(row)
-			m[envMode], m[envAddr], m[envListen] = "direct", "gateway.example:29427", "127.0.0.1:29427"
+			m[envMode], m[envAddr], m[envListen] = "direct", "gateway.example:29707", "127.0.0.1:29707"
 			cfg, _, err := ConfigFromEnv(env(m), row)
 			if err != nil {
 				t.Errorf("direct with an address and a listen address: %v", err)
-			} else if cfg.DialHomeMode != "direct" || cfg.DialHomeAddr != "gateway.example:29427" || cfg.DialHomeListen != "127.0.0.1:29427" {
+			} else if cfg.DialHomeMode != "direct" || cfg.DialHomeAddr != "gateway.example:29707" || cfg.DialHomeListen != "127.0.0.1:29707" {
 				t.Errorf("direct: the config carries mode %q, address %q, listen %q", cfg.DialHomeMode, cfg.DialHomeAddr, cfg.DialHomeListen)
 			}
 			m = liveSettings(row)
 			m[envMode], m[envAddr], m[envKey] = "ssh", "gateway.example:29227", "/example/key"
 			if _, _, err := ConfigFromEnv(env(m), row); err == nil || !strings.Contains(err.Error(), "ssh mode") || !strings.Contains(err.Error(), "must be host-dialed or direct") {
 				t.Errorf("ssh: err %v, want a refusal that says the row takes host-dialed or direct and names ssh mode", err)
+			}
+		})
+	}
+}
+
+// In direct mode a Sano row needs both the address the jobs dial and the front's dial-home listen address: either alone is refused at the settings, naming
+// the one that is missing, before any cluster call (PR 792's review). liveWorld refuses a direct run with no listener too, but only after the script has
+// contacted Slurm and built the binaries. The control first: both set is taken.
+func TestASanoRowInDirectModeNeedsItsAddressAndItsListenAddress(t *testing.T) {
+	for _, row := range []string{SanoServeName, SanoHandoverName, BetaBaselineName} {
+		t.Run(row, func(t *testing.T) {
+			direct := func(drop string) map[string]string {
+				m := liveSettings(row)
+				m[envMode], m[envAddr], m[envListen] = "direct", "gateway.example:29707", "127.0.0.1:29707"
+				delete(m, drop)
+				return m
+			}
+			if _, _, err := ConfigFromEnv(env(direct("")), row); err != nil {
+				t.Fatalf("direct with both set: %v", err)
+			}
+			for _, c := range []struct{ drop, want string }{{envListen, envListen + " is not set"}, {envAddr, envAddr + " is not set"}} {
+				if _, _, err := ConfigFromEnv(env(direct(c.drop)), row); err == nil || !strings.Contains(err.Error(), c.want) {
+					t.Errorf("direct without %s: err %v, want one that says %q", c.drop, err, c.want)
+				}
 			}
 		})
 	}

@@ -7,7 +7,10 @@ import "context"
 type waiter struct {
 	key   string
 	match Match
-	ch    chan *Reservation // buffered: placement never blocks
+	// charge is the request's own, so that a placement re-picks it by its own condition and never as a request that
+	// names no Workload.
+	charge Charge
+	ch     chan *Reservation // buffered: placement never blocks
 }
 
 // PickOrWait is TryPick, except that when every eligible matching member is
@@ -16,13 +19,19 @@ type waiter struct {
 // or until ctx ends. The caller bounds ctx with queueTimeout. A request that
 // gives up while being placed has that reservation released.
 func (g *Group) PickOrWait(ctx context.Context, key string, match Match) (*Reservation, error) {
+	return g.PickOrWaitFor(ctx, key, match, Charge{})
+}
+
+// PickOrWaitFor is PickOrWait for a request with charge ch. The waiter carries it, and every placement of the waiter
+// asks for it again.
+func (g *Group) PickOrWaitFor(ctx context.Context, key string, match Match, ch Charge) (*Reservation, error) {
 	g.lock()
-	r, err := g.pickLocked(key, match)
+	r, err := g.pickLocked(key, match, ch)
 	if err != ErrAllAtCap {
 		g.mu.Unlock()
 		return r, err
 	}
-	w := &waiter{key: key, match: match, ch: make(chan *Reservation, 1)}
+	w := &waiter{key: key, match: match, charge: ch, ch: make(chan *Reservation, 1)}
 	g.queue = append(g.queue, w)
 	g.mu.Unlock()
 
@@ -68,7 +77,7 @@ func (g *Group) placeWaitersLocked() {
 	}
 	kept := g.queue[:0]
 	for _, w := range g.queue {
-		r, err := g.pickLocked(w.key, w.match)
+		r, err := g.pickLocked(w.key, w.match, w.charge)
 		if err != nil {
 			kept = append(kept, w)
 			continue

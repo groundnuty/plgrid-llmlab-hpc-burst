@@ -82,6 +82,10 @@ type Workload struct {
 	Namespace string
 	Name      string
 	Model     string // spec.model
+	// Charge is c, what one request of the Workload is charged against an Instance's token budget (HBEP-5, Workloads,
+	// The count in tokens): shape.contextTokens.typical plus shape.outputTokens.typical, as the Workload had it when
+	// this view was built.
+	Charge int64
 }
 
 // ManagedSource is a managed-source ModelDeployment that attaches a model.
@@ -142,14 +146,31 @@ type Instance struct {
 	DeploymentID string // full form
 	DisplayID    string
 	Cap          int // routing.instanceCap, else launch.maxNumSeqs x workers
-	LeaseEnd     time.Time
-	DrainStart   time.Time
+	// KVCacheTokens is status.kvCacheTokens, the engine's KV cache size per worker; nil when the Instance has none (an
+	// engine run with disable-log-stats, or before the agent reports it). TokenBudget reads it.
+	KVCacheTokens *int64
+	// CapWorkers is the workers Cap counts: the healthy workers behind a router, else Workers.
+	CapWorkers int
+	LeaseEnd   time.Time
+	DrainStart time.Time
 	// Eligible is the part of eligibility the control plane decides: phase
 	// ready, AgentUnreachable not true, a registered transport, and a Provider
 	// that the deployment's spec.providers selects now. A member whose Provider
 	// was deselected stays a member, not eligible, so its open requests keep
 	// their count. The router adds its pauses and the request's level.
 	Eligible bool
+}
+
+// TokenBudget is the Instance's token budget B (HBEP-5, Workloads, The count in tokens) as its two factors: perWorker, its
+// status.kvCacheTokens, and workers, the workers its cap counts. B is their product, which the front never forms: it can be larger
+// than any int64 (two workers of 2^62 tokens each), and a budget that is known stays known, so the balancer compares the factors
+// exactly (balancer.Budget). ok is false when B is unknown, and the Instance then meets the count rule alone: it has no
+// kvCacheTokens (or one below 1, the field's minimum), or no worker its cap counts.
+func (i *Instance) TokenBudget() (perWorker int64, workers int, ok bool) {
+	if i.KVCacheTokens == nil || *i.KVCacheTokens < 1 || i.CapWorkers < 1 {
+		return 0, 0, false
+	}
+	return *i.KVCacheTokens, i.CapWorkers, true
 }
 
 // ManagedTarget is one attached managed catalog entry under one Provider.

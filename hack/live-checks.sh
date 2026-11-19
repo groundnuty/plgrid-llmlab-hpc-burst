@@ -898,6 +898,11 @@ check_alpha_settings() {
       if [ "${mode:-}" = ssh ]; then
         say "live-checks: $name does not run in ssh mode (LIVE_DIALHOME_MODE=host-dialed or direct): Sano's compute nodes have no home directory, where ssh mode's agent reads its key"; bad=1
       fi
+      # In direct mode the front's dial-home listen address is needed as well as the address the jobs dial (the address is checked below): the row's live
+      # world refuses a direct run with no listener, but only after Slurm was contacted and the binaries were built (PR 792's review).
+      if [ "${mode:-}" = direct ] && [ -z "${S[LIVE_DIALHOME_LISTEN]:-}" ]; then
+        say "live-checks: $name in direct mode needs LIVE_DIALHOME_LISTEN, the front's dial-home listen address on this host, beside LIVE_DIALHOME_ADDR"; bad=1
+      fi
       check_sano_settings || bad=1 ;;
   esac
   # The baseline row (issue #764): LLMLab's credentials for its managed Provider, #768's generator binary, and the optional switch and phases.

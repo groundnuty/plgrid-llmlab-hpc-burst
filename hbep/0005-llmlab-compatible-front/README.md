@@ -316,7 +316,7 @@ Amended 2026-11-18 from HBEP-764, a single study with several workloads, and the
   - A request that names no Workload is taken only when the count is below the cap and cap × N + (u + 1) × B ≤ cap × B.
 
   Both are integer comparisons, so nothing rounds. With no Workload request in flight, N is 0, and the second condition is u + 1 ≤ cap, the count rule exactly. So a study that names no Workload is routed as today, whatever its workers' health and its `instanceCap`.
-  - **At partial membership** (ready below desired), the count cap is off as today, and so is the second condition. The first stays in force, with cap at the value it has when in force, so a Workload's long requests never overfill an Instance's cache while the deployment is short of Instances.
+  - **At partial membership** (ready below desired), the count cap is off as today, and so is the second condition. The first stays in force, with cap at the value it has when in force, so a Workload's long requests never overfill an Instance's cache while the deployment is short of Instances. Only the first condition's budget inequality stays in force; its count clause is off, as the count cap is for every request.
   - In the capped pick (Load bound and cap), an Instance holds its cap when the request's condition fails. The rest of Load bound and cap is unchanged: a skip keeps an Instance's N and u as it keeps its count, and each charge is released exactly once, with its reservation.
   - Without `kvCacheTokens`, such as for an engine run with `disable-log-stats` or before the agent reports it, the count alone applies, as today. A set `instanceCap` still caps the count.
   - **Stated limits.** The charge is the declared typical shape, not a request's real size, and the prefix cache a Workload's sessions share isn't credited. For a hybrid-attention model, `kvCacheTokens` counts requests at `max-model-len`, so the budget is approximate. A study that finds it off sets `instanceCap` (HBEP-764, open question 3).
@@ -730,6 +730,7 @@ The front grows from www-2027's hand-tuned per-stack routers: affinity and polic
 - 2026-11-18: amendment from HBEP-764: Workloads, named per request, served by their own deployments, ordered per Workload, and counted against a token budget per Instance (Workloads).
 - 2026-11-18: erratum (the science agent's ruling Q1 on #764's stage-0 plan, 18 Nov 2026): Request path step 2 splits a Workload suffix off at the name's only `#`, as HBEP-3's Grammar does; it read "the last `#`".
 - 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764, for #784): `status.healthyWorkers` counts a worker only on a router read of its current process, joined by its identity, not its name, and at most two of the agent's router polls old.
+- 2026-11-18: erratum (the science agent's ruling of 18 Nov 2026 on #764, for #783): at partial membership only a Workload request's budget inequality stays in force; its count clause is off, as the count cap is for every request.
 
 ## Amendments
 

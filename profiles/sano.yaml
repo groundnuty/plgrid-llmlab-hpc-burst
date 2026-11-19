@@ -50,7 +50,7 @@ spec:
         - {gpus: 4, qos: gpu4}
         - {gpus: 8, qos: gpu8}
       imageFormat: sif # facts.containers.apptainer_compute_nodes (probe 5): a SIF was pulled to the job's scratch and run on both node classes
-      dialHomeModes: [host-dialed] # HBEP-4 (the platform profile schema): "Sano never lists ssh: its compute nodes have no home directories", where ssh mode's agent reads the dial-home key; facts.slurm.srun_chdir and facts.reachability.dial_home (probe 1 of 18 Nov 2026): host-dialed carries bytes both ways and the compute nodes have no home. direct is plausible and untested, and is no profile value
+      dialHomeModes: [host-dialed] # HBEP-4 (the platform profile schema): "Sano never lists ssh: its compute nodes have no home directories", where ssh mode's agent reads the dial-home key; facts.slurm.srun_chdir and facts.reachability.dial_home (probe 1 of 18 Nov 2026): host-dialed carries bytes both ways and the compute nodes have no home. direct is no profile value (the CRD's enum and HBEP-4: it rests on the control-plane host's address, not on the platform), so it is not listed here; probe P-D1 (#735, 18-19 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6995025741) verified its dial-home path from both node classes (facts.reachability.dial_home), and a served Instance in direct mode has not run yet
       # Not set on this partition: billingUnit (no fact: facts.slurm.priority says billing counts CPUs only,
       # and no billing weight was read), tmpDir and tmpDirFeature (no measured node-local variable).
       # computeGlibc is 2.39 (facts.compute_node.glibc, probe 2) but the field is not in the schema yet:
@@ -559,11 +559,11 @@ spec:
           value:
             ssh: "reaches this host's own sshd (TCP, host key equal)"
             host_dialed: "carries bytes both ways"
-            direct: "plausible, untested at its own port"
+            direct: "the dial-home path reached from a node of each class at its own port (probe P-D1); no served Instance has run in it yet"
           method: measured
-          source: "TCP opens from a node of each class to this host's sshd and to a second listener; a listener on a node's ephemeral port accepted the login node's connect; a relay-form srun step returned its input unchanged (#735, probe 1 of 18 Nov 2026)"
-          date: "2026-11-18"
-          note: "An ssh -N -L login with the restricted key was not run (no key goes on the cluster), binary safety and throughput were not measured, and no listener was started for direct mode."
+          source: "TCP opens from a node of each class to this host's sshd and to a second listener; a listener on a node's ephemeral port accepted the login node's connect; a relay-form srun step returned its input unchanged (#735, probe 1 of 18 Nov 2026). For direct: from a CPU job on each node class, TCP to the front's dial-home listener opened and a closed port beside it was refused; the presented certificate's SHA-256 equalled the launcher's agent-endpoint certificate; GET /agent/v1/desired with no credential got the agent endpoint's own 401 through the front's passthrough; a WebSocket upgrade on /~!frp got 101 from frps (#735, probe P-D1 of 18-19 Nov 2026, https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/735#issuecomment-6995025741)"
+          date: "2026-11-19"
+          note: "An ssh -N -L login with the restricted key was not run (no key goes on the cluster), and binary safety and throughput were not measured. Probe P-D1 ran a direct-mode launcher with the front's listener and two CPU jobs, but no served Instance: the judged proof of direct mode is alpha-sano-serve in that mode, still to run. direct is no profile value (HBEP-4), so dialHomeModes does not list it."
         compute_node_names_on_login:
           value:
             resolve: false
