@@ -168,7 +168,8 @@ func (p *Proxy) serveV1(w http.ResponseWriter, r *http.Request) {
 	}
 	n.HeaderWorkload = workloadHeaderValue(r.Header, p.cfg.WorkloadHeader)
 	x.rec.Level = string(n.Level)
-	key, _ := convkey.Key(r.Header, p.cfg.SessionHeaders, rb.messages)
+	key, source := convkey.Key(r.Header, p.cfg.SessionHeaders, rb.messages)
+	n.KeyFromHeader = source == convkey.SourceHeader
 	p.forward(w, r, x, n, key, body, rb)
 }
 
@@ -246,6 +247,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, x *exchange, n n
 	// The Workload this first choice resolved to, with its serving set: every later choice of this request reuses it, and none looks the name up
 	// again (HBEP-5, Workloads; the review of #778, finding 1). Nil for a request that names none.
 	wres := t.wres
+	// A sticky conversation's pin is held until the request ends, whatever it does meanwhile (HBEP-5, Sticky routes, Lifetime).
+	defer t.pin.done()
 	for {
 		// Released exactly once however the request ends, including the
 		// http.ErrAbortHandler panic of a cut body (HBEP-5, Request path

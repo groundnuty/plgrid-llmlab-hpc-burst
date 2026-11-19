@@ -99,10 +99,27 @@ func (ws *wlState) enqueueLocked(p *plan) *wlWaiter {
 }
 
 // popHeadLocked takes the head out of the FIFO, which was placed.
-func (ws *wlState) popHeadLocked() {
-	ws.queue = ws.queue[1:]
+func (ws *wlState) popHeadLocked() { ws.popAtLocked(0) }
+
+// popAtLocked takes the waiter at index i out of the FIFO, which was placed or answered.
+func (ws *wlState) popAtLocked(i int) {
+	ws.queue = slices.Delete(ws.queue, i, i+1)
 	ws.syncQueueLocked()
 	ws.r.wlActive.Add(-1)
+}
+
+// competesLocked reports whether a request arriving now must queue behind a waiter instead of trying a route: the FIFO is strict, so a request behind a
+// waiter that may take the same route queues. A waiter that holds no pin may take any route, so it competes with every request. A waiter that holds one
+// may take only its pinned target, so it competes with a request that holds the same pin, and a pinned head that can't be placed blocks no other
+// (HBEP-5, Sticky routes, Requests after the pin). pin is the arriving request's pin, nil for one that holds none. A Workload with no sticky request
+// has no pinned waiter, so there a waiter always competes: the FIFO is strict as before.
+func (ws *wlState) competesLocked(pin *pinTarget) bool {
+	for _, w := range ws.queue {
+		if w.res.pin == nil || (pin != nil && *w.res.pin == *pin) {
+			return true
+		}
+	}
+	return false
 }
 
 // removeLocked takes a waiter that gave up out of the FIFO. It reports whether it was there, and whether it was the head.
@@ -213,7 +230,7 @@ func (r *Router) chooseNamed(ctx context.Context, n naming.Name, res *Resolution
 	if r.beforePick != nil {
 		r.beforePick()
 	}
-	if len(ws.queue) == 0 {
+	if !ws.competesLocked(res.pin) {
 		tg, canWait := r.tryNamedLocked(ws, p)
 		if tg != nil {
 			ws.mu.Unlock()
@@ -259,6 +276,9 @@ func (r *Router) mayFreeLocked(p *plan) bool {
 	if len(p.managed) > 0 {
 		return true
 	}
+	if p.res.pin != nil {
+		return p.pinWait || len(p.managed) > 0
+	}
 	match := levelMatch(p.n, p.exclude)
 	for _, d := range p.serving {
 		if g := p.groups[d.Key]; g != nil && g.HasEligible(match) {
@@ -281,7 +301,7 @@ func (r *Router) tryNamedLocked(ws *wlState, p *plan) (tg *target, canWait bool)
 			return tg, false
 		}
 	}
-	tg, wait := r.chooseServed(p.serving, p.ring, p.groups, p.n, p.key, p.exclude, res.load())
+	tg, wait := r.chooseServed(p.serving, p.ring, p.groups, p.key, p.match(), res.load())
 	if tg != nil {
 		tg.workload, tg.wres = p.wname, res
 		return tg, false
@@ -291,7 +311,7 @@ func (r *Router) tryNamedLocked(ws *wlState, p *plan) (tg *target, canWait bool)
 			return tg, false
 		}
 	}
-	return nil, wait != nil || len(p.managed) > 0
+	return nil, wait != nil || len(p.managed) > 0 || p.pinWait
 }
 
 // takeManagedLocked reserves the Workload's count and returns a managed target when one is eligible and the Workload is below its managedSessions (no
@@ -443,30 +463,44 @@ func (r *Router) tryHead(ws *wlState, seq uint64) headResult {
 	if len(ws.queue) == 0 {
 		return headNone
 	}
-	w := ws.queue[0]
-	if w.seq != seq {
+	if ws.queue[0].seq != seq {
 		// The head the order was taken on left before this lock: the oldest request of this FIFO is another now, and the order must be taken again, or a
 		// younger request of this FIFO could be placed ahead of an older one of another (Q5).
 		return headStale
 	}
-	p, rerr := r.plan(w.n, w.res, w.key, w.exclude, w.withManaged)
-	if rerr != nil {
-		// Its serving set has gone, or its provider: no route can take it. It leaves with the error, and the pass goes on to the next waiter.
-		ws.popHeadLocked()
-		w.ch <- wlResult{err: rerr.forWorkload(w.res.Name)}
-		return headAnswered
-	}
-	tg, canWait := r.tryNamedLocked(ws, p)
-	switch {
-	case tg != nil:
-		ws.popHeadLocked()
-		w.ch <- wlResult{tg: tg}
-		return headAnswered
-	case !canWait:
-		// Nothing is eligible for it now, after its exclusions and its level's filter: no wake can place it, and it must not hold the waiters behind it.
-		ws.popHeadLocked()
-		w.ch <- wlResult{err: errNoReadyTarget(w.n.Model).forWorkload(w.res.Name)}
-		return headAnswered
+	// The head is tried, and when it is a waiter that holds a pin and can't be placed, so are the waiters behind it, in order, except those that hold the
+	// same pin: it blocks no request of another target (HBEP-5, Sticky routes). A waiter that holds none, which is every waiter of a Workload without
+	// sessionAffinity, ends the scan when it can't be placed: it may take any route, so the FIFO is strict behind it.
+	var blocked []pinTarget
+	for i := 0; i < len(ws.queue); i++ {
+		w := ws.queue[i]
+		if w.res.pin != nil && slices.Contains(blocked, *w.res.pin) {
+			continue
+		}
+		p, rerr := r.plan(w.n, w.res, w.key, w.exclude, w.withManaged)
+		if rerr != nil {
+			// Its serving set has gone, or its provider, or its pinned target: no route can take it. It leaves with the error, and the pass goes on to
+			// the next waiter.
+			ws.popAtLocked(i)
+			w.ch <- wlResult{err: rerr.forWorkload(w.res.Name)}
+			return headAnswered
+		}
+		tg, canWait := r.tryNamedLocked(ws, p)
+		switch {
+		case tg != nil:
+			ws.popAtLocked(i)
+			w.ch <- wlResult{tg: tg}
+			return headAnswered
+		case !canWait:
+			// Nothing is eligible for it now, after its exclusions and its level's filter: no wake can place it, and it must not hold the waiters behind it.
+			ws.popAtLocked(i)
+			w.ch <- wlResult{err: errNoReadyTarget(w.n.Model).forWorkload(w.res.Name)}
+			return headAnswered
+		}
+		if w.res.pin == nil {
+			break
+		}
+		blocked = append(blocked, *w.res.pin)
 	}
 	return headNone
 }
