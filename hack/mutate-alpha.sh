@@ -1267,6 +1267,10 @@ beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_
   # PR 809's review (#764), point 6: a failed P0 says its job ran (the marker's flag here, and the script's line).
   'run.go@@baselineInvalid = &BaselineInvalidError{Why: why, NoJob: !o.ServedCreated}@@baselineInvalid = &BaselineInvalidError{Why: why}'
   'hack/live-checks.sh@@    elif baseline_invalid_marker && baseline_nojob_marker; then@@    elif false; then'
+  # PR 809's review (#764), point 7: the example names plgrid-gpu-a100's Provider.
+  'examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml@@    names:
+      - athena-now@@    names:
+      - athena-a100'
   # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
@@ -1431,7 +1435,7 @@ baseline() {
     internal/providerctl/*) cp "$tmp/conf.test" "$tmp/base-conf.test"; cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
     internal/rehearsal/*) cp "$tmp/reh.test" "$tmp/base-reh.test" ;;
     pkg/agentapi/*) cp "$tmp/api.test" "$tmp/base-api.test" ;;
-    *.go) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
+    *.go|examples/*) cp "$tmp/pkg.test" "$tmp/base-pkg.test" ;;
   esac
   tests_of "$1"
   bounded "$tmp/baseline.log"

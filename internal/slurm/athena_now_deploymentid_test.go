@@ -88,7 +88,7 @@ func TestTheAthenaBaselineExampleDerivesTheRowsDeploymentID(t *testing.T) {
 }
 
 // The Athena example is Sano's in everything the engine is given (checkpoint, engine, flags) and in its workload block (so the gate's key shape is Sano's),
-// and in what the baseline holds fixed (one Instance, no extra Allocation); its provider is Athena's and its cap is the row's cap, 3.
+// and in what the baseline holds fixed (one Instance, no extra Allocation); its provider is Athena plgrid-now's and its cap is the row's cap, 3.
 func TestTheAthenaBaselineExampleIsSanosWithAthenasProviderAndCap(t *testing.T) {
 	athena, sano := readExample(t, athenaNowQwen3VLExample), readExample(t, sanoQwen3VLExample)
 	if !reflect.DeepEqual(athena.Spec.Source.Served, sano.Spec.Source.Served) || athena.Spec.Model != sano.Spec.Model {
@@ -97,8 +97,8 @@ func TestTheAthenaBaselineExampleIsSanosWithAthenasProviderAndCap(t *testing.T) 
 	if athena.Spec.Instances != 1 || athena.Spec.OverAllocation == nil || *athena.Spec.OverAllocation != 0 {
 		t.Errorf("instances %d, overAllocation %v, want 1 and 0", athena.Spec.Instances, athena.Spec.OverAllocation)
 	}
-	if got := athena.Spec.Providers.Names; len(got) != 1 || got[0] != "athena-a100" {
-		t.Errorf("providers %v, want athena-a100 alone (examples/provider-athena-a100.yaml)", got)
+	if got := athena.Spec.Providers.Names; len(got) != 1 || got[0] != "athena-now" {
+		t.Errorf("providers %v, want athena-now alone (examples/provider-athena-now.yaml: the plgrid-now Provider, not plgrid-gpu-a100's)", got)
 	}
 	if r := athena.Spec.Routing; r == nil || r.InstanceCap == nil || *r.InstanceCap != 3 {
 		t.Errorf("routing %+v, want instanceCap 3", r)

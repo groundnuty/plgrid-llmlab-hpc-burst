@@ -201,3 +201,40 @@ func TestTheAthenaBaselineRowsSettings(t *testing.T) {
 		}
 	}
 }
+
+// The example, applied as it stands, targets the row's own platform: the Provider it names is an example Provider whose profile is the row's (athena-now) and which
+// allows exactly the row's partition (plgrid-now), and not plgrid-gpu-a100's Provider, which the live row's rewriting of the Provider selection would have hidden
+// (point 7 of PR 809's review). The Provider is found among the example files by the name the deployment lists, as an operator applying both would find it.
+func TestTheAthenaBaselineExampleNamesAProviderOnThePartitionItRunsOn(t *testing.T) {
+	repo := filepath.Join("..", "..")
+	row := AthenaBaselineRow()
+	var md v1alpha1.ModelDeployment
+	readYAML(t, filepath.Join(repo, "examples", row.DeploymentFile()), &md)
+	if len(md.Spec.Providers.Names) != 1 {
+		t.Fatalf("the example allows Providers %v, want one", md.Spec.Providers.Names)
+	}
+	files, err := filepath.Glob(filepath.Join(repo, "examples", "provider-*.yaml"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no Provider examples (%v)", err)
+	}
+	var found []v1alpha1.Provider
+	for _, f := range files {
+		var p v1alpha1.Provider
+		readYAML(t, f, &p)
+		if p.Name == md.Spec.Providers.Names[0] {
+			found = append(found, p)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d example Providers are called %q, want exactly one", len(found), md.Spec.Providers.Names[0])
+	}
+	p := found[0]
+	if p.Spec.PlatformProfileRef.Name != row.ProfileName() || len(p.Spec.AllowedPartitions) != 1 || p.Spec.AllowedPartitions[0] != row.Partition ||
+		p.Labels[v1alpha1.LabelPartition] != row.Partition {
+		t.Errorf("the Provider %q names profile %q, partitions %v and partition label %q; the row runs under profile %q on partition %q",
+			p.Name, p.Spec.PlatformProfileRef.Name, p.Spec.AllowedPartitions, p.Labels[v1alpha1.LabelPartition], row.ProfileName(), row.Partition)
+	}
+	if p.Spec.QOS != "" {
+		t.Errorf("the Provider sets qos %q: plgrid-now's own QOS applies and the row sets none (Row.QOS %q)", p.Spec.QOS, row.QOS)
+	}
+}

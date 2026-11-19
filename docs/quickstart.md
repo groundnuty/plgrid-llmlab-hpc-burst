@@ -166,7 +166,8 @@ The profile tells `status` which agent builds the host needs. Once it is applied
 | `provider-sano-a100.yaml` | a batch Provider on Sano `gpu` (beta), with its own `stagingDir`, run host-dialed as on this page; `direct` mode has served there too ([Sano](#sano-beta)) |
 | `modeldeployment-sano-qwen25-7b-instruct.yaml` | a 7B instruct model, served on that Provider (beta) |
 | `modeldeployment-sano-qwen3-vl-8b-instruct.yaml` | Qwen3-VL-8B-Instruct, served on that Provider, with its own expected-performance entry (beta) |
-| `modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml` | Qwen3-VL-8B-Instruct, served on the Athena Provider under `profiles/athena-now.yaml`, the deployment of the baseline's Athena test row (beta; its image and checkpoint must be staged first, because that profile gives an Instance 12 minutes to be ready) |
+| `provider-athena-now.yaml` | a batch Provider on Athena `plgrid-now` under `profiles/athena-now.yaml` (beta; short tests only: the partition's one hour and one-job slot) |
+| `modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml` | Qwen3-VL-8B-Instruct, served on that `plgrid-now` Provider, the deployment of the baseline's Athena test row (beta; its image and checkpoint must be staged first, because that profile gives an Instance 12 minutes to be ready) |
 | `modeldeployment-sano-reference-qwen25-7b-instruct.yaml` | the same model under a name no client sends, with one Allocation, for the reference run behind Sano's expected-performance entry (beta) |
 | `provider-llmlab.yaml` | a managed Provider: LLMLab itself, read-only ([optional](#optional-attach-llmlab)) |
 | `modeldeployment-llmlab.yaml` | a model LLMLab already serves, attached to a plain name ([optional](#optional-attach-llmlab)) |

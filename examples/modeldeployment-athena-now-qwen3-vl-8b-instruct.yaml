@@ -1,11 +1,13 @@
 # A served ModelDeployment: Qwen3-VL-8B-Instruct on one A100 40 GB of Athena's plgrid-now (HBEP-3,
 # HBEP-7; issue #764, beta). It is examples/modeldeployment-sano-qwen3-vl-8b-instruct.yaml with the
-# Athena Provider in place of the Sano one, and it is the deployment the baseline's Athena row
-# serves (beta-athena-now-llmlab-baseline). Clients ask the front for it by its plain name,
-# spec.model. Run it under profiles/athena-now.yaml, the test profile of that partition: the
-# partition's one hour is too short for an Instance under profiles/athena.yaml, and the test profile
-# gives an Instance 12 minutes to be ready, which only a staged image and checkpoint can meet. Stage
-# both first (alpha-athena-now-stage-qwen3-vl; docs/alpha-runbook.md).
+# Athena plgrid-now Provider in place of the Sano one, and it is the deployment the baseline's Athena
+# row serves (beta-athena-now-llmlab-baseline). Clients ask the front for it by its plain name,
+# spec.model. Apply it with examples/provider-athena-now.yaml, the Provider that names profile
+# athena-now and the partition plgrid-now (apply profiles/athena-now.yaml first): that is the test
+# profile of the partition, because its one hour is too short for an Instance under profiles/athena.yaml
+# (the Provider of examples/provider-athena-a100.yaml, which is plgrid-gpu-a100's), and it gives an
+# Instance 12 minutes to be ready, which only a staged image and checkpoint can meet. Stage both first
+# (alpha-athena-now-stage-qwen3-vl; docs/alpha-runbook.md).
 #
 # The checkpoint is pinned by a full commit ID and the engine by an image digest, because they
 # make up the deployment ID (HBEP-3, Deployment ID). The checkpoint, the engine and the flags are
@@ -51,7 +53,7 @@ spec:
   overAllocation: 0
   providers:
     names:
-      - athena-a100
+      - athena-now
   routing:
     instanceCap: 3
   # Release the Allocation when it has hosted no Instance for this long. The default, Keep,
