@@ -820,24 +820,187 @@ func TestOnlyANewReadIsAnEngineSample(t *testing.T) {
 	}
 }
 
-// A KV figure is posted as at the cap only from a distinct read taken inside the stretch with the cap's requests in flight, and a first scrape that came less
-// than the probe interval after the stretch began does not count, since its read may predate it. By hand: eleven requests from 0 s to 40 s make the stretch
-// [0, 40]; a scrape at 5 s (read before the stretch may be), 10 s (the lag is not exceeded) and 45 s (after) do not count, one at 11 s and one at 40 s do.
+// A KV figure is posted as at the cap only from a distinct read whose OWN time (ReadAt, the agent's clock) falls inside a stretch with the cap's requests in
+// flight, [start, end): half-open at its end, since the front releases a request at the instant it ends (atCapWindows), so at that instant the cap no longer
+// holds. The scrape that first saw a read (At) places nothing, and a sample with no ReadAt counts for nothing (the science agent's ruling on #764, 19 Nov 2026).
+// By hand: eleven requests from 0 s to 40 s make the stretch [0, 40). Reads taken at 0 s, 20 s and 39.999 s count, though their scrapes came at 90 s; reads taken
+// at -1 ms, at 40 s (the end) and at 40 s + 1 ms do not, though their scrapes came inside the stretch at 20 s; a sample with no ReadAt does not, whatever its At.
 func TestKVIsPostedAsAtTheCapOnlyFromReadsInsideTheStretch(t *testing.T) {
 	t0 := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	var joined []joinedRow
 	for i := 0; i < CapSano; i++ {
 		joined = append(joined, joinedRow{Gen: GenRow{Session: fmt.Sprintf("s%d", i), Turn: 1}, Front: FrontRow{Emitter: "instance", Start: t0, End: t0.Add(40 * time.Second)}})
 	}
-	at := func(s int) EngineSample { return EngineSample{At: t0.Add(time.Duration(s) * time.Second)} }
-	po := PhaseObs{Engine: []EngineSample{at(5), at(10), at(11), at(40), at(45)}}
-	got := readsAtTheCap(po, joined, LLMLabProviderName, CapSano)
-	if len(got) != 2 || !got[0].At.Equal(t0.Add(11*time.Second)) || !got[1].At.Equal(t0.Add(40*time.Second)) {
-		t.Errorf("the reads at the cap are %v, want the scrapes at 11 s and 40 s", got)
+	read := func(taken, scraped time.Duration) EngineSample {
+		return EngineSample{ReadAt: t0.Add(taken), At: t0.Add(scraped)}
+	}
+	po := PhaseObs{Engine: []EngineSample{
+		read(0, 90*time.Second), read(20*time.Second, 90*time.Second), read(40*time.Second-time.Millisecond, 90*time.Second), // inside, the start included, scraped long after
+		read(-time.Millisecond, 20*time.Second), read(40*time.Second, 20*time.Second), read(40*time.Second+time.Millisecond, 20*time.Second), // outside, scraped inside
+		{At: t0.Add(20 * time.Second)}, // no ReadAt
+	}}
+	got := readsAtTheCap(BaselineObs{}, po, joined, LLMLabProviderName, CapSano)
+	if len(got) != 3 || !got[0].ReadAt.Equal(t0) || !got[1].ReadAt.Equal(t0.Add(20*time.Second)) || !got[2].ReadAt.Equal(t0.Add(40*time.Second-time.Millisecond)) {
+		t.Errorf("the reads at the cap are %v, want the reads taken at 0 s, 20 s and 39.999 s", got)
 	}
 	// One request short of the cap for the whole phase: no stretch, no read at the cap.
-	if got := readsAtTheCap(po, joined[:CapSano-1], LLMLabProviderName, CapSano); len(got) != 0 {
+	if got := readsAtTheCap(BaselineObs{}, po, joined[:CapSano-1], LLMLabProviderName, CapSano); len(got) != 0 {
 		t.Errorf("%d reads at the cap with %d requests in flight", len(got), CapSano-1)
+	}
+	// The reads are searched in every phase's samples, each once by its ReadAt: a read at 30 s in the next phase's samples counts, and one that both lists hold,
+	// a phase that is also listed in the observation, counts once.
+	next := PhaseObs{Engine: []EngineSample{read(30*time.Second, 95*time.Second), read(20*time.Second, 90*time.Second)}}
+	o := BaselineObs{Phases: []PhaseObs{po, next}}
+	if got := readsAtTheCap(o, po, joined, LLMLabProviderName, CapSano); len(got) != 4 {
+		t.Errorf("%d reads at the cap over both phases' samples, want 4: the reads taken at 0 s, 20 s, 39.999 s and the next phase's at 30 s, the 20 s read once", len(got))
+	}
+}
+
+// shortLongPhase is a dry run's P1-long with its front records cut to the Athena run's shape, first turns of 10.9 s and second turns of 3 s (#764), so its
+// at-cap stretches are [0, 10.9 s) and [41 s, 44 s) from t0, the first request's start. next is the run's P2, whose own at-cap stretches are long after, and
+// inP2 a time inside its first one.
+func shortLongPhase(t *testing.T) (o BaselineObs, long, next PhaseObs, t0, inP2 time.Time) {
+	t.Helper()
+	out, _, _, _ := runBaselineDry(t, "")
+	o = obsOfRecord(t, out)
+	for _, po := range o.Phases {
+		switch po.Phase.Name {
+		case PhaseP1Long:
+			long = po
+		case PhaseP2:
+			next = po
+		}
+	}
+	if len(long.Rows) == 0 || len(next.Rows) == 0 {
+		t.Fatal("the dry run's P1-long or P2 holds no front record")
+	}
+	t0 = long.Rows[0].Start
+	for _, r := range long.Rows {
+		if r.Start.Before(t0) {
+			t0 = r.Start
+		}
+	}
+	rows := slices.Clone(long.Rows)
+	for i, r := range rows {
+		d := 3 * time.Second
+		if r.Start.Equal(t0) {
+			d = 10900 * time.Millisecond
+		}
+		rows[i].End, rows[i].DurationMs = r.Start.Add(d), d.Milliseconds()
+	}
+	long.Rows = rows
+	joined, _, _, _ := joinPhase(next)
+	w2 := atCapWindows(rowsOn(joined, o.LLMLabProvider, RouteServed), o.Cap)
+	if len(w2) == 0 || !w2[0][0].After(t0.Add(time.Minute)) {
+		t.Fatalf("the dry P2's at-cap stretches %v are not after P1-long's", w2)
+	}
+	return o, long, next, t0, w2[0][0].Add(time.Second)
+}
+
+// The Athena run's turn-1 stretch lasted about 10.9 s and its later turns, prefix-cached, about 3 s (#764): a read counted only when its first scrape came more
+// than a probe interval after the stretch began could never be inside one of 10.9 s or less. By the read's OWN time a stretch of that length holds a read.
+// The check is the judge's own: judgePhase over shortLongPhase. By hand, in the first row the read taken at 5 s (scraped at 8 s) is the only one inside, and no
+// scrape is more than 10 s after a stretch began, so the old rule counts none and the row kills it; in the second the read taken at -1 s was scraped at 10.5 s,
+// inside the old rule's window and outside the stretch by its own time.
+func TestAShortAtCapStretchIsWitnessedByAReadsOwnTime(t *testing.T) {
+	o, long, _, t0, _ := shortLongPhase(t)
+	sample := func(taken, scraped time.Duration) EngineSample {
+		return EngineSample{ReadAt: t0.Add(taken), At: t0.Add(scraped), Running: float64(CapSano), KVUsage: 0.74}
+	}
+	const missing = "no distinct engine read was taken inside the stretch"
+	for _, c := range []struct {
+		name    string
+		engine  []EngineSample
+		witness int // the reads at the cap
+	}{
+		{"one read inside the short stretch, by its own time", []EngineSample{sample(-2*time.Second, time.Second), sample(5*time.Second, 8*time.Second), sample(25*time.Second, 27*time.Second)}, 1},
+		{"the same stretch with no read inside by its own time, one scraped in the old rule's window", []EngineSample{sample(-2*time.Second, time.Second), sample(-time.Second, 10500*time.Millisecond), sample(25*time.Second, 27*time.Second)}, 0},
+		{"a read just before the stretch and one just after it", []EngineSample{sample(-time.Millisecond, 5*time.Second), sample(10900*time.Millisecond+time.Millisecond, 10500*time.Millisecond)}, 0},
+		{"a read taken at the start of the stretch alone", []EngineSample{sample(-2*time.Second, time.Second), sample(0, 3*time.Second)}, 1},
+		{"a read taken at the end of the stretch alone: the request is released at that instant", []EngineSample{sample(-2*time.Second, time.Second), sample(10900*time.Millisecond, 12*time.Second)}, 0},
+		{"a read taken just before the end of the stretch", []EngineSample{sample(-2*time.Second, time.Second), sample(10900*time.Millisecond-time.Millisecond, 12*time.Second)}, 1},
+		{"a sample with no ReadAt, scraped inside the stretch", []EngineSample{{At: t0.Add(5 * time.Second), Running: float64(CapSano), KVUsage: 0.74}, sample(-2*time.Second, time.Second)}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			po := long
+			po.Engine = c.engine
+			o1 := o
+			o1.Phases = []PhaseObs{po}
+			fail, invalid := judgePhase(o1, po)
+			joined, _, _, _ := joinPhase(po)
+			if n := len(readsAtTheCap(o1, po, joined, o.LLMLabProvider, o.Cap)); n != c.witness {
+				t.Errorf("%d reads at the cap, want %d", n, c.witness)
+			}
+			unwitnessed := slices.ContainsFunc(invalid, func(s string) bool { return strings.Contains(s, missing) })
+			if unwitnessed != (c.witness == 0) {
+				t.Errorf("the phase's INVALID reasons %q: the missing-read reason is %v, want %v", invalid, unwitnessed, c.witness == 0)
+			}
+			if c.witness > 0 && (len(fail) != 0 || len(invalid) != 0) {
+				t.Errorf("a short stretch holding a read has failed checks %q or invalid reasons %q, want none", fail, invalid)
+			}
+			// The post says how the read was placed, and the limit of that, in a fixed sentence.
+			post := baselinePost(BaselineRow(), o1, fail, invalid)
+			if want := "a read is placed by the agent's own time of it, and counted when that falls inside the stretch; the node's clock against this host's is a stated limit"; !strings.Contains(post, want) {
+				t.Errorf("the post does not say how a read is placed at the cap (%q):\n%s", want, post)
+			}
+		})
+	}
+}
+
+// A read taken inside P1-long's stretch can be first scraped after the phase's last look (the stretch is 10.9 s, the phase ends at about 15 s, and a read reaches
+// the controller up to a probe interval after it was taken), and then sits in the NEXT phase's samples. By the ruling, a read counts when its own time falls
+// inside an at-cap stretch, so one lost to that bookkeeping would contradict it: the witness searches every phase's samples. But the stretches are P1-long's own
+// (its front records): a read inside P2's at-cap stretch, and outside every one of P1-long's, is no witness at P1-long's cap, and it still counts for P2's own
+// checks (the minimum of 2 reads), where it stays. Each phase keeps its reads in its own list.
+func TestAReadInTheNextPhasesSamplesIsAtP1LongsCapOnlyByP1LongsOwnStretches(t *testing.T) {
+	o, long, next, t0, inP2 := shortLongPhase(t)
+	read := func(at time.Time) EngineSample {
+		return EngineSample{ReadAt: at, At: at.Add(2 * time.Second), Running: float64(CapSano), KVUsage: 0.74}
+	}
+	own := []EngineSample{read(t0.Add(-2 * time.Second)), read(t0.Add(25 * time.Second))} // outside both of P1-long's stretches
+	const missing = "no distinct engine read was taken inside the stretch"
+	for _, c := range []struct {
+		name    string
+		next    []EngineSample
+		both    bool // P1-long's own samples hold the read at 5 s too
+		witness int
+	}{
+		{"a read inside P1-long's stretch, in the next phase's samples", []EngineSample{read(t0.Add(5 * time.Second)), read(inP2)}, false, 1},
+		{"a read inside P1-long's second stretch, in the next phase's samples", []EngineSample{read(t0.Add(42 * time.Second)), read(inP2)}, false, 1},
+		{"a read between P1-long's stretches, in the next phase's samples", []EngineSample{read(t0.Add(20 * time.Second)), read(inP2)}, false, 0},
+		{"a read inside P2's own stretch and outside every one of P1-long's", []EngineSample{read(inP2), read(inP2.Add(500 * time.Millisecond))}, false, 0},
+		{"a read both phases' samples hold, inside P1-long's stretch, counted once", []EngineSample{read(t0.Add(5 * time.Second)), read(inP2)}, true, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pl, pn := long, next
+			pl.Engine, pn.Engine = slices.Clone(own), c.next
+			if c.both {
+				pl.Engine = append(pl.Engine, read(t0.Add(5*time.Second)))
+			}
+			wantOwn := len(pl.Engine)
+			o1 := o
+			o1.Phases = []PhaseObs{pl, pn}
+			fail, invalid := judgePhase(o1, pl)
+			joined, _, _, _ := joinPhase(pl)
+			if n := len(readsAtTheCap(o1, pl, joined, o.LLMLabProvider, o.Cap)); n != c.witness {
+				t.Errorf("%d reads at P1-long's cap, want %d", n, c.witness)
+			}
+			unwitnessed := slices.ContainsFunc(invalid, func(s string) bool { return strings.Contains(s, missing) })
+			if unwitnessed != (c.witness == 0) {
+				t.Errorf("P1-long's INVALID reasons %q: the missing-read reason is %v, want %v", invalid, unwitnessed, c.witness == 0)
+			}
+			if c.witness > 0 && (len(fail) != 0 || len(invalid) != 0) {
+				t.Errorf("a read in the next phase's samples inside P1-long's stretch leaves failed checks %q or invalid reasons %q, want none", fail, invalid)
+			}
+			// The reads stay in their own phases' lists: P1-long's own are unchanged, and P2's two reads, the one inside P2's stretch among them, still satisfy
+			// P2's own minimum of 2.
+			if len(pl.Engine) != wantOwn || len(pn.Engine) != 2 {
+				t.Errorf("the phases' own lists changed: P1-long %d reads, want %d, P2 %d, want 2", len(pl.Engine), wantOwn, len(pn.Engine))
+			}
+			if f2, _ := judgePhase(o1, pn); slices.ContainsFunc(f2, func(s string) bool { return strings.Contains(s, "fewer than 2 distinct engine reads") }) {
+				t.Errorf("P2's own reads no longer satisfy its minimum of 2: %q", f2)
+			}
+		})
 	}
 }
 
