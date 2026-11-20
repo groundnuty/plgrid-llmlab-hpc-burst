@@ -219,6 +219,41 @@ func loginHostInUse(login, holder string, pending bool) string {
 	return fmt.Sprintf("login host %s is in use by host-dialed Provider %s: one host-dialed Provider per login host (HBEP-6, Capacity)", login, holder)
 }
 
+// hostDialedCap is the Provider's host-dialed cap for the profile spec this
+// pass read (v1alpha1.HostDialedCap; HBEP-4, open question 17, amended
+// 2026-11-20), the planner's cap read again from the Provider's side. M, the
+// stack's Providers on the login host, is the login-host register's count,
+// which the Provider's own claim has just filled. known is false while the
+// Provider has not said which host it uses, and only when the profile sets a
+// budget: unset, the cap is 2 and reads no M. In relay-keeper mode the cap is
+// 2 whatever the budget, since the keeper's wire carries no budget (K2).
+func (r *relayState) hostDialedCap(spec *v1alpha1.PlatformProfileSpec) (c int32, known bool) {
+	if r.keeper != nil || spec.Transport == nil || spec.Transport.LoginHostBudget == nil {
+		return v1alpha1.HostDialedCap(spec, 0, r.keeper != nil), true
+	}
+	m, ok := r.hosts.OnHostOf(r.provider)
+	if !ok {
+		return 0, false
+	}
+	return v1alpha1.HostDialedCap(spec, m, false), true
+}
+
+// syncRelayLimit gives the login node the relay limit of the Provider's cap:
+// 2 relays for each Allocation (agentapi.RelayChannels), so with the stack's
+// masters the connections stay within the budget; the Slots' default, 4, while
+// the profile sets no budget or in keeper mode. A budget raised lets a waiting
+// Allocation's pair start, and one lowered holds the next pair back until the
+// Allocations above the new cap have drained (HBEP-4, open question 17).
+func (r *relayState) syncRelayLimit(login string, spec *v1alpha1.PlatformProfileSpec) {
+	if spec.Transport == nil || spec.Transport.LoginHostBudget == nil {
+		r.owner.ClearRelayLimit(login)
+		return
+	}
+	if c, known := r.hostDialedCap(spec); known {
+		r.owner.SetRelayLimit(login, len(agentapi.RelayChannels)*int(c))
+	}
+}
+
 // enroll records the Provider's age in the login-host register, from its
 // object's creationTimestamp.
 func (r *relayState) enroll(ctx context.Context, reader client.Reader) error {
@@ -312,6 +347,7 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", inUse)
 		return
 	}
+	r.syncRelayLimit(login, &e.v.Profile.Spec)
 	ref := a.DeepCopy()
 	r.owner.Want(hostdial.Target{
 		Tag: tag, JobID: o.JobID,

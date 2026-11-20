@@ -4,7 +4,7 @@ package lifecycle
 // most 2 Allocations, pending or running. That's a submit limit
 // (`SubmitLimitReached`, HBEP-4), so the planner counts it, and the handover
 // pair fits." The expected counts and texts below are written from that text,
-// not read from HostDialedMaxAllocations or hostDialedLimitSource.
+// not read from v1alpha1.HostDialedDefaultAllocations or hostDialedLimitSource.
 //
 // The fake Slurm of these rigs has no submit limit (pfake.Config.MaxSubmitPerUser
 // 0 is none), so only the controller's own plan can hold a third Allocation
@@ -135,7 +135,7 @@ func TestHostDialedLimitsLeaveTheirArgument(t *testing.T) {
 		MaxSubmitPerUser: i32(5), MaxGPUsPerUser: i32(1),
 		From: map[string]string{v1alpha1.LimitMaxSubmitPerUser: "example-now", v1alpha1.LimitMaxGPUsPerUser: "example-now"},
 	}
-	out := hostDialedLimits(in)
+	out := hostDialedLimits(in, 2)
 	if *out.MaxSubmitPerUser != 2 || *out.MaxGPUsPerUser != 1 || out.From[v1alpha1.LimitMaxGPUsPerUser] != "example-now" {
 		t.Fatalf("capped %d submit, %d GPUs, GPU source %q; want 2, 1, example-now", *out.MaxSubmitPerUser, *out.MaxGPUsPerUser, out.From[v1alpha1.LimitMaxGPUsPerUser])
 	}
@@ -147,7 +147,7 @@ func TestHostDialedLimitsLeaveTheirArgument(t *testing.T) {
 		t.Fatalf("submitLimitText = %q, want %q", got, want)
 	}
 	// With no QOS limit at all, From is nil and the cap still names itself.
-	pv = &providerView{limits: hostDialedLimits(v1alpha1.QOSLimits{})}
+	pv = &providerView{limits: hostDialedLimits(v1alpha1.QOSLimits{}, 2)}
 	if got, want := submitLimitText(pv), "maxSubmitPerUser 2 (host-dialed mode, HBEP-6)"; got != want {
 		t.Fatalf("with no QOS limit submitLimitText = %q, want %q", got, want)
 	}

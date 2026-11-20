@@ -28,9 +28,19 @@ type Config struct {
 	// Single-user host).
 	FrontConfigured bool
 	// HostDialed says the host-wide dial-home mode is host-dialed. Each batch
-	// Provider's submit limit is then at most HostDialedMaxAllocations
-	// (hostdialed.go; HBEP-6, Host-dialed mode, Capacity).
+	// Provider's submit limit is then at most its host-dialed cap
+	// (hostdialed.go, hostDialedCapOf; HBEP-6, Host-dialed mode, Capacity).
 	HostDialed bool
+	// RelayKeeper says the relay keeper holds the relays (beta): the cap is
+	// then 2 whatever a profile's transport.loginHostBudget, since the keeper's
+	// wire carries no budget (HBEP-4, open question 17, K2).
+	RelayKeeper bool
+	// LoginHostProviders returns M for a Provider, how many of the stack's
+	// Providers use its login host, itself included, and false while its
+	// controller has not said which host that is (hostdial.Hosts.OnHostOf). It
+	// is read only when the Provider's profile sets transport.loginHostBudget;
+	// nil reads as never known.
+	LoginHostProviders func(provider string) (m int, known bool)
 	// AgentDigest returns the SHA-256, 64 lowercase hex, of the allocation
 	// agent's build for a CPU architecture (HBEP-7, Provisioning).
 	AgentDigest func(cpuArch string) (string, error)

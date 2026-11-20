@@ -79,6 +79,7 @@ import (
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/lifecycle"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -352,6 +353,10 @@ func managerOptions(f flags, cfg *rest.Config, getenv func(string) string) lifec
 	return lifecycle.Options{
 		Config: cfg, CredentialsDir: f.host.CredentialsDir(), AgentBuildsDir: f.host.AgentBuildsDir(),
 		FrontConfigured: f.frontMode != "", HostDialed: f.frontMode == string(agentapi.DialHomeHostDialed), HealthAddr: f.healthAddr, MetricsAddr: f.host.ControllerMetricsAddr(),
+		// The host-dialed cap follows a profile's transport.loginHostBudget (HBEP-4, open question 17): M, the stack's
+		// Providers on a login host, is the Providers' own register's count (providerctl claims each Provider's host
+		// there); in relay-keeper mode the cap stays 2 whatever the budget, since the keeper's wire carries none.
+		RelayKeeper: f.relayKeeperSocket != "", LoginHostProviders: hostdial.SharedHosts.OnHostOf,
 		LeaderElection: f.leaderElect, Workers: f.workers, HubEndpoint: getenv(hubEndpointEnv),
 		InstanceRouter: v1alpha1.InstanceRouter(f.instanceRouter),
 	}

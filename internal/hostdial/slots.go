@@ -24,12 +24,19 @@ const DefaultRelaysPerLogin = 4
 // Allocations" (HBEP-6). So a relay that drops never gives its slot to
 // another Allocation, which would leave both with half a pair. A third
 // Allocation on one login node waits for a pair of slots.
+//
+// The 4 is the default. A Provider whose profile sets transport.loginHostBudget
+// gives its login node another limit, 2 relays for each Allocation of its cap
+// (SetLimit; HBEP-4, open question 17), which waiters read again when it
+// changes. A limit set below the slots taken keeps the Allocations that hold
+// them and holds the next back until they drain.
 type Slots struct {
 	max int
 
-	mu   sync.Mutex
-	used map[string]int
-	wake chan struct{} // closed and replaced when a slot frees
+	mu    sync.Mutex
+	used  map[string]int
+	limit map[string]int // a login node's own limit, in place of max
+	wake  chan struct{}  // closed and replaced when a slot frees or a limit changes
 }
 
 // NewSlots returns slots with max per login node; max below 1 means
@@ -38,23 +45,75 @@ func NewSlots(max int) *Slots {
 	if max < 1 {
 		max = DefaultRelaysPerLogin
 	}
-	return &Slots{max: max, used: map[string]int{}, wake: make(chan struct{})}
+	return &Slots{max: max, used: map[string]int{}, limit: map[string]int{}, wake: make(chan struct{})}
 }
 
 // SharedSlots is the process's slots, which the controller binary gives every
 // Provider's relay owner.
 var SharedSlots = NewSlots(DefaultRelaysPerLogin)
 
+// SetLimit gives login a limit of n relays in place of the default, and wakes
+// the Allocations waiting for a pair: a limit of 0 admits none. A negative n
+// changes nothing.
+func (s *Slots) SetLimit(login string, n int) {
+	if n < 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.limit[login]; ok && cur == n {
+		return
+	}
+	s.limit[login] = n
+	s.wakeLocked()
+}
+
+// ClearLimit gives login the default limit back, and wakes the Allocations
+// waiting for a pair.
+func (s *Slots) ClearLimit(login string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.limit[login]; !ok {
+		return
+	}
+	delete(s.limit, login)
+	s.wakeLocked()
+}
+
+// Limit is the most relays login may hold now.
+func (s *Slots) Limit(login string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.limitLocked(login)
+}
+
+func (s *Slots) limitLocked(login string) int {
+	if n, ok := s.limit[login]; ok {
+		return n
+	}
+	return s.max
+}
+
+func (s *Slots) wakeLocked() {
+	close(s.wake)
+	s.wake = make(chan struct{})
+}
+
 // Acquire takes n slots on login together, waiting while fewer are free,
 // until ctx ends. The returned release gives them all back; it may be called
-// once.
+// once. Under the default limit it refuses at once an n that could never be
+// admitted; under a limit that SetLimit set it waits, whatever n, since the
+// limit may rise.
 func (s *Slots) Acquire(ctx context.Context, login string, n int) (release func(), err error) {
-	if n < 1 || n > s.max {
+	s.mu.Lock()
+	_, own := s.limit[login]
+	s.mu.Unlock()
+	if n < 1 || (n > s.max && !own) {
 		return nil, fmt.Errorf("hostdial: %d slots asked of a login node capped at %d", n, s.max)
 	}
 	for {
 		s.mu.Lock()
-		if s.used[login]+n <= s.max {
+		if s.used[login]+n <= s.limitLocked(login) {
 			s.used[login] += n
 			s.mu.Unlock()
 			var once sync.Once
@@ -76,8 +135,7 @@ func (s *Slots) release(login string, n int) {
 	if s.used[login] -= n; s.used[login] <= 0 {
 		delete(s.used, login)
 	}
-	close(s.wake)
-	s.wake = make(chan struct{})
+	s.wakeLocked()
 }
 
 // InUse is how many slots are taken on login.
@@ -165,6 +223,28 @@ func (h *Hosts) Claim(login, provider string) (holder string, pending, ok bool) 
 
 func olderThan(a *hostEntry, an string, b *hostEntry, bn string) bool {
 	return a.created.Before(b.created) || (a.created.Equal(b.created) && an < bn)
+}
+
+// OnHostOf is how many of the register's Providers use the login host that
+// provider uses, provider itself included: the stack's Providers on that
+// host, each holding its own master (HBEP-4, open question 17, M in the
+// host-dialed cap). A Provider counts once it has said which host it uses,
+// whether or not its claim was granted, since a refused Provider's master is
+// open all the same. ok is false while provider is not enrolled or has not
+// said which host it uses (or uses none), so M is not known yet.
+func (h *Hosts) OnHostOf(provider string) (n int, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	me, enrolled := h.by[provider]
+	if !enrolled || !me.reported || me.login == "" {
+		return 0, false
+	}
+	for _, e := range h.by {
+		if e.reported && e.login == me.login {
+			n++
+		}
+	}
+	return n, true
 }
 
 // Release forgets provider: its manager has stopped.

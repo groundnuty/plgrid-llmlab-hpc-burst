@@ -267,6 +267,15 @@ func NewOwner(o OwnerOptions) (*Owner, error) {
 // controller-runtime manager.
 func (*Owner) NeedLeaderElection() bool { return true }
 
+// SetRelayLimit gives the login node a limit of n relays in place of the
+// Slots' default: 2 for each Allocation of the Provider's host-dialed cap
+// (HBEP-4, open question 17). The Allocations waiting for a pair read it
+// again, and a relay that runs is not changed.
+func (o *Owner) SetRelayLimit(login string, n int) { o.o.Slots.SetLimit(login, n) }
+
+// ClearRelayLimit gives the login node the default limit back.
+func (o *Owner) ClearRelayLimit(login string) { o.o.Slots.ClearLimit(login) }
+
 // Want records that t's Allocation is running, and starts its two relays when
 // the Owner runs and they are not already kept for the same job. A Want for
 // the same tag with another job, agent, directory, UID, login or credentials

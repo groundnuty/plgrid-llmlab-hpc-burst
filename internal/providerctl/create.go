@@ -205,8 +205,14 @@ func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v
 
 // hostDialedCapFull returns why the Provider has no free slot in host-dialed
 // mode, "" when it has one: its other Allocations whose job is submitted or
-// being submitted, from a fresh API list, number HostDialedMaxAllocations.
+// being submitted, from a fresh API list, number the Provider's host-dialed
+// cap (relayState.hostDialedCap: floor((transport.loginHostBudget - M) / 2),
+// 2 while the profile sets no budget and in keeper mode).
 func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocation) (string, error) {
+	limit, known := e.s.relays.hostDialedCap(&e.v.Profile.Spec)
+	if !known {
+		return "", errors.New("the Provider has not said which login host it uses, so the host-dialed cap, which follows transport.loginHostBudget, is not known")
+	}
 	var list v1alpha1.AllocationList
 	if err := e.s.reader.List(ctx, &list); err != nil {
 		return "", err
@@ -229,11 +235,11 @@ func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocat
 			n++
 		}
 	}
-	if n < agentapi.HostDialedMaxAllocations {
+	if int32(n) < limit {
 		return "", nil
 	}
 	return fmt.Sprintf("Provider %s already has %d Allocations submitted or being submitted, at most %d in host-dialed mode (HBEP-6, Capacity)",
-		e.s.o.Provider, n, agentapi.HostDialedMaxAllocations), nil
+		e.s.o.Provider, n, limit), nil
 }
 
 // rejectedWith records attempt claim as Rejected with reason, a full submit

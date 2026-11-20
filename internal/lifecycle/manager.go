@@ -64,6 +64,10 @@ type Options struct {
 	// HostDialed: the dial-home mode is host-dialed, which caps each batch
 	// Provider's submit limit (Config.HostDialed).
 	HostDialed bool
+	// RelayKeeper and LoginHostProviders are Config's: the cap stays 2 in
+	// relay-keeper mode, and M is read from the Providers' controllers.
+	RelayKeeper        bool
+	LoginHostProviders func(provider string) (int, bool)
 	// HealthAddr is where /healthz and /readyz listen; "0" or empty disables.
 	HealthAddr string
 	// MetricsAddr is where controller-runtime's metrics server serves
@@ -348,7 +352,8 @@ func NewManager(o Options) (manager.Manager, *Backend, error) {
 	r := &Reconciler{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Clock: clock, Backend: backend, Checkpoints: src,
 		Recorder: KubeRecorder{R: eventcount.Events(mgr.GetEventRecorder(v1alpha1.FieldManagerLifecycle), counted, eventcount.ControllerLifecycle, logOpt)},
-		Config:   Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, HostDialed: o.HostDialed, AgentDigest: builds.digest},
+		Config: Config{CredentialsDir: o.CredentialsDir, FrontConfigured: o.FrontConfigured, HostDialed: o.HostDialed,
+			RelayKeeper: o.RelayKeeper, LoginHostProviders: o.LoginHostProviders, AgentDigest: builds.digest},
 	}
 	r.Config.InstanceRouter = o.InstanceRouter
 	if lock != nil {
