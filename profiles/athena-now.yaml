@@ -683,7 +683,7 @@ spec:
           note: "Not stated either way, and not tested, per the spike rules. The prohibition above covers computations; whether a lightweight poller counts is not documented."
         ssh_connection_limits:
           value: {connections_held_at_least: 12, held_for: 5m, commands_on_one_master: 4, refused: none, maxlogins_readable: false, login_host_budget_at_least: 11}
-          method: probe
+          method: measured
           source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-7019586324"
           date: "2026-11-19"
           note: "The probe of 19 Nov 2026 held 12 connections for 5 minutes, the probe's bound, beside a master, with no refusal and no maxlogins readable, and four commands ran at once on one master. So the connections one stack may hold on the login host, masters included, are at least 11 (HBEP-4, open question 17). This is the host's measured floor, not a stack's share, and transport.loginHostBudget stays unset below. S5's read of /etc/ssh/sshd_config or sshd_config.d on Athena was never attempted, so MaxStartups, MaxSessions and login throttling are still not known from the files. HBEP-4 mentions throttling from parallel logins."
