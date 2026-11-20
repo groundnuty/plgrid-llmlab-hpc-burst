@@ -286,6 +286,31 @@ func TestARestartUnderACutBudgetReadoptsEveryServingAllocation(t *testing.T) {
 	}
 }
 
+// The budget REMOVED while five serve (a reduction to "unset", whose cap is 2) is the same cut: a restart takes all five
+// pairs again, since the limit is max(2 x 2, 2 x the five admitted), where a bare default of 4 would strand the third to
+// fifth. Removing a budget never releases a running job (PR 814, point 1).
+func TestARestartAfterTheBudgetIsRemovedReadoptsEveryServingAllocation(t *testing.T) {
+	e := newEnv(t, hostDialedOn(hostdial.NewHosts(), 1000), withBudget(11))
+	stop := stoppableRelays(e)
+	tags := map[string]bool{}
+	for i := range 5 {
+		n := fmt.Sprintf("alloc-%d", i)
+		e.newAlloc(n)
+		e.run(n, 4)
+		tags[tagOf(e.get(n))] = true
+	}
+	waitRelays(t, "five pairs held", func() bool { return pairsHeld(e, tags) })
+	e.profiles.set(func(v *slurm.Validated) { v.Profile.Spec.Transport = nil }) // the operator removes the budget
+	restartRelays(e, stop)
+	for i := range 5 {
+		e.run(fmt.Sprintf("alloc-%d", i), 3)
+	}
+	waitRelays(t, "all five re-adopted, each with its pair, none waiting", func() bool { return pairsHeld(e, tags) })
+	if got := e.opts.Relays.Slots.InUse(loginHost); got != 10 {
+		t.Errorf("%d slots taken after the restart, want 10", got)
+	}
+}
+
 // A relay's reconnect keeps its pair after a reduction: the pair is taken once for the Allocation, and a relay that
 // drops and starts again asks for none. Five Allocations hold their pairs; the budget is cut to 5; every relay starts
 // again (the ssh double ends at once and is retried), and no pair is lost or waits.

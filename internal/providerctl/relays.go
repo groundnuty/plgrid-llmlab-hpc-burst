@@ -253,26 +253,30 @@ func (r *relayState) hostDialedCap(spec *v1alpha1.PlatformProfileSpec) (c int32,
 // Allocations), 2 being len(agentapi.RelayChannels), so that with the stack's
 // masters the connections stay within the budget (2 x cap + M <= budget) for
 // every Allocation the cap admitted, and an Allocation submitted before a
-// reduction still gets its pair when its job starts: a reduction only stops
-// new admissions, which the re-check before each submit enforces (HBEP-4, open
-// question 17). The cap reads the profile as the holder has it now and M as
-// the register has it now (1 while this Provider has not claimed its host);
-// the admitted count is the last observation of the fresh list the re-check
-// reads (syncRelays). It reports false, and the default limit holds, when the
-// profile sets no budget, and in keeper mode. It never revokes a pair.
+// reduction still gets its pair when its job starts, and a restart takes the
+// pairs of the serving ones again: a reduction, or the removal of the budget,
+// only stops new admissions, which the re-check before each submit enforces
+// (HBEP-4, open question 17). The cap reads the profile as the holder has it
+// now and M as the register has it now (1 while this Provider has not claimed
+// its host); with no budget the cap is the default 2, so the limit is 4 while
+// at most 2 are admitted, as on main. The admitted count is the last
+// observation of the fresh list the re-check reads (syncRelays). In keeper
+// mode it reports false and the keeper's own gates hold. It never revokes a
+// pair.
 func (r *relayState) relayLimit() (int, bool) {
-	if r.keeper != nil || r.transport == nil {
+	if r.keeper != nil {
 		return 0, false
 	}
-	tp := r.transport()
-	if tp == nil || tp.LoginHostBudget == nil {
-		return 0, false
+	c := int32(v1alpha1.HostDialedDefaultAllocations)
+	if r.transport != nil {
+		if tp := r.transport(); tp != nil && tp.LoginHostBudget != nil {
+			m := 1
+			if k, ok := r.hosts.OnHostOf(r.provider); ok {
+				m = k
+			}
+			c = v1alpha1.HostDialedCap(&v1alpha1.PlatformProfileSpec{Transport: tp}, m, false)
+		}
 	}
-	m := 1
-	if k, ok := r.hosts.OnHostOf(r.provider); ok {
-		m = k
-	}
-	c := v1alpha1.HostDialedCap(&v1alpha1.PlatformProfileSpec{Transport: tp}, m, false)
 	return len(agentapi.RelayChannels) * int(max(c, int32(r.admitted.Load()))), true
 }
 
