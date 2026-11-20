@@ -79,7 +79,12 @@ func TestHostDialedCapInRelayKeeperModeIsTwoWhateverTheBudget(t *testing.T) {
 	spec := func(b int32) *v1alpha1.PlatformProfileSpec {
 		return &v1alpha1.PlatformProfileSpec{Transport: &v1alpha1.TransportProfile{LoginHostBudget: &b}}
 	}
-	keeper := &relayState{keeper: &keeperState{}}
+	// The register holds the Provider's claim too, so a keeper-mode cap that read it would show the budget's 5 rather than
+	// fail on a missing register.
+	keeperHosts := hostdial.NewHosts()
+	keeperHosts.Enroll("p", at(11, 0, 0))
+	keeperHosts.Claim("login.example.org", "p")
+	keeper := &relayState{keeper: &keeperState{}, hosts: keeperHosts, provider: "p"}
 	for _, b := range []int32{5, 11, 17} {
 		if c, known := keeper.hostDialedCap(spec(b)); c != 2 || !known {
 			t.Errorf("relay-keeper mode, budget %d: cap %d, known %v; want 2, true", b, c, known)
