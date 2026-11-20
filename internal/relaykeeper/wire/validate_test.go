@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/utils/ptr"
+
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/relaykeeper/wire"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
 )
@@ -293,9 +296,32 @@ func TestAZeroMessageIsRefused(t *testing.T) {
 	}
 }
 
-func TestMaxAllocationsIsAtLeastTheHostDialedMaximum(t *testing.T) {
-	if wire.MaxAllocations < agentapi.HostDialedMaxAllocations {
-		t.Errorf("MaxAllocations %d is below the host-dialed maximum %d", wire.MaxAllocations, agentapi.HostDialedMaxAllocations)
+// A host-dialed Provider's cap follows its profile's transport.loginHostBudget, whose admission rules bound the budget
+// from above (HBEP-4, open question 17; the science agent's and the team lead's ruling of 20 Nov 2026: the bound, not a
+// raised MaxAllocations, keeps the cap within the keeper's one set). The cap is asserted against the CONSTANTS, the
+// field's maximum and MaxAllocations, so a change to either fails here: the largest cap HostDialedCap returns, at the
+// field's maximum with the Provider's own master the only one on the host, is at most MaxAllocations.
+func TestMaxAllocationsIsAtLeastTheLargestHostDialedCap(t *testing.T) {
+	maxSpec := &v1alpha1.PlatformProfileSpec{Transport: &v1alpha1.TransportProfile{LoginHostBudget: ptr.To(int32(v1alpha1.LoginHostBudgetMax))}}
+	largest := v1alpha1.HostDialedCap(maxSpec, 1, false)
+	if int(largest) > wire.MaxAllocations {
+		t.Errorf("the cap at the field's maximum budget %d is %d, above MaxAllocations %d: the keeper would refuse the Provider's set", v1alpha1.LoginHostBudgetMax, largest, wire.MaxAllocations)
+	}
+	if int(v1alpha1.HostDialedCapMax) > wire.MaxAllocations {
+		t.Errorf("HostDialedCapMax %d is above MaxAllocations %d", v1alpha1.HostDialedCapMax, wire.MaxAllocations)
+	}
+	// No budget the field admits, with any M, gives a larger cap.
+	for b := int32(v1alpha1.LoginHostBudgetMin); b <= v1alpha1.LoginHostBudgetMax; b++ {
+		for m := 0; m <= int(b); m++ {
+			spec := &v1alpha1.PlatformProfileSpec{Transport: &v1alpha1.TransportProfile{LoginHostBudget: ptr.To(b)}}
+			if c := v1alpha1.HostDialedCap(spec, m, false); int(c) > wire.MaxAllocations {
+				t.Errorf("budget %d, M %d: cap %d is above MaxAllocations %d", b, m, c, wire.MaxAllocations)
+			}
+		}
+	}
+	// The default cap fits too, with the room the bound keeps for an unfenced hand-over's surplus.
+	if wire.MaxAllocations < v1alpha1.HostDialedDefaultAllocations {
+		t.Errorf("MaxAllocations %d is below the default host-dialed cap %d", wire.MaxAllocations, v1alpha1.HostDialedDefaultAllocations)
 	}
 }
 

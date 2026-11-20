@@ -112,6 +112,12 @@ type extraAsk struct {
 // count: where the Provider's partition sets qosByGpus it says which QOS the extra runs under, and the headroom is then asked
 // a second time over the Allocations under that QOS alone (qosHeadroom; HBEP-7, Per-user limits).
 func (p *pass) extraChecks(pv *providerView, exclude *v1alpha1.Instance, gpus int32) (ask extraAsk, ok bool) {
+	// In host-dialed mode no extra is made above the default cap (HBEP-7, Over-allocation, In host-dialed mode, amended
+	// 2026-11-20: "no extra is made, whatever the Provider's cap"): the cap's slots serve primaries and their handovers.
+	// At the default cap of 2 the slot check below decides as before.
+	if pv.hostDialed && pv.hostDialedCap > v1alpha1.HostDialedDefaultAllocations {
+		return extraAsk{}, false
+	}
 	if !p.extraBoundWithout(pv, exclude) {
 		return extraAsk{}, false
 	}

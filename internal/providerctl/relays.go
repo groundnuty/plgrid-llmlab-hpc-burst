@@ -102,6 +102,10 @@ type relayState struct {
 	// keeper is set in keeper mode (RelaySettings.KeeperSocket): then owner
 	// and ssh stay nil, and the keeper holds the relays (keeper.go).
 	keeper *keeperState
+
+	// transport reads the profile's transport block as the holder has it now
+	// (Setup fills it); nil reads as no budget.
+	transport func() *v1alpha1.TransportProfile
 }
 
 func newRelayState(o Options) (*relayState, error) {
@@ -219,6 +223,69 @@ func loginHostInUse(login, holder string, pending bool) string {
 	return fmt.Sprintf("login host %s is in use by host-dialed Provider %s: one host-dialed Provider per login host (HBEP-6, Capacity)", login, holder)
 }
 
+// hostDialedCap is the Provider's host-dialed cap for the profile spec this
+// pass read (v1alpha1.HostDialedCap; HBEP-4, open question 17, amended
+// 2026-11-20), the planner's cap read again from the Provider's side. M, the
+// stack's Providers on the login host, is the login-host register's count,
+// which the Provider's own claim has just filled. known is false while the
+// Provider has not said which host it uses, and only when the profile sets a
+// budget: unset, the cap is 2 and reads no M. In relay-keeper mode the cap is
+// 2 whatever the budget, since the keeper's wire carries no budget (K2).
+func (r *relayState) hostDialedCap(spec *v1alpha1.PlatformProfileSpec) (c int32, known bool) {
+	if r.keeper != nil || spec.Transport == nil || spec.Transport.LoginHostBudget == nil {
+		return v1alpha1.HostDialedCap(spec, 0, r.keeper != nil), true
+	}
+	m, ok := r.hosts.OnHostOf(r.provider)
+	if !ok {
+		return 0, false
+	}
+	return v1alpha1.HostDialedCap(spec, m, false), true
+}
+
+// relayLimit is the most relays this Provider's login node may hold, for the
+// relay owner to read under the slot lock at every attempt to take an
+// Allocation's pair (Target.RelayLimit): 2 x the cap, 2 being
+// len(agentapi.RelayChannels), so that with the stack's masters the
+// connections stay within the budget (2 x cap + M <= budget). The cap reads the
+// profile as the holder has it now and M as the register has it now (1 while
+// this Provider has not claimed its host). It reports false, and the default
+// limit holds, when the profile sets no budget: EXACTLY main's 4 relays, so an
+// unfenced hand-over's surplus third Allocation waits for its pair as it does
+// on main (the science agent's ruling U on #814: no reservation mechanism);
+// and in keeper mode, where the keeper's own gates hold. A pair held is never
+// revoked and a relay's reconnect asks for none; a budget lowered below the
+// Allocations admitted is a stated limit (HBEP-4, open question 17, the
+// erratum of #814): an Allocation admitted but not yet started may find no pair.
+func (r *relayState) relayLimit() (int, bool) {
+	if r.keeper != nil || r.transport == nil {
+		return 0, false
+	}
+	tp := r.transport()
+	if tp == nil || tp.LoginHostBudget == nil {
+		return 0, false
+	}
+	m := 1
+	if k, ok := r.hosts.OnHostOf(r.provider); ok {
+		m = k
+	}
+	c := v1alpha1.HostDialedCap(&v1alpha1.PlatformProfileSpec{Transport: tp}, m, false)
+	return len(agentapi.RelayChannels) * int(c), true
+}
+
+// claimBeforeMaster records the Provider's login host in the register BEFORE
+// the Provider's first command opens its master (the holder calls it before it
+// returns a Platform), so the stack's other Providers count this master in M
+// from the moment it can exist (HBEP-4, open question 17: "each holding its own
+// master"). A refusal (another Provider holds the host) is not an error here:
+// the status loop and Create report it, and the refused Provider's master is
+// open all the same, so it counts. An error is a host that could not be
+// resolved (ssh -G timed out): it is not claimed this pass (the holder logs it
+// and goes on, and the status loop reports it).
+func (r *relayState) claimBeforeMaster(v slurm.Validated) error {
+	_, _, err := r.claimLogin(v.SSH)
+	return err
+}
+
 // enroll records the Provider's age in the login-host register, from its
 // object's creationTimestamp.
 func (r *relayState) enroll(ctx context.Context, reader client.Reader) error {
@@ -320,7 +387,7 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		UID:       string(a.UID),
 		Login:     login, Jobs: e.p, Command: rel.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify,
 		OnFailed: e.onRelayFailed(ref, tag),
-		Gen:      credentialsGen(e.v.SSH),
+		Gen:      credentialsGen(e.v.SSH), RelayLimit: r.relayLimit,
 	})
 }
 

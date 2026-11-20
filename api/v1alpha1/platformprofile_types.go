@@ -714,6 +714,12 @@ type PlatformProfileSpec struct {
 	// +kubebuilder:default={}
 	Restart *RestartPolicy `json:"restart,omitempty"`
 
+	// Transport holds the platform's login-host facts the framework reads
+	// (HBEP-4, open question 17).
+	//
+	// +optional
+	Transport *TransportProfile `json:"transport,omitempty"`
+
 	// Profile is the rest of the profile, untyped: the facts that are not typed
 	// above, with the provenance envelope of each (value, method, source and
 	// date; HBEP-4, open question 7), until HBEP-4 fixes the schema.
@@ -722,6 +728,25 @@ type PlatformProfileSpec struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Profile *apiextensionsv1.JSON `json:"profile,omitempty"`
+}
+
+// TransportProfile is the platform's login-host facts that the lifecycle
+// planner and the Provider's controller read (HBEP-4, open question 17,
+// amended 2026-11-20).
+type TransportProfile struct {
+	// LoginHostBudget is the connections to the platform's login host that
+	// ONE control-plane stack may hold, its Providers' masters included: the
+	// stack's share, not the host's whole budget. A host-dialed Provider then
+	// has at most floor((loginHostBudget - M) / 2) Allocations, M being the
+	// stack's Providers on that login host (HBEP-4, open question 17); unset,
+	// it has 2. An integer from 5 to 17: the cap is then at most 8, the relay
+	// keeper's bound on one set of Allocations. A public profile leaves it
+	// unset, since it cannot know how many stacks share the host.
+	//
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self >= 5",message="loginHostBudget must be at least 5: a stack needs a master and a handover pair of Allocations (HBEP-4, open question 17)"
+	// +kubebuilder:validation:XValidation:rule="self <= 17",message="loginHostBudget must be at most 17: the cap is then 8, the relay keeper's bound on one set of Allocations (HBEP-4, open question 17; HBEP-6, The relay keeper)"
+	LoginHostBudget *int32 `json:"loginHostBudget,omitempty"`
 }
 
 // PlatformProfileStatus is the observed state of a PlatformProfile.

@@ -155,6 +155,8 @@ type rig struct {
 	extra []*rigExtra
 	// hostDialed is the controller's Config.HostDialed, kept across a restart.
 	hostDialed bool
+	// configHook, when set, edits the controller's Config at every start (withConfig).
+	configHook func(*Config)
 	// syncHook, when set, sees the result of every Provider controller pass (the Provider's name and the error its Sync
 	// returned, nil for none). It returns true when it handled the error, which then does not fail the test: it plays
 	// crossplane's managed reconciler, which turns a failed delete into Synced=False and retries it with backoff.
@@ -173,6 +175,7 @@ type rigConfig struct {
 	holdRelease  bool
 	front        bool
 	hostDialed   bool
+	configHook   func(*Config)
 	interceptors *interceptor.Funcs
 	// partition edits the rig partition's profile entry; providerQOS is the
 	// rig Provider's spec.qos; batch edits the fake Slurm's configuration.
@@ -202,6 +205,10 @@ func withBatchConfig(f func(*pfake.Config)) rigOption {
 
 // withHostDialed runs the controller as in host-dialed mode (Config.HostDialed).
 func withHostDialed() rigOption { return func(c *rigConfig) { c.hostDialed = true } }
+
+// withConfig edits the controller's Config at every start and restart, for the fields the rig does not name
+// (Config.RelayKeeper, Config.LoginHostProviders).
+func withConfig(f func(*Config)) rigOption { return func(c *rigConfig) { c.configHook = f } }
 
 func ptrTo[T any](v T) *T { return &v }
 
@@ -283,7 +290,7 @@ func newRig(t *testing.T, opts ...rigOption) *rig {
 		t: t, ctx: context.Background(), clock: clock, batch: batch, c: c,
 		prov:   &pfake.Controller{Client: c, Provider: rigProvider, Batch: batch, Clock: clock, HoldRelease: cfg.holdRelease},
 		source: &stubSource{}, rec: &MemoryRecorder{}, creds: t.TempDir(),
-		agents: map[string]*rigAgent{}, sw: &switchBackend{}, hostDialed: cfg.hostDialed,
+		agents: map[string]*rigAgent{}, sw: &switchBackend{}, hostDialed: cfg.hostDialed, configHook: cfg.configHook,
 	}
 	rg.events = eventcount.New()
 	rg.memEvents = newMemoryEvents(rg.rec, rg.events)
@@ -305,6 +312,9 @@ func (rg *rig) startController(front bool) {
 		Recorder: KubeRecorder{R: eventcount.Events(rg.memEvents, rg.events, eventcount.ControllerLifecycle)},
 		Config: Config{CredentialsDir: rg.creds, FrontConfigured: front, HostDialed: rg.hostDialed,
 			AgentDigest: func(string) (string, error) { return rigAgentDigest, nil }},
+	}
+	if rg.configHook != nil {
+		rg.configHook(&rg.r.Config)
 	}
 	rg.sw.set(rg.backend)
 }

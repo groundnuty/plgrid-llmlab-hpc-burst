@@ -187,7 +187,12 @@ func sanoView(qos []v1alpha1.QOSProfile, hostDialed bool) *providerView {
 	part.Name = "gpu"
 	sanoPartition(&part)
 	prof := &v1alpha1.PlatformProfile{Spec: v1alpha1.PlatformProfileSpec{QOS: qos, Partitions: []v1alpha1.PartitionProfile{part}}}
-	return &providerView{name: provB, prov: &v1alpha1.Provider{}, profile: prof, partition: part, hostDialed: hostDialed}
+	pv := &providerView{name: provB, prov: &v1alpha1.Provider{}, profile: prof, partition: part, hostDialed: hostDialed}
+	if hostDialed {
+		// providerViewOf sets the view's host-dialed cap (hostDialedCapOf): 2 for a profile that sets no budget.
+		pv.hostDialedCap = v1alpha1.HostDialedDefaultAllocations
+	}
+	return pv
 }
 
 // listedAlloc is a Running Allocation of ours on Provider B of the given size.

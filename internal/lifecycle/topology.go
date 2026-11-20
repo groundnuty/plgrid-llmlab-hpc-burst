@@ -39,8 +39,10 @@ type providerView struct {
 	// (v1alpha1.EffectiveQOSLimits; HBEP-4, QOS limits).
 	limits v1alpha1.QOSLimits
 	// hostDialed is whether the controller runs in host-dialed mode, which caps the Provider's submit limit
-	// at HostDialedMaxAllocations (hostDialedLimits).
+	// at hostDialedCap (hostDialedLimits).
 	hostDialed bool
+	// hostDialedCap is that cap, set with hostDialed (hostDialedCapOf).
+	hostDialedCap int32
 	// jobLimits and scope are set only on a view resolved for a GPU count (forGPUs) of a Provider whose partition
 	// sets qosByGpus: the QOS limits of the job's QOS, which size an Allocation, and how the per-user limits that
 	// belong to that QOS are counted (qosscope.go). Then limits holds only the Provider-wide ones: the partition
@@ -182,7 +184,13 @@ func (r *Reconciler) providerViewOf(ctx context.Context, n string, p *v1alpha1.P
 	pv.limits = limits
 	pv.hostDialed = r.Config.HostDialed
 	if r.Config.HostDialed {
-		pv.limits = hostDialedLimits(limits)
+		c, why := r.hostDialedCapOf(n, &prof.Spec)
+		if why != "" {
+			pv.problem = why
+			return pv, nil
+		}
+		pv.hostDialedCap = c
+		pv.limits = hostDialedLimits(limits, c)
 	}
 	if !v1alpha1.ProviderReady(p, r.Clock.Now()) {
 		pv.problem = fmt.Sprintf("Provider %s is not Ready", n)

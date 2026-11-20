@@ -43,8 +43,12 @@ const Version = 1
 // MaxMessage bounds one message's line, its newline excluded.
 const MaxMessage = 256 << 10
 
-// MaxAllocations bounds a set's Allocations: the 2 a host-dialed Provider
-// may have (agentapi.HostDialedMaxAllocations), with room for an unfenced
+// MaxAllocations bounds a set's Allocations: the most a host-dialed Provider
+// may have, which is 8 at the largest budget its profile's
+// transport.loginHostBudget admits (v1alpha1.HostDialedCapMax; HBEP-4, open
+// question 17). The field's upper bound keeps the cap within this one, and
+// TestMaxAllocationsIsAtLeastTheLargestHostDialedCap holds the two constants
+// together. At the default cap of 2 it leaves room for an unfenced
 // hand-over's surplus.
 const MaxAllocations = 8
 
