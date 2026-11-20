@@ -39,7 +39,8 @@ type Config struct {
 	// Providers use its login host, itself included, and false while its
 	// controller has not said which host that is (hostdial.Hosts.OnHostOf). It
 	// is read only when the Provider's profile sets transport.loginHostBudget;
-	// nil reads as never known.
+	// while it is not known (and for nil) the Provider is planned with M = 1
+	// (hostDialedCapOf).
 	LoginHostProviders func(provider string) (m int, known bool)
 	// AgentDigest returns the SHA-256, 64 lowercase hex, of the allocation
 	// agent's build for a CPU architecture (HBEP-7, Provisioning).

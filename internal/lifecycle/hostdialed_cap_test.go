@@ -130,8 +130,7 @@ func TestHostDialedCapStaysTwoInRelayKeeperMode(t *testing.T) {
 }
 
 // TestHostDialedCapOfZeroMakesTheProviderUnavailable: a budget that leaves no room beside the stack's masters (5 with 5
-// Providers on the host: floor(0 / 2) = 0), and a Provider whose controller has not said which host it uses while the
-// profile sets a budget, are ProviderUnavailable (HBEP-7): no Allocation is made and none waits on it.
+// Providers on the host: floor(0 / 2) = 0) is ProviderUnavailable (HBEP-7): no Allocation is made and none waits on it.
 func TestHostDialedCapOfZeroMakesTheProviderUnavailable(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -140,7 +139,6 @@ func TestHostDialedCapOfZeroMakesTheProviderUnavailable(t *testing.T) {
 	}{
 		{"budget 5, five Providers on the host: cap 0", withLoginHostBudget(i32(5), 5), "leaves no room for an Allocation beside the 5 master(s)"},
 		{"budget 5, six Providers: below zero reads 0", withLoginHostBudget(i32(5), 6), "so the host-dialed cap is 0"},
-		{"a budget and no login host said yet", withLoginHostBudget(i32(11), -1), "has not said which login host it uses yet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rg := newRig(t, tc.opts...)
@@ -236,5 +234,59 @@ func TestNoExtraInHostDialedModeAboveTheDefaultCap(t *testing.T) {
 				t.Fatalf("%d Allocations for a deployment of one Instance with k 1, want %d", n, tc.want)
 			}
 		})
+	}
+}
+
+// TestControllerRestartWithABudgetSetChangesNothingWhileTheLoginHostIsUnknown: on a live stack whose profile sets a budget, a
+// controller start leaves the Providers' controllers' register empty until each has claimed its login host (M unknown).
+// The planner plans the Provider with M = 1 meanwhile (hostDialedCapOf), so nothing is made unavailable: with a ready
+// primary, a restart and several passes with M unknown, then M known, no Allocation or Instance is created, deleted, ended
+// or annotated, the deployment stays Ready and AsDesired, and no ProviderUnavailable is raised or counted.
+func TestControllerRestartWithABudgetSetChangesNothingWhileTheLoginHostIsUnknown(t *testing.T) {
+	known := true
+	rg := newRig(t, withHostDialed(), withMaxTime(4*time.Hour),
+		withProfile(func(s *v1alpha1.PlatformProfileSpec) {
+			s.Transport = &v1alpha1.TransportProfile{LoginHostBudget: i32(11)}
+		}),
+		withConfig(func(c *Config) { c.LoginHostProviders = func(string) (int, bool) { return 1, known } }))
+	hoStart(rg, nil)
+	snapshot := func() string {
+		var out []string
+		for _, a := range rg.allAllocations() {
+			out = append(out, fmt.Sprintf("A %s %s %s del=%v ann=%v", a.Name, a.UID, a.Status.AtProvider.Phase, a.DeletionTimestamp, a.Annotations))
+		}
+		for _, in := range rg.instances(hoMD) {
+			out = append(out, fmt.Sprintf("I %s %s %s del=%v ann=%v", in.Name, in.UID, in.Status.Phase, in.DeletionTimestamp, in.Annotations))
+		}
+		return strings.Join(out, "\n")
+	}
+	before := snapshot()
+	if n := rg.readyCount(hoMD); n != 1 {
+		t.Fatalf("%d ready before the restart, want 1", n)
+	}
+	check := func(what string) {
+		t.Helper()
+		if got := snapshot(); got != before {
+			t.Fatalf("%s: the objects changed:\nbefore:\n%s\nafter:\n%s", what, before, got)
+		}
+		if c := rg.condition(hoMD, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonAsDesired {
+			t.Fatalf("%s: Degraded = %s/%s %q, want False/AsDesired", what, c.Status, c.Reason, c.Message)
+		}
+		if n := len(rg.rec.Find(eventDegraded, v1alpha1.ReasonProviderUnavailable)); n != 0 {
+			t.Fatalf("%s: %d ProviderUnavailable events, want none", what, n)
+		}
+	}
+	known = false
+	rg.restartController()
+	for i := range 6 {
+		rg.clock.Advance(10 * time.Second)
+		rg.Step()
+		check(fmt.Sprintf("pass %d after the restart, the login host unknown", i+1))
+	}
+	known = true
+	for i := range 3 {
+		rg.clock.Advance(10 * time.Second)
+		rg.Step()
+		check(fmt.Sprintf("pass %d with the login host known", i+1))
 	}
 }
