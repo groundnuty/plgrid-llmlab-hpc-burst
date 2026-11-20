@@ -203,12 +203,9 @@ const (
 	LongPromptMax = 28_672
 	// EngineProbeInterval is Sano's health.probeInterval (profiles/sano.yaml:143): the agent reads the engine's metrics once an interval, and the controller's
 	// gauges repeat the last read between reads, so a scrape every BaselinePoll sees the same read several times. The agent's own read time
-	// (hpcburst_instance_metrics_read_timestamp_seconds, internal/lifecycle/metrics.go:132) tells the reads apart, and only DISTINCT reads are samples.
+	// (hpcburst_instance_metrics_read_timestamp_seconds, internal/lifecycle/metrics.go:132) tells the reads apart, and only DISTINCT reads are samples; it also places a
+	// read inside P1-long's at-cap stretch (readsAtTheCap), with the node's clock against this host's a stated limit.
 	EngineProbeInterval = 10 * time.Second
-	// EngineReadLag is how long before the first scrape that saw it a read may have been taken: the agent's report reaches the controller up to a probe
-	// interval after the read. A read is placed by the time of the scrape that first saw it, so it counts as taken inside a stretch only when that scrape was
-	// more than this after the stretch began: a stated limit, never a read taken before the stretch posted as at it.
-	EngineReadLag = EngineProbeInterval
 	// EngineWaitingSustain is how many consecutive DISTINCT engine reads with requests waiting fail a phase: 3, which at Sano's 10 s probe interval is about
 	// 20 to 30 s of waiting. N sessions that start together can have their first prefills briefly above the engine's batched-token budget, so a read or two with
 	// requests waiting is no sign that the engine is the bottleneck: such a blip is a reading, posted with its count and its longest run (the science agent's

@@ -140,7 +140,7 @@ var baselineInvalidCases = []struct{ fault, why string }{
 	{"llmlab-spill-below-the-cap", "LLMLab request(s) arrived while the front's records showed fewer than the cap's 11 requests in flight on the Instance, at the arrival or within 1ms after it: not a cap spill"},
 	{"llmlab-spill-50ms-before-the-cap", "not a cap spill"},
 	{"llmlab-spill-2ms-before-the-cap", "not a cap spill"},
-	// A KV figure is posted as at the cap only from a read taken inside the cap's stretch (#776's review, point 7).
+	// A KV figure is posted as at the cap only from a read whose own time falls inside the cap's stretch (#776's review, point 7; the science agent's ruling on #764, 19 Nov 2026).
 	{"long-no-read-in-window", "no distinct engine read was taken inside the stretch with the cap's 11 requests in flight"},
 	{"ratio-unread", "the ratio probe's usage record holds no prompt tokens"},
 	// Point 3 of PR 809's review: a ratio probe that answered as its time bound fired ends the run before any phase, which was a PASS with four phases absent.
@@ -167,8 +167,9 @@ func init() {
 	dryCases[BetaBaselineName] = baselineCases
 }
 
-// dryReadEpoch is the agent's clock for the dry engine's reads: its own, unrelated to the fake clock.
-var dryReadEpoch = time.Date(2026, 11, 18, 3, 0, 0, 0, time.UTC)
+// dryReadLag is how long before the look that first saw it the dry engine's read was taken: the look's own tick of the fake clock. The dry node's clock is the
+// fake clock's, so a read's own time is on the clock the stretches are (a node's clock skewed against this host's is the fault long-no-read-in-window).
+const dryReadLag = time.Second
 
 const (
 	dryServedUID      = "00000000-0000-4000-8000-0000000000a1"
@@ -230,7 +231,7 @@ type dryBaseline struct {
 	waitCalls        int
 	phaseWaits       bool
 	phaseCalls       int
-	readSeq          int
+	lastReadAt       time.Time
 	phaseT0          time.Time
 	p1LongRowsRead   bool
 	phaseSamples     int
@@ -559,7 +560,7 @@ func (w *dryBaseline) EngineSample(context.Context) (EngineSample, bool) {
 	}
 	w.d.tick(time.Second) // each look is a second of the fake clock, so a generator that never ends reaches the phase's bound
 	w.phaseCalls++
-	// Every scrape is a new read of the engine, 10 s after the last, except in the faults whose gauges repeat a read: the controller's gauges do between reads,
+	// Every scrape is a new read of the engine, except in the faults whose gauges repeat a read: the controller's gauges do between reads,
 	// and only the agent's read time tells two scrapes of one read apart (#776's review, point 7).
 	newRead := true
 	switch {
@@ -568,19 +569,26 @@ func (w *dryBaseline) EngineSample(context.Context) (EngineSample, bool) {
 	case w.d.fault("engine-waiting-cached") && w.phase.Name == PhaseP2:
 		newRead = w.phaseCalls%4 == 1 // one read every four scrapes
 	}
-	if newRead {
-		w.readSeq++
-	}
 	// A scrape while the phase's generator runs is first seen inside the phase's stretch, 20 s apart; the one before a phase starts and the one after its generator
 	// ended are first seen outside it, at the clock's own time.
 	at := w.d.now()
 	if !w.genDone() {
 		at = w.phaseT0.Add(time.Duration(w.phaseCalls) * 20 * time.Second)
 	}
-	s := EngineSample{At: at, ReadAt: dryReadEpoch.Add(time.Duration(w.readSeq) * EngineProbeInterval), Running: w.running, KVUsage: w.kv, Preemptions: w.pre}
-	if w.d.fault("long-no-read-in-window") && w.phase.Name == PhaseP1Long {
-		s.At = w.phaseT0.Add(time.Hour) // every read first seen long after the cap's stretch
+	// A new read is taken dryReadLag before the look that first saw it, and always after the last one (the in-phase looks are stamped 20 s apart whatever the
+	// clock says, so a look can come before the one that went before it); a look that sees a repeated read shows the last read's time. The node's clock an hour
+	// ahead of this host's, for the whole run, puts every read's own time long after the cap's stretch.
+	if newRead {
+		readAt := at.Add(-dryReadLag)
+		if w.d.fault("long-no-read-in-window") {
+			readAt = readAt.Add(time.Hour)
+		}
+		if !readAt.After(w.lastReadAt) {
+			readAt = w.lastReadAt.Add(time.Millisecond)
+		}
+		w.lastReadAt = readAt
 	}
+	s := EngineSample{At: at, ReadAt: w.lastReadAt, Running: w.running, KVUsage: w.kv, Preemptions: w.pre}
 	switch {
 	case w.d.fault("engine-waiting-cached") && w.phase.Name == PhaseP2:
 		// The single read with requests waiting is scraped four times.
@@ -748,7 +756,7 @@ func (w *dryBaseline) build(ph Phase) (gen []GenRow, rows []FrontRow, llm, insta
 		llmSessions = 150 // one request each: the guard is the metric's, past 144
 	}
 	// A turn takes two seconds, and in the long phase forty (eleven prompts of 26k tokens prefill together, so the cap's stretch is long enough to hold a read
-	// taken after the probe interval); the next turn starts after the think time.
+	// taken inside it); the next turn starts after the think time.
 	// serialized runs the phase's sessions one after another, every configured turn each, so that at most one request is ever in flight: the control that
 	// proves nothing. In the long phase a turn takes twenty seconds then, to keep eleven sessions of two turns inside the phase's bound.
 	serialized := (w.d.fault("p1-serialized") && ph.Name == PhaseP1) || (w.d.fault("long-serialized") && ph.Name == PhaseP1Long)
