@@ -67,9 +67,12 @@ type GenRow struct {
 
 // EngineSample is one read of the served Instance's engine gauges (HBEP-8, Engine gauges per Instance), from the controller's /metrics.
 type EngineSample struct {
-	// At is this host's time of the scrape that FIRST saw this read, and ReadAt the agent's own time of the read (its clock, from
-	// hpcburst_instance_metrics_read_timestamp_seconds): used only to tell reads apart, never compared with this host's clock. A sample with no ReadAt is
-	// never fresh, and the controller's gauges repeat a read between reads, so only a read newer than the last one taken is a sample.
+	// At is this host's time of the scrape that FIRST saw this read, and ReadAt the agent's own time of the read (the node's clock, from
+	// hpcburst_instance_metrics_read_timestamp_seconds, stamped when the agent's read returned). ReadAt tells reads apart, and is compared with this
+	// host's clock for ONE purpose: placing a read inside a stretch with the cap's requests in flight (readsAtTheCap), whose bounds are the front's records
+	// on this host's clock. The skew of the node's clock against this host's is a stated limit of that placement, and At is never used for it. A sample
+	// with no ReadAt is never fresh and never at the cap, and the controller's gauges repeat a read between reads, so only a read newer than the last
+	// one taken is a sample.
 	At          time.Time `json:"at"`
 	ReadAt      time.Time `json:"readAt"`
 	Running     float64   `json:"running"`

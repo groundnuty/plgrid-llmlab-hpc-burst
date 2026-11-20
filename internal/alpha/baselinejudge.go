@@ -778,7 +778,7 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 	// eleven prompts of 24k tokens that arrive together queue in the engine's own prefill, and the reading is what R4's budget is compared against; only the cap
 	// is a check there, and the reading must have been taken at the cap.
 	if ph.Kind == KindLong && ph.Sessions == cap && len(readsAtTheCap(po, joined, managed, cap)) == 0 {
-		inv("no distinct engine read was taken inside the stretch with the cap's %d requests in flight (a read counts when its first scrape came more than %s after the stretch began), so the KV use at the cap was not witnessed", cap, EngineReadLag)
+		inv("no distinct engine read was taken inside the stretch with the cap's %d requests in flight (a read counts when the agent's own time of it falls inside the stretch, so the node's clock against this host's is a stated limit), so the KV use at the cap was not witnessed", cap)
 	}
 	if len(po.Engine) < 2 {
 		f("fewer than 2 distinct engine reads (by the agent's own read time) were taken in the phase, so the engine's running, waiting and preemptions were not checked: repeated copies of one read count once")
@@ -838,14 +838,17 @@ func atCapWindows(rows []FrontRow, cap int) [][2]time.Time {
 	return out
 }
 
-// readsAtTheCap are the phase's distinct engine reads taken inside a stretch with the cap's requests in flight on the Instance. A read is placed by the time of
-// the scrape that first saw it (At), which may be up to a probe interval after the read was taken, so it counts only when that scrape came more than
-// EngineReadLag after the stretch began and before it ended: a stale KV figure is never posted as at the cap.
+// readsAtTheCap are the phase's distinct engine reads taken inside a stretch with the cap's requests in flight on the Instance. A read is placed by its OWN
+// time, ReadAt, the agent's clock (the science agent's ruling on #764, 19 Nov 2026): it counts when ReadAt falls inside a stretch, [start, end], the front's
+// records on this host's clock. The scrape that first saw it (At) is not used: it can come up to a probe interval after the read, so a stretch of that length
+// or less could never hold a counted read. The skew between the node's clock and this host's is a stated limit: a read stamped by a node clock that runs
+// ahead of or behind this host's by more than the distance from the stretch's edge is placed outside it, or inside one it was not taken in. A sample with no
+// ReadAt never counts: a stale figure is never posted as at the cap.
 func readsAtTheCap(po PhaseObs, joined []joinedRow, managed string, cap int) []EngineSample {
 	var out []EngineSample
 	for _, w := range atCapWindows(rowsOn(joined, managed, RouteServed), cap) {
 		for _, s := range po.Engine {
-			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {
+			if !s.ReadAt.IsZero() && !s.ReadAt.Before(w[0]) && !s.ReadAt.After(w[1]) {
 				out = append(out, s)
 			}
 		}
@@ -996,7 +999,7 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 				// The KV use is posted as AT THE CAP only from the distinct reads taken inside the stretch with the cap's requests in flight.
 				kvReads = readsAtTheCap(po, joined, o.LLMLabProvider, o.Cap)
 				kvWhat = fmt.Sprintf("of the cache (vllm:kv_cache_usage_perc) over the %d distinct read(s) taken inside the stretch with the cap's requests in flight", len(kvReads))
-				reading = " (a READING, ruling H0: the declared charge of 1,152 tokens a session against the cache's real use at the cap; a read is placed by the first scrape that saw it, and counted only more than the probe interval after the stretch began)"
+				reading = " (a READING, ruling H0: the declared charge of 1,152 tokens a session against the cache's real use at the cap; a read is placed by the agent's own time of it, and counted when that falls inside the stretch; the node's clock against this host's is a stated limit)"
 			}
 			kvLine := "KV use at the cap NOT witnessed: no distinct read was taken inside the stretch with the cap's requests in flight"
 			if len(kvReads) > 0 {

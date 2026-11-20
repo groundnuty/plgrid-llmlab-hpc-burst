@@ -1271,9 +1271,10 @@ beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_
   'examples/modeldeployment-athena-now-qwen3-vl-8b-instruct.yaml@@    names:
       - athena-now@@    names:
       - athena-a100'
-  # #776's review, point 7: only a read newer than the last is an engine sample, and KV is posted as at the cap only from a read inside the cap's stretch.
+  # #776's review, point 7: only a read newer than the last is an engine sample. And (the science agent's ruling on #764, 19 Nov 2026) KV is posted as at the cap
+  # only from a read whose OWN time falls inside the cap's stretch: the mutant restores the old rule, the time of the scrape that first saw it, more than a probe interval after the stretch began.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
-  'baselinejudge.go@@			if s.At.After(w[0].Add(EngineReadLag)) && !s.At.After(w[1]) {@@			if !s.At.After(w[1]) {'
+  'baselinejudge.go@@			if !s.ReadAt.IsZero() && !s.ReadAt.Before(w[0]) && !s.ReadAt.After(w[1]) {@@			if s.At.After(w[0].Add(EngineProbeInterval)) && !s.At.After(w[1]) {'
   # #776's review, point 5: the cap-spill rule's tick (0 rejects a healthy burst), guard 2 (a failed dial in a phase) and the front log's privacy (the post prints the matches).
   'baseline.go@@	ArrivalTick = time.Millisecond@@	ArrivalTick = 0'
   'baselinejudge.go@@		case po.DialFailures > 0:@@		case false:'
