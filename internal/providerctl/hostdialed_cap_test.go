@@ -20,7 +20,6 @@ import (
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/hostdial"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider"
-	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/provider/fake"
 )
 
 // withBudget sets the profile's transport.loginHostBudget.
@@ -123,36 +122,6 @@ func setBudget(e *env, b int32) {
 	e.profiles.set(func(v *slurm.Validated) { v.Profile.Spec.Transport = &v1alpha1.TransportProfile{LoginHostBudget: &b} })
 }
 
-// restartRelays models a controller restart for the relays: the old owner stops, and a new controller is built with a
-// register and slots of its own, empty as a new process's are, over the same objects. The returned owner runs until the
-// test ends.
-func restartRelays(e *env, stop func()) {
-	e.t.Helper()
-	stop()
-	e.opts.Relays.Hosts, e.opts.Relays.Slots = hostdial.NewHosts(), hostdial.NewSlots(0)
-	e.build()
-	runRelays(e)
-}
-
-// stoppableRelays is runRelays with a stop for the test to call.
-func stoppableRelays(e *env) (stop func()) {
-	e.t.Helper()
-	if err := e.ctl.shared.relays.enroll(e.ctx, e.c); err != nil {
-		e.t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = e.ctl.RunRelays(ctx); close(done) }()
-	return func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(30 * time.Second):
-			e.t.Error("the relay owner did not stop")
-		}
-	}
-}
-
 // pairsHeld reports, for the Allocations named, whether each holds its pair of relays and none waits for slots.
 func pairsHeld(e *env, tags map[string]bool) bool {
 	held := map[string]int{}
@@ -171,10 +140,10 @@ func pairsHeld(e *env, tags map[string]bool) bool {
 }
 
 // Through the reconciler: a cap of 5 gives each of five running Allocations its pair of relays on the login node, none
-// waiting for slots (the relay limit is max(2 x cap, 2 x admitted): 10 at a budget of 11 beside one master, 2 x 5 + 1 <=
-// 11). Without the limit the third to fifth would wait for slots for good, with no error. With no budget the limit is the
-// default 4, as on main.
-func TestEveryAdmittedAllocationHoldsItsPair(t *testing.T) {
+// waiting for slots (the relay limit is 2 x the cap: 10 at a budget of 11 beside one master, 2 x 5 + 1 <= 11). Without the
+// limit the third to fifth would wait for slots for good, with no error. With no budget the limit is the default 4, as on
+// main.
+func TestEveryAllocationUnderTheCapHoldsItsPair(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mods   []envOption
@@ -203,111 +172,36 @@ func TestEveryAdmittedAllocationHoldsItsPair(t *testing.T) {
 	}
 }
 
-// THE REVIEW'S SCENARIO (PR 814, point 1): two Allocations run, a third is admitted (submitted, still queued), the budget
-// is cut from 11 to 5 (a cap of 2), and then the third's job starts. Under a limit of 2 x cap alone it would wait for
-// relays, miss its registration and be released; the limit counts the Provider's admitted Allocations too, so the third
-// GETS its pair, and nothing is released.
-func TestAnAdmittedAllocationStillGetsItsPairAfterTheBudgetIsCut(t *testing.T) {
+// UNSET IS EXACTLY MAIN (the science agent's ruling U on #814): with no budget the relay limit is the default 4 whatever the
+// Provider has admitted, so in an unfenced hand-over (HBEP-11's accepted overlap) the surplus third Allocation WAITS for its
+// pair, as on main, and the login node never holds more than 4 relays. The row makes the third exist the way the overlap does,
+// admitted past the cap by another leader: the budget is set while the three are made and removed before the relays start.
+func TestAnUnsetBudgetIsExactlyMainASurplusThirdWaitsForItsPair(t *testing.T) {
 	e := newEnv(t, hostDialedOn(hostdial.NewHosts(), 1000), withBudget(11))
-	runRelays(e)
-	tags := map[string]bool{}
-	for _, n := range []string{"alloc-a", "alloc-b"} {
-		e.newAlloc(n)
-		e.run(n, 4)
-		tags[tagOf(e.get(n))] = true
-	}
-	e.batch.Enqueue(fake.Script{QueueWait: 10 * time.Minute}) // the third job queues for ten minutes
-	e.newAlloc("alloc-c")
-	e.run("alloc-c", 4)
-	if p := e.get("alloc-c").Status.AtProvider.Phase; p == v1alpha1.AllocationRunning {
-		t.Fatalf("the third Allocation runs at once; the row needs it queued")
-	}
-	if n := e.count("sbatch"); n != 3 {
-		t.Fatalf("%d sbatch calls, want 3: the third is admitted", n)
-	}
-	waitRelays(t, "the first two hold their pairs", func() bool { return pairsHeld(e, tags) })
-	setBudget(e, 5) // the operator cuts the budget: a cap of floor((5 - 1) / 2) = 2
-	e.run("alloc-a", 2)
-	e.clock.Advance(11 * time.Minute) // the third job starts
-	e.run("alloc-c", 4)
-	a := e.get("alloc-c")
-	if a.Status.AtProvider.Phase != v1alpha1.AllocationRunning {
-		t.Fatalf("the third Allocation is %s after its job started, want Running", a.Status.AtProvider.Phase)
-	}
-	tags[tagOf(a)] = true
-	waitRelays(t, "the admitted third Allocation gets its pair after the cut, none waiting", func() bool { return pairsHeld(e, tags) })
-	if got := e.opts.Relays.Slots.InUse(loginHost); got != 6 {
-		t.Errorf("%d slots taken, want 6: three pairs, the held two untouched", got)
-	}
-	for _, n := range []string{"alloc-a", "alloc-b", "alloc-c"} {
-		if p := e.get(n).Status.AtProvider.Phase; p != v1alpha1.AllocationRunning {
-			t.Errorf("%s is %s, want Running: nothing is released", n, p)
-		}
-	}
-}
-
-// A restart with five Allocations serving under a budget that was cut meanwhile (a cap of 2): the new process's slots
-// are empty, and every admitted Allocation takes its pair again, with no exemption: five admitted give a limit of 10.
-// A sixth admission is refused at the cut cap by the final check before its submit, so it never asks for a pair.
-func TestARestartUnderACutBudgetReadoptsEveryServingAllocation(t *testing.T) {
-	e := newEnv(t, hostDialedOn(hostdial.NewHosts(), 1000), withBudget(11))
-	stop := stoppableRelays(e)
-	names := []string{"alloc-0", "alloc-1", "alloc-2", "alloc-3", "alloc-4"}
-	tags := map[string]bool{}
-	for _, n := range names {
-		e.newAlloc(n)
-		e.run(n, 4)
-		tags[tagOf(e.get(n))] = true
-	}
-	waitRelays(t, "five pairs held", func() bool { return pairsHeld(e, tags) })
-	setBudget(e, 5) // cut while serving: a cap of 2
-	restartRelays(e, stop)
-	for _, n := range names {
-		e.run(n, 3)
-	}
-	waitRelays(t, "all five re-adopted, each with its pair, none waiting", func() bool { return pairsHeld(e, tags) })
-	if got := e.opts.Relays.Slots.InUse(loginHost); got != 10 {
-		t.Errorf("%d slots taken after the restart, want 10", got)
-	}
-	e.newAlloc("alloc-6")
-	e.run("alloc-6", 4)
-	if n := e.count("sbatch"); n != 5 {
-		t.Errorf("%d sbatch calls, want still 5: the sixth is refused at the cut cap", n)
-	}
-	rec, err := readRecord(e.get("alloc-6"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.sub == nil || rec.sub.State != v1alpha1.SubmissionRejected || rec.sub.Code != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(rec.sub.Reason, "at most 2 in host-dialed mode") {
-		t.Errorf("the sixth Allocation's record %+v: want Rejected, SubmitLimitReached, naming the cut cap of 2", rec.sub)
-	}
-	if rs := relaysOf(e, tagOf(e.get("alloc-6"))); len(rs) != 0 {
-		t.Errorf("the refused sixth Allocation has %d relays", len(rs))
-	}
-}
-
-// The budget REMOVED while five serve (a reduction to "unset", whose cap is 2) is the same cut: a restart takes all five
-// pairs again, since the limit is max(2 x 2, 2 x the five admitted), where a bare default of 4 would strand the third to
-// fifth. Removing a budget never releases a running job (PR 814, point 1).
-func TestARestartAfterTheBudgetIsRemovedReadoptsEveryServingAllocation(t *testing.T) {
-	e := newEnv(t, hostDialedOn(hostdial.NewHosts(), 1000), withBudget(11))
-	stop := stoppableRelays(e)
-	tags := map[string]bool{}
-	for i := range 5 {
+	for i := range 3 {
 		n := fmt.Sprintf("alloc-%d", i)
 		e.newAlloc(n)
-		e.run(n, 4)
-		tags[tagOf(e.get(n))] = true
+		e.run(n, 4) // running, its relays wanted; the owner has not started yet
 	}
-	waitRelays(t, "five pairs held", func() bool { return pairsHeld(e, tags) })
-	e.profiles.set(func(v *slurm.Validated) { v.Profile.Spec.Transport = nil }) // the operator removes the budget
-	restartRelays(e, stop)
-	for i := range 5 {
-		e.run(fmt.Sprintf("alloc-%d", i), 3)
+	if n := e.count("sbatch"); n != 3 {
+		t.Fatalf("%d sbatch calls, want the 3 the budget of 11 admitted", n)
 	}
-	waitRelays(t, "all five re-adopted, each with its pair, none waiting", func() bool { return pairsHeld(e, tags) })
-	if got := e.opts.Relays.Slots.InUse(loginHost); got != 10 {
-		t.Errorf("%d slots taken after the restart, want 10", got)
+	e.profiles.set(func(v *slurm.Validated) { v.Profile.Spec.Transport = nil }) // the budget is removed: unset
+	e.run("alloc-0", 2)                                                         // the holder reads the profile again
+	runRelays(e)
+	waiting := func() int {
+		w := map[string]bool{}
+		for _, r := range e.ctl.Relays() {
+			if r.Waiting {
+				w[r.Tag] = true
+			}
+		}
+		return len(w)
+	}
+	waitRelays(t, "two pairs held and the third waiting", func() bool { return e.opts.Relays.Slots.InUse(loginHost) == 4 && waiting() == 1 })
+	time.Sleep(2 * time.Second) // the limit is read again every second while a pair waits: still 4, still one waiting
+	if got, w := e.opts.Relays.Slots.InUse(loginHost), waiting(); got != 4 || w != 1 {
+		t.Fatalf("%d slots taken and %d Allocations waiting after the limit was read again, want 4 and 1: unset is main's 4 relays", got, w)
 	}
 }
 

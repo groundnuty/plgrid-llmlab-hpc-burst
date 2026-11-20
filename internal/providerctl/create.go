@@ -243,9 +243,7 @@ func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocat
 // admittedAllocations counts the Provider's Allocations whose job is submitted
 // or being submitted, from a fresh list of reader, leaving out the one with UID
 // exclude (none when it is empty): the Allocations that hold a place under the
-// host-dialed cap. The re-check before a submit counts the others with it, and
-// the relay limit counts them all with it (relayState.relayLimit), so both read
-// one definition of "admitted".
+// host-dialed cap, which the final check before a submit counts the others of.
 func (e *external) admittedAllocations(ctx context.Context, reader client.Reader, exclude types.UID) (int, error) {
 	var list v1alpha1.AllocationList
 	if err := reader.List(ctx, &list); err != nil {
