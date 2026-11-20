@@ -839,8 +839,9 @@ func atCapWindows(rows []FrontRow, cap int) [][2]time.Time {
 }
 
 // readsAtTheCap are the run's distinct engine reads taken inside a stretch of THIS phase with the cap's requests in flight on the Instance. A read is placed by
-// its OWN time, ReadAt, the agent's clock (the science agent's ruling on #764, 19 Nov 2026): it counts when ReadAt falls inside a stretch, [start, end], the
-// front's records on this host's clock. The scrape that first saw it (At) is not used: it can come up to a probe interval after the read, so a stretch of that
+// its OWN time, ReadAt, the agent's clock (the science agent's ruling on #764, 19 Nov 2026): it counts when ReadAt falls inside a stretch, [start, end), the
+// front's records on this host's clock. The stretch is half-open at its end, as the front's own rule is (atCapWindows: a request ending at t is released at t,
+// so at t the cap no longer holds): a read stamped at the instant a request finishes is no read at the cap. The scrape that first saw it (At) is not used: it can come up to a probe interval after the read, so a stretch of that
 // length or less could never hold a counted read. The skew between the node's clock and this host's is a stated limit: a read stamped by a node clock that runs
 // ahead of or behind this host's by more than the distance from the stretch's edge is placed outside it, or inside one it was not taken in. A sample with no
 // ReadAt never counts: a stale figure is never posted as at the cap.
@@ -855,7 +856,7 @@ func readsAtTheCap(o BaselineObs, po PhaseObs, joined []joinedRow, managed strin
 	var out []EngineSample
 	for _, w := range atCapWindows(rowsOn(joined, managed, RouteServed), cap) {
 		for _, s := range runReads(o, po) {
-			if !s.ReadAt.IsZero() && !s.ReadAt.Before(w[0]) && !s.ReadAt.After(w[1]) {
+			if !s.ReadAt.IsZero() && !s.ReadAt.Before(w[0]) && s.ReadAt.Before(w[1]) {
 				out = append(out, s)
 			}
 		}
