@@ -107,6 +107,15 @@ type Target struct {
 	// new Gen (HBEP-6, The relay keeper; issue #343). same ignores it, so
 	// seeding it restarts no relay. Nil is alpha's.
 	Final map[agentapi.RelayChannel]string
+	// RelayLimit, when set, is the most relays the Allocation's login node may
+	// hold, read under the slot lock at every attempt to take the Allocation's
+	// pair (Slots.AcquireWith): a Provider whose profile sets a login-host
+	// budget answers 2 x its cap (HBEP-4, open question 17). It never revokes a
+	// pair held, and a relay's reconnect asks for none. It reports false, and the
+	// default limit holds (exactly main's 4), when the profile sets no budget,
+	// and for the relay keeper and a test. same ignores it. Nil is the default
+	// limit.
+	RelayLimit func() (int, bool)
 	// OnStart, when set, is told of each ssh start of a channel's relay, for
 	// the keeper's count of restarts, which outlives a Drop (HBEP-8,
 	// hpcburst_relay_restarts_total; issue #343). Nil is alpha's.
@@ -486,7 +495,7 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 	}
 	go func() {
 		defer close(a.done)
-		release, err := o.o.Slots.Acquire(ctx, t.Login, len(a.relays))
+		release, err := o.o.Slots.AcquireWith(ctx, t.Login, len(a.relays), t.RelayLimit)
 		if err != nil {
 			return
 		}

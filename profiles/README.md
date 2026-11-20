@@ -135,7 +135,7 @@ It is not a deployment-ID input. A partition that states no format gets `sif` (`
 Each profile ends with an `unknown:` list. All three share these:
 - compute-node outbound internet and inbound reachability: needs a job, which is spike S1;
 - user namespaces and the container runtime on compute nodes: needs a job;
-- the login node's effective ssh connection limits: Helios's `sshd_config` is not readable by a plain user, Sano's readable files set none and the effective values were not read, and Athena's was not probed.
+- the login node's effective ssh connection limits: Helios's `sshd_config` is not readable by a plain user, Sano's readable files set none and the effective values were not read, and Athena's `sshd_config` was not read. Athena's count of connections the login host held was probed on 19 Nov 2026: at least 12 beside a master, so a stack's budget is at least 11 (HBEP-4, open question 17; recorded in `athena.yaml` and `athena-now.yaml`, whose `transport.loginHostBudget` stays unset).
 
 Specific to each platform:
 - **Helios:** whether a slurmrestd endpoint exists and is reachable for a plain user; the size of the node-local disk behind `-C localfs`; the GPU model on `plgrid-gpu-rtx`; whether a lightweight poller is allowed on the login node.

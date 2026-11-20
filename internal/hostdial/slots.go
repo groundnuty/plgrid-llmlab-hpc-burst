@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// DefaultRelaysPerLogin is alpha's cap on relays per login node: 4, that is 2
-// Allocations, the handover pair (HBEP-6, Dial-home modes, host-dialed mode).
-// The probe of 9 Nov 2026 held 4 concurrent connections, and made 10 at one a
-// second, with no refusal. A per-platform budget stays HBEP-4's open question
-// 17.
+// DefaultRelaysPerLogin is alpha's default cap on relays per login node: 4,
+// that is 2 Allocations, the handover pair (HBEP-6, Dial-home modes,
+// host-dialed mode). The probe of 9 Nov 2026 held 4 concurrent connections, and
+// made 10 at one a second, with no refusal. A profile's transport.loginHostBudget
+// gives its login node another limit (Slots.SetLimit; HBEP-4, open question 17).
 const DefaultRelaysPerLogin = 4
 
 // Slots caps the relays on each login node across the whole process: every
@@ -24,6 +24,14 @@ const DefaultRelaysPerLogin = 4
 // Allocations" (HBEP-6). So a relay that drops never gives its slot to
 // another Allocation, which would leave both with half a pair. A third
 // Allocation on one login node waits for a pair of slots.
+//
+// The 4 is the default. A Provider whose profile sets transport.loginHostBudget
+// gives its Allocations' Acquire a limit to ask each time (AcquireWith; HBEP-4,
+// open question 17): a NEW pair is granted only while the slots held plus the
+// pair stay within it, and the limit is read under the slot lock at every
+// attempt, never stored here, so a change of budget has no update path to
+// order. Held pairs are never revoked or re-checked: a reduction only stops
+// new pairs.
 type Slots struct {
 	max int
 
@@ -45,16 +53,36 @@ func NewSlots(max int) *Slots {
 // Provider's relay owner.
 var SharedSlots = NewSlots(DefaultRelaysPerLogin)
 
+// limitRecheck is how often an Acquire that waits under a limit reads it
+// again, so a raised budget reaches a waiter without any update to the Slots.
+const limitRecheck = time.Second
+
 // Acquire takes n slots on login together, waiting while fewer are free,
 // until ctx ends. The returned release gives them all back; it may be called
 // once.
 func (s *Slots) Acquire(ctx context.Context, login string, n int) (release func(), err error) {
-	if n < 1 || n > s.max {
+	return s.AcquireWith(ctx, login, n, nil)
+}
+
+// AcquireWith is Acquire under a limit. limit, when it is not nil, is called
+// under the slot lock at every attempt, and when it reports a value that value
+// is the most slots login may hold, in place of the default; it is read again
+// every limitRecheck while the call waits. It must not block or call the Slots.
+// Without a limit the call refuses at once an n that the default could never
+// admit; under one it waits, whatever n, since the limit may rise.
+func (s *Slots) AcquireWith(ctx context.Context, login string, n int, limit func() (int, bool)) (release func(), err error) {
+	if n < 1 || (n > s.max && limit == nil) {
 		return nil, fmt.Errorf("hostdial: %d slots asked of a login node capped at %d", n, s.max)
 	}
 	for {
 		s.mu.Lock()
-		if s.used[login]+n <= s.max {
+		lim := s.max
+		if limit != nil {
+			if v, ok := limit(); ok {
+				lim = v
+			}
+		}
+		if s.used[login]+n <= lim {
 			s.used[login] += n
 			s.mu.Unlock()
 			var once sync.Once
@@ -62,10 +90,23 @@ func (s *Slots) Acquire(ctx context.Context, login string, n int) (release func(
 		}
 		wake := s.wake
 		s.mu.Unlock()
+		var timer *time.Timer
+		var recheck <-chan time.Time
+		if limit != nil {
+			timer = time.NewTimer(limitRecheck)
+			recheck = timer.C
+		}
 		select {
 		case <-wake:
+		case <-recheck:
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return nil, ctx.Err()
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 	}
 }
@@ -165,6 +206,28 @@ func (h *Hosts) Claim(login, provider string) (holder string, pending, ok bool) 
 
 func olderThan(a *hostEntry, an string, b *hostEntry, bn string) bool {
 	return a.created.Before(b.created) || (a.created.Equal(b.created) && an < bn)
+}
+
+// OnHostOf is how many of the register's Providers use the login host that
+// provider uses, provider itself included: the stack's Providers on that
+// host, each holding its own master (HBEP-4, open question 17, M in the
+// host-dialed cap). A Provider counts once it has said which host it uses,
+// whether or not its claim was granted, since a refused Provider's master is
+// open all the same. ok is false while provider is not enrolled or has not
+// said which host it uses (or uses none), so M is not known yet.
+func (h *Hosts) OnHostOf(provider string) (n int, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	me, enrolled := h.by[provider]
+	if !enrolled || !me.reported || me.login == "" {
+		return 0, false
+	}
+	for _, e := range h.by {
+		if e.reported && e.login == me.login {
+			n++
+		}
+	}
+	return n, true
 }
 
 // Release forgets provider: its manager has stopped.

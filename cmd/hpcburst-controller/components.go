@@ -501,8 +501,9 @@ func (w wiring) profileReader(r client.Reader) *slurm.ProfileReader {
 // Provider (HBEP-6, Dial-home modes, host-dialed mode), nil in the other
 // modes: control relays dial the agent endpoint (base+3), serving relays the
 // dial-home listener (base+7); every Provider of this process takes its
-// relays' slots from one hostdial.SharedSlots, so the cap of 4 per login node
-// holds across Providers on one cluster; and the relays' ssh configuration
+// relays' slots from one hostdial.SharedSlots, so the limit of 4 per login node
+// (2 for each Allocation of a profile's budgeted cap: syncRelays) holds across
+// Providers on one cluster; and the relays' ssh configuration
 // file is kept beside the ssh masters' sockets.
 func (w wiring) relaySettings() *providerctl.RelaySettings {
 	if w.front == nil || w.front.Mode != agentapi.DialHomeHostDialed {

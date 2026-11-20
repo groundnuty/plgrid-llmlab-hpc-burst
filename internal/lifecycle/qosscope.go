@@ -147,7 +147,7 @@ func (pv *providerView) forGPUs(gpus int32) (*providerView, error) {
 	out.jobLimits = &job
 	out.limits = wide
 	if pv.hostDialed {
-		out.limits = hostDialedLimits(wide)
+		out.limits = hostDialedLimits(wide, pv.hostDialedCap)
 	}
 	out.scope = &qosScope{partition: pv.partition, providerQOS: "", qos: q, limits: own}
 	return &out, nil

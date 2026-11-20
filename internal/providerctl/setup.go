@@ -79,6 +79,13 @@ func New(kube client.Client, reader client.Reader, scheme *runtime.Scheme, o Opt
 	}
 	s := &shared{o: o, kube: kube, reader: reader, builds: &buildCache{}, relays: relays, draining: drainingIn(reader, false)}
 	s.h = &holder{o: &s.o}
+	if relays != nil && relays.keeper == nil {
+		// The Provider's own relay owner: the holder claims the login host before
+		// it hands out a Platform (so before the ssh master can open), and the
+		// relay limit reads the holder's current profile.
+		s.h.claim = relays.claimBeforeMaster
+		relays.transport = s.h.transport
+	}
 	opts := []managed.ReconcilerOption{
 		managed.WithExternalConnector(&connector{s: s}),
 		managed.WithFinalizer(resource.NewAPIFinalizer(kube, v1alpha1.FinalizerCancelAll)),

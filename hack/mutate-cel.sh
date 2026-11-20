@@ -168,6 +168,8 @@ platformprofiles:$.spec.restart.backoff#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.stopGrace#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.restart.window#0|^TestDurationsArePositiveAndFit$
 platformprofiles:$.spec.stagingDir#0|^TestStagingDirRefusesDotDotSegments$
+platformprofiles:$.spec.transport.loginHostBudget#0|^TestLoginHostBudgetBounds$
+platformprofiles:$.spec.transport.loginHostBudget#1|^TestLoginHostBudgetBounds$
 platformprofiles:$.spec.unknownBound#0|^TestDurationsArePositiveAndFit$
 providers:$#0|^TestProviderNamesAreDNS1123Labels$
 providers:$.spec.credentialsRef#0|^TestProviderCredentialsReferenceNamesExactlyOneSource$

@@ -914,6 +914,33 @@ spec:
                 minLength: 1
                 pattern: ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$
                 type: string
+              transport:
+                description: |-
+                  Transport holds the platform's login-host facts the framework reads
+                  (HBEP-4, open question 17).
+                properties:
+                  loginHostBudget:
+                    description: |-
+                      LoginHostBudget is the connections to the platform's login host that
+                      ONE control-plane stack may hold, its Providers' masters included: the
+                      stack's share, not the host's whole budget. A host-dialed Provider then
+                      has at most floor((loginHostBudget - M) / 2) Allocations, M being the
+                      stack's Providers on that login host (HBEP-4, open question 17); unset,
+                      it has 2. An integer from 5 to 17: the cap is then at most 8, the relay
+                      keeper's bound on one set of Allocations. A public profile leaves it
+                      unset, since it cannot know how many stacks share the host.
+                    format: int32
+                    type: integer
+                    x-kubernetes-validations:
+                    - message: 'loginHostBudget must be at least 5: a stack needs
+                        a master and a handover pair of Allocations (HBEP-4, open
+                        question 17)'
+                      rule: self >= 5
+                    - message: 'loginHostBudget must be at most 17: the cap is then
+                        8, the relay keeper''s bound on one set of Allocations (HBEP-4,
+                        open question 17; HBEP-6, The relay keeper)'
+                      rule: self <= 17
+                type: object
               unknownBound:
                 default: 10m
                 description: |-

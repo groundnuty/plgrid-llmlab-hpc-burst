@@ -7,11 +7,13 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/event"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 
+	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/eventcount"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/pkg/agentapi"
@@ -241,17 +243,50 @@ func (o *Options) defaults() error {
 type holder struct {
 	o *Options
 
+	// claim, set in host-dialed mode with the Provider's own relay owner, is
+	// called after a successful profile read and BEFORE get returns a Platform
+	// (so before any command can open the ssh master): it records the
+	// Provider's login host in the register (relayState.claimBeforeMaster).
+	claim func(slurm.Validated) error
+	// reads numbers the profile reads as they start, so a slower read that
+	// finishes last never replaces a newer one's view (v, readSeq).
+	reads atomic.Uint64
+
+	// tp is the transport block of the newest profile read (v), kept apart so
+	// the relay limit reads it under the slot lock without waiting for mu, which
+	// get holds while it makes or closes a Platform.
+	tp atomic.Pointer[v1alpha1.TransportProfile]
+
 	mu       sync.Mutex
 	v        slurm.Validated
+	readSeq  uint64
 	platform Platform
 	closer   io.Closer
 	lastErr  error
 }
 
+// transport is the profile's transport block as the newest read left it, a copy
+// that callers must not change; nil before a read, and while the profile sets
+// none.
+func (h *holder) transport() *v1alpha1.TransportProfile { return h.tp.Load() }
+
 // get reads the Provider's profile and returns it with the Platform. A read or
 // validation failure is returned, and remembered for the Provider's status.
 func (h *holder) get(ctx context.Context) (slurm.Validated, Platform, error) {
+	seq := h.reads.Add(1)
 	v, err := h.o.Profiles.Read(ctx, h.o.Provider)
+	if err == nil && h.claim != nil {
+		// Before the Platform: no command, so no master, until the login host
+		// is in the register (HBEP-4, open question 17). A host that ssh -G
+		// cannot resolve (it timed out) is not claimed this pass, and the
+		// status loop says so (the Provider is Ready False, LoginHostInUse, with
+		// the timeout) as it did before; the Platform is made all the same, so
+		// the poll goes on, and that Provider's master is counted from its first
+		// successful claim: a stated limit.
+		if cerr := h.claim(v); cerr != nil {
+			h.o.Log.Debug("the login host is not claimed before the Platform is made", "error", cerr.Error())
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lastErr = err
@@ -271,7 +306,10 @@ func (h *holder) get(ctx context.Context) (slurm.Validated, Platform, error) {
 	} else if b, ok := h.platform.(*slurm.Batch); ok {
 		b.Configure(v.Profile, v.Settings)
 	}
-	h.v = v
+	if seq > h.readSeq {
+		h.v, h.readSeq = v, seq
+		h.tp.Store(v.Profile.Spec.Transport.DeepCopy())
+	}
 	return v, h.platform, nil
 }
 

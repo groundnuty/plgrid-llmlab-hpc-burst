@@ -79,6 +79,11 @@ spec:
   # prefix. The draft kept no real v0.0.40 document, so the Slurm provider checks it here before alpha (HBEP-4, Graduation criteria).
   jsonDataParser: v0.0.40
   stagingDir: $SCRATCH # facts.storage.scratch_fstype: a Lustre file system, reached through $SCRATCH (HBEP-4, Transport)
+  # transport.loginHostBudget is deliberately UNSET (HBEP-4, open question 17, amended 2026-11-20): it is one control-plane
+  # stack's share of the login host's connections, masters included, and a public profile cannot know how many stacks
+  # share the host. The cap of host-dialed Allocations per Provider is then 2. Athena's measured budget is at least 11
+  # (facts.login_node_policy.ssh_connection_limits: the probe of 19 Nov 2026), so one stack with one Provider there may
+  # set 11 in its own copy, for a cap of 5: floor((11 - 1) / 2).
   maxIdle: 30m # HBEP-4, Platform profile schema, maxIdle: Athena 30 min (HBEP-7, Retention); motivated by facts.login_node_policy.gpu_only (GPU jobs only)
   # jobName.maxLength is measured, not a default: the conformance run on Athena plgrid-now of 1 Nov 2026
   # (step 5, a 56-character job name submitted and read back unchanged from squeue and from sacct; issue #93, comment 6557645735) is
@@ -677,11 +682,11 @@ spec:
           date: "2026-10-30"
           note: "Not stated either way, and not tested, per the spike rules. The prohibition above covers computations; whether a lightweight poller counts is not documented."
         ssh_connection_limits:
-          value: null
-          method: unknown
-          source: "not probed: S5 did not attempt to read /etc/ssh/sshd_config or sshd_config.d on Athena"
-          date: "2026-10-30"
-          note: "No read was attempted, so nothing is known about MaxStartups, MaxSessions or login throttling here. HBEP-4 mentions throttling from parallel logins."
+          value: {connections_held_at_least: 12, held_for: 5m, commands_on_one_master: 4, refused: none, maxlogins_readable: false, login_host_budget_at_least: 11}
+          method: measured
+          source: "https://github.com/groundnuty/plgrid-llmlab-hpc-burst/issues/145#issuecomment-7019586324"
+          date: "2026-11-19"
+          note: "The probe of 19 Nov 2026 held 12 connections for 5 minutes, the probe's bound, beside a master, with no refusal and no maxlogins readable, and four commands ran at once on one master. So the connections one stack may hold on the login host, masters included, are at least 11 (HBEP-4, open question 17). This is the host's measured floor, not a stack's share, and transport.loginHostBudget stays unset below. S5's read of /etc/ssh/sshd_config or sshd_config.d on Athena was never attempted, so MaxStartups, MaxSessions and login throttling are still not known from the files. HBEP-4 mentions throttling from parallel logins."
         gpu_only:
           value: "Athena is for GPU-enabled jobs only; extensive workloads that do not use GPUs lead to account suspension"
           method: documented
@@ -751,7 +756,7 @@ spec:
         reason: "the docs state that a limit exists but not its value; probing it was out of scope"
       - fact: "whether a lightweight long-running process (a poller) on the login node is allowed"
         reason: "the docs prohibit computations on the login node but do not address a lightweight poller; S5 must not test it"
-      - fact: "ssh connection limits of the login node (MaxStartups, MaxSessions)"
-        reason: "not probed: S5 did not attempt to read sshd_config on Athena; HBEP-4 mentions throttling from parallel logins"
+      - fact: "ssh connection limits of the login node as sshd_config states them (MaxStartups, MaxSessions)"
+        reason: "S5 did not attempt to read sshd_config on Athena; HBEP-4 mentions throttling from parallel logins. The count of connections the host held without refusal is a fact above (the probe of 19 Nov 2026)"
       - fact: "whether a slurmrestd service is running and where it is reachable"
         reason: "the binary exists and the docs do not advertise a service; JWT is not enabled, but slurmrestd can also run with local (unix-socket) auth, so reachability for a plain user is unverified"
