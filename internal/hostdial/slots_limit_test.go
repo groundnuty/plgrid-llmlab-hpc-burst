@@ -2,22 +2,23 @@ package hostdial
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// A Provider whose profile sets transport.loginHostBudget gives its login node a limit of 2 relays for each Allocation
-// of its cap (HBEP-4, open question 17): at a cap of 5, five Allocations each hold their pair, and the sixth waits. The
-// default stays 4 on every node with no limit.
-func TestSlotsLimitLetsFiveAllocationsHoldTheirPairs(t *testing.T) {
+// A Provider whose profile sets transport.loginHostBudget answers a limit at every attempt to take a pair (HBEP-4, open
+// question 17): with a limit of 10 (a cap of 5), five Allocations each hold their pair and the sixth waits. The default
+// stays 4 where no limit is given or the limit reports none (an unset budget).
+func TestAcquireWithAdmitsFiveAllocationsUnderALimitOf10(t *testing.T) {
 	s := NewSlots(DefaultRelaysPerLogin)
 	ctx := context.Background()
-	s.SetLimit("login-a", 10) // a cap of 5
+	limit := func() (int, bool) { return 10, true }
 	for i := 1; i <= 5; i++ {
 		short, cancel := context.WithTimeout(ctx, 2*time.Second)
-		if _, err := s.Acquire(short, "login-a", 2); err != nil {
+		if _, err := s.AcquireWith(short, "login-a", 2, limit); err != nil {
 			cancel()
-			t.Fatalf("Allocation %d of a cap of 5 did not get its pair: %v", i, err)
+			t.Fatalf("Allocation %d of a limit of 10 did not get its pair: %v", i, err)
 		}
 		cancel()
 	}
@@ -26,78 +27,72 @@ func TestSlotsLimitLetsFiveAllocationsHoldTheirPairs(t *testing.T) {
 	}
 	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	if _, err := s.Acquire(short, "login-a", 2); err == nil {
-		t.Fatal("a sixth pair on a node limited to 10 was given")
+	if _, err := s.AcquireWith(short, "login-a", 2, limit); err == nil {
+		t.Fatal("a sixth pair under a limit of 10 was given")
 	}
-	// Another node keeps the default of 4.
-	if _, err := s.Acquire(ctx, "login-b", 2); err != nil {
-		t.Fatal(err)
+	// A limit that reports none (an unset budget): the default of 4.
+	login := "login-c"
+	for range 2 {
+		if _, err := s.AcquireWith(ctx, login, 2, func() (int, bool) { return 0, false }); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := s.Acquire(ctx, "login-b", 2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Acquire(short, "login-b", 2); err == nil {
-		t.Fatal("a third pair on a node with no limit of its own was given")
+	if _, err := s.AcquireWith(short, login, 2, func() (int, bool) { return 0, false }); err == nil {
+		t.Fatal("a third pair on a node whose limit reports none was given: the default is 4")
 	}
 }
 
-// A raised limit wakes an Allocation already waiting for its pair; a lowered one keeps the pairs held and holds the
-// next back (HBEP-4: lowering a live stack's share frees its connections only once the Allocations above the new cap
-// have drained); a cleared one is the default again.
-func TestSlotsLimitIsReadAgainByWaiters(t *testing.T) {
+// The limit is read at EVERY attempt, under the slot lock, and again while a call waits: a raised limit reaches a waiter
+// with nothing told to the Slots (no update path), and a lowered one never revokes a pair held, it only refuses the next
+// new pair. A limit read once, at the call, would leave the waiter waiting for good.
+func TestAcquireWithReadsTheLimitAtEachAttempt(t *testing.T) {
 	s := NewSlots(DefaultRelaysPerLogin)
 	ctx := context.Background()
-	rel := make([]func(), 0, 3)
+	var lim atomic.Int64
+	lim.Store(4)
+	limit := func() (int, bool) { return int(lim.Load()), true }
 	for range 2 {
-		r, err := s.Acquire(ctx, "login-a", 2)
-		if err != nil {
+		if _, err := s.AcquireWith(ctx, "login-a", 2, limit); err != nil {
 			t.Fatal(err)
 		}
-		rel = append(rel, r)
 	}
-	got := make(chan struct{})
+	got := make(chan func(), 1)
 	go func() {
-		if r, err := s.Acquire(ctx, "login-a", 2); err == nil {
-			rel = append(rel, r)
-			close(got)
+		if r, err := s.AcquireWith(ctx, "login-a", 2, limit); err == nil {
+			got <- r
 		}
 	}()
 	select {
 	case <-got:
-		t.Fatal("a third pair was given at the default limit of 4")
+		t.Fatal("a third pair was given under a limit of 4")
 	case <-time.After(100 * time.Millisecond):
 	}
-	s.SetLimit("login-a", 6) // the budget is raised: a cap of 3
+	lim.Store(6) // the budget is raised: the waiter reads it at its next attempt
+	var third func()
 	select {
-	case <-got:
+	case third = <-got:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the waiting Allocation did not read the raised limit")
 	}
-	// Lowered below what is held: nothing is taken back, and the next pair waits.
-	s.SetLimit("login-a", 2)
+	// Lowered below what is held: nothing is taken back, and a fourth NEW pair is refused.
+	lim.Store(2)
 	if n := s.InUse("login-a"); n != 6 {
 		t.Fatalf("InUse = %d after the limit was lowered, want the 6 held", n)
 	}
-	short, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	short, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
-	if _, err := s.Acquire(short, "login-a", 2); err == nil {
-		t.Fatal("a pair was given above the lowered limit")
+	if _, err := s.AcquireWith(short, "login-a", 2, limit); err == nil {
+		t.Fatal("a new pair was given above the lowered limit")
 	}
-	if s.Limit("login-a") != 2 {
-		t.Fatalf("Limit = %d, want 2", s.Limit("login-a"))
+	// A freed pair under the lowered limit is not given to a new one either, until the held fall under it.
+	third()
+	if n := s.InUse("login-a"); n != 4 {
+		t.Fatalf("InUse = %d after a pair was released, want 4", n)
 	}
-	// A limit of 0 admits none, and waits rather than failing: the budget may rise.
-	s.SetLimit("login-b", 0)
-	if _, err := s.Acquire(short, "login-b", 2); err == nil || short.Err() == nil {
-		t.Fatalf("a pair under a limit of 0: %v, want a wait that ends with the context", err)
-	}
-	s.ClearLimit("login-a")
-	if s.Limit("login-a") != DefaultRelaysPerLogin {
-		t.Fatalf("Limit = %d after ClearLimit, want the default %d", s.Limit("login-a"), DefaultRelaysPerLogin)
-	}
-	s.SetLimit("login-a", -1) // a negative n changes nothing
-	if s.Limit("login-a") != DefaultRelaysPerLogin {
-		t.Fatalf("a negative limit changed the limit to %d", s.Limit("login-a"))
+	short2, cancel2 := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel2()
+	if _, err := s.AcquireWith(short2, "login-a", 2, limit); err == nil {
+		t.Fatal("a new pair was given with 4 held under a limit of 2")
 	}
 }
 

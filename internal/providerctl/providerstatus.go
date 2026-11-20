@@ -121,7 +121,14 @@ func (l *statusLoop) sync(ctx context.Context) error {
 	var inUse string
 	if r := l.s.relays; r != nil {
 		if cfgErr != nil {
-			r.reportNoLogin()
+			// A profile that cannot be read clears the claim only while no
+			// Platform was ever made, so no ssh master can be open: a master
+			// that is open keeps the Provider's login host in the register, so
+			// the stack's other Providers keep counting it in M (HBEP-4, open
+			// question 17).
+			if cur, _ := l.s.h.current(); cur == nil {
+				r.reportNoLogin()
+			}
 		} else if _, why, err := r.claimLogin(v.SSH); err != nil {
 			inUse = "the login host's claim: " + err.Error()
 		} else {

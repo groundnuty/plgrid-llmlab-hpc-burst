@@ -26,17 +26,18 @@ const DefaultRelaysPerLogin = 4
 // Allocation on one login node waits for a pair of slots.
 //
 // The 4 is the default. A Provider whose profile sets transport.loginHostBudget
-// gives its login node another limit, 2 relays for each Allocation of its cap
-// (SetLimit; HBEP-4, open question 17), which waiters read again when it
-// changes. A limit set below the slots taken keeps the Allocations that hold
-// them and holds the next back until they drain.
+// gives its Allocations' Acquire a limit to ask each time (AcquireWith; HBEP-4,
+// open question 17): a NEW pair is granted only while the slots held plus the
+// pair stay within it, and the limit is read under the slot lock at every
+// attempt, never stored here, so a change of budget has no update path to
+// order. Held pairs are never revoked or re-checked: a reduction only stops
+// new pairs.
 type Slots struct {
 	max int
 
-	mu    sync.Mutex
-	used  map[string]int
-	limit map[string]int // a login node's own limit, in place of max
-	wake  chan struct{}  // closed and replaced when a slot frees or a limit changes
+	mu   sync.Mutex
+	used map[string]int
+	wake chan struct{} // closed and replaced when a slot frees
 }
 
 // NewSlots returns slots with max per login node; max below 1 means
@@ -45,75 +46,43 @@ func NewSlots(max int) *Slots {
 	if max < 1 {
 		max = DefaultRelaysPerLogin
 	}
-	return &Slots{max: max, used: map[string]int{}, limit: map[string]int{}, wake: make(chan struct{})}
+	return &Slots{max: max, used: map[string]int{}, wake: make(chan struct{})}
 }
 
 // SharedSlots is the process's slots, which the controller binary gives every
 // Provider's relay owner.
 var SharedSlots = NewSlots(DefaultRelaysPerLogin)
 
-// SetLimit gives login a limit of n relays in place of the default, and wakes
-// the Allocations waiting for a pair: a limit of 0 admits none. A negative n
-// changes nothing.
-func (s *Slots) SetLimit(login string, n int) {
-	if n < 0 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cur, ok := s.limit[login]; ok && cur == n {
-		return
-	}
-	s.limit[login] = n
-	s.wakeLocked()
-}
-
-// ClearLimit gives login the default limit back, and wakes the Allocations
-// waiting for a pair.
-func (s *Slots) ClearLimit(login string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.limit[login]; !ok {
-		return
-	}
-	delete(s.limit, login)
-	s.wakeLocked()
-}
-
-// Limit is the most relays login may hold now.
-func (s *Slots) Limit(login string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.limitLocked(login)
-}
-
-func (s *Slots) limitLocked(login string) int {
-	if n, ok := s.limit[login]; ok {
-		return n
-	}
-	return s.max
-}
-
-func (s *Slots) wakeLocked() {
-	close(s.wake)
-	s.wake = make(chan struct{})
-}
+// limitRecheck is how often an Acquire that waits under a limit reads it
+// again, so a raised budget reaches a waiter without any update to the Slots.
+const limitRecheck = time.Second
 
 // Acquire takes n slots on login together, waiting while fewer are free,
 // until ctx ends. The returned release gives them all back; it may be called
-// once. Under the default limit it refuses at once an n that could never be
-// admitted; under a limit that SetLimit set it waits, whatever n, since the
-// limit may rise.
+// once.
 func (s *Slots) Acquire(ctx context.Context, login string, n int) (release func(), err error) {
-	s.mu.Lock()
-	_, own := s.limit[login]
-	s.mu.Unlock()
-	if n < 1 || (n > s.max && !own) {
+	return s.AcquireWith(ctx, login, n, nil)
+}
+
+// AcquireWith is Acquire under a limit. limit, when it is not nil, is called
+// under the slot lock at every attempt, and when it reports a value that value
+// is the most slots login may hold, in place of the default; it is read again
+// every limitRecheck while the call waits. It must not block or call the Slots.
+// Without a limit the call refuses at once an n that the default could never
+// admit; under one it waits, whatever n, since the limit may rise.
+func (s *Slots) AcquireWith(ctx context.Context, login string, n int, limit func() (int, bool)) (release func(), err error) {
+	if n < 1 || (n > s.max && limit == nil) {
 		return nil, fmt.Errorf("hostdial: %d slots asked of a login node capped at %d", n, s.max)
 	}
 	for {
 		s.mu.Lock()
-		if s.used[login]+n <= s.limitLocked(login) {
+		lim := s.max
+		if limit != nil {
+			if v, ok := limit(); ok {
+				lim = v
+			}
+		}
+		if s.used[login]+n <= lim {
 			s.used[login] += n
 			s.mu.Unlock()
 			var once sync.Once
@@ -121,10 +90,23 @@ func (s *Slots) Acquire(ctx context.Context, login string, n int) (release func(
 		}
 		wake := s.wake
 		s.mu.Unlock()
+		var timer *time.Timer
+		var recheck <-chan time.Time
+		if limit != nil {
+			timer = time.NewTimer(limitRecheck)
+			recheck = timer.C
+		}
 		select {
 		case <-wake:
+		case <-recheck:
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return nil, ctx.Err()
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 	}
 }
@@ -135,7 +117,8 @@ func (s *Slots) release(login string, n int) {
 	if s.used[login] -= n; s.used[login] <= 0 {
 		delete(s.used, login)
 	}
-	s.wakeLocked()
+	close(s.wake)
+	s.wake = make(chan struct{})
 }
 
 // InUse is how many slots are taken on login.

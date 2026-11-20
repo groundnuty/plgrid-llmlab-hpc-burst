@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
@@ -102,6 +103,14 @@ type relayState struct {
 	// keeper is set in keeper mode (RelaySettings.KeeperSocket): then owner
 	// and ssh stay nil, and the keeper holds the relays (keeper.go).
 	keeper *keeperState
+
+	// transport reads the profile's transport block as the holder has it now
+	// (Setup fills it); nil reads as no budget.
+	transport func() *v1alpha1.TransportProfile
+	// admitted is the Provider's Allocations submitted or being submitted, as
+	// syncRelays last counted them from a fresh list: one number the relay
+	// limit reads, never a stored limit.
+	admitted atomic.Int64
 }
 
 func newRelayState(o Options) (*relayState, error) {
@@ -238,20 +247,47 @@ func (r *relayState) hostDialedCap(spec *v1alpha1.PlatformProfileSpec) (c int32,
 	return v1alpha1.HostDialedCap(spec, m, false), true
 }
 
-// syncRelayLimit gives the login node the relay limit of the Provider's cap:
-// 2 relays for each Allocation (agentapi.RelayChannels), so with the stack's
-// masters the connections stay within the budget; the Slots' default, 4, while
-// the profile sets no budget or in keeper mode. A budget raised lets a waiting
-// Allocation's pair start, and one lowered holds the next pair back until the
-// Allocations above the new cap have drained (HBEP-4, open question 17).
-func (r *relayState) syncRelayLimit(login string, spec *v1alpha1.PlatformProfileSpec) {
-	if spec.Transport == nil || spec.Transport.LoginHostBudget == nil {
-		r.owner.ClearRelayLimit(login)
-		return
+// relayLimit is the most relays this Provider's login node may hold, for the
+// relay owner to read under the slot lock at every attempt to take an
+// Allocation's pair (Target.RelayLimit): max(2 x the cap, 2 x the admitted
+// Allocations), 2 being len(agentapi.RelayChannels), so that with the stack's
+// masters the connections stay within the budget (2 x cap + M <= budget) for
+// every Allocation the cap admitted, and an Allocation submitted before a
+// reduction still gets its pair when its job starts: a reduction only stops
+// new admissions, which the re-check before each submit enforces (HBEP-4, open
+// question 17). The cap reads the profile as the holder has it now and M as
+// the register has it now (1 while this Provider has not claimed its host);
+// the admitted count is the last observation of the fresh list the re-check
+// reads (syncRelays). It reports false, and the default limit holds, when the
+// profile sets no budget, and in keeper mode. It never revokes a pair.
+func (r *relayState) relayLimit() (int, bool) {
+	if r.keeper != nil || r.transport == nil {
+		return 0, false
 	}
-	if c, known := r.hostDialedCap(spec); known {
-		r.owner.SetRelayLimit(login, len(agentapi.RelayChannels)*int(c))
+	tp := r.transport()
+	if tp == nil || tp.LoginHostBudget == nil {
+		return 0, false
 	}
+	m := 1
+	if k, ok := r.hosts.OnHostOf(r.provider); ok {
+		m = k
+	}
+	c := v1alpha1.HostDialedCap(&v1alpha1.PlatformProfileSpec{Transport: tp}, m, false)
+	return len(agentapi.RelayChannels) * int(max(c, int32(r.admitted.Load()))), true
+}
+
+// claimBeforeMaster records the Provider's login host in the register BEFORE
+// the Provider's first command opens its master (the holder calls it before it
+// returns a Platform), so the stack's other Providers count this master in M
+// from the moment it can exist (HBEP-4, open question 17: "each holding its own
+// master"). A refusal (another Provider holds the host) is not an error here:
+// the status loop and Create report it, and the refused Provider's master is
+// open all the same, so it counts. An error is a host that could not be
+// resolved (ssh -G timed out): it is not claimed this pass (the holder logs it
+// and goes on, and the status loop reports it).
+func (r *relayState) claimBeforeMaster(v slurm.Validated) error {
+	_, _, err := r.claimLogin(v.SSH)
+	return err
 }
 
 // enroll records the Provider's age in the login-host register, from its
@@ -347,7 +383,17 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		e.s.o.Log.Info("no relays for this Provider", "tag", tag, "why", inUse)
 		return
 	}
-	r.syncRelayLimit(login, &e.v.Profile.Spec)
+	// The admitted count the relay limit reads is the fresh list the final
+	// check before a submit reads (admittedAllocations), taken before the pair
+	// is asked for, so a restart that finds five Allocations serving under a
+	// budget cut asks for its limit with five admitted. A list that cannot be
+	// read leaves the relays as they were until the next pass.
+	n, err := e.admittedAllocations(ctx, e.s.reader, "")
+	if err != nil {
+		e.s.o.Log.Info("the relays wait for the Provider's Allocations to be counted", "tag", tag, "error", err)
+		return
+	}
+	r.admitted.Store(int64(n))
 	ref := a.DeepCopy()
 	r.owner.Want(hostdial.Target{
 		Tag: tag, JobID: o.JobID,
@@ -356,7 +402,7 @@ func (e *external) syncRelays(ctx context.Context, a *v1alpha1.Allocation, tag s
 		UID:       string(a.UID),
 		Login:     login, Jobs: e.p, Command: rel.Command, Stderr: sshrun.Stderr, Describe: sshrun.Classify,
 		OnFailed: e.onRelayFailed(ref, tag),
-		Gen:      credentialsGen(e.v.SSH),
+		Gen:      credentialsGen(e.v.SSH), RelayLimit: r.relayLimit,
 	})
 }
 

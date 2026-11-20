@@ -107,6 +107,16 @@ type Target struct {
 	// new Gen (HBEP-6, The relay keeper; issue #343). same ignores it, so
 	// seeding it restarts no relay. Nil is alpha's.
 	Final map[agentapi.RelayChannel]string
+	// RelayLimit, when set, is the most relays the Allocation's login node may
+	// hold, read under the slot lock at every attempt to take the Allocation's
+	// pair (Slots.AcquireWith): a Provider whose profile sets a login-host
+	// budget answers max(2 x its cap, 2 x its admitted Allocations), so an
+	// Allocation submitted before a reduction still gets its pair when its job
+	// starts, and a reduction only stops new admissions (HBEP-4, open question
+	// 17). It reports false when the profile sets no budget, and the default
+	// limit holds. It never revokes a pair held, and a relay's reconnect asks
+	// for none. same ignores it. Nil is the default limit.
+	RelayLimit func() (int, bool)
 	// OnStart, when set, is told of each ssh start of a channel's relay, for
 	// the keeper's count of restarts, which outlives a Drop (HBEP-8,
 	// hpcburst_relay_restarts_total; issue #343). Nil is alpha's.
@@ -266,15 +276,6 @@ func NewOwner(o OwnerOptions) (*Owner, error) {
 // NeedLeaderElection makes the Owner a leader-only runnable of a
 // controller-runtime manager.
 func (*Owner) NeedLeaderElection() bool { return true }
-
-// SetRelayLimit gives the login node a limit of n relays in place of the
-// Slots' default: 2 for each Allocation of the Provider's host-dialed cap
-// (HBEP-4, open question 17). The Allocations waiting for a pair read it
-// again, and a relay that runs is not changed.
-func (o *Owner) SetRelayLimit(login string, n int) { o.o.Slots.SetLimit(login, n) }
-
-// ClearRelayLimit gives the login node the default limit back.
-func (o *Owner) ClearRelayLimit(login string) { o.o.Slots.ClearLimit(login) }
 
 // Want records that t's Allocation is running, and starts its two relays when
 // the Owner runs and they are not already kept for the same job. A Want for
@@ -495,7 +496,7 @@ func (o *Owner) startLocked(t Target) *allocRelays {
 	}
 	go func() {
 		defer close(a.done)
-		release, err := o.o.Slots.Acquire(ctx, t.Login, len(a.relays))
+		release, err := o.o.Slots.AcquireWith(ctx, t.Login, len(a.relays), t.RelayLimit)
 		if err != nil {
 			return
 		}

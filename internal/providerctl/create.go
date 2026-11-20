@@ -19,7 +19,10 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/api/v1alpha1"
 	"github.com/groundnuty/plgrid-llmlab-hpc-burst/internal/slurm"
@@ -124,11 +127,15 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		// The cap of Allocations (2 unless the profile sets a budget), read fresh after this attempt's claim, so
 		// that two leaders' planners that each reserved the last slot do not
 		// both submit (HBEP-6, Capacity; the delta review of PR 301, D3).
-		if why, err := e.hostDialedCapFull(ctx, a); err != nil || why != "" {
+		why, zero, err := e.hostDialedCapFull(ctx, a)
+		if zero {
+			return managed.ExternalCreation{}, e.refuseCapZero(ctx, a, claim, why)
+		}
+		if err != nil || why != "" {
 			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err != nil {
-				why = "the Provider's Allocations could not be read to check host-dialed mode's cap: " + err.Error()
+				why = "the profile or the Provider's Allocations could not be read to check host-dialed mode's cap: " + err.Error()
 			}
 			return managed.ExternalCreation{}, e.rejectedWith(wctx, a, claim, why, true)
 		}
@@ -207,20 +214,47 @@ func (e *external) rejected(ctx context.Context, a *v1alpha1.Allocation, claim v
 // mode, "" when it has one: its other Allocations whose job is submitted or
 // being submitted, from a fresh API list, number the Provider's host-dialed
 // cap (relayState.hostDialedCap: floor((transport.loginHostBudget - M) / 2),
-// 2 while the profile sets no budget and in keeper mode).
-func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocation) (string, error) {
-	limit, known := e.s.relays.hostDialedCap(&e.v.Profile.Spec)
-	if !known {
-		return "", errors.New("the Provider has not said which login host it uses, so the host-dialed cap, which follows transport.loginHostBudget, is not known")
+// 2 while the profile sets no budget and in keeper mode). It is the FINAL
+// check, right before the submit, so the cap comes from the profile read NOW
+// (Profiles.Read, not the view this pass started with, which file staging may
+// have outlived) and from M as the register holds it now. zero is true when
+// the cap itself is 0: no list of Allocations can make room, so the caller
+// ends the Allocation for good (refuseCapZero), where a full cap only waits.
+func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocation) (why string, zero bool, err error) {
+	v, err := e.s.o.Profiles.Read(ctx, e.s.o.Provider)
+	if err != nil {
+		return "", false, fmt.Errorf("the profile could not be read for the cap: %w", err)
 	}
+	limit, known := e.s.relays.hostDialedCap(&v.Profile.Spec)
+	if !known {
+		return "", false, errors.New("the Provider has not said which login host it uses, so the host-dialed cap, which follows transport.loginHostBudget, is not known")
+	}
+	n, err := e.admittedAllocations(ctx, e.s.reader, self.UID)
+	if err != nil {
+		return "", false, err
+	}
+	if int32(n) < limit {
+		return "", false, nil
+	}
+	return fmt.Sprintf("Provider %s already has %d Allocations submitted or being submitted, at most %d in host-dialed mode (HBEP-6, Capacity)",
+		e.s.o.Provider, n, limit), limit == 0, nil
+}
+
+// admittedAllocations counts the Provider's Allocations whose job is submitted
+// or being submitted, from a fresh list of reader, leaving out the one with UID
+// exclude (none when it is empty): the Allocations that hold a place under the
+// host-dialed cap. The re-check before a submit counts the others with it, and
+// the relay limit counts them all with it (relayState.relayLimit), so both read
+// one definition of "admitted".
+func (e *external) admittedAllocations(ctx context.Context, reader client.Reader, exclude types.UID) (int, error) {
 	var list v1alpha1.AllocationList
-	if err := e.s.reader.List(ctx, &list); err != nil {
-		return "", err
+	if err := reader.List(ctx, &list); err != nil {
+		return 0, err
 	}
 	n := 0
 	for i := range list.Items {
 		o := &list.Items[i]
-		if o.UID == self.UID || o.Spec.ProviderConfigReference == nil || o.Spec.ProviderConfigReference.Name != e.s.o.Provider {
+		if (exclude != "" && o.UID == exclude) || o.Spec.ProviderConfigReference == nil || o.Spec.ProviderConfigReference.Name != e.s.o.Provider {
 			continue
 		}
 		rec, err := readRecord(o)
@@ -235,11 +269,31 @@ func (e *external) hostDialedCapFull(ctx context.Context, self *v1alpha1.Allocat
 			n++
 		}
 	}
-	if int32(n) < limit {
-		return "", nil
+	return n, nil
+}
+
+// refuseCapZero ends the Allocation for good when the final check finds a
+// host-dialed cap of 0 (the budget leaves no room beside the stack's masters,
+// as the planner, which plans M = 1 until the Provider has claimed its host,
+// could not know). The attempt is recorded Rejected as any refusal, and the
+// Allocation's phase is Refused, the terminal phase an Allocation that nothing
+// can submit already takes (Observe keeps it, and submits nothing for a
+// Refused Allocation with no job), so its Instance ends with AllocationRefused
+// and the planner places the deployment again, now knowing M: a Provider whose
+// cap is 0 is unavailable (HBEP-7). It never retries as Submitting.
+func (e *external) refuseCapZero(ctx context.Context, a *v1alpha1.Allocation, claim v1alpha1.SubmissionRecord, why string) error {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	err := e.rejectedWith(wctx, a, claim, why, true)
+	o := &a.Status.AtProvider
+	first := o.Phase != v1alpha1.AllocationRefused
+	o.Phase, o.Reason = v1alpha1.AllocationRefused, truncate(why)
+	a.SetConditions(xpv2.Unavailable().WithMessage(o.Reason))
+	if first {
+		e.typed(a, v1alpha1.ReasonAllocationRefused, attemptFact(record{sub: &claim}),
+			"the Allocation is refused: the Provider's host-dialed cap is 0, so nothing is submitted for it", nil)
 	}
-	return fmt.Sprintf("Provider %s already has %d Allocations submitted or being submitted, at most %d in host-dialed mode (HBEP-6, Capacity)",
-		e.s.o.Provider, n, limit), nil
+	return err
 }
 
 // rejectedWith records attempt claim as Rejected with reason, a full submit

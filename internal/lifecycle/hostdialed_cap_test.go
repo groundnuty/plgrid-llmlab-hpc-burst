@@ -351,3 +351,59 @@ func TestALoweredCapReleasesNothingThatRuns(t *testing.T) {
 		t.Fatalf("md-5 Degraded = %s/%s %q, want SubmitLimitReached at the cap of 2", c.Status, c.Reason, c.Message)
 	}
 }
+
+// TestACapOfZeroRefusalIsReplannedOnAnotherProvider (PR 814, point 4): the planner plans a primary on a Provider with M = 1
+// before its controller has claimed its host; the Provider controller's final check then finds a cap of 0 (the budget leaves
+// no room beside five masters) and ends the Allocation Refused, the terminal phase (providerctl.refuseCapZero). The row
+// plays that refusal on the rig's Allocation and holds the planner's half: the Instance ends AllocationRefused, the planner,
+// which now knows M, finds the first Provider unavailable, and with a second Provider allowed the deployment's primary is
+// placed THERE and becomes ready, instead of waiting for ever on the first.
+func TestACapOfZeroRefusalIsReplannedOnAnotherProvider(t *testing.T) {
+	const second = "second"
+	m := map[string]int{rigProvider: 1, second: 1}
+	rg := newRig(t, withHostDialed(), withMaxTime(4*time.Hour),
+		withProfile(func(s *v1alpha1.PlatformProfileSpec) {
+			s.Transport = &v1alpha1.TransportProfile{LoginHostBudget: i32(5)}
+		}),
+		withConfig(func(c *Config) { c.LoginHostProviders = func(n string) (int, bool) { return m[n], true } }))
+	rg.addProvider(second, "gpu2", 4*time.Hour, nil, nil)
+	rg.Step()
+	md := mdSpec("md")
+	md.Spec.Providers = v1alpha1.ProviderSelection{Names: []string{rigProvider, second}}
+	rg.create(md)
+	rg.until(2*time.Minute, 10*time.Second, "the primary's Allocation on the first Provider", func() bool { return len(rg.allocations("md")) == 1 })
+	first := rg.allocations("md")[0]
+	if got := first.Spec.ProviderConfigReference.Name; got != rigProvider {
+		t.Fatalf("the primary is planned on %s, want the first Provider %s", got, rigProvider)
+	}
+	// The Provider's controller claims its host: five masters share it now, so its cap is floor((5 - 5) / 2) = 0, and its
+	// final check ends the Allocation for good.
+	m[rigProvider] = 5
+	a, ok := rg.allocation(first.Name)
+	if !ok {
+		t.Fatalf("Allocation %s is gone", first.Name)
+	}
+	a.Status.AtProvider.Phase, a.Status.AtProvider.Reason = v1alpha1.AllocationRefused, "Provider "+rigProvider+" already has 0 Allocations submitted or being submitted, at most 0 in host-dialed mode (HBEP-6, Capacity)"
+	if err := rg.c.Status().Update(rg.ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	rg.until(15*time.Minute, 10*time.Second, "the deployment's primary ready on the second Provider", func() bool { return rg.readyCount("md") == 1 })
+	var onSecond bool
+	for _, al := range rg.allAllocations() {
+		if al.Spec.ProviderConfigReference.Name == second {
+			onSecond = true
+		}
+	}
+	if !onSecond {
+		t.Fatalf("no Allocation on %s: the primary was not placed there", second)
+	}
+	ended := 0
+	for _, in := range rg.instances("md") {
+		if in.Status.Phase == v1alpha1.InstanceEnded && in.Status.EndReason == v1alpha1.ReasonAllocationRefused {
+			ended++
+		}
+	}
+	if ended != 1 {
+		t.Fatalf("%d Instances ended AllocationRefused, want the first Provider's one", ended)
+	}
+}
