@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// DefaultRelaysPerLogin is alpha's cap on relays per login node: 4, that is 2
-// Allocations, the handover pair (HBEP-6, Dial-home modes, host-dialed mode).
-// The probe of 9 Nov 2026 held 4 concurrent connections, and made 10 at one a
-// second, with no refusal. A per-platform budget stays HBEP-4's open question
-// 17.
+// DefaultRelaysPerLogin is alpha's default cap on relays per login node: 4,
+// that is 2 Allocations, the handover pair (HBEP-6, Dial-home modes,
+// host-dialed mode). The probe of 9 Nov 2026 held 4 concurrent connections, and
+// made 10 at one a second, with no refusal. A profile's transport.loginHostBudget
+// gives its login node another limit (Slots.SetLimit; HBEP-4, open question 17).
 const DefaultRelaysPerLogin = 4
 
 // Slots caps the relays on each login node across the whole process: every

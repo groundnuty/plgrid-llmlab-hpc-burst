@@ -121,7 +121,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, fmt.Errorf("could not claim submission attempt %d, nothing submitted: %w", n, err)
 	}
 	if e.s.relays != nil {
-		// The cap of 2 Allocations, read fresh after this attempt's claim, so
+		// The cap of Allocations (2 unless the profile sets a budget), read fresh after this attempt's claim, so
 		// that two leaders' planners that each reserved the last slot do not
 		// both submit (HBEP-6, Capacity; the delta review of PR 301, D3).
 		if why, err := e.hostDialedCapFull(ctx, a); err != nil || why != "" {
