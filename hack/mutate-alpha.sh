@@ -1275,6 +1275,9 @@ beta-athena-now-router|LIVE_OWNER_GO_ATHENA_NOW|60@@beta-athena-now-router|LIVE_
   # only from a read whose OWN time falls inside the cap's stretch: the mutant restores the old rule, the time of the scrape that first saw it, more than a probe interval after the stretch began.
   'baselineflow.go@@	if smp.ReadAt.IsZero() || (s.lastRead != nil && !smp.ReadAt.After(*s.lastRead)) {@@	if smp.ReadAt.IsZero() && false {'
   'baselinejudge.go@@			if !s.ReadAt.IsZero() && !s.ReadAt.Before(w[0]) && !s.ReadAt.After(w[1]) {@@			if s.At.After(w[0].Add(EngineProbeInterval)) && !s.At.After(w[1]) {'
+  # And the witness searches every phase's samples (a read first scraped after P1-long's last look sits in the next phase's), but only inside P1-long's OWN stretches.
+  'baselinejudge.go@@		for _, s := range runReads(o, po) {@@		for _, s := range po.Engine {'
+  'baselinejudge.go@@	for _, w := range atCapWindows(rowsOn(joined, managed, RouteServed), cap) {@@	for _, w := range func() (ws [][2]time.Time) { for _, p := range append([]PhaseObs{po}, o.Phases...) { pj, _, _, _ := joinPhase(p); ws = append(ws, atCapWindows(rowsOn(pj, managed, RouteServed), cap)...) }; return }() {'
   # #776's review, point 5: the cap-spill rule's tick (0 rejects a healthy burst), guard 2 (a failed dial in a phase) and the front log's privacy (the post prints the matches).
   'baseline.go@@	ArrivalTick = time.Millisecond@@	ArrivalTick = 0'
   'baselinejudge.go@@		case po.DialFailures > 0:@@		case false:'

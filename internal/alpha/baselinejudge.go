@@ -777,7 +777,7 @@ func judgePhase(o BaselineObs, po PhaseObs) (fail, invalid []string) {
 	// satisfies neither the minimum nor the sustain rule. In the long phase the engine's requests waiting and its preemptions are readings (ruling H0, #764):
 	// eleven prompts of 24k tokens that arrive together queue in the engine's own prefill, and the reading is what R4's budget is compared against; only the cap
 	// is a check there, and the reading must have been taken at the cap.
-	if ph.Kind == KindLong && ph.Sessions == cap && len(readsAtTheCap(po, joined, managed, cap)) == 0 {
+	if ph.Kind == KindLong && ph.Sessions == cap && len(readsAtTheCap(o, po, joined, managed, cap)) == 0 {
 		inv("no distinct engine read was taken inside the stretch with the cap's %d requests in flight (a read counts when the agent's own time of it falls inside the stretch, so the node's clock against this host's is a stated limit), so the KV use at the cap was not witnessed", cap)
 	}
 	if len(po.Engine) < 2 {
@@ -838,20 +838,49 @@ func atCapWindows(rows []FrontRow, cap int) [][2]time.Time {
 	return out
 }
 
-// readsAtTheCap are the phase's distinct engine reads taken inside a stretch with the cap's requests in flight on the Instance. A read is placed by its OWN
-// time, ReadAt, the agent's clock (the science agent's ruling on #764, 19 Nov 2026): it counts when ReadAt falls inside a stretch, [start, end], the front's
-// records on this host's clock. The scrape that first saw it (At) is not used: it can come up to a probe interval after the read, so a stretch of that length
-// or less could never hold a counted read. The skew between the node's clock and this host's is a stated limit: a read stamped by a node clock that runs
+// readsAtTheCap are the run's distinct engine reads taken inside a stretch of THIS phase with the cap's requests in flight on the Instance. A read is placed by
+// its OWN time, ReadAt, the agent's clock (the science agent's ruling on #764, 19 Nov 2026): it counts when ReadAt falls inside a stretch, [start, end], the
+// front's records on this host's clock. The scrape that first saw it (At) is not used: it can come up to a probe interval after the read, so a stretch of that
+// length or less could never hold a counted read. The skew between the node's clock and this host's is a stated limit: a read stamped by a node clock that runs
 // ahead of or behind this host's by more than the distance from the stretch's edge is placed outside it, or inside one it was not taken in. A sample with no
 // ReadAt never counts: a stale figure is never posted as at the cap.
-func readsAtTheCap(po PhaseObs, joined []joinedRow, managed string, cap int) []EngineSample {
+//
+// The reads are searched in EVERY phase's samples (runReads), not only this phase's: a read taken inside a short stretch can be first scraped after the phase's
+// last look, and then sits in the next phase's samples, where the sequencer's bookkeeping put it. The stretches are always this phase's own, from its own front
+// records (joined): a read inside another phase's stretch is never at this phase's cap. The reads stay in their own phase's samples for that phase's other
+// checks (waiting, preemptions, the minimum count). No scrape is taken after the run's last phase for this: P2 follows P1-long in every run that can pass (a
+// phase override replaces a phase's fields and never drops a phase, PhasesFromEnv), and its looks are taken every poll; a run that ends after P1-long ended
+// INVALID (P2 did not fit) or FAIL (a stopped generator, a phase not run) already, whatever the witness says.
+func readsAtTheCap(o BaselineObs, po PhaseObs, joined []joinedRow, managed string, cap int) []EngineSample {
 	var out []EngineSample
 	for _, w := range atCapWindows(rowsOn(joined, managed, RouteServed), cap) {
-		for _, s := range po.Engine {
+		for _, s := range runReads(o, po) {
 			if !s.ReadAt.IsZero() && !s.ReadAt.Before(w[0]) && !s.ReadAt.After(w[1]) {
 				out = append(out, s)
 			}
 		}
+	}
+	return out
+}
+
+// runReads are the engine reads of the whole run, each once, by the agent's own read time: the samples of every phase the observation holds and of po itself
+// (a phase the judge is handed may not be listed in o.Phases). The sequencer takes a read once in the whole run (takeRead), so a read is in one phase's samples
+// only; the dedup keeps a phase that is in both lists from counting its reads twice. A sample with no ReadAt is none.
+func runReads(o BaselineObs, po PhaseObs) []EngineSample {
+	var out []EngineSample
+	seen := map[int64]bool{}
+	add := func(ss []EngineSample) {
+		for _, s := range ss {
+			if s.ReadAt.IsZero() || seen[s.ReadAt.UnixNano()] {
+				continue
+			}
+			seen[s.ReadAt.UnixNano()] = true
+			out = append(out, s)
+		}
+	}
+	add(po.Engine)
+	for _, p := range o.Phases {
+		add(p.Engine)
 	}
 	return out
 }
@@ -997,7 +1026,7 @@ func baselinePost(row Row, o BaselineObs, failures, invalid []string) string {
 			reading := ""
 			if po.Phase.Kind == KindLong {
 				// The KV use is posted as AT THE CAP only from the distinct reads taken inside the stretch with the cap's requests in flight.
-				kvReads = readsAtTheCap(po, joined, o.LLMLabProvider, o.Cap)
+				kvReads = readsAtTheCap(o, po, joined, o.LLMLabProvider, o.Cap)
 				kvWhat = fmt.Sprintf("of the cache (vllm:kv_cache_usage_perc) over the %d distinct read(s) taken inside the stretch with the cap's requests in flight", len(kvReads))
 				reading = " (a READING, ruling H0: the declared charge of 1,152 tokens a session against the cache's real use at the cap; a read is placed by the agent's own time of it, and counted when that falls inside the stretch; the node's clock against this host's is a stated limit)"
 			}
