@@ -290,3 +290,64 @@ func TestControllerRestartWithABudgetSetChangesNothingWhileTheLoginHostIsUnknown
 		check(fmt.Sprintf("pass %d with the login host known", i+1))
 	}
 }
+
+// TestALoweredCapReleasesNothingThatRuns: a cap that falls below the Allocations that run (the budget lowered, or M
+// raised by another Provider on the host) stops new Allocations and releases, replaces or ends none that runs: "lowering a
+// live stack's share frees its connections only once its Allocations above the new cap have drained" (HBEP-4, open
+// question 17). Five deployments of one Instance each run under a cap of 5; M becomes 6, a cap of 2; no object changes,
+// the deployments stay AsDesired, and a sixth deployment waits at SubmitLimitReached.
+func TestALoweredCapReleasesNothingThatRuns(t *testing.T) {
+	m := 1
+	rg := newRig(t, withHostDialed(),
+		withProfile(func(s *v1alpha1.PlatformProfileSpec) {
+			s.Transport = &v1alpha1.TransportProfile{LoginHostBudget: i32(11)}
+		}),
+		withConfig(func(c *Config) { c.LoginHostProviders = func(string) (int, bool) { return m, true } }))
+	rg.Step()
+	names := []string{"md-0", "md-1", "md-2", "md-3", "md-4"}
+	for _, n := range names {
+		rg.create(mdSpec(n))
+		rg.reconcileAll()
+	}
+	for range 8 {
+		rg.clock.Advance(10 * time.Second)
+		rg.Step()
+	}
+	snapshot := func() string {
+		var out []string
+		for _, a := range rg.allAllocations() {
+			out = append(out, fmt.Sprintf("A %s %s %s del=%v ann=%v", a.Name, a.UID, a.Status.AtProvider.Phase, a.DeletionTimestamp, a.Annotations))
+		}
+		for _, n := range names {
+			for _, in := range rg.instances(n) {
+				out = append(out, fmt.Sprintf("I %s %s %s del=%v ann=%v", in.Name, in.UID, in.Status.Phase, in.DeletionTimestamp, in.Annotations))
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	if got := len(rg.allAllocations()); got != 5 {
+		t.Fatalf("%d Allocations under a cap of 5, want 5", got)
+	}
+	before := snapshot()
+	m = 6 // the cap is now floor((11 - 6) / 2) = 2
+	rg.create(mdSpec("md-5"))
+	for i := range 6 {
+		rg.clock.Advance(10 * time.Second)
+		rg.Step()
+		if got := snapshot(); got != before {
+			t.Fatalf("pass %d under the lowered cap: the objects changed:\nbefore:\n%s\nafter:\n%s", i+1, before, got)
+		}
+		for _, n := range names {
+			if c := rg.condition(n, v1alpha1.ConditionDegraded); c.Status != metav1.ConditionFalse {
+				t.Fatalf("%s Degraded = %s/%s %q under the lowered cap, want False", n, c.Status, c.Reason, c.Message)
+			}
+		}
+	}
+	if got := len(rg.allAllocations()); got != 5 {
+		t.Fatalf("%d Allocations after the cap fell to 2, want the 5 that run, and none for md-5", got)
+	}
+	c := rg.condition("md-5", v1alpha1.ConditionDegraded)
+	if c.Reason != v1alpha1.ReasonSubmitLimitReached || !strings.Contains(c.Message, "maxSubmitPerUser 2 (host-dialed mode, HBEP-6)") {
+		t.Fatalf("md-5 Degraded = %s/%s %q, want SubmitLimitReached at the cap of 2", c.Status, c.Reason, c.Message)
+	}
+}
